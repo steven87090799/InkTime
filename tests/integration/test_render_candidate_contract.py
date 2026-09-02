@@ -4,6 +4,7 @@ from PIL import Image
 
 from inktime.app.domain.analysis.scoring import SEMANTIC_SCORE_KIND
 from tests.conftest import create_admin, csrf, login
+from tests.unit.test_analysis_schema import valid_result
 
 
 def _candidate(app, root, photo_id: str, *, eligible: int = 1, lifecycle: str = "active"):
@@ -26,19 +27,13 @@ def _candidate(app, root, photo_id: str, *, eligible: int = 1, lifecycle: str = 
         "test-model",
         "local",
         "test",
-        {
-            "schema_version": 1,
-            "caption": "測試",
-            "types": ["其他"],
-            "memory_score": 99,
-            "beauty_score": 99,
-            "technical_quality_score": 99,
-            "emotion_score": 99,
-            "side_caption": "",
-            "should_keep": True,
-            "sensitive": False,
-            "reason": "測試",
-        },
+        valid_result(
+            caption="這是一段候選契約測試說明。",
+            types=["其他"],
+            memory_score=99,
+            visual_score=99,
+            side_caption="這是一段測試回憶短句。",
+        ),
         "{}",
         score_kind=SEMANTIC_SCORE_KIND,
         ranking_score=99,

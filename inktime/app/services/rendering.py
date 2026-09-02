@@ -2280,8 +2280,18 @@ class RenderService:
             if semantic_selection
             else "COALESCE(a.local_score,p.local_candidate_score,0)"
         )
+        with self.database.session() as connection:
+            library_ids = [
+                str(row["id"])
+                for row in connection.execute("SELECT id FROM libraries ORDER BY id").fetchall()
+            ]
+        distributions = {
+            library_id: prepare_score_distribution(self.photos.score_population(library_id))
+            for library_id in library_ids
+        }
         combined_expression = (
-            f"({score_expression} * ? + COALESCE(p.e6_score,50) * ?)"
+            f"(inktime_distinguishing_score({score_expression},p.library_id) * ? + "
+            "COALESCE(p.e6_score,50) * ?)"
             if semantic_selection
             else score_expression
         )
@@ -2297,10 +2307,19 @@ class RenderService:
         # existing burst-proximity signal consumed by LocalSelectionPolicy.
         while len(result) < max(limit, 1):
             with self.database.session() as connection:
+                connection.create_function(
+                    "inktime_distinguishing_score",
+                    2,
+                    lambda value, library_id: calculate_distinguishing_score(
+                        value,
+                        distributions.get(str(library_id), prepare_score_distribution(())),
+                    )[0],
+                    deterministic=True,
+                )
                 rows = connection.execute(
                     f"""
                     WITH ranked_candidates AS (
-                    SELECT p.id,p.relative_path,p.captured_at,p.captured_date,p.captured_month_day,
+                    SELECT p.id,p.library_id,p.relative_path,p.captured_at,p.captured_date,p.captured_month_day,
                            p.sha256,p.perceptual_hash,p.difference_hash,p.duplicate_group_id,p.gps_lat,p.gps_lon,
                            p.e6_score,p.e6_contrast_score,
                            p.e6_subject_score,p.e6_skin_score,p.e6_text_score,
@@ -2389,27 +2408,29 @@ class RenderService:
             ):
                 row[key] = refreshed[key]
         now = datetime.now(timezone.utc)
-        score_distribution = (
-            prepare_score_distribution(self.photos.score_population())
-            if semantic_selection
-            else None
-        )
         for row in result:
-            stored_ranking = row.get("ranking_score") if semantic_selection else None
-            ranking = float(stored_ranking) if isinstance(stored_ranking, (int, float, str)) else None
-            row["raw_ranking_score"] = round(ranking, 1) if ranking is not None else None
-            row["ranking_percentile"] = None
-            row["distinguishing_score"] = None
-            if ranking is not None and score_distribution is not None:
-                row["distinguishing_score"], row["ranking_percentile"] = calculate_distinguishing_score(
-                    ranking, score_distribution
+            stored_ranking = row.get("ranking_score")
+            ranking = float(stored_ranking) if isinstance(stored_ranking, (int, float, str)) else 0.0
+            row["raw_ranking_score"] = ranking
+            if semantic_selection:
+                distinguishing, percentile = calculate_distinguishing_score(
+                    ranking,
+                    distributions.get(
+                        str(row["library_id"]), prepare_score_distribution(())
+                    ),
                 )
-            row["local_quality_score"] = (
-                round(float(row.get("selection_score") or 0.0), 2)
-                if not semantic_selection
-                else None
-            )
-            raw_combined = float(row["combined_score"])
+                row["ranking_percentile"] = percentile
+                row["distinguishing_score"] = distinguishing
+                e6 = row["e6_score"] if row.get("e6_score") is not None else 50.0
+                raw_combined = distinguishing * (1.0 - weight) + float(e6) * weight
+                row["display_score"] = round(raw_combined, 2)
+                row["local_quality_score"] = None
+            else:
+                raw_combined = float(row.get("selection_score") or 0.0)
+                row["ranking_percentile"] = None
+                row["distinguishing_score"] = None
+                row["display_score"] = round(raw_combined, 2)
+                row["local_quality_score"] = round(raw_combined, 2)
             adjustments = self._selection_adjustments(row, target=target, now=now)
             row["raw_combined_score"] = round(raw_combined, 2)
             row["score_components"] = {"base_combined_score": round(raw_combined, 2), **adjustments}
@@ -2682,9 +2703,9 @@ class RenderService:
                        p.local_candidate_score,p.exclusion_status,
                        p.manual_override,l.root_path,p.e6_score,
                        a.provider,a.model,a.prompt_version,a.schema_version,a.ranking_rule_version,
-                       a.memory_score,a.beauty_score,a.technical_quality_score,a.emotion_score,
-                       a.final_ranking_score,a.ranking_score,a.local_score,a.score_kind,
-                       a.travel_bonus,a.location_rule_version,a.types_json,a.semantic_json,
+                       a.memory_score,a.visual_score,a.local_quality_score,a.final_ranking_score,
+                       a.ranking_score,a.effective_special_level,a.local_score,a.score_kind,
+                       a.types_json,a.semantic_json,
                        {score_expression} AS final_score
                 FROM photos p
                 JOIN libraries l ON l.id=p.library_id

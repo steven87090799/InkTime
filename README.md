@@ -249,7 +249,7 @@ flowchart TD
     VALID2 -->|否| MODEL_FAIL["❌ 穩定錯誤；不無限重試修復"]
     VALID2 -->|是| PUT_CACHE["保存 AI Cache 與一次用量"]
     VALID -->|是| PUT_CACHE
-    PUT_CACHE --> SCORE["保存 semantic 四項分數、ranking_score、規則版本"]
+    PUT_CACHE --> SCORE["保存 v4 memory／visual、ranking_score、規則版本"]
     LOW --> GATE{"smart：回憶分達門檻，或人物／最愛？"}
     GATE -->|是| HIGH
     GATE -->|否| SCORE
@@ -700,14 +700,14 @@ Production 預設且建議使用 `INKTIME_COOKIE_SECURE=1`、`INKTIME_ALLOW_INSE
 
 ## 照片評分與模型調整在哪裡
 
-管理介面的「設定」與「評分」頁可調整：
+管理介面的「設定」與「評分」頁提供：
 
 - `model.low_model`、`model.high_model`：第一、第二階段使用哪個模型。
-- 「評分」頁：照片高低分規則、四項綜合排序權重、最愛加分、版本歷史與單張測試台。
-- `analysis.stage_two_threshold`：第一階段的回憶分達到多少才升級到高品質分析；人物或最愛照片也會升級。
+- 「評分」頁：Schema v4 評分規則、固定排名公式、版本歷史與單張測試台。
+- `analysis.stage_two_threshold`：舊版兩階段設定的讀取相容欄位，不會恢復第二次圖片請求。
 - `render.memory_threshold`：電子紙歷史今日選片的最低回憶分門檻。
 
-真正完成 AI 語意分析的資料列以 `score_kind=semantic` 標記，保存模型輸出的四項原始分數，並以版本化權重計算 `ranking_score`；預設為回憶 50%、美觀 20%、技術 10%、情緒 20%，最愛照片再加 5 分（最高 100）。本機影像分析以 `score_kind=local_quality` 標記，只保存 `local_score` 與本機特徵，`semantic_score`、`base_ranking_score`、`final_ranking_score`、`ranking_score` 與正式四項語意分數皆為 `NULL`。為相容舊版 JSON 形狀，本機結果可能保留中性 placeholder，但會標記 `semantic_scores_available=false`，不會進入語意 percentile。無法可靠辨識的歷史列標為 `legacy`。新規則只影響之後的分析；每筆分析會記住使用的規則版本。測試台照片只在暫存目錄停留，但模型 Token 與費用仍會記入成本頁。完整資料流見 [專案架構與評分流程](docs/architecture/ARCHITECTURE_ZH_TW.md)。
+真正完成 Vision v4 分析的資料列以 `score_kind=semantic` 標記，模型只輸出 `memory_score`、`visual_score` 與特殊程度；Server 再加入本機品質，以固定的回憶 50%、視覺 25%、本機品質 25% 計算基礎分，並套用特殊程度、同照片庫稀有度與最愛提升。本機影像分析以 `score_kind=local_quality` 標記，只保存 `local_score` 與本機特徵，正式語意排名欄位為 `NULL`，也不進入語意 percentile。`automatic_ai` 會先選 semantic 候選，數量不足才用 local quality 另層補足，不會直接比較兩種分數。無法可靠辨識的歷史列標為 `legacy`；舊 schema 不會轉成 v4 排名。測試台照片只在暫存目錄停留，但模型 Token 與費用仍會記入成本頁。完整資料流見 [專案架構與評分流程](docs/architecture/ARCHITECTURE_ZH_TW.md)。
 
 ## Token 與成本控制
 

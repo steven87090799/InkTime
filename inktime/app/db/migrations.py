@@ -2202,6 +2202,68 @@ MIGRATIONS = (
             "CREATE INDEX IF NOT EXISTS idx_photo_analysis_score_kind_ranking ON photo_analysis(score_kind,ranking_score DESC,photo_id)",
         ),
     ),
+    Migration(
+        55,
+        "Vision schema v4 與本機特殊程度排序",
+        (
+            "ALTER TABLE photo_analysis ADD COLUMN visual_score REAL CHECK(visual_score BETWEEN 0 AND 100)",
+            "ALTER TABLE photo_analysis ADD COLUMN local_quality_score REAL CHECK(local_quality_score BETWEEN 0 AND 100)",
+            "ALTER TABLE photo_analysis ADD COLUMN special_level INTEGER CHECK(special_level BETWEEN 0 AND 4)",
+            "ALTER TABLE photo_analysis ADD COLUMN special_codes_json TEXT NOT NULL DEFAULT '[]'",
+            "ALTER TABLE photo_analysis ADD COLUMN people_count INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE photo_analysis ADD COLUMN content_filter_json TEXT",
+            "ALTER TABLE photo_analysis ADD COLUMN effective_special_level INTEGER",
+            "ALTER TABLE photo_analysis ADD COLUMN library_rarity_adjustment INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE scoring_rule_versions ADD COLUMN visual_weight REAL CHECK(visual_weight BETWEEN 0 AND 100)",
+            "ALTER TABLE scoring_rule_versions ADD COLUMN local_weight REAL CHECK(local_weight BETWEEN 0 AND 100)",
+            "ALTER TABLE scoring_rule_versions ADD COLUMN ranking_contract_version INTEGER NOT NULL DEFAULT 3 CHECK(ranking_contract_version IN (3,4))",
+            "UPDATE scoring_rule_versions SET is_active=0",
+            "DELETE FROM settings WHERE key LIKE 'analysis.ranking_%'",
+            "DELETE FROM settings WHERE key='analysis.scoring_rules' AND updated_by IS NULL",
+            "UPDATE settings SET value_json='10' WHERE key='analysis.caption_min_chars'",
+            "UPDATE settings SET value_json='60' WHERE key='analysis.caption_target_chars'",
+            "UPDATE settings SET value_json='100' WHERE key='analysis.caption_max_chars'",
+            "UPDATE settings SET value_json='1200' WHERE key IN ('budget.full_analysis_max_tokens','budget.caption_variants_max_tokens') AND CAST(value_json AS INTEGER)>1200",
+        ),
+    ),
+    Migration(
+        56,
+        "持久化照片庫排序待重算狀態",
+        (
+            """
+            CREATE TABLE library_ranking_state (
+                library_id TEXT PRIMARY KEY REFERENCES libraries(id) ON DELETE CASCADE,
+                dirty INTEGER NOT NULL DEFAULT 1 CHECK(dirty IN (0,1)),
+                updated_at TEXT NOT NULL,
+                last_refreshed_at TEXT
+            )
+            """,
+            "INSERT INTO library_ranking_state(library_id,dirty,updated_at) SELECT id,1,datetime('now') FROM libraries",
+        ),
+    ),
+    Migration(
+        57,
+        "Vision v4 歷史排序與 E6 排除轉換",
+        (
+            "UPDATE photo_analysis SET score_kind='legacy' WHERE score_kind='semantic' AND schema_version<>4",
+            """
+            INSERT INTO photo_events(photo_id,event,changes_json,created_at)
+            SELECT id,'automatic_exclusion_retired',
+                json_object('reason','e6_below_threshold','migration',57,
+                            'previous_reject_details',reject_details_json),datetime('now')
+            FROM photos
+            WHERE exclusion_status='auto_excluded' AND manual_override=0
+              AND reject_reason='e6_below_threshold' AND reject_rule='local-quality'
+            """,
+            """
+            UPDATE photos SET eligible=1,exclusion_status='eligible',reject_reason=NULL,
+                reject_rule=NULL,reject_rule_version=NULL,reject_details_json=NULL,
+                rejected_at=NULL,updated_at=datetime('now')
+            WHERE exclusion_status='auto_excluded' AND manual_override=0
+              AND reject_reason='e6_below_threshold' AND reject_rule='local-quality'
+            """,
+        ),
+    ),
 )
 
 
@@ -2895,8 +2957,8 @@ def migrate(database: Database, backup_dir: Path | None = None) -> list[int]:
                     "migration_name": migration.name,
                 },
             )
-        if 54 in applied:
-            # Migration 54 changes which historical rows are eligible for the
+        if 54 in applied or 57 in applied:
+            # Migrations 54 and 57 change which historical rows are eligible for the
             # semantic population.  Clear an already-loaded process-local
             # distribution before any caller can reuse it.
             from inktime.app.repositories.photos import invalidate_score_population_cache

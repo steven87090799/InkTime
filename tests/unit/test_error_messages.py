@@ -89,11 +89,10 @@ def test_unknown_error_is_honest_and_never_suggests_blind_retries():
     assert error["technical_message"] == "UnknownProviderFailure"
 
 
-def test_grade_error_and_specific_validation_are_explained_without_losing_evidence():
-    grade = explain_error("VLM-004", "display_suitability_grade 等級不合法")
-    assert "不是照片損壞" in grade["detail"]
-    assert "null" in grade["detail"]
-    assert "電子紙適合度" in grade["title"]
+def test_schema_error_and_specific_validation_are_explained_without_losing_evidence():
+    schema_error = explain_error("VLM-004", "visual_orientation 格式不合法")
+    assert schema_error["title"] == "模型回覆的欄位格式不符合要求"
+    assert "visual_orientation 格式不合法" in schema_error["detail"]
     assert "至少需要 12 個字元" in error_text("password_too_short", "密碼至少需要 12 個字元。")
     assert "SHOULD-NOT-LEAK" not in error_text("IMG-004", "SHOULD-NOT-LEAK 欄位不合法")
 
@@ -206,11 +205,11 @@ def test_error_pages_flash_and_error_center_show_words_with_codes_only_collapsed
     assert "password_too_short" not in primary_text(flashed.text)
     assert 'class="notice error"' in flashed.text
     app.extensions["inktime_observability_service"].alert(
-        "provider", "VLM-004", "display_suitability_grade 等級不合法", severity="ERROR",
+        "provider", "VLM-004", "visual_orientation 格式不合法", severity="ERROR",
     )
     page = client.get("/errors")
     assert page.status_code == 200
-    assert "模型回覆的電子紙適合度格式不正確" in primary_text(page.text)
+    assert "模型回覆的欄位格式不符合要求" in primary_text(page.text)
     assert "可以怎麼處理" in primary_text(page.text)
     assert "VLM-004" not in primary_text(page.text)
     assert '<details class="error-technical">' in page.text
@@ -241,7 +240,7 @@ def test_browser_error_helpers_match_server_and_preserve_success_payloads():
         pytest.skip("Node is required for the hosted JavaScript contract check")
     source = (ROOT / "inktime/app/web/static/error-messages.js").read_text()
     cases = [[code, "", None] for code in CATALOG] + [
-        ["VLM-004", "display_suitability_grade 等級不合法", 200],
+        ["VLM-004", "visual_orientation 格式不合法", 200],
         ["VLM-008", "已確認為截圖；禁止送入 AI 模型", 409],
         ["VLM-008", "AI 模式目前為關閉", 409],
         ["VLM-005", "No endpoints found that can handle the requested parameters", 404],

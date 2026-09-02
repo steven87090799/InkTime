@@ -141,6 +141,10 @@ SUITE_EXECUTION_OWNER_JOB_IDS = {
 # bounded while ensuring production changes still select the relevant
 # integration contract.
 INTEGRATION_TEST_OWNER_SUITES: dict[str, tuple[str, ...]] = {
+    "tests/integration/test_vision_v4.py": (
+        "provider_analysis_owner",
+        "scanner_photos_owner",
+    ),
     "tests/integration/test_image_format_pipeline.py": ("scanner_photos_owner",),
     "tests/integration/test_activity_console.py": (
         "web_api_owner",

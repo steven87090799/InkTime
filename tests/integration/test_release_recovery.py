@@ -12,6 +12,7 @@ from PIL import Image
 
 from inktime.app.domain.rendering import release as release_module
 from tests.conftest import create_admin, csrf, login
+from tests.unit.test_analysis_schema import valid_result
 
 
 def _stage(publisher, profile: str):
@@ -75,19 +76,13 @@ def _add_history_photo(app, tmp_path, release_id: str) -> str:
         "local",
         "local",
         "gc-regression",
-        {
-            "schema_version": 1,
-            "caption": "GC 歷史測試",
-            "types": ["日常"],
-            "memory_score": 80,
-            "beauty_score": 80,
-            "technical_quality_score": 80,
-            "emotion_score": 80,
-            "side_caption": "GC 歷史測試",
-            "should_keep": True,
-            "sensitive": False,
-            "reason": "測試",
-        },
+        valid_result(
+            caption="這是一段 GC 歷史測試說明文字。",
+            types=["日常"],
+            memory_score=80,
+            visual_score=80,
+            side_caption="GC 歷史測試短句。",
+        ),
         "{}",
         ranking_score=80,
         final_ranking_score=80,

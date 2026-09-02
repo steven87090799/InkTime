@@ -4,7 +4,6 @@ from PIL import Image
 
 from inktime.app.domain.analysis.scoring import DEFAULT_SCORING_RULES
 from inktime.app.providers.openai_compatible import (
-    COMPACT_SCORING_RUBRIC,
     OpenAICompatibleProvider,
 )
 from inktime.app.services.providers import ProviderService
@@ -60,11 +59,11 @@ class FakeSettingsRepository:
         return "網頁儲存的自訂評分規則"
 
 
-def test_default_rules_restore_high_and_low_value_photo_guidance():
-    assert "人物互動或合照，大幅提高評分" in DEFAULT_SCORING_RULES
-    assert "孩子、貓咪或其他寵物" in DEFAULT_SCORING_RULES
-    assert "收據、帳單、廣告、螢幕截圖" in DEFAULT_SCORING_RULES
-    assert "美觀分 beauty_score" in DEFAULT_SCORING_RULES
+def test_default_rules_separate_ai_value_from_local_quality_and_special():
+    assert "memory_score、visual_score" in DEFAULT_SCORING_RULES
+    assert "重大事件、里程碑、大型合照" in DEFAULT_SCORING_RULES
+    assert "女性、男性、孩子、寵物或旅行題材本身不加分" in DEFAULT_SCORING_RULES
+    assert "library rarity 由本機判定" in DEFAULT_SCORING_RULES
 
 
 def test_provider_includes_configured_scoring_rules_in_system_prompt(tmp_path):
@@ -85,10 +84,10 @@ def test_provider_includes_configured_scoring_rules_in_system_prompt(tmp_path):
     assert session.body is not None
     system_prompt = session.body["messages"][0]["content"]
     assert custom_rules in system_prompt
-    assert COMPACT_SCORING_RUBRIC in system_prompt
+    assert DEFAULT_SCORING_RULES in system_prompt
     assert "人物互動或合照，大幅提高評分" not in system_prompt
-    assert "JSON Schema／固定安全規則 > 管理員自訂評分規則 > 精簡預設基準" in system_prompt
-    assert "只輸出符合 JSON Schema" in system_prompt
+    assert "不得違反 Schema 與固定內容安全規則" in system_prompt
+    assert "只輸出符合 Schema v4 的 JSON" in system_prompt
 
 
 def test_provider_sends_compact_baseline_when_default_rules_are_configured():
@@ -101,8 +100,8 @@ def test_provider_sends_compact_baseline_when_default_rules_are_configured():
 
     prompt = provider.system_prompt
 
-    assert COMPACT_SCORING_RUBRIC in prompt
-    assert DEFAULT_SCORING_RULES not in prompt
+    assert DEFAULT_SCORING_RULES in prompt
+    assert prompt.count(DEFAULT_SCORING_RULES) == 1
     assert "管理員自訂評分規則" not in prompt
 
 

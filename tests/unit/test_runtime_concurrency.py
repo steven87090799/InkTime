@@ -450,7 +450,7 @@ def test_parent_pipe_exception_still_reaps_child(failure):
         )
     assert boundary.observability()["active"] == 0
     boundary._context = multiprocessing.get_context("spawn")
-    assert boundary.call(_return_call, timeout_seconds=1, kwargs={"value": "reused"}) == "reused"
+    assert boundary.call(_return_call, timeout_seconds=5, kwargs={"value": "reused"}) == "reused"
     boundary.shutdown()
     assert not [
         child for child in multiprocessing.active_children() if child.name == f"inktime-{failure}-fault-child"

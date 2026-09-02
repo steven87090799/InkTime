@@ -26,19 +26,19 @@ def test_quality_policy_requires_combined_screenshot_evidence_and_protects_manua
     assert evaluate_local_quality({**base, "favorite": True})["decision"] == "protected"
 
 
-def test_quality_policy_document_e6_and_low_priority_score_are_deterministic():
+def test_quality_policy_document_and_e6_display_only_are_deterministic():
     document = evaluate_local_quality(
         {"relative_path": "receipt_2026.jpg", "width": 1200, "height": 1800, "format": "jpg"}
     )
     assert document["decision"] == "auto_excluded"
     e6 = evaluate_local_quality({"relative_path": "photo.jpg", "width": 1200, "height": 800, "e6_score": 10})
-    assert e6["decision"] == "auto_excluded"
+    assert e6["decision"] == "pass"
     assert (
         local_candidate_score(
             {"width": 1200, "height": 800, "blur_score": 36, "contrast": 30},
             evaluation=e6,
         )
-        == 0
+        > 0
     )
 
 

@@ -187,8 +187,11 @@ def photos_page():
         "tiny_nearly_blank": "近乎空白",
         "extreme_exposure_low_contrast": "極端曝光／低對比",
         "e6_below_threshold": "E6 適合度過低",
+        "sexualized_content": "偏色情／性感內容",
+        "explicit_nudity": "成人裸露",
+        "female_glamour_portrait": "女性單人寫真",
     }
-    score_distribution = prepare_score_distribution(_repository().score_population())
+    distributions = {library_id: prepare_score_distribution(_repository().score_population(library_id)) for library_id in {str(row["library_id"]) for row in rows}}
     photos = []
     for stored_row in rows:
         photo = dict(stored_row)
@@ -206,9 +209,9 @@ def photos_page():
         photo["quality_reason"] = str(quality["primary_reason"])
         calibrated_score = None
         percentile = None
-        if ranking_score is not None:
+        if ranking_score is not None and not hard_excluded:
             calibrated_score, percentile = calculate_distinguishing_score(
-                float(ranking_score), score_distribution
+                float(ranking_score), distributions[str(photo["library_id"])]
             )
             photo["raw_ranking_score"] = round(float(ranking_score), 1)
             photo["ranking_percentile"] = percentile
@@ -686,7 +689,7 @@ def photo_detail(photo_id: str):
     )
     analysis_rows = analysis_rows[:2]
     analyses = []
-    score_distribution = prepare_score_distribution(_repository().score_population())
+    score_distribution = prepare_score_distribution(_repository().score_population(str(photo["library_id"])))
     for index, row in enumerate(analysis_rows):
         analysis = dict(row)
         try:

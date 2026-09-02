@@ -22,6 +22,9 @@ from PIL import Image, ImageDraw
 from inktime.app.domain.photos.formats import load_rgb
 
 from inktime.app.domain.analysis import REPAIR_TOKEN_CAP
+from inktime.app.domain.photos.preprocessing import PhotoPreprocessor
+from inktime.app.domain.photos.quality_policy import local_candidate_score, evaluate_local_quality
+from inktime.app.domain.analysis.content_filter import evaluate_content_filter
 from inktime.app.domain.analysis.plan import normalize_reasoning_effort
 from inktime.app.domain.analysis.schema import AnalysisValidationError, validate_analysis_result
 from inktime.app.domain.analysis.scoring import (
@@ -57,19 +60,7 @@ _MANIFEST_ITEM_KEYS = {
     "missing",
     "manually_excluded",
 }
-_MANIFEST_EXPECTED_KEYS = {
-    "memory_grade",
-    "beauty_grade",
-    "technical_grade",
-    "technical_quality_grade",
-    "emotion_grade",
-    "types",
-    "should_keep",
-    "rotation_cw",
-    "ambiguous",
-    "visual_orientation",
-}
-_MANIFEST_GRADE_VALUES = {"E", "D", "C", "B", "A", "S", "unknown"}
+_MANIFEST_EXPECTED_KEYS = {"memory_score", "visual_score", "special_level", "types", "should_keep", "rotation_cw", "ambiguous", "visual_orientation"}
 _MANIFEST_ROTATIONS = {0, 90, 180, 270, None}
 _BENCHMARK_RANKING_WEIGHTS = dict(DEFAULT_RANKING_WEIGHTS)
 
@@ -123,9 +114,9 @@ class BenchmarkAxis:
 
 def _caption_controls(variants_enabled: bool) -> dict[str, Any]:
     return {
-        "caption_min_chars": 120,
-        "caption_target_chars": 160,
-        "caption_max_chars": 200,
+        "caption_min_chars": 10,
+        "caption_target_chars": 60,
+        "caption_max_chars": 100,
         "side_caption_min_chars": 8,
         "side_caption_target_chars": 12,
         "side_caption_max_chars": 16,
@@ -300,22 +291,9 @@ def _validate_manifest_expected(expected: Any) -> dict[str, Any]:
     if not isinstance(expected, dict):
         raise BenchmarkError("live quality dataset item 缺少 expected schema")
     _manifest_unknown_fields(expected, _MANIFEST_EXPECTED_KEYS, "expected")
-    for field in ("memory_grade", "beauty_grade", "emotion_grade"):
-        if field not in expected or not isinstance(expected[field], str) or expected[field] not in _MANIFEST_GRADE_VALUES:
+    for field, maximum in (("memory_score", 100), ("visual_score", 100), ("special_level", 4)):
+        if type(expected.get(field)) not in (int, float) or not 0 <= expected[field] <= maximum:
             raise BenchmarkError(f"golden manifest expected.{field} 不合法")
-    technical_fields = {"technical_grade", "technical_quality_grade"} & set(expected)
-    if len(technical_fields) != 1:
-        raise BenchmarkError("golden manifest expected 必須只包含一個 technical grade alias")
-    for field in technical_fields | {"memory_grade", "beauty_grade", "emotion_grade"}:
-        if not isinstance(expected[field], str) or expected[field] not in _MANIFEST_GRADE_VALUES:
-            raise BenchmarkError(f"golden manifest expected.{field} 不合法")
-    types = expected.get("types")
-    if (
-        not isinstance(types, list)
-        or any(not isinstance(item, str) for item in types)
-        or len(types) != len(set(types))
-    ):
-        raise BenchmarkError("golden manifest expected.types 必須是唯一字串陣列")
     if not isinstance(expected.get("should_keep"), bool):
         raise BenchmarkError("golden manifest expected.should_keep 必須是 Boolean")
     has_nested_orientation = "visual_orientation" in expected
@@ -323,8 +301,6 @@ def _validate_manifest_expected(expected: Any) -> dict[str, Any]:
     if has_nested_orientation and has_flat_orientation:
         raise BenchmarkError("golden manifest expected orientation 不可同時使用 nested 與 flat alias")
     canonical = dict(expected)
-    if "technical_quality_grade" in canonical:
-        canonical["technical_grade"] = canonical.pop("technical_quality_grade")
     if has_nested_orientation:
         orientation = expected["visual_orientation"]
         if not isinstance(orientation, dict):
@@ -540,16 +516,11 @@ def _new_metrics() -> dict[str, Any]:
 
 
 def _quality_prediction(result: Mapping[str, Any]) -> dict[str, Any]:
-    details_value = result.get("details")
-    details: Mapping[str, Any] = details_value if isinstance(details_value, Mapping) else {}
     return {
-        "memory_grade": details.get("memory_grade", "unknown"),
-        "beauty_grade": details.get("beauty_grade", "unknown"),
-        "technical_grade": details.get("technical_grade", "unknown"),
-        "emotion_grade": details.get("emotion_grade", "unknown"),
-        "types": list(result.get("types") or []),
-        "should_keep": bool(result.get("should_keep")),
-        "visual_orientation": dict(result.get("visual_orientation") or {}),
+        "memory_score": result["memory_score"], "visual_score": result["visual_score"],
+        "special_level": result["special_level"], "types": list(result["types"]),
+        "should_keep": evaluate_content_filter(dict(result["content_filter"]))["decision"] != "auto_excluded",
+        "visual_orientation": dict(result["visual_orientation"]),
     }
 
 
@@ -923,6 +894,8 @@ class ModelBenchmarkService:
                                     record.get("expected_score") is not None
                                     or record.get("expected_rank") is not None
                                 ):
+                                    features = PhotoPreprocessor().analyze(image).as_dict()
+                                    validated_result["local_quality_score"] = local_candidate_score(features, evaluation=evaluate_local_quality(features, settings={"analysis.e6_prefilter_enabled": False}))
                                     quality_item["predicted_score"] = _production_ranking_score(validated_result)
                                 quality_items.append(quality_item)
                 except _BudgetStop:

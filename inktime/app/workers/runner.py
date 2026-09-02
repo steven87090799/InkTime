@@ -365,19 +365,7 @@ class WorkerRunner:
                             "local",
                             "local",
                             "virtual-display-local",
-                            {
-                                "schema_version": 1,
-                                "caption": "本機電子紙收件匣照片",
-                                "types": ["其他"],
-                                "memory_score": 50,
-                                "beauty_score": 50,
-                                "technical_quality_score": 50,
-                                "emotion_score": 50,
-                                "side_caption": "",
-                                "should_keep": True,
-                                "sensitive": False,
-                                "reason": "本機無模型發布",
-                            },
+                            self.app.extensions["inktime_analysis_service"]._local_result(photo_repository.get_with_path(photo_id)),
                             "{}",
                             score_kind=LOCAL_QUALITY_SCORE_KIND,
                         )
@@ -435,9 +423,16 @@ class WorkerRunner:
                 finalized_job_id: str,
                 target: str,
                 *,
+                job=job,
                 settings=settings,
                 runtime_settings=runtime_settings,
             ) -> None:
+                if str(job["kind"]) == "analysis":
+                    self.app.extensions[
+                        "inktime_photo_repository"
+                    ].refresh_dirty_libraries_for_job(
+                        finalized_job_id, connection=connection
+                    )
                 offline_prepare = settings.get("offline_prepare")
                 offline_schedules = self.app.extensions["inktime_offline_schedule_repository"]
                 scheduled_task = settings.get("scheduled_task")

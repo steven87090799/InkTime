@@ -24,6 +24,7 @@ from inktime.app.domain.rendering.release import (
     STOCK_DIRECT_TEST_DIRECTORY,
     pack_four_color_2bpp,
 )
+from tests.unit.test_analysis_schema import valid_result
 
 
 def test_four_color_480x800_is_96000_bytes():
@@ -807,30 +808,14 @@ def test_automatic_release_candidates_respect_configured_memory_threshold(app, t
         )
 
     for photo_id, memory_score in (("photo-80", 80), ("photo-70", 70), ("photo-60", 60)):
-        result = {
-            "schema_version": "1.0",
-            "caption": "測試",
-            "types": ["風景"],
-            "memory_score": memory_score,
-            "beauty_score": 50,
-            "technical_quality_score": 50,
-            "emotion_score": 50,
-            "side_caption": "",
-            "should_keep": True,
-            "sensitive": False,
-            "reason": "測試",
-        }
-        photos.save_analysis(
-            photo_id,
-            None,
-            "single",
-            "test-ai",
-            "test",
-            result,
-            "{}",
-            score_kind=SEMANTIC_SCORE_KIND,
-            ranking_score=memory_score,
+        result = valid_result(
+            caption="這是一段自動選片測試說明。",
+            types=["風景"],
+            memory_score=memory_score,
+            visual_score=50,
+            side_caption="這是一段測試回憶短句。",
         )
+        photos.save_analysis(photo_id, None, "test", "test", "test", result, "{}")
 
     render_service = app.extensions["inktime_render_service"]
     assert render_service.select_candidates() == ["photo-80", "photo-70"]
@@ -870,30 +855,14 @@ def test_history_today_is_selected_before_higher_ranked_fallback(app, tmp_path):
             ],
         )
     for photo_id, _path, _captured, score in entries:
-        result = {
-            "schema_version": 1,
-            "caption": "測試",
-            "types": ["日常"],
-            "memory_score": score,
-            "beauty_score": score,
-            "technical_quality_score": score,
-            "emotion_score": score,
-            "side_caption": "歷年今日",
-            "should_keep": True,
-            "sensitive": False,
-            "reason": "選片測試",
-        }
-        photos.save_analysis(
-            photo_id,
-            None,
-            "single",
-            "test-ai",
-            "test",
-            result,
-            "{}",
-            score_kind=SEMANTIC_SCORE_KIND,
-            ranking_score=score,
+        result = valid_result(
+            caption="這是一段歷年今日選片測試說明。",
+            types=["日常"],
+            memory_score=score,
+            visual_score=score,
+            side_caption="歷年今日回憶短句。",
         )
+        photos.save_analysis(photo_id, None, "test", "local", "test", result, "{}", ranking_score=score)
 
     details = app.extensions["inktime_render_service"].select_candidates_details(
         2, target_date=date(2026, 7, 20)
@@ -945,19 +914,13 @@ def test_all_photo_frame_layouts_render_at_panel_size(app, tmp_path):
         "single",
         "test-ai",
         "test",
-        {
-            "schema_version": 1,
-            "caption": "旅行回憶",
-            "types": ["旅行"],
-            "memory_score": 88,
-            "beauty_score": 80,
-            "technical_quality_score": 80,
-            "emotion_score": 85,
-            "side_caption": "把這一天留在相框裡。",
-            "should_keep": True,
-            "sensitive": False,
-            "reason": "版型測試",
-        },
+        valid_result(
+            caption="這是一段旅行回憶版型測試說明。",
+            types=["旅行"],
+            memory_score=88,
+            visual_score=80,
+            side_caption="把這一天留在相框。",
+        ),
         "{}",
         score_kind=SEMANTIC_SCORE_KIND,
     )
@@ -967,19 +930,13 @@ def test_all_photo_frame_layouts_render_at_panel_size(app, tmp_path):
         "single",
         "test-ai",
         "test",
-        {
-            "schema_version": 1,
-            "caption": "第二張回憶",
-            "types": ["日常"],
-            "memory_score": 82,
-            "beauty_score": 78,
-            "technical_quality_score": 79,
-            "emotion_score": 84,
-            "side_caption": "一起填滿相框。",
-            "should_keep": True,
-            "sensitive": False,
-            "reason": "雙照片版型測試",
-        },
+        valid_result(
+            caption="這是一段第二張回憶版型測試說明。",
+            types=["日常"],
+            memory_score=82,
+            visual_score=78,
+            side_caption="一起填滿這個相框。",
+        ),
         "{}",
         score_kind=SEMANTIC_SCORE_KIND,
     )
@@ -1050,19 +1007,13 @@ def test_formal_caption_uses_builtin_traditional_font_without_fallback(app, tmp_
         "single",
         "test-ai",
         "test",
-        {
-            "schema_version": "1.0",
-            "caption": "回憶",
-            "types": ["日常"],
-            "memory_score": 80,
-            "beauty_score": 70,
-            "technical_quality_score": 70,
-            "emotion_score": 80,
-            "side_caption": "把今天的風景，寫進明日的回憶。",
-            "should_keep": True,
-            "sensitive": False,
-            "reason": "測試內建繁中字型",
-        },
+        valid_result(
+            caption="這是一段內建繁中字型測試說明。",
+            types=["日常"],
+            memory_score=80,
+            visual_score=70,
+            side_caption="把今天寫進明日回憶。",
+        ),
         "{}",
         score_kind=SEMANTIC_SCORE_KIND,
     )
@@ -1098,19 +1049,13 @@ def test_formal_render_shows_nearest_city_when_photo_has_gps(app, tmp_path):
         "single",
         "test-ai",
         "test",
-        {
-            "schema_version": 1,
-            "caption": "臺北回憶",
-            "types": ["旅行"],
-            "memory_score": 80,
-            "beauty_score": 70,
-            "technical_quality_score": 70,
-            "emotion_score": 80,
-            "side_caption": "",
-            "should_keep": True,
-            "sensitive": False,
-            "reason": "測試地點顯示",
-        },
+        valid_result(
+            caption="這是一段臺北地點顯示測試說明。",
+            types=["旅行"],
+            memory_score=80,
+            visual_score=70,
+            side_caption="這是一段測試回憶短句。",
+        ),
         "{}",
         score_kind=SEMANTIC_SCORE_KIND,
     )

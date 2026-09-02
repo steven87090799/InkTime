@@ -144,9 +144,9 @@ class ReviewRepository:
             clauses.append("a.id IS NULL")
         elif ai_status:
             raise ValueError("REVIEW-001 ai_status 不合法")
-        if filters.get("model_should_keep") is not None:
-            clauses.append("COALESCE(a.should_keep,0)=?")
-            params.append(int(bool(filters["model_should_keep"])))
+        if filters.get("content_excluded") is not None:
+            clauses.append("(p.eligible=0 AND p.reject_rule='content-filter')=?")
+            params.append(int(bool(filters["content_excluded"])))
         if filters.get("excluded") is not None:
             clauses.append("p.eligible=?")
             params.append(0 if bool(filters["excluded"]) else 1)
@@ -159,8 +159,9 @@ class ReviewRepository:
             clauses.append("a.score_kind=? AND a.ranking_score<=?")
             params.extend([SEMANTIC_SCORE_KIND, float(str(score_max))])
         confidence = (
-            "COALESCE(json_extract(a.semantic_json,'$.confidence.overall'),"
-            "json_extract(a.semantic_json,'$.confidence'))"
+            "min(json_extract(a.content_filter_json,'$.sexualized_content.confidence'),"
+            "json_extract(a.content_filter_json,'$.explicit_nudity.confidence'),"
+            "json_extract(a.content_filter_json,'$.female_glamour_portrait.confidence'))"
         )
         if filters.get("low_confidence"):
             clauses.append(f"{confidence} IS NOT NULL AND CAST({confidence} AS REAL)<?")
@@ -177,8 +178,19 @@ class ReviewRepository:
             WITH latest_analysis AS (
                 SELECT pa.*
                 FROM photo_analysis pa
-                JOIN (SELECT photo_id,MAX(id) AS id FROM photo_analysis GROUP BY photo_id) latest
-                  ON latest.id=pa.id
+                WHERE pa.id=(
+                    SELECT preferred.id FROM photo_analysis preferred
+                    WHERE preferred.photo_id=pa.photo_id
+                    ORDER BY
+                        CASE preferred.score_kind
+                            WHEN 'semantic' THEN 0
+                            WHEN 'local_quality' THEN 1
+                            ELSE 2
+                        END,
+                        preferred.created_at DESC,
+                        preferred.id DESC
+                    LIMIT 1
+                )
             )
             SELECT p.id,p.library_id,p.width,p.height,p.format,p.sha256,p.favorite,p.eligible,
                    p.exclusion_status,p.reject_reason,p.reject_rule,p.reject_details_json,
@@ -200,8 +212,8 @@ class ReviewRepository:
                    a.id AS analysis_id,a.schema_version AS analysis_schema_version,a.stage AS analysis_stage,
                    a.provider AS analysis_provider,a.model AS analysis_model,a.prompt_version,
                    a.analysis_fingerprint,a.created_at AS analysis_created_at,a.caption,a.side_caption,
-                   a.types_json,a.memory_score,a.beauty_score,a.technical_quality_score,
-                   a.emotion_score,a.ranking_score,a.local_score,a.final_ranking_score,a.score_kind,a.semantic_json,
+                   a.types_json,a.memory_score,a.visual_score,a.local_quality_score,
+                   a.ranking_score,a.local_score,a.final_ranking_score,a.score_kind,a.semantic_json,
                    p.visual_orientation_rotation_cw,p.visual_orientation_confidence,
                    p.visual_orientation_ambiguous,p.visual_orientation_evidence_json
             FROM photos p
@@ -230,11 +242,13 @@ class ReviewRepository:
                 semantic = {}
         else:
             semantic = {}
-        value["confidence"] = semantic.get("confidence")
+        classifications = (semantic.get("values") or {}).get("content_filter") or {}
+        confidences = [classifications.get(code, {}).get("confidence") for code in (
+            "sexualized_content", "explicit_nudity", "female_glamour_portrait"
+        )]
+        value["confidence"] = min(confidences) if all(type(c) in (int, float) for c in confidences) else None
         value["analysis_details"] = semantic.get("values") if isinstance(semantic.get("values"), dict) else {}
         confidence = value.get("confidence")
-        if isinstance(confidence, dict):
-            confidence = confidence.get("overall")
         try:
             value["low_confidence"] = confidence is not None and float(confidence) < LOW_CONFIDENCE_THRESHOLD
         except (TypeError, ValueError):
@@ -300,7 +314,7 @@ class ReviewRepository:
                 "COALESCE(SUM(CASE WHEN COALESCE(feedback.understanding_incorrect,decision.understanding_incorrect,0)=1 THEN 1 ELSE 0 END),0) AS understanding_incorrect,"
                 "COALESCE(SUM(CASE WHEN COALESCE(feedback.caption_bad,decision.caption_bad,0)=1 THEN 1 ELSE 0 END),0) AS caption_bad,"
                 "COALESCE(SUM(CASE WHEN COALESCE(feedback.scores_unreasonable,decision.scores_unreasonable,0)=1 THEN 1 ELSE 0 END),0) AS scores_unreasonable,"
-                "COALESCE(SUM(CASE WHEN COALESCE(a.should_keep,0)=0 AND a.id IS NOT NULL THEN 1 ELSE 0 END),0) AS model_excluded,"
+                "COALESCE(SUM(CASE WHEN p.eligible=0 AND p.reject_rule='content-filter' THEN 1 ELSE 0 END),0) AS content_excluded,"
                 "COALESCE(SUM(CASE WHEN COALESCE(CASE WHEN decision.id IS NOT NULL THEN decision.candidate_pool ELSE feedback.candidate_pool END,0)=1 THEN 1 ELSE 0 END),0) AS candidate_pool "
                 "FROM photos p "
                 "LEFT JOIN photo_analysis a ON a.id=(SELECT MAX(id) FROM photo_analysis WHERE photo_id=p.id) "
@@ -320,7 +334,7 @@ class ReviewRepository:
                     "understanding_incorrect",
                     "caption_bad",
                     "scores_unreasonable",
-                    "model_excluded",
+                    "content_excluded",
                     "candidate_pool",
                 )
             },
@@ -405,7 +419,7 @@ class ReviewRepository:
         now = _now()
         with self.database.transaction() as connection:
             photo = connection.execute(
-                "SELECT id,lifecycle_status FROM photos WHERE id=?", (photo_id,)
+                "SELECT id,library_id,lifecycle_status FROM photos WHERE id=?", (photo_id,)
             ).fetchone()
             if photo is None or str(photo["lifecycle_status"]) in {"deleted", "archived"}:
                 raise KeyError(photo_id)
@@ -597,8 +611,14 @@ class ReviewRepository:
                 connection.execute("UPDATE photos SET eligible=1,exclusion_status='pending_review',reject_reason='REVIEW_PENDING',manual_override=1,updated_at=? WHERE id=?", (now, photo_id))
             elif next_state == "unreviewed":
                 connection.execute("UPDATE photos SET eligible=1,exclusion_status='eligible',reject_reason=NULL,manual_override=0,updated_at=? WHERE id=?", (now, photo_id))
+            from inktime.app.repositories.photos import PhotoRepository, invalidate_score_population_cache
+            PhotoRepository._mark_library_ranking_dirty(
+                connection, str(photo["library_id"]), now
+            )
             if next_favorite is not None:
                 connection.execute("UPDATE photos SET favorite=?,updated_at=? WHERE id=?", (next_favorite, now, photo_id))
+                PhotoRepository._refresh_favorite_ranking(connection, photo_id)
+                invalidate_score_population_cache()
             current_after = connection.execute(
                 "SELECT * FROM photo_reviews WHERE id=?", (int(decision["id"]),)
             ).fetchone()
@@ -626,6 +646,7 @@ class ReviewRepository:
                     now,
                 ),
             )
+        invalidate_score_population_cache()
         return self.get(photo_id) or after
 
     @staticmethod

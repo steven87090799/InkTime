@@ -5,6 +5,8 @@ import pytest
 import sqlite3
 
 from inktime.app.domain.analysis.scoring import SEMANTIC_SCORE_KIND
+from tests.unit.test_analysis_schema import valid_result
+
 
 def test_schedule_resolves_devices_limits_years_and_commits_history_after_publish(app, tmp_path):
     app.extensions["inktime_settings_repository"].update(
@@ -46,19 +48,13 @@ def test_schedule_resolves_devices_limits_years_and_commits_history_after_publis
             "single",
             "test-ai",
             "scheduled-test",
-            {
-                "schema_version": 1,
-                "caption": "排程測試",
-                "types": ["日常"],
-                "memory_score": 90 - index,
-                "beauty_score": 80,
-                "technical_quality_score": 80,
-                "emotion_score": 80,
-                "side_caption": "",
-                "should_keep": True,
-                "sensitive": False,
-                "reason": "測試",
-            },
+            valid_result(
+                caption="這是一段排程測試說明文字。",
+                types=["日常"],
+                memory_score=90 - index,
+                visual_score=80,
+                side_caption="這是一段測試回憶短句。",
+            ),
             "{}",
             score_kind=SEMANTIC_SCORE_KIND,
             ranking_score=90 - index,
@@ -135,19 +131,13 @@ def test_enhanced_device_preparation_publishes_one_release_per_slot_and_is_idemp
             "single",
             "test-ai",
             "offline-scheduled-test",
-            {
-                "schema_version": 1,
-                "caption": "離線測試",
-                "types": ["日常"],
-                "memory_score": 100 - index,
-                "beauty_score": 80,
-                "technical_quality_score": 80,
-                "emotion_score": 80,
-                "side_caption": "",
-                "should_keep": True,
-                "sensitive": False,
-                "reason": "測試",
-            },
+            valid_result(
+                caption="這是一段離線排程測試說明。",
+                types=["日常"],
+                memory_score=100 - index,
+                visual_score=80,
+                side_caption="這是一段測試回憶短句。",
+            ),
             "{}",
             score_kind=SEMANTIC_SCORE_KIND,
             ranking_score=100 - index,
@@ -276,19 +266,13 @@ def test_enhanced_prepare_fails_closed_when_device_config_changes_before_commit(
         "single",
         "test-ai",
         "offline-race",
-        {
-            "schema_version": 1,
-            "caption": "競態照片",
-            "types": ["日常"],
-            "memory_score": 90,
-            "beauty_score": 90,
-            "technical_quality_score": 90,
-            "emotion_score": 90,
-            "side_caption": "",
-            "should_keep": True,
-            "sensitive": False,
-            "reason": "測試",
-        },
+        valid_result(
+            caption="這是一段競態照片測試說明。",
+            types=["日常"],
+            memory_score=90,
+            visual_score=90,
+            side_caption="這是一段測試回憶短句。",
+        ),
         "{}",
         score_kind=SEMANTIC_SCORE_KIND,
         ranking_score=90,

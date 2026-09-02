@@ -1,0 +1,11 @@
+{
+  "source_commit": "3f169ac799063aa31d26c423606b84af5822d8d5",
+  "version": 54,
+  "name": "分離本機品質與 AI 語意排序來源",
+  "statements": [
+    "\n            ALTER TABLE photo_analysis ADD COLUMN score_kind TEXT NOT NULL DEFAULT 'legacy'\n                CHECK(score_kind IN ('semantic','local_quality','legacy'))\n            ",
+    "\n            UPDATE photo_analysis\n            SET score_kind='local_quality'\n            WHERE lower(COALESCE(provider,'')) IN (\n                    'local','local-prefilter','local-quality-v3','virtual-display-local'\n                )\n               OR lower(COALESCE(stage,'')) IN ('local','local_fallback','prefilter')\n            ",
+    "\n            UPDATE photo_analysis\n            SET score_kind='semantic'\n            WHERE score_kind='legacy'\n              AND ranking_score IS NOT NULL\n              AND memory_score IS NOT NULL\n              AND beauty_score IS NOT NULL\n              AND technical_quality_score IS NOT NULL\n              AND emotion_score IS NOT NULL\n              AND length(trim(COALESCE(provider,''))) > 0\n              AND lower(provider) <> 'inherited'\n              AND lower(COALESCE(stage,'')) NOT IN ('local','local_fallback','prefilter')\n            ",
+    "CREATE INDEX IF NOT EXISTS idx_photo_analysis_score_kind_ranking ON photo_analysis(score_kind,ranking_score DESC,photo_id)"
+  ]
+}

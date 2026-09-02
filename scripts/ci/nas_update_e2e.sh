@@ -173,9 +173,12 @@ with database.transaction(operation="nas_e2e.seed_photo") as connection:
     )
 photos.save_analysis(
     "ci-photo", None, "final", "ci-provider", "ci-model",
-    {"schema_version": 1, "caption": "NAS persistent analysis", "types": ["memory"], "memory_score": 88,
-     "beauty_score": 77, "technical_quality_score": 66, "emotion_score": 55,
-     "side_caption": "NAS CI", "should_keep": True, "sensitive": False, "reason": "CI"},
+    {"schema_version": 4, "caption": "NAS persistent analysis for the stored test photo and its visible scene.",
+     "types": ["日常"], "memory_score": 88, "visual_score": 77,
+     "special_level": 0, "special_codes": [], "people_count": 0,
+     "side_caption": "相框留住此刻的光影。", "subject_position": "center", "text_safe_area": "bottom_right",
+     "content_filter": {code: {"detected": False, "confidence": 1} for code in ("sexualized_content", "explicit_nudity", "female_glamour_portrait")},
+     "visual_orientation": {"rotation_cw": None, "confidence": 0, "ambiguous": True, "evidence": ["insufficient_visual_cues"]}},
     '{"ci":true}',
 )
 session_secret = Path("/data/session.key").read_text(encoding="utf-8")

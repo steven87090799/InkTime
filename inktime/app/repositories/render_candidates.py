@@ -32,9 +32,10 @@ class RenderCandidateRepository:
     _BASE_SQL_PREDICATE = """
         p.status='analyzed'
         AND p.eligible=1
+        AND p.exclusion_status NOT IN ('auto_excluded','manually_excluded')
         AND p.lifecycle_status='active'
         AND l.enabled=1
-        AND a.id IS NOT NULL
+        AND a.id IS NOT NULL AND a.schema_version=4
     """
     SQL_PREDICATE = f"""
         {_BASE_SQL_PREDICATE}

@@ -24,7 +24,7 @@ def _filters() -> dict[str, Any]:
         "candidate_pool",
         "favorite",
         "low_confidence",
-        "model_should_keep",
+        "content_excluded",
         "excluded",
         "understanding_incorrect",
         "caption_bad",

@@ -241,8 +241,6 @@ def explain_error(code: object = "", message: object = "", http_status: object =
         entry = dict(CATALOG["ANALYSIS-DISABLED"])
     elif "no endpoints found that can handle" in lowered:
         entry = {"title": "模型路由目前沒有相容端點", "detail": "模型服務找不到能同時支援本次圖片與輸出格式的端點。", "action": "稍後再試，或改用固定且支援圖片與結構化輸出的模型；增加 Worker 不會解除這個限制。"}
-    elif "display_suitability_grade" in raw:
-        entry = {"title": "模型回覆的電子紙適合度格式不正確", "detail": "這是模型欄位格式問題，不是照片損壞；合法值為 S、A、B、C、D、E、unknown 或 null（無法判斷）。", "action": "舊版曾誤拒絕 null，目前已修正；若仍失敗，查看技術資料中的實際回覆再重試。"}
     elif (str(http_status) == "429" or re.search(r"\b429\b", raw)) and key.startswith(("VLM", "AI-PROVIDER")):
         entry = dict(CATALOG["VLM-002"])
     elif key.startswith(("VLM", "AI-PROVIDER")) and str(http_status) in {"401", "403"}:

@@ -7,23 +7,8 @@ import math
 from typing import Any
 
 
-GRADE_ORDER = {"E": 0, "D": 1, "C": 2, "B": 3, "A": 4, "S": 5}
-
-
 def _rate(numerator: int, denominator: int) -> float | None:
     return round(numerator / denominator, 6) if denominator else None
-
-
-def _grade(value: Any) -> int | None:
-    key = str(value or "").strip().upper()
-    return GRADE_ORDER.get(key)
-
-
-def _field(record: Mapping[str, Any], *names: str, default: Any = None) -> Any:
-    for name in names:
-        if name in record:
-            return record[name]
-    return default
 
 
 def _orientation(record: Mapping[str, Any]) -> Mapping[str, Any]:
@@ -37,43 +22,9 @@ def _orientation(record: Mapping[str, Any]) -> Mapping[str, Any]:
     }
 
 
-def grade_agreement(expected: Sequence[Any], predicted: Sequence[Any]) -> dict[str, Any]:
-    """Return exact/within-one/MAE grade agreement without unknown inflation."""
-
-    pairs = list(zip(expected, predicted, strict=True))
-    # Keep the loop explicit so invalid/unknown grades are excluded from the
-    # distance metrics rather than silently treated as the lowest grade.
-    exact = 0
-    within_one = 0
-    known_expected = 0
-    valid_distances: list[int] = []
-    for expected_value, predicted_value in pairs:
-        expected_grade = _grade(expected_value)
-        predicted_grade = _grade(predicted_value)
-        if expected_grade is not None:
-            known_expected += 1
-        if expected_grade is not None and predicted_grade is not None:
-            distance = abs(expected_grade - predicted_grade)
-            valid_distances.append(distance)
-            within_one += int(distance <= 1)
-            exact += int(distance == 0)
-    exact_rate = _rate(exact, known_expected)
-    within_one_rate = _rate(within_one, known_expected)
-    mean_absolute_distance = (
-        round(sum(valid_distances) / len(valid_distances), 6) if valid_distances else None
-    )
-    return {
-        "count": len(pairs),
-        "valid_count": len(valid_distances),
-        "exact_grade_accuracy": exact_rate,
-        "within_one_grade_accuracy": within_one_rate,
-        "mean_absolute_grade_distance": mean_absolute_distance,
-        # Keep concise aliases for existing report consumers while exposing
-        # the unambiguous metric names required by the quality contract.
-        "exact": exact_rate,
-        "within_one": within_one_rate,
-        "mae": mean_absolute_distance,
-    }
+def score_agreement(expected: Sequence[Any], predicted: Sequence[Any]) -> dict[str, Any]:
+    distances = [abs(float(a) - float(b)) for a, b in zip(expected, predicted, strict=True) if type(a) in (int, float) and type(b) in (int, float)]
+    return {"count": len(distances), "mae": round(sum(distances) / len(distances), 6) if distances else None}
 
 
 def type_metrics(expected: Sequence[Iterable[Any]], predicted: Sequence[Iterable[Any]]) -> dict[str, Any]:
@@ -260,30 +211,9 @@ def top_k_overlap(expected: Any, predicted: Any, ks: Sequence[int] = (10, 25, 50
 def calculate_quality_metrics(items: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     expected = [item.get("expected") or item.get("golden") or {} for item in items]
     predicted = [item.get("predicted") or {} for item in items]
-    grade_fields = {
-        name: grade_agreement(
-            [
-                _field(
-                    row,
-                    name,
-                    "technical_quality_grade" if name == "technical_grade" else name,
-                )
-                for row in expected
-            ],
-            [
-                _field(
-                    row,
-                    name,
-                    "technical_quality_grade" if name == "technical_grade" else name,
-                )
-                for row in predicted
-            ],
-        )
-        for name in ("memory_grade", "beauty_grade", "technical_grade", "emotion_grade")
-    }
+    scores = {name: score_agreement([row.get(name) for row in expected], [row.get(name) for row in predicted]) for name in ("memory_score", "visual_score", "special_level")}
     return {
-        "count": len(items),
-        "grades": grade_fields,
+        "count": len(items), "scores": scores,
         "types": type_metrics(
             [row.get("types") or [] for row in expected],
             [row.get("types") or [] for row in predicted],

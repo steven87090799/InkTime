@@ -6,6 +6,8 @@ import time
 
 import pytest
 
+from tests.unit.test_analysis_schema import valid_result
+
 
 class FirstChoice:
     def choice(self, values):
@@ -48,23 +50,16 @@ def _insert_photo(
         "local",
         "local",
         "local-quality-v3",
-        {
-            "schema_version": 1,
-            "caption": "測試",
-            "types": ["旅行", "人物"],
-            "memory_score": score,
-            "beauty_score": score,
-            "technical_quality_score": score,
-            "emotion_score": score,
-            "side_caption": "測試",
-            "should_keep": True,
-            "sensitive": False,
-            "reason": "測試",
-        },
+        valid_result(
+            caption="這是一段歷史選片測試說明。",
+            types=["旅行", "人物"],
+            memory_score=score,
+            visual_score=score,
+            side_caption="歷史選片測試短句。",
+        ),
         "{}",
         ranking_score=score,
         final_ranking_score=score,
-        travel_bonus=4,
     )
 
 
@@ -139,19 +134,13 @@ def test_history_selection_synthetic_rows_is_bounded_sqlite_work(app, tmp_path, 
         "local",
         "local",
         "synthetic",
-        {
-            "schema_version": 1,
-            "caption": "測試",
-            "types": ["其他"],
-            "memory_score": 75,
-            "beauty_score": 75,
-            "technical_quality_score": 75,
-            "emotion_score": 75,
-            "side_caption": "",
-            "should_keep": True,
-            "sensitive": False,
-            "reason": "測試",
-        },
+        valid_result(
+            caption="這是一段合成歷史選片測試說明。",
+            types=["其他"],
+            memory_score=75,
+            visual_score=75,
+            side_caption="這是一段測試回憶短句。",
+        ),
         "{}",
         ranking_score=75,
         final_ranking_score=75,

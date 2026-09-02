@@ -37,25 +37,8 @@ def test_orientation_priority_and_thresholds():
 
 
 def test_orientation_validation_rejects_invalid_values():
-    result = {
-        "schema_version": 1,
-        "caption": "x",
-        "types": ["其他"],
-        "memory_score": 1,
-        "beauty_score": 1,
-        "technical_quality_score": 1,
-        "emotion_score": 1,
-        "side_caption": "",
-        "should_keep": True,
-        "sensitive": False,
-        "reason": "x",
-        "visual_orientation": {
-            "rotation_cw": 45,
-            "confidence": 1,
-            "ambiguous": False,
-            "evidence": ["faces_upright"],
-        },
-    }
+    from tests.unit.test_analysis_schema import valid_result
+    result = valid_result(visual_orientation={"rotation_cw": 45, "confidence": 1, "ambiguous": False, "evidence": ["faces_upright"]})
     with pytest.raises(AnalysisValidationError):
         validate_analysis_result(result)
 
