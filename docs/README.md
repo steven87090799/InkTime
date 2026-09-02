@@ -6,6 +6,7 @@
 
 | 你要做什麼 | 先讀 |
 |---|---|
+| 從 NAS 到 ESP32 完成上線 | [完整上線指南](operations/PRODUCTION_DEPLOYMENT_GUIDE_ZH_TW.md) |
 | 第一次啟動 Docker | [快速開始](getting-started/QUICK_START_ZH_TW.md) → [安裝指南](getting-started/INSTALLATION_ZH_TW.md) |
 | 了解程式如何運作 | [現行架構與流程](architecture/ARCHITECTURE_ZH_TW.md) → [Application Factory](architecture/APPLICATION_FACTORY.md) |
 | 管理照片、模型、裝置與設定 | [管理員指南](guides/ADMIN_GUIDE_ZH_TW.md) → [使用者指南](guides/USER_GUIDE_ZH_TW.md) |
@@ -77,6 +78,8 @@
 
 ### 維運、安全與部署
 
+- [`operations/PRODUCTION_DEPLOYMENT_GUIDE_ZH_TW.md`](operations/PRODUCTION_DEPLOYMENT_GUIDE_ZH_TW.md)：NAS 初始化、Web 首次使用、韌體準備、配對、畫面驗收與更新復原。
+
 - [`operations/DOCKER_GUIDE_ZH_TW.md`](operations/DOCKER_GUIDE_ZH_TW.md)：N100 Docker 部署、資源、健康檢查、更新與回滾。
 - [`operations/NAS_TAG_DEPLOYMENT_ZH_TW.md`](operations/NAS_TAG_DEPLOYMENT_ZH_TW.md)：Git Tag 發布 GHCR 映像、NAS 初次設定、單一 Tag 更新與固定版本回復。
 - [`operations/N100_RESOURCE_GUIDE_ZH_TW.md`](operations/N100_RESOURCE_GUIDE_ZH_TW.md)：N100 容量與低功耗調校。
@@ -132,6 +135,8 @@
 - [`archive/reports/FINAL_ONE_SHOT_HARDENING_AUDIT.md`](archive/reports/FINAL_ONE_SHOT_HARDENING_AUDIT.md)：本輪 P1、Provider、AI、Release、Container、文件與 hosted CI 交接證據。
 
 ### 元件旁文件
+
+- [`../esp32/ink-display-7C-photo/README.md`](../esp32/ink-display-7C-photo/README.md)：7.3 吋／PhotoPainter 板型、現行韌體與安全操作入口。
 
 - [`../esp32/ink-display-133C-photo/README.md`](../esp32/ink-display-133C-photo/README.md)：133C 韌體元件說明。
 - [`../esp32/ink-display-7C-photo/THIRD_PARTY_NOTICES.md`](../esp32/ink-display-7C-photo/THIRD_PARTY_NOTICES.md)：7C／PhotoPainter 韌體第三方授權聲明。

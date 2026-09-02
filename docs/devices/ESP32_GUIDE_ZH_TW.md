@@ -1,5 +1,7 @@
 # ESP32-S3 與電子墨水完整指南
 
+從 NAS 初次部署、Web 首張 Release 到 ESP32 配對與顯示驗收，請先看[完整上線指南](../operations/PRODUCTION_DEPLOYMENT_GUIDE_ZH_TW.md)。
+
 ## 1. 正式支援範圍
 
 | 組合 | 狀態 | 韌體選項 | InkTime 發布格式 |

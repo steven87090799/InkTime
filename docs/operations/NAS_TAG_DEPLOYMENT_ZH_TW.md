@@ -1,5 +1,7 @@
 # NAS 以 Git Tag 更新 InkTime Docker
 
+從 NAS 初次部署、Web 首張 Release 到 ESP32 配對與顯示驗收，請先看[完整上線指南](PRODUCTION_DEPLOYMENT_GUIDE_ZH_TW.md)。
+
 這條部署路徑讓 NAS 不需要每次複製原始碼，也不需要在低功耗主機重新 Build。維護者把已合併到 `main` 的版本建立 `vMAJOR.MINOR.PATCH` Git Tag 後，GitHub Actions 會建置並發布 GHCR 映像；NAS 只要指定同一個 Tag 執行更新工具。
 
 ```text
