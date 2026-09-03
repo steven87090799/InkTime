@@ -1090,7 +1090,7 @@ def test_photo_detail_shows_only_two_latest_analyses_and_compact_type_picker(cli
 
     assert body.count('class="analysis-card"') == 2
     assert "顯示優先結果與最近記錄，共 2 / 3 筆" in body
-    assert "本機重掃或 Fallback 只保留為歷史" in body
+    assert "優先顯示現行 v4 模型結果，其次為已保存的歷史模型紀錄，再顯示本機分析" in body
     assert 'class="photo-orientation-actions"' in body
     assert 'class="secondary orientation-set orientation-clear"' in body
     assert 'class="photo-type-picker"' in body
@@ -1133,7 +1133,7 @@ def test_model_analysis_stays_preferred_after_newer_local_fallback(client, app):
     assert "完整模型判斷" in listing
     assert "模型短句" in listing
     assert "只有本機特徵" not in listing
-    assert "目前採用 · 模型判斷 · Vision 模型分析" in detail
+    assert "優先顯示 · 模型判斷 · Vision 模型分析" in detail
     assert detail.index("完整模型判斷") < detail.index("只有本機特徵")
 
 
