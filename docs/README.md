@@ -1,6 +1,6 @@
 # InkTime 文件地圖
 
-核對日期：2026-08-31；主線 `48d2b8d`。先讀[現行版本與功能基線](reference/CURRENT_STATE_ZH_TW.md)，了解 Migration 52、AI Schema v3、韌體 2.8.6、local-only 預設與本次驗證範圍。
+核對日期：2026-09-03；主線 `51309e2`。先讀[現行版本與功能基線](reference/CURRENT_STATE_ZH_TW.md)，了解 Migration 57、AI Schema v4、韌體 2.8.6、local-only 預設與本次驗證範圍。
 
 這是 InkTime 文件的單一入口。根目錄的 [`USER_MANUAL.html`](../USER_MANUAL.html) 保留可瀏覽的說明與完整文件連結；現行操作契約以本次校對的 Markdown 為準；本頁則提供適合 GitHub、純文字閱讀器與程式碼審查的 Markdown 索引。
 
@@ -9,6 +9,7 @@
 | 你要做什麼 | 先讀 |
 |---|---|
 | 工作已完成但沒有文案／Worker 告警 | [Activity、工作與 AI Trace](guides/ACTIVITY_AI_TRACE_ZH_TW.md) |
+| 從 NAS 到 ESP32 完成上線 | [完整上線指南](operations/PRODUCTION_DEPLOYMENT_GUIDE_ZH_TW.md) |
 | 第一次啟動 Docker | [快速開始](getting-started/QUICK_START_ZH_TW.md) → [安裝指南](getting-started/INSTALLATION_ZH_TW.md) |
 | 了解程式如何運作 | [現行架構與流程](architecture/ARCHITECTURE_ZH_TW.md) → [Application Factory](architecture/APPLICATION_FACTORY.md) |
 | 管理照片、模型、裝置與設定 | [管理員指南](guides/ADMIN_GUIDE_ZH_TW.md) → [使用者指南](guides/USER_GUIDE_ZH_TW.md) |
@@ -46,6 +47,8 @@
 - [`../README.md`](../README.md)：中文專案首頁、完整資料流與快速入口。
 - [`../README.en.md`](../README.en.md)：英文專案概覽與 Modern 啟動方式。
 - [`../USER_MANUAL.html`](../USER_MANUAL.html)：HTML 手冊與所有 Markdown 文件索引；舊章節請配合現行基線閱讀。
+
+- [`VISION_SCHEMA_V4.md`](VISION_SCHEMA_V4.md)：嚴格 v4 輸出、內容排除、排序與人工恢復契約。
 
 ### Batch 與交付專項
 
@@ -85,6 +88,8 @@
 - [`architecture/TECH_DEBT_LOCAL_ONLY_ZH_TW.md`](architecture/TECH_DEBT_LOCAL_ONLY_ZH_TW.md)：Local-only 交付刻意未處理的技術債。
 
 ### 維運、安全與部署
+
+- [`operations/PRODUCTION_DEPLOYMENT_GUIDE_ZH_TW.md`](operations/PRODUCTION_DEPLOYMENT_GUIDE_ZH_TW.md)：NAS 初始化、Web 首次使用、韌體準備、配對、畫面驗收與更新復原。
 
 - [`operations/PHOTO_ANALYSIS_RETENTION_ZH_TW.md`](operations/PHOTO_ANALYSIS_RETENTION_ZH_TW.md)：分析歷史保護、dry-run digest 與逐批明確確認。
 

@@ -1,8 +1,8 @@
 # InkTime｜照片分析與電子紙回憶管理平台
 
-> 原始碼核對：2026-08-31，主線 `48d2b8d`。SQLite Migration 52、AI Schema v3、ESP32 2.8.6；詳細版本、預設值與驗收邊界見[現行基線](docs/reference/CURRENT_STATE_ZH_TW.md)。
+> 原始碼核對：2026-09-03，主線 `51309e2`。SQLite Migration 57、AI Schema v4、ESP32 2.8.6；詳細版本、預設值與驗收邊界見[現行基線](docs/reference/CURRENT_STATE_ZH_TW.md)。
 
-[English README](README.en.md) · [HTML 手冊與文件入口](USER_MANUAL.html) · [完整 Markdown 文件地圖](docs/README.md) · [完整程式流程圖](#完整程式流程圖從啟動照片分析到電子紙顯示) · [快速開始](docs/getting-started/QUICK_START_ZH_TW.md) · [電子紙模擬器](docs/guides/EPAPER_SIMULATOR_ZH_TW.md) · [N100 Docker 部署規格](docs/operations/DOCKER_GUIDE_ZH_TW.md) · [NAS Tag 更新](docs/operations/NAS_TAG_DEPLOYMENT_ZH_TW.md) · [ESP32／電子紙指南](docs/devices/ESP32_GUIDE_ZH_TW.md) · [ESP32 自動配對與憑證](docs/devices/ESP32_AUTOMATIC_PAIRING_ZH_TW.md) · [Waveshare PhotoPainter](docs/devices/WAVESHARE_PHOTOPAINTER_ZH_TW.md) · [ESP32 TLS／配網信任根](docs/devices/ESP32_TLS_PROVISIONING_ZH_TW.md) · [OpenRouter Provider](docs/providers/OPENROUTER_ZH_TW.md) · [模型 Benchmark](docs/providers/MODEL_BENCHMARK_ZH_TW.md) · [資源與低功耗](docs/operations/N100_RESOURCE_GUIDE_ZH_TW.md) · [Log 指南](docs/operations/LOGGING_GUIDE_ZH_TW.md)
+[English README](README.en.md) · [HTML 手冊與文件入口](USER_MANUAL.html) · [完整 Markdown 文件地圖](docs/README.md) · [完整程式流程圖](#完整程式流程圖從啟動照片分析到電子紙顯示) · [快速開始](docs/getting-started/QUICK_START_ZH_TW.md) · [電子紙模擬器](docs/guides/EPAPER_SIMULATOR_ZH_TW.md) · [N100 Docker 部署規格](docs/operations/DOCKER_GUIDE_ZH_TW.md) · [完整上線指南](docs/operations/PRODUCTION_DEPLOYMENT_GUIDE_ZH_TW.md) · [NAS Tag 更新](docs/operations/NAS_TAG_DEPLOYMENT_ZH_TW.md) · [ESP32／電子紙指南](docs/devices/ESP32_GUIDE_ZH_TW.md) · [ESP32 自動配對與憑證](docs/devices/ESP32_AUTOMATIC_PAIRING_ZH_TW.md) · [Waveshare PhotoPainter](docs/devices/WAVESHARE_PHOTOPAINTER_ZH_TW.md) · [ESP32 TLS／配網信任根](docs/devices/ESP32_TLS_PROVISIONING_ZH_TW.md) · [OpenRouter Provider](docs/providers/OPENROUTER_ZH_TW.md) · [模型 Benchmark](docs/providers/MODEL_BENCHMARK_ZH_TW.md) · [資源與低功耗](docs/operations/N100_RESOURCE_GUIDE_ZH_TW.md) · [Log 指南](docs/operations/LOGGING_GUIDE_ZH_TW.md)
 
 InkTime 會在本地掃描相簿、擷取 EXIF 與品質特徵，先辨識重複與不適合顯示的照片。新安裝預設只做本機選片；明確啟用 AI 後，才以可控預算的視覺模型產生繁體中文描述、分類、分數與電子紙短文案。所有工作、模型、成本、裝置、渲染、備份與診斷都能由登入後的 Web 管理介面操作。
 
@@ -14,7 +14,7 @@ InkTime 會在本地掃描相簿、擷取 EXIF 與品質特徵，先辨識重複
 
 - 以 SHA-256、pHash、dHash、EXIF、亮度、對比、模糊與曝光做本地預處理；相同內容不重複呼叫模型。
 - 512／1024／1600px 內容雜湊縮圖快取；預設不傳原始 4K／8K 圖片。
-- 單一分析請求同時回傳描述、類型、四種分數、短文案與敏感判斷；JSON 最多純文字修復一次。
+- 單一分析請求同時回傳描述、類型、回憶與視覺兩項分數、特殊程度、短文案、內容分類與必要方向欄位；JSON 最多純文字修復一次。
 - 正式 OpenRouter Provider contract：受控 routing／privacy options、reasoning 與 session routing；OpenRouter 不進入 InkTime Batch 路徑。完整設定見 [OpenRouter Provider 文件](docs/providers/OPENROUTER_ZH_TW.md)。
 - 每筆 usage 區分 `provider_reported`／`estimated`／`unknown`；unknown 不會被當作 US$0，預算與新請求採 fail-closed。Token、cache 與 request-size 指標見 [Token 與成本指南](docs/reference/TOKEN_COST_GUIDE_ZH_TW.md)。
 - 提供預設 offline、bounded、可重現的 [模型 Benchmark](docs/providers/MODEL_BENCHMARK_ZH_TW.md)；不會修改 production DB、analysis、release 或 AI cache。

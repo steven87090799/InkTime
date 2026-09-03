@@ -1,6 +1,6 @@
 # InkTime 決策、韌性與發布安全實作計畫
 
-此頁保留韌性功能的設計順序；現行主線已演進至 Migration 52，新增 AI Trace／Provider model／保留政策等功能，見[現行基線](../reference/CURRENT_STATE_ZH_TW.md)。Decision Trace、AI Trace 與 Job completed 分別代表選片、模型嘗試與工作狀態。
+此頁保留韌性功能的設計順序；現行主線已演進至 Migration 57，新增 AI Trace／Provider model／保留政策等功能，見[現行基線](../reference/CURRENT_STATE_ZH_TW.md)。Decision Trace、AI Trace 與 Job completed 分別代表選片、模型嘗試與工作狀態。
 
 
 ## 現有資料流與插入點

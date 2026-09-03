@@ -1,6 +1,6 @@
 # Security／Production Readiness 最終交接
 
-> 本頁保留 PR #53 的歷史安全交接與後續補充，並非最新 CI 成績單。2026-08-31 原始碼最高 Migration 為 52、韌體 2.8.6、Config Store v5；現行部署／模型／實板邊界見[版本基線](reference/CURRENT_STATE_ZH_TW.md)。下文日期、PASS、NOT RUN 與舊版本指當時交付，不推定目前部署狀態。
+> 本頁保留 PR #53 的歷史安全交接與後續補充，並非最新 CI 成績單。2026-09-03 原始碼最高 Migration 為 57、韌體 2.8.6、Config Store v5；現行部署／模型／實板邊界見[版本基線](reference/CURRENT_STATE_ZH_TW.md)。下文日期、PASS、NOT RUN 與舊版本指當時交付，不推定目前部署狀態。
 
 本文件記錄 PR #53 安全強化分支最後一輪的操作契約與人工邊界。自動化測試通過不代表真實 NAS、正式憑證、OpenRouter 或電子紙硬體已驗證；未實際執行的項目必須標記 `NOT RUN`。Hosted provenance 必須區分 `PR_HEAD`、`TESTED_MERGE_REF`、`MERGE_GROUP` 與 optional `EXACT_HEAD_WORKFLOW_RUN`；最新 PR merge-ref required checks 是主要合併相容性證據。
 
@@ -8,7 +8,7 @@
 
 - 當時基準為該次 `origin/main`；正式 schema source 為 `Migration 33`。Migration 32 保存 Provider options/capabilities、usage 的 cache-write、成本來源與 request-size metrics；Migration 33 增加 Provider identity、OpenRouter legacy data fix 與成本回溯索引，舊 Migration 1–31 不修改。
 - Provider 路徑新增正式 OpenRouter contract、受控 routing/privacy options、reasoning／session routing 與 Batch hard guard；Vision 與 text-only JSON repair 共用 policy helper；成本來源分為 `provider_reported`、`estimated`、`unknown`，unknown 不當作零成本。
-- AI 請求固定 512／1024／1600 image side；完整、變體、文字修復分別受 2048／3072／1200 token cap 約束。repair policy 在 Analysis Plan 建立時 freeze，但不進 Vision fingerprint；每次分析最多一次 repair，且 repair 不重新上傳圖片。
+- AI 請求固定 512／1024／1600 image side；完整、變體、文字修復分別受 當時的 2048／3072／1200 token cap（目前 v4 三者均上限 1200，見[Token 指南](reference/TOKEN_COST_GUIDE_ZH_TW.md)） 約束。repair policy 在 Analysis Plan 建立時 freeze，但不進 Vision fingerprint；每次分析最多一次 repair，且 repair 不重新上傳圖片。
 - ESP32 HTTPS 仍要求 trust anchor 且沒有 `setInsecure()` fallback；PhotoPainter 另可直接連
   literal RFC1918 HTTP，其他 public IP／hostname HTTP 一律拒絕。首次配網使用每個 AP
   session 重新產生的 8 位數字密碼，並在 AP 頁面與裝置畫面顯示同一值。

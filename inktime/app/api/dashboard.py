@@ -4,6 +4,7 @@ from flask import Blueprint, current_app, render_template
 
 from inktime.app.web.ai_readiness import MODE_LABELS, ai_readiness_snapshot
 from inktime.app.web.access import login_required
+from inktime.app.repositories.analysis_history import historical_model_sql
 
 
 bp = Blueprint("dashboard", __name__)
@@ -246,6 +247,21 @@ def dashboard():
                 """
             ).fetchone()[0],
         }
+        model_counts = connection.execute(
+            f"""
+            SELECT COALESCE(SUM(current_model),0) AS current_model,
+                   COALESCE(SUM(historical_model AND NOT current_model),0) AS historical_model
+            FROM (
+                SELECT a.photo_id,
+                       MAX(a.schema_version=4 AND a.score_kind='semantic') AS current_model,
+                       MAX({historical_model_sql()}) AS historical_model
+                FROM photo_analysis a GROUP BY a.photo_id
+            )
+            """,  # noqa: S608 -- fixed presentation predicate, no request interpolation.
+        ).fetchone()
+        counts["current_model_analyzed"] = int(model_counts["current_model"])
+        counts["historical_model_analyzed"] = int(model_counts["historical_model"])
+        counts["model_analyzed"] = counts["current_model_analyzed"] + counts["historical_model_analyzed"]
         recent_errors = connection.execute(
             "SELECT error_code, message, last_seen_at, occurrences FROM job_errors WHERE resolved_at IS NULL ORDER BY last_seen_at DESC LIMIT 5"
         ).fetchall()

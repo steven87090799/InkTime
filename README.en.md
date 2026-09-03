@@ -1,6 +1,6 @@
 # InkTime · E-Ink Memory Frame
 
-> Source baseline: 2026-08-31, `48d2b8d`. Migration 52, AI Schema v3 and ESP32 2.8.6 are separate version contracts. See the [current-state reference](docs/reference/CURRENT_STATE_ZH_TW.md).
+> Source baseline: 2026-09-03, `51309e2`. Migration 57, AI Schema v4 and ESP32 2.8.6 are separate version contracts. See the [current-state reference](docs/reference/CURRENT_STATE_ZH_TW.md).
 
 > For complete Web/Worker/Scheduler setup, device queues, resilience features, and the document map, also see the [Chinese README](README.md), the [documentation portal](USER_MANUAL.html), and [docs/README.md](docs/README.md).
 
@@ -63,7 +63,7 @@ Native Python processes do not load the Compose `.env` automatically. Export `IN
 
 New installations default to `analysis.execution_mode=local_only`; scanning, local selection and rendering do not require an AI provider. To run ordinary AI jobs, an administrator must explicitly select `automatic_ai` in `/settings`, configure a provider, its model and pricing, then create a small `single` job in `/jobs`. `local_with_manual_ai` permits explicit manual AI operations only.
 
-The current pipeline sends one Vision image request per analysis plan, with at most one text-only JSON repair. Old two-stage strategy names normalize to `single`. Results include descriptions, photo types, scores and captions; the source schema is v3 and retains older results for reading.
+The current pipeline sends one Vision image request per analysis plan, with at most one text-only JSON repair. Old two-stage strategy names normalize to `single`. Results include descriptions, photo types, scores and captions; new responses must satisfy strict Schema v4, including memory and visual scores, content filters and visual orientation. Stored v1–v3 results remain historical records and need reanalysis to enter v4 ranking.
 
 `analyze_photos.py` is a compatibility CLI that creates persisted jobs and executes one Worker iteration. It is not the retired standalone analyzer; remaining work requires the Worker service. A completed local job, prefilter result, inherited analysis or cache hit does not prove a new provider call. Check [Activity and AI Trace](docs/guides/ACTIVITY_AI_TRACE_ZH_TW.md) together with usage and timestamps.
 

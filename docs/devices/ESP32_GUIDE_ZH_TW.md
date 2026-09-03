@@ -1,5 +1,7 @@
 # ESP32-S3 與電子墨水完整指南
 
+從 NAS 到 ESP32 配對與顯示驗收，請先看[完整上線指南](../operations/PRODUCTION_DEPLOYMENT_GUIDE_ZH_TW.md)。
+
 現行共用韌體為 2.8.6、Config Store v5（舊 v1–v4 可讀）；24-slot 支援仍須配對能力確認。PhotoPainter KEY1 雙擊電源頁／SD 原圖恢復與 1h→6h→24h 故障退避詳見[PhotoPainter 指南](WAVESHARE_PHOTOPAINTER_ZH_TW.md)。
 
 

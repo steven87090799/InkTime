@@ -2205,12 +2205,14 @@ class SettingsRepository:
         safe_before = {
             key: value
             for key, value in before.items()
-            if SETTING_DEFINITIONS[key].get("snapshot_allowed", True)
+            if key in SETTING_DEFINITIONS
+            and SETTING_DEFINITIONS[key].get("snapshot_allowed", True)
         }
         safe_after = {
             key: value
             for key, value in after.items()
-            if SETTING_DEFINITIONS[key].get("snapshot_allowed", True)
+            if key in SETTING_DEFINITIONS
+            and SETTING_DEFINITIONS[key].get("snapshot_allowed", True)
         }
         changed_keys = sorted(changed)
         connection.execute(

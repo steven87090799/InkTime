@@ -58,7 +58,7 @@ Migration 33 不會把 `cost_source='unknown'` 的 historical row 推論成 `est
 
 本次跨日 staged-next 修復不新增 SQLite schema，也不修改既有 Migration；`MIGRATION=none`。明日 schedule 以 PhotoPainter SD 上 bounded 的 `staged_next.json`、`.tmp` 與 `.bak` 保存，active schedule 仍由既有 snapshot／Queue schema 管理。部署時不需重跑資料遷移；需確認韌體版本同時支援 `target=current|next`、future rotation、午夜 promote 與 non-terminal prefetch ACK。
 
-## 目前主線 Migration 34–52
+## 目前主線 Migration 34–57
 
 以下依原始碼逐版列出名稱；既有 1–33 說明保留作歷史升級背景，並非最高版本。
 
@@ -83,5 +83,12 @@ Migration 33 不會把 `cost_source='unknown'` 的 historical row 推論成 `est
 | 50 | 為保留清理稽核建立有界 GC 索引 |
 | 51 | 加入有界 AI 分析追蹤檢視器 |
 | 52 | 加入 Provider 預設模型 ID |
+| 53 | 統一既有 AI 分析為台灣繁體中文 |
+| 54 | 分離本機品質與 AI 語意排序來源 |
+| 55 | Vision schema v4 與本機特殊程度排序 |
+| 56 | 持久化照片庫排序待重算狀態 |
+| 57 | Vision v4 歷史排序與 E6 排除轉換 |
 
-Migration 51 保存 AI Trace run／attempt 與預設 30 天保留政策；52 為 Provider 加入可空白的 `model`。空白保持全域模型 fallback，已設定值納入路由與凍結計畫。版本數字與 API／Config Store schema 不同，完整對照見[現行基線](../reference/CURRENT_STATE_ZH_TW.md)。升級、fresh、rollback 與 restore 證據由目前 source 對應的 Hosted CI 決定；本文件同步未執行資料遷移。
+Migration 51 保存 AI Trace run／attempt 與預設 30 天保留政策；52 為 Provider 加入可空白的 `model`。空白保持全域模型 fallback，已設定值納入路由與凍結計畫。版本數字與 API／Config Store schema 不同，完整對照見[現行基線](../reference/CURRENT_STATE_ZH_TW.md)。升級、fresh、rollback 與 restore 證據由目前 source 對應的 Hosted CI 決定。本次另在獲授權的 OrbStack debug 環境驗證 53→57，不能替代 NAS 實測或完整 Hosted CI。
+
+Migration 55 會退休舊排名權重、將文案長度改為 10／60／100 並把完整／變體分析上限收斂至 1200；57 將舊 v1–v3 語意結果標為歷史並精準解除舊 E6 自動排除。升級前應備份，再核對個人設定與 [Vision v4 契約](../VISION_SCHEMA_V4.md)。設定快照會略過目前版本不認識的舊 key，原始資料列仍保留，避免退休設定阻止一般設定儲存。

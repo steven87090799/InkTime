@@ -5,7 +5,7 @@
 工作 `completed` 不等於曾送出模型請求。先以同一 Job ID／Photo ID 核對：
 
 1. 「工作」`/jobs`：工作類型、策略、建立時間、完成／失敗筆數。本機掃描與 `local` 工作可正常完成但沒有 AI 文案。
-2. 「設定」`/settings`：administrator 搜尋「分析執行模式」或 `analysis.execution_mode`。若找不到，切換「進階」並清除其他篩選。新安裝 `local_only` 不會呼叫 Provider；一般模型工作需 `automatic_ai`。`local_with_manual_ai` 只開放明確的手動 AI 操作。
+2. 「設定」`/settings`：administrator 搜尋「分析執行模式」或 `analysis.execution_mode`。若找不到，清除其他篩選後搜尋完整 key。新安裝 `local_only` 不會呼叫 Provider；一般模型工作需 `automatic_ai`。`local_with_manual_ai` 只開放明確的手動 AI 操作。
 3. 「模型與 API」`/providers`：確認啟用、憑證、Provider 專屬模型、Schema 能力與價格；OpenRouter 模型需完整前綴。連線測試成功只代表連線能力。
 4. 「AI 分析追蹤」`/ai/traces`：依 Job／Photo／Provider／model 查詢 attempts 的 request、response、parse 與完成時間，再核對「成本」`/costs` 的 `api_usage`。
 5. 已存在的工作會保存分析計畫；改模式或模型後先建立少量新工作，不推定舊完成工作會自動重跑。預篩排除、相同內容繼承及 cache hit 也可能沒有新的付費請求。

@@ -41,7 +41,7 @@ flowchart LR
 
 1. 到「模型」新增 Provider：填名稱、完整 Base URL、API Key、優先順序與限制，儲存後先執行連線測試。
 2. 到「設定」把「分析執行模式」設為 `automatic_ai`，設定預算；Provider 專屬模型優先，留白才沿用 `model.analysis_model`。
-3. 到「評分」以單張測試台確認模型能回傳符合 Schema 的繁體中文描述、四項分數與 `side_caption`。
+3. 到「評分」以單張測試台確認模型能回傳符合 Schema 的繁體中文描述、回憶／視覺兩項分數、內容分類與必要方向欄位與 `side_caption`。
 4. 到「維護」掃描照片資料夾；掃描只做本地 EXIF、雜湊與影像特徵，不會自行開始付費分析。
 5. 到「工作」先用 10～100 張建立 `single` 工作。每張照片最多一次圖片模型請求；Worker 會依設定呼叫 Provider，並將分析與用量寫入 SQLite。
 6. 到「照片」檢查實際分數與文案；到「成本」確認 Token 與費用。

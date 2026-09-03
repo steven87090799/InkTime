@@ -1,6 +1,6 @@
 # InkTime 專案架構與照片評分流程
 
-> 現行主線 Migration 52、AI Schema v3 與三程序基線見[版本參考](../reference/CURRENT_STATE_ZH_TW.md)。下文 Migration 22–24 是功能引入歷史，不是目前最高版本。
+> 現行主線 Migration 57、AI Schema v4 與三程序基線見[版本參考](../reference/CURRENT_STATE_ZH_TW.md)。下文 Migration 22–24 是功能引入歷史，不是目前最高版本。
 
 > 決策與韌性擴充：Migration 22 加入 Decision Trace、回饋、Shadow、Queue、Retention 與 Canary 資料；Migration 23 補強決策關聯，Migration 24 補上分析／Vision Input 指紋。正式發布仍由 `RenderService → ReleaseCoordinator` 管理；追蹤或 Shadow 寫入失敗不會中斷正式 Release。
 

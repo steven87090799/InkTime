@@ -153,6 +153,35 @@ def test_partial_update_only_writes_changed_keys_and_creates_one_snapshot(client
     assert json.loads(snapshots[0]["changed_keys_json"]) == ["analysis.concurrency"]
 
 
+@pytest.mark.parametrize("retired_key", ["travel_bonus_enabled", "retired.api_key"])
+def test_retired_persisted_setting_does_not_block_update_or_enter_snapshot(client, app, retired_key):
+    create_admin(app)
+    login(client)
+    legacy_value = json.dumps("preserve-without-exporting")
+    with app.extensions["inktime_database"].transaction() as connection:
+        connection.execute(
+            """INSERT INTO settings(key,category,value_json,value_type,requires_restart,updated_at)
+               VALUES (?, 'retired', ?, 'string', 0, ?)""",
+            (retired_key, legacy_value, datetime.now(timezone.utc).isoformat()),
+        )
+    response = _post(client, "/api/v1/settings", {"system.log_level": "DEBUG"}, confirm=True)
+    assert response.status_code == 200
+    assert response.json["changed_keys"] == ["system.log_level"]
+    snapshot = app.extensions["inktime_settings_repository"].snapshot(response.json["snapshot_id"])
+    assert retired_key not in snapshot["before"]
+    assert retired_key not in snapshot["after"]
+    assert "preserve-without-exporting" not in json.dumps(snapshot)
+    with app.extensions["inktime_database"].session() as connection:
+        retained = connection.execute(
+            "SELECT value_json FROM settings WHERE key=?", (retired_key,)
+        ).fetchone()
+        log_level = connection.execute(
+            "SELECT value_json FROM settings WHERE key='system.log_level'"
+        ).fetchone()
+    assert retained["value_json"] == legacy_value
+    assert json.loads(log_level["value_json"]) == "DEBUG"
+
+
 def test_offline_policy_change_invalidates_only_eligible_device_deadlines(client, app):
     create_admin(app)
     login(client)

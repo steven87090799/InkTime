@@ -1,6 +1,6 @@
 # InkTime 2.x 遷移與回滾計畫
 
-目前最高版本為 Migration 52；以下「設定對應」是從舊平台遷移時的人工核對表，不代表 repository 還提供 Legacy 匯入／渲染腳本。NAS 正式升級由[NAS 更新器](NAS_TAG_DEPLOYMENT_ZH_TW.md)建立 recovery point；不要直接在線上替換 `.db`。
+目前最高版本為 Migration 57；以下「設定對應」是從舊平台遷移時的人工核對表，不代表 repository 還提供 Legacy 匯入／渲染腳本。NAS 正式升級由[NAS 更新器](NAS_TAG_DEPLOYMENT_ZH_TW.md)建立 recovery point；不要直接在線上替換 `.db`。
 
 
 ## 原則

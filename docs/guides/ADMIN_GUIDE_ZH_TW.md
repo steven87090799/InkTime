@@ -1,6 +1,6 @@
 # 管理員指南
 
-設定表以新安裝預設為準，升級會保留管理員已存的設定。登入 administrator 後在 `/settings` 搜尋中文標籤或 key；本主線仍有「基本／進階」模式，找不到欄位時切到進階並清除篩選。一般 AI 工作必須先把「分析執行模式」設為 `automatic_ai`；只填 Key 或模型不會啟用。追查沒有文案或 Worker 告警見[Activity／AI Trace](ACTIVITY_AI_TRACE_ZH_TW.md)。
+設定表以新安裝預設為準；升級保留帳號與 Provider，版本契約可能遷移已退休設定或收斂文案／Token 上限，升級前須備份。登入 administrator 後在 `/settings` 搜尋中文標籤或 key；目前設定頁完整列出設定，以分類、風險、生效方式與全文搜尋篩選；找不到欄位時清除篩選。一般 AI 工作必須先把「分析執行模式」設為 `automatic_ai`；只填 Key 或模型不會啟用。追查沒有文案或 Worker 告警見[Activity／AI Trace](ACTIVITY_AI_TRACE_ZH_TW.md)。
 
 
 ## 角色
@@ -18,8 +18,6 @@
 | `analysis.stage_two_threshold` | 65 | 舊版讀取相容欄位 | 新工作不再使用，不會觸發第二次圖片請求 | 否 |
 | 本機預篩選 | 啟用 | 截圖／明顯低品質可分別停用 | 排除項目 0 Token；不刪原檔 | 否 |
 | `analysis.prefilter_sensitivity` | conservative | conservative／balanced／aggressive | 越積極越省 Token，也越可能誤排除 | 否 |
-| `analysis.e6_prefilter_enabled` | true | true／false | 關閉後不會因六色量化失真而省下模型請求 | 否 |
-| `analysis.e6_min_score` | 25 | 0–100，建議 20–35 | 越高越省 Token，但可能排除原圖好看、六色表現較弱的照片 | 否 |
 | `analysis.scoring_rules` | 內建完整規則 | 100–12000 字元 | 影響新分析結果 | 否 |
 | 綜合排序公式 | 50／25／25 | 固定為回憶／視覺／本機品質 | 公式不可由舊版權重介面改寫 | 否 |
 | 最愛照片提升 | 特殊程度 +1 | 固定且最高為 level 4 | 影響 v4 排名，不改模型原始分 | 否 |
@@ -34,11 +32,11 @@
 | `analysis.max_retries` | 3 | 0–10 | 重試增加成本 | 否 |
 | `model.analysis_model` | gpt-4o | 支援圖片／Schema 的模型 | 能力不足會進錯誤佇列 | 否 |
 | `model.low_model`／`model.high_model` | 舊值 | 舊版讀取相容欄位 | 新工作不會恢復低／高兩次圖片請求 | 否 |
-| `budget.daily_warning` | 5 | ≥0 美元 | 只警告 | 否 |
-| `budget.daily_stop` | 10 | ≥0 美元 | 達到即停新請求 | 否 |
-| `budget.monthly_warning` | 50 | ≥0 美元 | 只警告 | 否 |
-| `budget.monthly_stop` | 100 | ≥0 美元 | 達到即停新請求 | 否 |
-| `budget.job_default` | 10 | ≥0 美元 | 工作達到後暫停 | 否 |
+| `budget.daily_warning` | 5.0 | ≥0 美元 | 只警告 | 否 |
+| `budget.daily_stop` | 10.0 | ≥0 美元 | 達到即停新請求 | 否 |
+| `budget.monthly_warning` | 50.0 | ≥0 美元 | 只警告 | 否 |
+| `budget.monthly_stop` | 100.0 | ≥0 美元 | 達到即停新請求 | 否 |
+| `budget.job_default` | 10.0 | ≥0 美元 | 工作達到後暫停 | 否 |
 | `budget.photo_max` | 0.25 | ≥0 美元 | 過低會阻擋單次模型分析 | 否 |
 | `budget.max_tokens` | 8000 | 256–1,000,000 | 需符合模型能力 | 否 |
 | `render.memory_threshold` | 70 | 0–100 | 過高可能無候選 | 否 |
@@ -49,16 +47,16 @@
 | `render.e6_weight` | 20 | 0–60% | 過高會讓面板顯示效果凌駕回憶分 | 否 |
 | `render.layout` | photo_info | full／postcard／photo_info／photo_pair／photo_pair_caption／adaptive_memory／calendar／weather_sensor | 日曆與天氣版型的照片區較小 | 否 |
 | `render.show_capture_date` | true | true／false | EXIF 日期錯誤時也會跟著顯示 | 否 |
-| `render.font_path` | 內建芫荽 | 內建手寫／文青風格或已上傳 TTF／OTF／TTC | 缺字會停止發布，不會 fallback | 否 |
+| `render.font_path` | builtin:iansui | 內建手寫／文青風格或已上傳 TTF／OTF／TTC | 缺字會停止發布，不會 fallback | 否 |
 | `render.show_location` | true | true／false | 只顯示最近城市，不顯示座標 | 否 |
 | `render.location_max_distance_km` | 80 | 1–500 公里 | 過大可能顯示不準確的鄰近城市 | 否 |
 | `render.profile` | gdep073e01_6c | 四色／GDEP 六色／GDEY 七色 | 必須與裝置面板相符 | 否 |
 | `render.dither` | gooddisplay | 原廠相容／照片平滑／Floyd／Atkinson／Bayer／none | 照片平滑可能柔化極細線；兩種新模式強度固定 | 否 |
-| `render.dither_strength` | 1 | 0–2 | 過高會增加色點 | 否 |
+| `render.dither_strength` | 1.0 | 0–2 | 過高會增加色點 | 否 |
 | `render.color_distance` | oklab | oklab／rgb | 切換會改變色彩映射 | 否 |
 | `render.weather_enabled` | false | 啟用前先填正確經緯度 | 需連外；失敗不阻擋照片發布 | 否 |
 | 天氣經緯度／顯示名稱 | 臺北市中心／所在地 | 緯度 -90–90、經度 -180–180 | 預設座標只是範例，啟用前必須修改 | 否 |
-| `render.sensor_device_id` | 空白 | PhotoPainter 裝置 ID；空白取最近回報 | 多裝置時可能抓到別的房間 | 否 |
+| `render.sensor_device_id` |  | PhotoPainter 裝置 ID；空白取最近回報 | 多裝置時可能抓到別的房間 | 否 |
 | `device.legacy_api_enabled` | false | 歷史相容設定；舊 Web 路由已移除 | 不能用此鍵恢復 URL 金鑰下載路由 | 不適用 |
 | `device.default_timezone` | Asia/Taipei | IANA 時區 | 影響新增裝置排程 | 否 |
 | `device.default_schedule` | 08:00 | 00:00–23:59 | 影響新增裝置刷新時間 | 否 |
@@ -69,7 +67,7 @@
 | Webhook | 停用 | 預設只允許 HTTPS URL、2–30 秒逾時 | 只連可信端點；Token 加密保存 | 否 |
 | `system.log_level` | INFO | DEBUG／INFO／WARNING／ERROR／CRITICAL | DEBUG 增加磁碟寫入 | 否 |
 | `system.log_format` | json | human/json | 集中 Log 建議 json | 否 |
-| `system.diagnostics_cache_seconds` | 21600（6 小時） | 30–86,400 | 太小會反覆掃大型縮圖目錄 | 否 |
+| `system.diagnostics_cache_seconds` | 21600 | 30–86,400 | 太小會反覆掃大型縮圖目錄 | 否 |
 | `security.session_minutes` | 30 | 5–1440 | 過長增加共用裝置風險 | 否 |
 | `backup.schedule_enabled` | true | true/false | 關閉後需手動備份 | 否 |
 | `backup.hour` | 3 | 0–23 | 避開大量分析 | 否 |
@@ -109,7 +107,7 @@
 
 「渲染」頁提供即時六色預覽。智慧裁切先用本機 OpenCV 尋找正面人臉；沒有可信人臉時，改以邊緣、色彩與中央先驗估計主體。裁切會盡量保留偵測到的主體範圍，管理員也可用水平／垂直滑桿覆寫焦點並儲存，或恢復自動模式。這些操作只儲存 0–1 的相對位置，不修改原始照片。
 
-E6 適合度會在任何模型請求前，以正式 `gdep073e01_6c` 色盤、OKLab 色差與 Bayer 抖動建立 112 px 本機樣本，量測量化後對比保留、主體細節、膚色偏差與強邊緣／文字可讀性。總分低於 `analysis.e6_min_score` 時可直接排除，因此不新增 Token；最愛照片仍會略過排除。舊照片第一次進入候選或渲染時會自動補算，仍不呼叫模型。
+E6 適合度完全在本機計算，量測正式六色色盤量化後的對比、主體、膚色與文字／邊緣保留；只參與顯示分數，不再作自動排除門檻，也不計入本機品質分。補算 E6 不會呼叫 Provider。Migration 57 只解除符合舊 E6 規則且未人工覆寫的自動排除；其他排除與人工決定保留。
 
 八種版型為全版照片、明信片、照片＋日期地點、純雙照片、雙照片各自一句話、智慧自適應回憶、月曆相框、天氣＋室內溫溼度；後兩種只支援直向。預覽可暫時切換版型，按「設為預設版型」才會改正式發布設定。天氣資料為選用功能，從 Open-Meteo 取得目前天氣、溼度與當日高低溫並快取 30 分鐘；外部服務失敗時照片仍正常發布。室內資料來自 PhotoPainter 裝置狀態回報；沒有感測值時畫面會明確顯示尚無回報。
 

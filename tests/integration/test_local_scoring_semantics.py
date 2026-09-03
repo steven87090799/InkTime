@@ -478,3 +478,92 @@ def test_semantic_detail_retains_v4_ranking_percentile_and_components(client, ap
     assert "視覺 78" in body
     assert "本機品質 78" in body
     assert "已完成 AI 語意評分照片" in body
+
+
+def _save_model_history(app, photo_id: str, *, stage: str = "single") -> int:
+    _save_semantic(app, photo_id, 78)
+    raw = json.dumps(
+        {"schema_version": 3, "caption": "舊模型保存的海邊家庭回憶。", "memory_score": 78},
+        ensure_ascii=False,
+    )
+    with app.extensions["inktime_database"].session() as connection:
+        analysis_id = connection.execute(
+            "SELECT max(id) FROM photo_analysis WHERE photo_id=?", (photo_id,)
+        ).fetchone()[0]
+        connection.execute(
+            """UPDATE photo_analysis SET schema_version=3,score_kind='legacy',stage=?,
+                      caption=?,side_caption=?,types_json=?,raw_json=?,visual_score=NULL,
+                      beauty_score=81,technical_quality_score=76,emotion_score=83,
+                      created_at='2026-01-01T00:00:00+00:00'
+               WHERE id=?""",
+            (stage, "舊模型保存的海邊家庭回憶。", "海風吹來一家人的笑聲", '["家庭"]', raw, analysis_id),
+        )
+    return int(analysis_id)
+
+
+def test_preserved_model_history_survives_newer_local_rows_in_browse_and_search(
+    client, app, tmp_path
+):
+    root = tmp_path / "preserved-history"
+    for stage in ("single", "inherited"):
+        photo_id = f"history-{stage}"
+        _insert_photo(app, root, photo_id)
+        _save_model_history(app, photo_id, stage=stage)
+        _save_local(app, photo_id, 62)
+        _save_local(app, photo_id, 63)
+    repo = app.extensions["inktime_photo_repository"]
+    with repo.database.session() as connection:
+        before = [dict(row) for row in connection.execute("SELECT * FROM photo_analysis ORDER BY id")]
+    rows, count = repo.search(query="舊模型保存", photo_type="家庭", limit=1)
+    assert count == 2 and len(rows) == 1
+    assert rows[0]["is_historical_model"] == 1
+    assert rows[0]["score_kind"] == "legacy"
+    assert rows[0]["schema_version"] == 3
+    assert repo.search(query="舊模型保存", minimum_score=1)[1] == 0
+    assert repo.score_population() == []
+    create_admin(app)
+    login(client)
+    listing = client.get("/photos?q=舊模型保存").get_data(as_text=True)
+    assert listing.count("歷史模型判斷 · Schema 3") == 2
+    assert "海風吹來一家人的笑聲" in listing
+    for stage in ("single", "inherited"):
+        detail = client.get(f"/photos/history-{stage}").get_data(as_text=True)
+        assert "優先顯示 · 歷史模型判斷" in detail
+        assert "舊模型保存的海邊家庭回憶。" in detail
+        assert "歷史模型原始分數" in detail
+        assert "美觀 81" in detail
+        assert "現行 v4 排名需重新分析" in detail
+    dashboard = client.get("/dashboard").get_data(as_text=True)
+    assert "已完成分析（含本機）" in dashboard
+    assert "現行 v4 0／歷史 2" in dashboard
+    with repo.database.session() as connection:
+        after = [dict(row) for row in connection.execute("SELECT * FROM photo_analysis ORDER BY id")]
+    assert before == after
+
+
+def test_current_model_precedes_history_and_model_counts_do_not_include_local(
+    client, app, tmp_path
+):
+    root = tmp_path / "current-and-history"
+    _insert_photo(app, root, "current-and-history")
+    _save_model_history(app, "current-and-history")
+    _save_semantic(app, "current-and-history", 82)
+    _save_local(app, "current-and-history", 95)
+    _insert_photo(app, root, "old-local-only")
+    _save_local(app, "old-local-only", 98)
+    with app.extensions["inktime_database"].session() as connection:
+        connection.execute(
+            "UPDATE photo_analysis SET schema_version=2 WHERE photo_id='old-local-only'"
+        )
+    repo = app.extensions["inktime_photo_repository"]
+    rows, count = repo.search()
+    assert count == 2
+    indexed = {row["id"]: row for row in rows}
+    assert indexed["current-and-history"]["score_kind"] == SEMANTIC_SCORE_KIND
+    assert indexed["current-and-history"]["is_historical_model"] == 0
+    assert indexed["old-local-only"]["is_historical_model"] == 0
+    assert len(repo.score_population()) == 1
+    create_admin(app)
+    login(client)
+    dashboard = client.get("/dashboard").get_data(as_text=True)
+    assert "現行 v4 1／歷史 0" in dashboard

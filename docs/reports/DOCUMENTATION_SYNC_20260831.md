@@ -1,5 +1,7 @@
 # 2026-08-31 全專案 Markdown 校對紀錄
 
+> 歷史校對紀錄，以下數量與版本保留當時結果；2026-09-03 現況以[現行基線](../reference/CURRENT_STATE_ZH_TW.md)為準。
+
 原始碼基準：`origin/main` `48d2b8d`。工作分支：`docs/project-documentation-sync-20260831`。本次只調整文件；未合併的其他 worktree 功能不列入主線，也不代表使用者部署已更新。
 
 範圍為原有 75 份 Markdown，加上本次新增 4 份，共 79 份；依既有分類校對，不搬移文件。根目錄 `USER_MANUAL.html` 同步完整索引、現行基線提醒及少量衝突文字，未把既有長篇 HTML 宣稱為逐項更新的現行規格。

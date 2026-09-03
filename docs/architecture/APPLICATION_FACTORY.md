@@ -43,6 +43,6 @@ Auth、CSRF 與 HTTP error handler 只由 Modern Root 註冊。Device Bearer API
 
 三個 process role 都呼叫既有 `migrate()`；Docker 仍讓 Worker／Scheduler 等待 Web
 readiness，Migration lock、交易 rollback、pre-migration backup 與 integrity check 不變。
-Factory 分離本身不新增 Schema；整個主線目前有 Migration 1–52，不能據此略過其他功能的升級。
+Factory 分離本身不新增 Schema；整個主線目前有 Migration 1–57，不能據此略過其他功能的升級。
 
 回滾必須停止三個 process，確認舊程式可讀目前 Schema；若跨越不相容 Migration，先依[備份還原指南](../operations/BACKUP_RESTORE_ZH_TW.md)還原相容快照，再啟動相容映像。Factory 分離的歷史無 Schema 變更，不代表之後所有版本都能只回退程式。
