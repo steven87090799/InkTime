@@ -2,17 +2,19 @@
 from __future__ import annotations
 
 import argparse
-from datetime import datetime, timezone
-from hashlib import sha256
+import ctypes
+import gc
 import json
 from pathlib import Path
 import re
+import sys
 import tempfile
 import threading
 import time
 import tracemalloc
 from typing import Any
-import sys
+from datetime import datetime, timezone
+from hashlib import sha256
 
 import psutil
 
@@ -46,6 +48,28 @@ def _file_size(path: Path) -> int:
         return path.stat().st_size
     except OSError:
         return 0
+
+
+def _release_runtime_memory() -> tuple[int, int, int, bool, bool]:
+    """Stop profiler overhead and release free libc pages before RSS validation."""
+
+    traced_heap, traced_peak = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+    collected = gc.collect()
+    trim_available = False
+    trimmed = False
+    try:
+        libc = ctypes.CDLL(None)
+        malloc_trim = getattr(libc, "malloc_trim", None)
+        if malloc_trim is not None:
+            trim_available = True
+            malloc_trim.argtypes = [ctypes.c_size_t]
+            malloc_trim.restype = ctypes.c_int
+            trimmed = bool(malloc_trim(0))
+    except (AttributeError, OSError, TypeError, ValueError):
+        # macOS and non-glibc runners do not expose malloc_trim; GC remains useful.
+        pass
+    return traced_heap, traced_peak, collected, trim_available, trimmed
 
 
 def _snapshot(app, process: psutil.Process) -> dict[str, Any]:
@@ -365,7 +389,13 @@ def main() -> int:
         scheduler.request_stop()
         for thread in workers:
             thread.join(timeout=5)
-        final = _snapshot(app, process)
+        final_before_memory_cleanup = _snapshot(app, process)
+        traced_heap, traced_peak, collected, trim_available, trimmed = _release_runtime_memory()
+        final = dict(final_before_memory_cleanup)
+        final["rss_bytes_before_cleanup"] = int(final_before_memory_cleanup["rss_bytes"])
+        final["rss_bytes"] = process.memory_info().rss
+        final["heap_bytes"] = traced_heap
+        final["heap_peak_bytes"] = traced_peak
         if any(thread.is_alive() for thread in workers):
             failures.append("background-thread-cleanup")
         if final["pending_jobs"]:
@@ -396,6 +426,14 @@ def main() -> int:
             "rss_growth_bytes": rss_growth,
             "webhook_calls": webhook.calls,
             "unhandled_exceptions": failures,
+            "memory_cleanup": {
+                "tracemalloc_stopped": True,
+                "gc_collected": collected,
+                "malloc_trim_available": trim_available,
+                "malloc_trim_applied": trimmed,
+                "rss_bytes_before_cleanup": int(final_before_memory_cleanup["rss_bytes"]),
+                "rss_bytes_after_cleanup": int(final["rss_bytes"]),
+            },
             "cleanup": {
                 "threads_stopped": not any(thread.is_alive() for thread in workers),
                 "child_processes_reaped": final["child_processes"] == 0,
@@ -413,7 +451,6 @@ def main() -> int:
             )
         app.extensions["inktime_service_container"].close()
         app = None
-        tracemalloc.stop()
         return 0 if not failures else 1
 
 

@@ -1,16 +1,13 @@
 # 快速開始
 
-1. 可信任 LAN Production 執行 `cp .env.lan.production.example .env`；正式 HTTPS Reverse Proxy 執行 `cp .env.production.example .env`。`.env.local.example` 只供 development／模擬。
-2. 填入實際 URL、不同的絕對 data/photos 路徑與 Git SHA；LAN 執行 `python scripts/production_preflight.py --mode lan --env-file .env`，HTTPS 使用 `--mode https`。
-3. 執行 `scripts/build_release_image.sh` 與 `docker compose up -d`；LAN Health 顯示 production／trusted-lan-http／degraded，且不可公開至公網。
-4. 建立管理員；到「模型」新增 Provider、設定 API Key 與模型價格並測試連線。
-5. 到「Batch 照片分析」先執行 100 張 Sample，確認 Schema、分數、Token、成本、JSONL、峰值 RSS 與遠端 File 清理，再執行 `all_eligible_missing_analysis`。
-6. 無實體面板時，先把照片放進 `simulation_photos/`，到「維護」按「掃描並送到虛擬墨水屏」，另開 `/virtual-display` 接收；正式照片庫仍可用 `/photos` 建立一般掃描工作。
-7. 每週排名使用已保存分析；新增或變更照片只用增量 Batch，不建立 Stage Two。
-8. 到「成本」核對 usage；再逐步增加照片數與並行數。
-9. 到「渲染」預覽並選擇內建手寫／文青繁中字型後發布；到「裝置」查看自製 ESP32 的自動配對核准，既有 Legacy 裝置才使用相容 Token。
-10. 到「備份」建立第一份備份；到「診斷」下載遮蔽後診斷包。
+1. **先選部署方式**：正式 NAS 依[NAS Tag 指南](../operations/NAS_TAG_DEPLOYMENT_ZH_TW.md)準備 `.env.nas` 與實際路徑，以已發布 Tag 執行 `sudo ./scripts/update_nas.sh --initialize vX.Y.Z`；日後更新省略 `--initialize`。NAS 不做本機 Build。
+2. **本機開發／模擬**才使用 `.env.local.example`，並同時指定 `docker-compose.yml`、`docker-compose.dev.yml`。實際命令與 LAN／HTTPS 邊界見[安裝指南](INSTALLATION_ZH_TW.md)。
+3. 確認 Web、Worker、Scheduler 均運作，瀏覽 `/setup` 建立第一位管理員；先建立備份。
+4. 到「維護」以容器內 `/photos` 掃描照片。新安裝預設 `local_only`，不需要模型 Key；可先用 `/simulator` 預覽，或以維護頁「掃描並送到虛擬墨水屏」配合 `/virtual-display`。
+5. 要使用 AI 才到「設定」搜尋「分析執行模式」並選 `automatic_ai`，再到「模型與 API」設定 Provider、該 Provider 的完整模型 ID、Key 與價格。先做連線／合成圖片測試；圖片測試可能計費。
+6. 以 1–3 張非敏感照片確認 Schema、文案與費用，再逐步建立小批 `single` 工作。從[AI Trace、Activity](../guides/ACTIVITY_AI_TRACE_ZH_TW.md)與成本比對，不能只看工作 `completed`。
+7. Batch 是另外選用的功能，只給已確認支援完整 Files／Batches 生命週期的 Provider；OpenRouter 不支援此路徑。先完成[Batch 人工 smoke](../OPENAI_BATCH_ANALYSIS_ZH_TW.md)，再考慮 100 張 sample 與全庫。
+8. 到「渲染」選擇版型、字型及與面板相符的 Profile，預覽後發布；新自製 ESP32 以實體配對碼核准，既有 Legacy Token／Stock 裝置依相容模式操作。
+9. 在「裝置」核對設定 ACK、下載與真正顯示結果；虛擬畫面與 CI 都不取代實板驗收。
 
-Intel N100 請先維持 `analysis.concurrency=1`、`worker.queue_multiplier=1`；確認 100 張真實照片的 Worker 峰值 RSS 後再考慮並行 2。部署、Log 與 ESP32 細節分別見 [Docker 部署規格](../operations/DOCKER_GUIDE_ZH_TW.md)、[Log 指南](../operations/LOGGING_GUIDE_ZH_TW.md)與[ESP32 指南](../devices/ESP32_GUIDE_ZH_TW.md)。
-
-模型測試不應直接從 100,000 張開始。先確認分類、成本、字型與裝置版本，再執行全量工作。
+Intel N100 先維持 `analysis.concurrency=1`、`worker.queue_multiplier=1`；依部署環境的實際 RSS／延遲再調整。日常新照片由增量掃描納入，模型、策略與保留政策見[現行基線](../reference/CURRENT_STATE_ZH_TW.md)。

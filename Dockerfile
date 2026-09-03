@@ -23,12 +23,12 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     INKTIME_PORT=8765
 
 # The pinned Python image may lag Debian security rebuilds. Debian trixie
-# currently postpones the SQLite FTS5 fixes, so take only libsqlite3-0 from
-# Debian forky, where the fixed 3.53.x package is available. Keep the source
-# and pin temporary and verify the installed version before removing both.
+# currently postpones the SQLite FTS5 fix, so take only that runtime library
+# from Debian forky, where the fixed package is available. The base image's
+# systemd/udev libraries are not needed by InkTime and are removed below.
 RUN set -eux; \
     printf '%s\n' 'deb https://deb.debian.org/debian forky main' \
-        > /etc/apt/sources.list.d/inktime-sqlite-fix.list; \
+        > /etc/apt/sources.list.d/inktime-runtime-fixes.list; \
     printf '%s\n' \
         'Package: *' \
         'Pin: release n=forky' \
@@ -37,7 +37,7 @@ RUN set -eux; \
         'Package: libsqlite3-0' \
         'Pin: release n=forky' \
         'Pin-Priority: 1001' \
-        > /etc/apt/preferences.d/inktime-sqlite-fix; \
+        > /etc/apt/preferences.d/inktime-runtime-fixes; \
     apt-get update; \
     DEBIAN_FRONTEND=noninteractive apt-get install --no-install-recommends --only-upgrade -y \
         bsdutils \
@@ -52,8 +52,13 @@ RUN set -eux; \
         util-linux; \
     sqlite_version="$(dpkg-query -W -f='${Version}' libsqlite3-0)"; \
     dpkg --compare-versions "${sqlite_version}" ge '3.53.2-1'; \
-    rm -f /etc/apt/sources.list.d/inktime-sqlite-fix.list \
-        /etc/apt/preferences.d/inktime-sqlite-fix; \
+    dpkg --purge --force-depends \
+        libudev1 \
+        libsystemd0; \
+    test "$(dpkg-query -W -f='${db:Status-Status}' libsystemd0 2>/dev/null || true)" != installed; \
+    test "$(dpkg-query -W -f='${db:Status-Status}' libudev1 2>/dev/null || true)" != installed; \
+    rm -f /etc/apt/sources.list.d/inktime-runtime-fixes.list \
+        /etc/apt/preferences.d/inktime-runtime-fixes; \
     rm -rf /var/lib/apt/lists/*
 
 RUN groupadd --gid 10001 inktime \

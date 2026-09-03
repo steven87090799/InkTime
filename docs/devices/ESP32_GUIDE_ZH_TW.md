@@ -1,22 +1,25 @@
 # ESP32-S3 與電子墨水完整指南
 
+現行共用韌體為 2.8.6、Config Store v5（舊 v1–v4 可讀）；24-slot 支援仍須配對能力確認。PhotoPainter KEY1 雙擊電源頁／SD 原圖恢復與 1h→6h→24h 故障退避詳見[PhotoPainter 指南](WAVESHARE_PHOTOPAINTER_ZH_TW.md)。
+
+
 ## 1. 正式支援範圍
 
 | 組合 | 狀態 | 韌體選項 | InkTime 發布格式 |
 |---|---|---|---|
 | ESP32-S3＋GDEY073D46 7.3 吋 | 已支援；面板原廠標示 EOL | 預設編譯 | 七色 indexed4、192,000 bytes；亦相容四色 2bpp |
 | ESP32-S3＋GDEP073E01 7.3 吋 Spectra 6 | 新採購建議；已加入 GxEPD2 編譯選項 | `INKTIME_PANEL_GDEP073E01=1` | 六色 indexed4、192,000 bytes；亦相容四色 2bpp |
-| Waveshare ESP32-S3-PhotoPainter＋7.3 吋 E6 | 軟體 adapter 已加入；尚待實機驗證 | `DEVICE_PROFILE=DEVICE_PROFILE_WAVESHARE_PHOTOPAINTER` | 既有 480×800 wire payload 轉面板原生 800×480 六色 4bpp |
+| Waveshare ESP32-S3-PhotoPainter＋7.3 吋 E6 | 已記錄 Rev2.0 冷啟動／KEY1 局部實板結果；其餘逐項驗收 | `DEVICE_PROFILE=DEVICE_PROFILE_WAVESHARE_PHOTOPAINTER` | 既有 480×800 wire payload 轉面板原生 800×480 六色 4bpp |
 | `esp32/ink-display-133C-photo` 13.3 吋 | 舊實驗韌體，不是正式安全路徑 | 不建議部署 | 舊 1200×1600 split 4bpp，與新版 Manifest 不相容 |
 
 GDEY073D46 原廠資料為 800×480、7 色、3.3 V、50-pin FPC、SPI、15–35°C、全刷約 32 秒，且頁面已標示 EOL。[Good Display GDEY073D46](https://www.good-display.com/product/442.html)
 
 未來新採購建議 GDEP073E01＋DESPI-C73 或原廠 ESP32E6-E01。GDEP073E01 為 800×480、6 色 Spectra 6、3.3 V、50-pin SPI、0–50°C、全刷約 15–22 秒；韌體已可選用 GxEPD2 的 `GxEPD2_730c_GDEP073E01` 類別。[Good Display GDEP073E01](https://www.good-display.com/product/533.html) [DESPI-C73 adapter](https://www.good-display.com/product/522.html) [GxEPD2 支援清單](https://github.com/ZinggJM/GxEPD2)
 
-伺服器、Manifest schema v2 與韌體 2.6.0 已共同支援完整六／七色、Offline Queue ACK 與相同內容安全 skip；色盤、抖動、混合面板發布、設定 ACK 與離線通知詳見[裝置可靠性與六／七色渲染指南](DEVICE_COLOR_NOTIFICATION_GUIDE_ZH_TW.md)。韌體 2.6.0 的新自製裝置使用自動配對；既有 Legacy Token 與 PhotoPainter Stock 相容路徑仍分流保留，完整流程見[ESP32 自動配對與憑證生命週期](ESP32_AUTOMATIC_PAIRING_ZH_TW.md)。
+伺服器、Manifest schema v2 與目前韌體 2.8.6 已共同支援完整六／七色、Offline Queue ACK 與相同內容安全 skip；色盤、抖動、混合面板發布、設定 ACK 與離線通知詳見[裝置可靠性與六／七色渲染指南](DEVICE_COLOR_NOTIFICATION_GUIDE_ZH_TW.md)。目前韌體 2.8.6 的新自製裝置使用自動配對；既有 Legacy Token 與 PhotoPainter Stock 相容路徑仍分流保留，完整流程見[ESP32 自動配對與憑證生命週期](ESP32_AUTOMATIC_PAIRING_ZH_TW.md)。
 
 Waveshare 整合的中央 Profile、SD／PMIC／RTC／SHTC3、安全 BUSY timeout、授權與
-20 項實機清單見 [PhotoPainter 支援與實機驗收](WAVESHARE_PHOTOPAINTER_ZH_TW.md)。
+實機檢查與證據邊界見 [PhotoPainter 支援與實機驗收](WAVESHARE_PHOTOPAINTER_ZH_TW.md)。
 
 ## 2. 建議硬體清單
 
@@ -50,6 +53,8 @@ ESP32-S3 官方資料列出的 Wi-Fi TX 峰值最高可到約 340 mA；SoC deep 
 DESPI-C73 對 MCU 暴露 BUSY、RES、D/C、CS、SCK、SDI、GND、3.3V；FPC 方向接反可能損傷面板。斷電後再插拔 FPC，鎖緊 connector，再上電。
 
 ## 4. 編譯
+
+以下為 Hosted CI 固定依賴與編譯設定的重現參考；一般開發不可在本機編譯，依[AGENTS.md](../../AGENTS.md)執行。操作 PhotoPainter 前必讀[Rev2.0 硬體交接](PHOTOPAINTER_REV2_TG28_HARDWARE_HANDOFF_ZH_TW.md)。
 
 Arduino CLI：
 
@@ -91,17 +96,17 @@ rm -f esp32/ink-display-7C-photo/partitions.csv
 
 Board 選 ESP32-S3，啟用 OPI PSRAM。正式版 `INKTIME_DEBUG_LOG=0`；短期硬體除錯才加入 `-DINKTIME_DEBUG_LOG=1`。序列 Log 不輸出 Device Secret、配對碼或 Legacy Token，但正式環境仍不應長期開啟。PhotoPainter 的 `CDCOnBoot=cdc` 會讓 Arduino `Serial` 指向 Type-C 原生 USB CDC／JTAG；既有未啟用 CDC 的板則仍指向 UART0。PhotoPainter 必須使用 16 MiB Flash／OPI PSRAM 與中央 `DEVICE_PROFILE`，完整命令見上方專用指南。
 
-2026-07-30 以 Arduino CLI 1.5.1、ESP32 core 3.3.10、GxEPD2 1.6.9、ArduinoJson 7.4.3 實際編譯 2.5.0：secure GDEY 使用 1,228,261 bytes，LAN GDEY 1,228,545 bytes，LAN GDEP 1,228,645 bytes，均為預設 1,310,720-byte app partition 的 93%；LAN PhotoPainter 使用 1,177,311 bytes（其 3 MiB app partition 的 37%）。GDEY／GDEP 全域變數約 96.6 KiB，PhotoPainter 約 49.2 KiB。這表示目前可編譯，但不是實體燒錄、Heap、PSRAM、BUSY 或功耗證據；新增 OTA、TLS certificate 或大型 Web UI 前仍須重新檢查 partition 與實板餘裕。
+2026-07-30 以 Arduino CLI 1.5.1、ESP32 core 3.3.10、GxEPD2 1.6.9、ArduinoJson 7.4.3 實際編譯 2.5.0：secure GDEY 使用 1,228,261 bytes，LAN GDEY 1,228,545 bytes，LAN GDEP 1,228,645 bytes，均為預設 1,310,720-byte app partition 的 93%；LAN PhotoPainter 使用 1,177,311 bytes（其 3 MiB app partition 的 37%）。GDEY／GDEP 全域變數約 96.6 KiB，PhotoPainter 約 49.2 KiB。這只表示當時版本可編譯，不是目前 2.8.6 的大小或實體燒錄、Heap、PSRAM、BUSY 或功耗證據；新增 OTA、TLS certificate 或大型 Web UI 前仍須重新檢查 partition 與實板餘裕。
 
-2026-08-10 exact Hosted CI 以 ESP32 core 3.3.10 編譯目前分支時，GDEY release image 為 1,319,629 bytes、default debug image 為 1,382,925 bytes；因此 repository-owned 4 MiB table 已將雙 OTA app slot 擴為 1,441,792 bytes（0x160000），debug image 約使用 96%，保留 58,867 bytes headroom。這是 compile/partition evidence，不是實體燒錄、Heap、PSRAM、BUSY 或功耗證據。
+2026-08-10 exact Hosted CI 以 ESP32 core 3.3.10 編譯當時分支時，GDEY release image 為 1,319,629 bytes、default debug image 為 1,382,925 bytes；因此 repository-owned 4 MiB table 已將雙 OTA app slot 擴為 1,441,792 bytes（0x160000），debug image 約使用 96%，保留 58,867 bytes headroom。這是 compile/partition evidence，不是實體燒錄、Heap、PSRAM、BUSY 或功耗證據。
 
-上傳前先用原廠 sample／GxEPD2 Example 驗證「面板型號＋adapter＋供電＋引腳」能完整刷新，再燒 InkTime 韌體。不同面板 driver class 不可混用。
+新硬體首次驗收可先用原廠 sample／GxEPD2 Example 驗證「面板型號＋adapter＋供電＋引腳」能完整刷新，再燒 InkTime 韌體。不同面板 driver class 不可混用。已完成 A/B 的 PhotoPainter 不重做官方恢復；先讀交接並保留 full-flash 備份，app-only 必須寫入 `0x10000`。
 
 ## 5. 首次 AP 配網與自動配對
 
 新自製 ESP32 不再要求使用者複製或手動輸入 Device Token。流程如下：
 
-1. 首次開機或按住 GPIO38 再上電，裝置建立 `InkTime-XXXXXX` AP；5 分鐘未儲存會睡眠。
+1. 既有 PCB 首次開機或按住 GPIO38 再上電（PhotoPainter 改依 GPIO4 recovery 流程，GPIO38 是 SD CS），裝置建立 `InkTime-XXXXXX` AP；5 分鐘未儲存會睡眠。
 2. AP 密碼為每個 AP session 重新產生的 8 位隨機數字，不由 SSID 尾碼推導；裝置畫面、
    SoftAP 與 Portal 顯示的是同一值，不使用共用密碼。
 3. 連到 AP，瀏覽 `192.168.4.1`，只填 Wi-Fi SSID／密碼與 InkTime Server（例如
@@ -150,8 +155,8 @@ Web 裝置頁會顯示最後狀態、下載成功／失敗、韌體、訊號、H
 - 面板脆弱，避免彎折、點壓、扭曲與 FPC 拉扯；不要撕除非原廠指示可移除的保護層。
 - 電子紙可能有 ghosting／色偏；本韌體採 full refresh，不把 GxEPD2 partial window API 當成 GDEY 可用的快速局刷。
 - 強烈建議用 SHA-256 驗證與「成功才刷新」；不要為省幾秒移除。
-- 完整六／七色 Queue 流程需 server、裝置 Profile 與 2.6.0 韌體配對；舊韌體升級期間使用 `safe_4c`。
-- 目前 GDEY／GDEP release image 約使用 92%、debug image 約使用 96% 的 repository-owned app partition；增加函式庫、TLS 或 OTA 前須重新執行 Hosted compile 與記憶體邊界檢查。
+- 完整六／七色 Queue 流程需 server、裝置 Profile 與目前 2.8.6 韌體契約配對；舊韌體升級期間使用 `safe_4c`。
+- 歷史編譯占用率不可當成目前餘裕；每次變更依相同 source／Profile 的 Hosted compile artifact 核對 partition 與記憶體。
 
 ## 9. 常見錯誤
 

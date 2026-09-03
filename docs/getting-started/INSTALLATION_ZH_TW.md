@@ -8,20 +8,24 @@
 
 ## Docker
 
+正式 NAS 使用 [NAS Tag 部署指南](../operations/NAS_TAG_DEPLOYMENT_ZH_TW.md)：準備同版 `docker-compose.nas.yml`、更新器與部署契約檔，複製 `.env.nas.example` 為 `.env.nas`，設定已存在的 canonical 資料／照片目錄、實際 URL 與 UID/GID `10001:10001` 權限，再執行：
+
 ```bash
-# 可信任 LAN Production HTTP：
-cp .env.lan.production.example .env
-# 正式 HTTPS Reverse Proxy 則改用：
-# cp .env.production.example .env
-# 設定實際 URL、不同的絕對 data/photos 路徑與 immutable Git SHA
-python scripts/production_preflight.py --mode lan --env-file .env
-scripts/build_release_image.sh
-docker compose up -d
-docker compose ps
-curl -fsS http://127.0.0.1:8765/health/ready
+sudo ./scripts/update_nas.sh --initialize vX.Y.Z
 ```
 
-若容器 UID 10001 無法寫入資料目錄，執行 `sudo chown -R 10001:10001 <data-path>`。照片目錄只需讀取權限。
+`vX.Y.Z` 是佔位，必須換成已發布版本。日後更新不加 `--initialize`；不要直接 Build 或手動 up 繞過 recovery point。
+
+本機開發／模擬才執行：
+
+```bash
+cp .env.local.example .env
+# 調整實際 data/photos 路徑、INKTIME_DEV_PUBLIC_URL 與綁定位址。
+docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build
+docker compose -f docker-compose.yml -f docker-compose.dev.yml ps
+```
+
+開發 override 預設對 LAN 開放；僅本機使用時設定 `INKTIME_DEV_BIND_ADDRESS=127.0.0.1`。容器 UID 10001 必須可寫 data；照片只需讀取權限，不要對相簿遞迴 chown。
 
 ## 原生安裝
 
@@ -29,11 +33,15 @@ curl -fsS http://127.0.0.1:8765/health/ready
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-python scripts/migrate.py --database data/inktime.db
+
+# 三個程序均須使用同一組 RuntimeConfig 環境變數；啟動會自動套用 Migration。
+export INKTIME_ENVIRONMENT=development
+export INKTIME_DATA_DIR="$PWD/data"
+export INKTIME_PHOTO_DIR="$PWD/simulation_photos"
 gunicorn --config gunicorn.conf.py server:app
 ```
 
-另開程序執行 `python -m inktime.app.workers.runner` 與 `python -m inktime.app.workers.scheduler`。只有本機開發可執行 `python server.py`。
+原生 Python 不會自動讀取 Compose 的 `.env`。另開程序並重設相同環境後執行 `python -m inktime.app.workers.runner` 與 `python -m inktime.app.workers.scheduler`。只有本機開發可執行 `python server.py`。
 
 ## 首次啟動
 

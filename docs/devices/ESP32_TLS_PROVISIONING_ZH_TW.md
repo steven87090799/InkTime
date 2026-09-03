@@ -12,7 +12,7 @@
 - 禁止 `WiFiClientSecure::setInsecure()`。
 - `HTTPClient` 停用 redirect follow；3xx 不會被裝置靜默導向其他 host。
 - HTTPS trust anchor 只能來自編譯期 `INKTIME_DEVICE_ROOT_CA` 或已驗證的 Root CA PEM 設定，不會從遠端 response 接受 CA。
-- Device Secret／Legacy Bearer credential 不會寫入 pairing screen、URL、序列埠或 status 回報以外的診斷文字；短效 pairing code 只在裝置畫面出現，管理員核准表只提供輸入框，不回顯伺服器配對碼。
+- Device Secret／Legacy Bearer credential 不會寫入 pairing screen、URL、序列埠、status payload 或診斷文字；短效 pairing code 只在裝置畫面出現，管理員核准表只提供輸入框，不回顯伺服器配對碼。
 
 編譯期 provisioning 的最小概念如下；實際建置系統應透過受控 secret／board-specific build property 注入，不要把私有 CA key 或任何裝置 credential commit 到 Git：
 
@@ -60,8 +60,8 @@ AP password 是短期配網資訊，不是後端 credential。使用者完成設
 | `DEVICE-URL-INVALID` | scheme、host、userinfo 或 fragment 不符合 | 填完整 `https://host[:port]` URL，不要帶帳密。 |
 | `DEVICE-TLS-CA-INVALID` | HTTPS 沒有可解析的有效 CA | 重新注入 compile-time CA 或在 portal 貼正確 Root CA PEM。 |
 | `DEVICE-TLS-BEGIN` | secure client 初始化失敗 | 先確認 CA、heap 與 server certificate chain；不要改成 `setInsecure()`。 |
-| `DEVICE-HTTP-DISALLOWED` | secure build 收到 HTTP | 改用 HTTPS；只有隔離開發 build 才可開 LAN HTTP flag。 |
-| `DEVICE-HTTP-PUBLIC-DISALLOWED` | LAN build 收到公開 HTTP host | 改用 HTTPS 或受控私有 host。 |
+| `DEVICE-HTTP-DISALLOWED` | secure build 收到 HTTP | 改用 HTTPS；PhotoPainter 預設允許嚴格 RFC1918 HTTP，其他 Profile 需明確 LAN flag。 |
+| `DEVICE-HTTP-PUBLIC-DISALLOWED` | LAN build 收到公開 HTTP host | 改用 HTTPS 或嚴格 RFC1918 literal IPv4；HTTP hostname 不放行。 |
 | `PAIRING-NVS-001` | CA／設定 policy 不合法，或 NVS string／numeric write 失敗 | 修正 CA／欄位內容後重試；不要重啟或改用 `setInsecure()`。 |
 | `PAIRING-NVS-002` | NVS namespace 無法開啟 | 檢查裝置儲存狀態與硬體；設定未視為成功。 |
 | `PAIRING-NVS-003` | NVS write 後 read-back 不一致 | 保留現有設定，檢查 NVS 容量與 CA 長度後再重試。 |

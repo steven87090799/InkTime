@@ -7,7 +7,7 @@
 
 ## 支援狀態
 
-InkTime 2.6.0 可用單一 compile-time Profile 切換既有 PCB 與 Waveshare
+InkTime 韌體 2.8.6 可用單一 compile-time Profile 切換既有 PCB 與 Waveshare
 ESP32-S3-PhotoPainter。使用者實際板與 Waveshare Rev2.0 原理圖都確認 PMIC 為 TG28；
 這仍不代表 GPIO 喚醒、面板、SD、電池或睡眠電流已完成 InkTime 實機驗證。
 
@@ -161,7 +161,7 @@ Stock 原始碼使用相對秒數 timer，不足以證明支援 InkTime 的任�
   決策，因此讀不到電源資訊時仍能看見並修正網路或設定問題。
 - PhotoPainter 的 10 分鐘 max-awake supervisor 以 RTC no-init memory 記錄連續 timeout，
   不會每次喚醒寫 NVS。前兩次 timeout 仍以 restart 嘗試恢復；第三次後不再持續 boot loop，
-  而是保留 GPIO4 與 timer wake、關閉網路／LED 後 deep sleep 60 分鐘。正常進入 sleep、
+  而是保留 GPIO4 與 timer wake、關閉網路／LED，按 `1h → 6h → 24h → 每日一次` 退避；每次只允許一次 probation。正常進入 sleep、
   完整斷電或明確 GPIO4 recovery／factory reset 會清除計數。這是耗電失控保護；實板
   persistent-fault、timer wake 與睡眠電流驗收仍是 `NOT RUN`。
 - 持續至少 4 秒的 GPIO 4 喚醒才是 PhotoPainter 的明確實體 recovery/service 授權；
@@ -182,7 +182,7 @@ Stock 原始碼使用相對秒數 timer，不足以證明支援 InkTime 的任�
 
 ## 自動能源遙測
 
-- 韌體 2.6.0 在低頻 Status API 回報可取得的電池電壓、估算百分比、USB 狀態、刷新耗時與
+- 目前韌體在低頻 Status API 回報可取得的電池電壓、估算百分比、USB 狀態、刷新耗時與
   從開機到狀態上傳前的完整喚醒週期耗時；既有 Profile 也會回報刷新與喚醒耗時。
 - Web「能源」頁保存最近 400 天樣本，提供 7／30／90／365 天電量、電壓、刷新耗時、
   完整喚醒時間與最近樣本；所有資料都由裝置自動回報。
@@ -192,7 +192,9 @@ Stock 原始碼使用相對秒數 timer，不足以證明支援 InkTime 的任�
 
 ## 編譯
 
-先安裝 Arduino CLI 1.5.1、ESP32 core 3.3.10、GxEPD2 1.6.9、ArduinoJson 7.4.3。
+以下是 Hosted CI 所用固定工具鏈的重現參考；一般開發不得在本機編譯，見[AGENTS.md](../../AGENTS.md)。
+
+工具鏈固定為 Arduino CLI 1.5.1、ESP32 core 3.3.10、GxEPD2 1.6.9、ArduinoJson 7.4.3。
 
 本專案必須使用 repository-owned partition table；stock `app3M_fat9M_16MB` 的 20 KiB
 NVS 無法容納 32-entry ACK journal 的 COW／migration peak。Arduino-ESP32 支援在
@@ -256,8 +258,7 @@ ArduinoJson 7.4.3 完成以下編譯；這些是軟體建置結果，不是實�
 | PhotoPainter | Release | 1,161,527／3,145,728 bytes（36%） | 49,168 bytes（15%） |
 | PhotoPainter | Debug | 1,254,227／3,145,728 bytes（39%） | 49,296 bytes（15%） |
 
-既有板 Debug 僅餘 21,519 bytes app 空間，僅適合短期診斷；PhotoPainter 的雙 OTA
-slot 仍有足夠餘裕，但 OTA 簽章、rollback 與實際燒錄流程尚未實作。
+以上 Flash／RAM 數字只屬於 2026-07-19 歷史 binary，不代表 2.8.6 的剩餘容量。現行 4 MiB／16 MiB repository-owned partitions 與 artifact 大小需以同一 source 的 Hosted CI 核對；OTA 簽章與啟用流程仍未實作。
 
 ## 不需量測儀器的使用確認
 

@@ -1,5 +1,7 @@
 # Production Preflight
 
+本頁說明 CLI／啟動期檢查的分工；NAS 正式操作使用[NAS 更新器](NAS_TAG_DEPLOYMENT_ZH_TW.md)的 `.env.nas`／部署契約流程，不能只跑 preflight 就省略 recovery point。
+
 可信任 LAN Production 使用 `.env.lan.production.example`，保持 `INKTIME_ENVIRONMENT=production` 並明確 opt-in HTTP：
 
 ```bash

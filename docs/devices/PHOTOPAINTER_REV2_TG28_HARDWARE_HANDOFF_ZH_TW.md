@@ -1,5 +1,7 @@
 # PhotoPainter Rev2.0 TG28 實板除錯交接紀錄
 
+> 2026-08-31 文件校對註：以下實板數字／commit／未驗收項目保留原始日期，不改寫為本次測量。現行 2.8.6 的 KEY1 電源頁與 SD 原圖恢復、v5 Config Store 及 `1h → 6h → 24h` 故障退避，以[現行 PhotoPainter 指南](WAVESHARE_PHOTOPAINTER_ZH_TW.md)為準；本頁舊 60 分鐘退避是當時版本紀錄。
+
 > 狀態日期：2026-08-23
 >
 > 適用硬體：Waveshare ESP32-S3-PhotoPainter Rev2.0、ESP32-S3-WROOM-1 N16R8、TG28 PMIC

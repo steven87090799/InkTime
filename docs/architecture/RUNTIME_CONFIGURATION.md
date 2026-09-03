@@ -1,5 +1,7 @@
 # InkTime Runtime Configuration
 
+Compose 的 `.env` 供 Compose 展開；原生 Python 不會自動載入它。`INKTIME_DATA_PATH`／`INKTIME_PHOTO_PATH` 是 host bind 來源，容器內 `INKTIME_DATA_DIR`／`INKTIME_PHOTO_DIR` 才是 RuntimeConfig 使用的目錄，勿混用。NAS 的實際部署值與安全檢查另見[NAS 指南](../operations/NAS_TAG_DEPLOYMENT_ZH_TW.md)。
+
 `inktime.app.core.runtime_config.RuntimeConfig` 是 Web、Worker、Scheduler 與 CLI 共用的
 不可變部署設定。固定優先順序為「明確函式參數 → Environment → 安全部署預設」；
 SQLite `settings` 的動態業務設定不參與這個優先序。

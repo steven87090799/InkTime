@@ -1,5 +1,7 @@
 # 目標架構
 
+此頁保留責任分層與設計不變條件；實際版本及已知支援邊界見[現行基線](../reference/CURRENT_STATE_ZH_TW.md)。Scheduler 是獨立程序，負責排程、Batch poll、租約回收與保留工作。
+
 ```text
 Browser / ESP32
        │
@@ -18,7 +20,7 @@ Worker（有界佇列）      ├── settings / secrets / history
   ├── Scanner           ├── devices / releases
   ├── Preprocessor      └── api_usage
   ├── Analyzer
-  ├── Batch monitor
+  ├── Batch preparation / import
   └── Renderer
           │
           ├── Thumbnail cache（內容雜湊）
@@ -45,9 +47,9 @@ Worker（有界佇列）      ├── settings / secrets / history
 - 主要高品質分析以單一圖片請求同時回傳描述、類型、所有分數與短文案。
 - 工作項目從資料庫分批 claim，不為 100,000 張照片一次建立 Future。
 - 所有具副作用的 Web 操作要求 administrator 與 CSRF。
-- 裝置依模式以版本化 Device Secret 或 Legacy／Stock Bearer Token 驗證；資料庫只存雜湊；Device Secret 只在 claim 交付一次。
+- 裝置依模式以版本化 Device Secret 或 Legacy／Stock Bearer Token 驗證；資料庫只存雜湊；Device Secret 只經短效 claim envelope 交付；同一 pairing 可恢復 claim，confirm 後不再保存明文。
 - Release 在暫存目錄完成校驗後以原子 rename 發布，裝置先驗 Manifest 再套用。
-- 一般設定、分析策略與成本限制由 Web UI 管理；部署密鑰仍由環境變數注入。
+- 一般設定、分析策略與成本限制由 Web UI 管理；路徑／Port／Cookie 等部署邊界由 RuntimeConfig 決定；Provider Key 經 Web Secret Store 加密保存，不寫入 `.env` 範例。
 
 ## 可觀測性
 
