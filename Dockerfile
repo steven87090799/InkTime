@@ -52,9 +52,9 @@ RUN set -eux; \
         util-linux; \
     sqlite_version="$(dpkg-query -W -f='${Version}' libsqlite3-0)"; \
     dpkg --compare-versions "${sqlite_version}" ge '3.53.2-1'; \
-    DEBIAN_FRONTEND=noninteractive apt-get purge --auto-remove -y \
-        libsystemd0 \
-        libudev1; \
+    dpkg --purge --force-depends \
+        libudev1 \
+        libsystemd0; \
     test "$(dpkg-query -W -f='${db:Status-Status}' libsystemd0 2>/dev/null || true)" != installed; \
     test "$(dpkg-query -W -f='${db:Status-Status}' libudev1 2>/dev/null || true)" != installed; \
     rm -f /etc/apt/sources.list.d/inktime-runtime-fixes.list \
