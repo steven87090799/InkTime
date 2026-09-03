@@ -13,6 +13,7 @@ from uuid import uuid4
 
 from inktime.app.core.paths import UnsafePathError, safe_join
 from inktime.app.db import Database
+from inktime.app.repositories.analysis_history import display_analysis_order_sql, historical_model_sql
 from inktime.app.domain.analysis.scoring import (
     RANKING_RULE_VERSION,
     SEMANTIC_SCORE_KIND,
@@ -2058,7 +2059,7 @@ class PhotoRepository:
             clauses.append("a.types_json LIKE ?")
             parameters.append(f'%"{photo_type}"%')
         if minimum_score is not None:
-            clauses.append("a.score_kind=? AND a.memory_score>=?")
+            clauses.append("a.schema_version=4 AND a.score_kind=? AND a.memory_score>=?")
             parameters.append(SEMANTIC_SCORE_KIND)
             parameters.append(minimum_score)
         if duplicate_only:
@@ -2069,7 +2070,7 @@ class PhotoRepository:
                 connection.execute(
                     f"""
                 SELECT COUNT(*) FROM photos p
-                LEFT JOIN photo_analysis a ON a.id=(SELECT id FROM photo_analysis WHERE photo_id=p.id AND schema_version=4 ORDER BY {preferred_analysis_order_sql()} LIMIT 1)
+                LEFT JOIN photo_analysis a ON a.id=(SELECT display.id FROM photo_analysis display WHERE display.photo_id=p.id ORDER BY {display_analysis_order_sql('display')} LIMIT 1)
                 WHERE {where}
                 """,
                     parameters,
@@ -2079,10 +2080,11 @@ class PhotoRepository:
                 f"""
                 SELECT p.*,l.name AS library_name,a.caption,a.types_json,a.memory_score,
                        a.visual_score,a.local_quality_score,a.ranking_score,a.side_caption,
-                       a.local_score,a.score_kind,a.provider,a.model,a.raw_json,
+                       a.local_score,a.score_kind,a.provider,a.model,a.raw_json,a.schema_version,
+                       {historical_model_sql()} AS is_historical_model,
                        a.created_at AS analyzed_at
                 FROM photos p JOIN libraries l ON l.id=p.library_id
-                LEFT JOIN photo_analysis a ON a.id=(SELECT id FROM photo_analysis WHERE photo_id=p.id AND schema_version=4 ORDER BY {preferred_analysis_order_sql()} LIMIT 1)
+                LEFT JOIN photo_analysis a ON a.id=(SELECT display.id FROM photo_analysis display WHERE display.photo_id=p.id ORDER BY {display_analysis_order_sql('display')} LIMIT 1)
                 WHERE {where} ORDER BY COALESCE(p.captured_at,p.created_at) DESC,p.id LIMIT ? OFFSET ?
                 """,
                 (*parameters, limit, offset),

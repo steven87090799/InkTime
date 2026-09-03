@@ -39,7 +39,7 @@ from inktime.app.domain.photos.quality_policy import (
 )
 from inktime.app.web.access import administrator_required, login_required
 from inktime.app.domain.photos.orientation import original_exif_orientation, resolve_effective_orientation
-from inktime.app.repositories.photos import preferred_analysis_order_sql
+from inktime.app.repositories.analysis_history import display_analysis_order_sql, historical_model_sql
 
 
 bp = Blueprint("photos", __name__)
@@ -196,7 +196,11 @@ def photos_page():
     for stored_row in rows:
         photo = dict(stored_row)
         score_kind = str(photo.get("score_kind") or "")
-        ranking_score = photo.get("ranking_score") if score_kind == SEMANTIC_SCORE_KIND else None
+        ranking_score = (
+            photo.get("ranking_score")
+            if score_kind == SEMANTIC_SCORE_KIND and photo.get("schema_version") == 4
+            else None
+        )
         e6_score = photo.get("e6_score")
         quality = evaluate_local_quality(photo, settings=quality_settings)
         stored_exclusion = str(photo.get("exclusion_status") or "eligible")
@@ -655,20 +659,22 @@ def photo_detail(photo_id: str):
         )
         preferred_analysis = connection.execute(
             f"""
-            SELECT a.*,v.name AS scoring_version_name
+            SELECT a.*,v.name AS scoring_version_name,
+                   {historical_model_sql()} AS is_historical_model
             FROM photo_analysis a
             LEFT JOIN scoring_rule_versions v ON v.id=a.scoring_version_id
-            WHERE a.photo_id=? ORDER BY {preferred_analysis_order_sql('a')} LIMIT 1
+            WHERE a.photo_id=? ORDER BY {display_analysis_order_sql()} LIMIT 1
             """,  # noqa: S608 -- ordering is generated from a fixed repository helper.
             (photo_id,),
         ).fetchone()
         latest_analyses = connection.execute(
-            """
-            SELECT a.*,v.name AS scoring_version_name
+            f"""
+            SELECT a.*,v.name AS scoring_version_name,
+                   {historical_model_sql()} AS is_historical_model
             FROM photo_analysis a
             LEFT JOIN scoring_rule_versions v ON v.id=a.scoring_version_id
             WHERE a.photo_id=? ORDER BY a.created_at DESC,a.id DESC LIMIT 2
-            """,
+            """,  # noqa: S608 -- fixed presentation predicate, no request interpolation.
             (photo_id,),
         ).fetchall()
         usage = connection.execute(
@@ -717,7 +723,7 @@ def photo_detail(photo_id: str):
         analysis["origin_label"] = {
             SEMANTIC_SCORE_KIND: "模型判斷",
             LOCAL_QUALITY_SCORE_KIND: "本機影像分析",
-        }.get(score_kind, "歷史分析（來源不明）")
+        }.get(score_kind, "歷史模型判斷" if analysis["is_historical_model"] else "歷史分析（來源不明）")
         if score_kind == SEMANTIC_SCORE_KIND and analysis.get("ranking_score") is not None:
             calibrated, percentile = calculate_distinguishing_score(
                 float(analysis["ranking_score"]), score_distribution

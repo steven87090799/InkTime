@@ -24,6 +24,7 @@ Config Store v5 是裝置本機儲存格式，不是所有 HTTP Manifest 的版�
 - Web 的 `analysis.image_max_side` 預設 1024、可選 1600；底層 plan／benchmark 額外支援 512。不要把低解析度誤寫成第一階段。
 - Migration 51 增加有界 AI Trace；Migration 52 增加 `providers.model`。Provider 專屬模型優先於全域模型，留白才沿用；OpenRouter 必須使用完整模型 ID。
 - Schema v4 的回憶／視覺／本機品質固定為 50／25／25，加上本機特殊程度與照片庫稀有度；語意與本機品質分開排名。E6 只參與顯示分數；內容分類有獨立門檻與人工恢復保護，見 [Vision v4](../VISION_SCHEMA_V4.md)。
+- 照片庫優先顯示現行 v4 模型，再顯示已保存的歷史模型紀錄及本機分析；歷史描述／短句可搜尋、原始評分可查閱，仍不參與 v4 排名。儀表板分開標示含本機的完成狀態與依照片去重的模型結果。
 - `completed` 只表示工作結束；本機、預篩排除、繼承或 cache hit 不證明有新 API 請求。請合併工作策略、AI Trace attempts、`api_usage` 與時間戳判讀。
 
 操作見[管理員指南](../guides/ADMIN_GUIDE_ZH_TW.md)、[本機選片](../guides/LOCAL_ONLY_SELECTION_ZH_TW.md)與[Activity／AI Trace](../guides/ACTIVITY_AI_TRACE_ZH_TW.md)。設定頁完整列出設定，提供全文、分類、風險與生效方式篩選；功能與設定說明大全位於 `/help/controls`。

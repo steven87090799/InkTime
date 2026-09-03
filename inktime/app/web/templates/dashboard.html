@@ -8,7 +8,8 @@
     <div class="dashboard-summary-head"><div><p>照片資料</p><h2>照片庫</h2></div><a href="/photos">查看照片</a></div>
     <dl class="dashboard-summary-list">
       <div><dt>照片總數</dt><dd>{{ counts.photos }}</dd></div>
-      <div><dt>已完成分析</dt><dd>{{ counts.analyzed }}</dd></div>
+      <div><dt>已完成分析（含本機）</dt><dd>{{ counts.analyzed }}</dd></div>
+      <div><dt>有模型分析<small>現行 v4 {{ counts.current_model_analyzed }}／歷史 {{ counts.historical_model_analyzed }}</small></dt><dd>{{ counts.model_analyzed }}</dd></div>
       <div><dt>重複照片</dt><dd>{{ counts.duplicates }}</dd></div>
     </dl>
   </article>

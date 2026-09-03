@@ -83,12 +83,12 @@
 </section>
 
 <section class="panel photo-analysis-panel">
-  <div class="panel-head"><div><p class="eyebrow">目前採用與歷史分析</p><h2>模型與分析結果</h2><p class="analysis-history-note">有模型結果時會優先顯示；之後新增的本機重掃或 Fallback 只保留為歷史，不會再蓋掉模型文案。</p></div><span>顯示優先結果與最近記錄，共 {{ [analysis_total, 2]|min }} / {{ analysis_total }} 筆</span></div>
+  <div class="panel-head"><div><p class="eyebrow">優先顯示與歷史分析</p><h2>模型與分析結果</h2><p class="analysis-history-note">優先顯示現行 v4 模型結果，其次為已保存的歷史模型紀錄，再顯示本機分析；歷史模型文字與原始分數可查閱，不參與現行排名。</p></div><span>顯示優先結果與最近記錄，共 {{ [analysis_total, 2]|min }} / {{ analysis_total }} 筆</span></div>
   <div class="photo-analysis-grid">
     {% for a in analyses %}
     <article class="analysis-card">
       <div class="panel-head">
-        <strong>{% if a.is_preferred %}目前採用 · {% endif %}{{ a.origin_label }} · {{ a.stage_label }}</strong>
+        <strong>{% if a.is_preferred %}優先顯示 · {% endif %}{{ a.origin_label }} · {{ a.stage_label }}</strong>
         <span class="status">{{ a.origin_label }} · Schema {{ a.schema_version }}</span>
       </div>
       <p class="analysis-meta">{{ a.provider or '未知 Provider' }} / {{ a.model or '未知模型' }} · {{ a.created_at }}</p>
@@ -101,6 +101,15 @@
         <dt>內容分類</dt><dd>{{ a.content_filter_json }}</dd>
         <dt>評分版本</dt><dd>{{ a.scoring_version_name or '舊版／未記錄' }}</dd>
       </dl>
+      {% elif a.is_historical_model %}
+      <dl>
+        <dt>照片分類</dt><dd>{{ a.types|join('、') if a.types else '未分類' }}</dd>
+        <dt>歷史模型原始分數</dt><dd>回憶 {{ a.memory_score if a.memory_score is not none else '—' }}｜美觀 {{ a.beauty_score if a.beauty_score is not none else '—' }}｜技術 {{ a.technical_quality_score if a.technical_quality_score is not none else '—' }}｜情緒 {{ a.emotion_score if a.emotion_score is not none else '—' }}</dd>
+        <dt>歷史綜合分</dt><dd>{{ a.ranking_score if a.ranking_score is not none else '—' }}</dd>
+        <dt>判斷理由</dt><dd>{{ a.reason or '未記錄' }}</dd>
+        <dt>評分版本</dt><dd>{{ a.scoring_version_name or '舊版／未記錄' }}</dd>
+      </dl>
+      <p>這筆模型分析已完整保存；以上為當時版本的原始結果，現行 v4 排名需重新分析。</p>
       {% else %}
       <dl>
         <dt>本機候選品質分</dt><dd>{% if a.score_kind == 'local_quality' and a.local_quality_score is not none %}<strong>{{ '%.1f'|format(a.local_quality_score) }}</strong>{% else %}尚未產生{% endif %}</dd>
