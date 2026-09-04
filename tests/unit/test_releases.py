@@ -783,7 +783,7 @@ def test_custom_assignment_store_rejects_symlink_root(tmp_path):
     assert list(outside.iterdir()) == []
 
 
-def test_automatic_release_candidates_respect_configured_memory_threshold(app, tmp_path):
+def test_automatic_release_candidates_ignore_retired_memory_threshold(app, tmp_path):
     app.extensions["inktime_settings_repository"].update(
         "analysis.execution_mode", "automatic_ai", changed_by="tester", source_ip="127.0.0.1"
     )
@@ -815,7 +815,18 @@ def test_automatic_release_candidates_respect_configured_memory_threshold(app, t
             visual_score=50,
             side_caption="這是一段測試回憶短句。",
         )
-        photos.save_analysis(photo_id, None, "test", "test", "test", result, "{}")
+        photos.save_analysis(
+            photo_id,
+            None,
+            "single",
+            "test-ai",
+            "test-model",
+            result,
+            "{}",
+            score_kind=SEMANTIC_SCORE_KIND,
+        )
+    with app.extensions["inktime_database"].session() as connection:
+        connection.execute("UPDATE photos SET local_features_status='complete'")
 
     render_service = app.extensions["inktime_render_service"]
     assert render_service.select_candidates() == ["photo-80", "photo-70"]
@@ -823,7 +834,7 @@ def test_automatic_release_candidates_respect_configured_memory_threshold(app, t
     app.extensions["inktime_settings_repository"].update(
         "render.memory_threshold", 75, changed_by="tester", source_ip="127.0.0.1"
     )
-    assert render_service.select_candidates() == ["photo-80"]
+    assert render_service.select_candidates() == ["photo-80", "photo-70"]
 
 
 def test_history_today_is_selected_before_higher_ranked_fallback(app, tmp_path):
@@ -862,7 +873,18 @@ def test_history_today_is_selected_before_higher_ranked_fallback(app, tmp_path):
             visual_score=score,
             side_caption="歷年今日回憶短句。",
         )
-        photos.save_analysis(photo_id, None, "test", "local", "test", result, "{}", ranking_score=score)
+        photos.save_analysis(
+            photo_id,
+            None,
+            "single",
+            "test-ai",
+            "test-model",
+            result,
+            "{}",
+            score_kind=SEMANTIC_SCORE_KIND,
+        )
+    with app.extensions["inktime_database"].session() as connection:
+        connection.execute("UPDATE photos SET local_features_status='complete'")
 
     details = app.extensions["inktime_render_service"].select_candidates_details(
         2, target_date=date(2026, 7, 20)

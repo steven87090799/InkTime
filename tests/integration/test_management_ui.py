@@ -1086,7 +1086,8 @@ def test_photo_detail_shows_only_two_latest_analyses_and_compact_type_picker(cli
 
     assert body.count('class="analysis-card"') == 2
     assert "顯示優先結果與最近記錄，共 2 / 3 筆" in body
-    assert "優先顯示現行 v4 模型結果，其次為已保存的歷史模型紀錄，再顯示本機分析" in body
+    assert "自動顯示須同時完成本機品質檢查與 v4 模型分析" in body
+    assert "歷史模型結果保留供查閱" in body
     assert 'class="photo-orientation-actions"' in body
     assert 'class="secondary orientation-set orientation-clear"' in body
     assert 'class="photo-type-picker"' in body
@@ -1129,7 +1130,7 @@ def test_model_analysis_stays_preferred_after_newer_local_fallback(client, app):
     assert "完整模型判斷" in listing
     assert "模型短句" in listing
     assert "只有本機特徵" not in listing
-    assert "優先顯示 · 模型判斷 · Vision 模型分析" in detail
+    assert "優先顯示 · AI 模型判斷 · Vision 模型分析" in detail
     assert detail.index("完整模型判斷") < detail.index("只有本機特徵")
 
 
@@ -1184,7 +1185,8 @@ def test_photo_cards_never_present_excluded_screenshot_or_severe_blur_as_high_sc
     assert "本機品質分" in detail
     assert "模糊 44.54／對比 11.80" in detail
     assert "模糊 &lt; 60 且對比 &lt; 15" in detail
-    assert "明確截圖、解析度過低或嚴重單項缺陷會直接排除" in detail
+    assert "明確截圖、解析度過低或嚴重品質問題會直接排除" in detail
+    assert "疑似缺陷保留供參考，不降低 AI 選片分" in detail
 
 
 def test_photo_cards_force_ineligible_selection_score_to_zero_but_keep_diagnostics(client, app):
@@ -1333,6 +1335,11 @@ def test_rendering_console_exposes_layout_e6_and_manual_crop_controls(client, ap
         "{}",
         ranking_score=88,
     )
+    with app.extensions["inktime_database"].session() as connection:
+        connection.execute(
+            "UPDATE photos SET local_features_status='complete' WHERE id=?",
+            (photo_id,),
+        )
 
     page = client.get("/rendering")
     body = page.get_data(as_text=True)

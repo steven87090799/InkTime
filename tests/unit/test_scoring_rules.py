@@ -138,8 +138,9 @@ def test_prompt_inspector_matches_wire_without_changing_fixed_schema(tmp_path, k
         scoring_rules="memory_score：互動清楚約 70 分。", supports_json_schema=supports_schema,
     )
     try:
+        model = "openai/gpt-4o" if kind == "openrouter" else "vision"
         wire = provider.build_analysis_request_body(
-            image_path=image_path, model="vision", detail="high", stage="single", caption_controls=controls,
+            image_path=image_path, model=model, detail="high", stage="single", caption_controls=controls,
         )
         assert wire["messages"][0]["content"] == analysis_system_prompt(provider.scoring_rules, controls)
         assert wire.get("response_format") == analysis_response_format(
