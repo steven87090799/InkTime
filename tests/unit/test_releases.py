@@ -829,12 +829,12 @@ def test_automatic_release_candidates_ignore_retired_memory_threshold(app, tmp_p
         connection.execute("UPDATE photos SET local_features_status='complete'")
 
     render_service = app.extensions["inktime_render_service"]
-    assert render_service.select_candidates() == ["photo-80", "photo-70"]
+    assert render_service.select_candidates() == ["photo-80", "photo-70", "photo-60"]
 
     app.extensions["inktime_settings_repository"].update(
         "render.memory_threshold", 75, changed_by="tester", source_ip="127.0.0.1"
     )
-    assert render_service.select_candidates() == ["photo-80", "photo-70"]
+    assert render_service.select_candidates() == ["photo-80", "photo-70", "photo-60"]
 
 
 def test_history_today_is_selected_before_higher_ranked_fallback(app, tmp_path):
