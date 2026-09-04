@@ -133,10 +133,13 @@ RUNNER_SUITE_TEST_PATHS: dict[str, tuple[str, ...]] = {
     "settings_governance_owner": (
         "tests/unit/test_settings_repository_governance.py",
         "tests/integration/test_settings_governance.py",
+        "tests/integration/test_budget_calendar.py",
     ),
     "provider_analysis_owner": (
         "tests/unit/test_analysis_plan.py",
         "tests/unit/test_analysis_schema.py",
+        "tests/unit/test_usage_periods.py",
+        "tests/unit/test_batch_analysis_lifecycle.py",
         "tests/unit/test_photo_analysis_retention.py",
         "tests/unit/test_provider_batch.py",
         "tests/unit/test_provider_config.py",
@@ -146,6 +149,7 @@ RUNNER_SUITE_TEST_PATHS: dict[str, tuple[str, ...]] = {
         "tests/unit/test_scoring_rules.py",
         "tests/integration/test_ai_cache_singleflight.py",
         "tests/integration/test_analysis_pipeline.py",
+        "tests/integration/test_budget_calendar.py",
         "tests/integration/test_local_only_mode.py",
         "tests/integration/test_local_scoring_semantics.py",
         "tests/integration/test_photo_quality_ai.py",

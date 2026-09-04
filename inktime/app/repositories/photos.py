@@ -13,6 +13,7 @@ from uuid import uuid4
 
 from inktime.app.core.paths import UnsafePathError, safe_join
 from inktime.app.db import Database
+from inktime.app.domain.analysis.plan import reusable_analysis_fingerprint
 from inktime.app.repositories.analysis_history import display_analysis_order_sql, historical_model_sql
 from inktime.app.domain.analysis.scoring import (
     RANKING_RULE_VERSION,
@@ -1102,8 +1103,12 @@ class PhotoRepository:
         self, photo_id: str, job_id: str | None, *, analysis_context: dict | None = None
     ) -> dict | None:
         required_fingerprint = str((analysis_context or {}).get("analysis_fingerprint") or "")
+        required_spec = str((analysis_context or {}).get("analysis_spec_json") or "")
+        reusable_fingerprint = None
+        if required_spec:
+            reusable_fingerprint = reusable_analysis_fingerprint(json.loads(required_spec))
         with self.database.session() as connection:
-            row = connection.execute(
+            candidates = connection.execute(
                 f"""
                 SELECT a.*,source.local_candidate_score AS source_local_candidate_score,
                        source.visual_orientation_rotation_cw,source.visual_orientation_confidence,
@@ -1112,11 +1117,23 @@ class PhotoRepository:
                 JOIN photo_analysis a ON a.photo_id=source.id
                 WHERE target.id=?
                   AND a.schema_version=4
-                  AND (?='' OR a.analysis_fingerprint=?)
-                ORDER BY {preferred_analysis_order_sql('a')} LIMIT 1
+                  AND (?='' OR a.analysis_fingerprint=? OR ?)
+                ORDER BY {preferred_analysis_order_sql('a')}
                 """,
-                (photo_id, required_fingerprint, required_fingerprint),
-            ).fetchone()
+                (photo_id, required_fingerprint, required_fingerprint, reusable_fingerprint is not None),
+            )
+            row = None
+            for candidate in candidates:
+                if not required_fingerprint or candidate["analysis_fingerprint"] == required_fingerprint:
+                    row = candidate
+                    break
+                try:
+                    source_spec = json.loads(str(candidate["analysis_spec_json"] or "{}"))
+                    if source_spec and reusable_analysis_fingerprint(source_spec) == reusable_fingerprint:
+                        row = candidate
+                        break
+                except (TypeError, ValueError):
+                    continue
         if row is None:
             return None
         if row["schema_version"] != 4:
@@ -1138,7 +1155,7 @@ class PhotoRepository:
             row["raw_json"],
             "inherited",
             ranking_score=row["ranking_score"],
-            scoring_version_id=row["scoring_version_id"],
+            scoring_version_id=(analysis_context or {}).get("scoring_version_id") or row["scoring_version_id"],
             score_kind=source_kind,
             local_score=result.get("local_score"),
             semantic_score=row["semantic_score"] if semantic_available else None,

@@ -608,3 +608,53 @@ def test_preview_capacity_failure_leaves_no_job_item_or_event(app):
         leaked = connection.execute("SELECT COUNT(*) FROM jobs WHERE name='must roll back'").fetchone()[0]
     assert after == before
     assert int(leaked) == 0
+
+
+@pytest.mark.parametrize("first_kind,second_kind", [("analysis", "analysis_batch"), ("analysis_batch", "analysis")])
+def test_analysis_reservation_rechecks_explicit_ids_inside_transaction(app, first_kind, second_kind):
+    from inktime.app.repositories.analysis_reservations import AnalysisReservationConflict
+
+    photo_id = add_photos(app, 1)[0]
+    repository = app.extensions["inktime_job_repository"]
+    first = repository.create(
+        kind=first_kind, name="first", strategy="single", settings={}, created_by=None,
+        photo_ids=[photo_id], analysis_fingerprint="first-plan",
+    )
+    with pytest.raises(AnalysisReservationConflict):
+        repository.create(
+            kind=second_kind, name="second", strategy="single", settings={}, created_by=None,
+            photo_ids=[photo_id], analysis_fingerprint="different-plan", force_recompute=True,
+        )
+    preview = repository.selection_preview(analysis_fingerprint="different-plan", selection_mode="force_all")
+    assert preview["already_queued"] == 1 and preview["pending_total"] == 0
+    assert list(repository.iter_pending_photo_ids(analysis_fingerprint="different-plan", selection_mode="force_all")) == []
+    assert len(repository.list()) == 1
+    repository.cancel(first)
+    assert repository.create(
+        kind=second_kind, name="after cancel", strategy="single", settings={}, created_by=None,
+        photo_ids=[photo_id], analysis_fingerprint="different-plan",
+    )
+
+
+def test_realtime_and_batch_reserve_one_owner_when_candidates_race(app):
+    import threading
+    from inktime.app.repositories.analysis_reservations import AnalysisReservationConflict
+
+    photo_id = add_photos(app, 1)[0]
+    repository = app.extensions["inktime_job_repository"]
+    barrier = threading.Barrier(2)
+
+    def reserve(kind):
+        barrier.wait(timeout=5)
+        try:
+            return repository.create(
+                kind=kind, name=kind, strategy="single", settings={}, created_by=None,
+                photo_ids=[photo_id], analysis_fingerprint=kind,
+            )
+        except AnalysisReservationConflict:
+            return None
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(reserve, ["analysis", "analysis_batch"]))
+    assert sum(result is not None for result in results) == 1
+    assert len(repository.list()) == 1

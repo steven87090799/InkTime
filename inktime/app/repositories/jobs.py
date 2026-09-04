@@ -8,6 +8,10 @@ from typing import Any, Callable, Iterable, Iterator, List
 from uuid import uuid4
 
 from inktime.app.db import Database
+from inktime.app.repositories.analysis_reservations import (
+    AnalysisReservationConflict,
+    reserved_analysis_sql,
+)
 
 
 ACTIVE_STATUSES = {"preparing", "running", "pausing", "retrying"}
@@ -55,9 +59,8 @@ class JobRepository:
     ) -> dict:
         """Bounded SQLite-only pending selector; it never touches image files."""
         fingerprint = str(analysis_fingerprint or "")
-        active = "('pending','preparing','running','pausing','retrying')"
         current = "EXISTS (SELECT 1 FROM photo_analysis a WHERE a.photo_id=p.id AND a.analysis_fingerprint=?)"
-        queued = f"EXISTS (SELECT 1 FROM job_items ji JOIN jobs j ON j.id=ji.job_id WHERE ji.photo_id=p.id AND ji.status IN ('pending','running','retrying') AND j.status IN {active} AND COALESCE(j.analysis_fingerprint,'')=?)"
+        queued = reserved_analysis_sql()
         if selection_mode == "force_all":
             predicate = "1=1"
         elif selection_mode == "stale_only":
@@ -66,10 +69,9 @@ class JobRepository:
             predicate = f"NOT {current}"
         with self.database.session() as connection:
             # Bind the repeated fingerprint predicates in their SQL order.
-            params = [fingerprint, fingerprint]
+            params = [fingerprint]
             if selection_mode != "force_all":
                 params.append(fingerprint)
-            params.append(fingerprint)
             row = connection.execute(
                 f"""
                 SELECT
@@ -119,9 +121,8 @@ class JobRepository:
         self, *, analysis_fingerprint: str | None, selection_mode: str = "pending", limit: int | None = None
     ) -> Iterator[str]:
         fingerprint = str(analysis_fingerprint or "")
-        active = "('pending','preparing','running','pausing','retrying')"
         current = "EXISTS (SELECT 1 FROM photo_analysis a WHERE a.photo_id=p.id AND a.analysis_fingerprint=?)"
-        queued = f"EXISTS (SELECT 1 FROM job_items ji JOIN jobs j ON j.id=ji.job_id WHERE ji.photo_id=p.id AND ji.status IN ('pending','running','retrying') AND j.status IN {active} AND COALESCE(j.analysis_fingerprint,'')=?)"
+        queued = reserved_analysis_sql()
         predicate = (
             "1=1"
             if selection_mode == "force_all"
@@ -140,7 +141,7 @@ class JobRepository:
                 params = [last_score, last_score, last_id]
                 if selection_mode != "force_all":
                     params.append(fingerprint)
-                params.extend([fingerprint, size])
+                params.append(size)
                 rows = connection.execute(
                     f"SELECT p.id,COALESCE(p.local_candidate_score,-1) AS candidate_score FROM photos p "
                     f"WHERE p.lifecycle_status='active' AND p.eligible=1 AND COALESCE(p.screenshot_likelihood,0)<0.95 AND "
@@ -201,6 +202,21 @@ class JobRepository:
                             )
                         connection.execute("COMMIT")
                         return str(existing["id"])
+                # Recheck after BEGIN IMMEDIATE: candidate previews are only
+                # advisory and may race with another realtime or Batch submit.
+                if kind in {"analysis", "analysis_batch"}:
+                    for offset in range(0, len(photo_ids), 500):
+                        selected = photo_ids[offset : offset + 500]
+                        marks = ",".join("?" for _ in selected)
+                        conflict = connection.execute(
+                            f"SELECT 1 FROM photos p WHERE p.id IN ({marks}) "
+                            f"AND {reserved_analysis_sql()} LIMIT 1",  # noqa: S608 -- fixed predicate and bound IDs.
+                            selected,
+                        ).fetchone()
+                        if conflict is not None:
+                            raise AnalysisReservationConflict(
+                                "照片已有尚未結束的即時或 Batch 分析，請等待完成後再建立工作"
+                            )
                 connection.execute(
                     """
                     INSERT INTO jobs(id, kind, name, status, strategy, settings_json,
@@ -605,6 +621,7 @@ class JobRepository:
             "virtual_display",
             "webhook",
             "analysis_batch_import",
+            "analysis_batch_poll",
         }:
             raise ValueError("不支援的維護工作")
         job_id = str(uuid4())

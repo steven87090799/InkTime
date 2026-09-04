@@ -38,7 +38,7 @@ from inktime.app.domain.analysis.scoring import (
     ranking_components,
     resolve_score_kind,
 )
-from inktime.app.domain.analysis.schema import normalize_caption_controls
+from inktime.app.domain.analysis.schema import normalize_caption_controls, validate_model_response
 from inktime.app.domain.photos import ThumbnailCache
 from inktime.app.domain.photos.quality_policy import (
     FEATURE_VERSION,
@@ -1373,7 +1373,7 @@ class PhotoAnalysisService:
         try:
             local_json = extract_json_value(response.content)
             candidate = local_json if isinstance(local_json, dict) else response.content
-            result = self._apply_caption_variant(validate_analysis_result(candidate), caption_controls)
+            result = self._apply_caption_variant(validate_model_response(candidate), caption_controls)
             raw = response.content
             parsed_at = datetime.now(timezone.utc).isoformat()
             self._trace_write(
@@ -1574,7 +1574,7 @@ class PhotoAnalysisService:
             repaired_candidate = extract_json_value(repaired.content)
             try:
                 result = self._apply_caption_variant(
-                    validate_analysis_result(
+                    validate_model_response(
                         repaired_candidate
                         if isinstance(repaired_candidate, dict)
                         else repaired.content
@@ -1801,13 +1801,16 @@ class PhotoAnalysisService:
             advanced_caption=bool(caption_controls),
         )
         weights = ranking_weights or DEFAULT_RANKING_WEIGHTS
-        # Identical bytes can only inherit an analysis that was produced by the
-        # exact same frozen plan.  Reusing a different prompt/schema/Vision
-        # Input would make selection-preview incorrectly consider it current.
+        # Reuse identical bytes and semantic inputs across local ranking/version
+        # changes, while retaining the current full plan for result provenance.
         inherited = self.photos.inherit_existing_analysis(
             photo_id,
             job_id,
-            analysis_context={"analysis_fingerprint": analysis_fingerprint},
+            analysis_context={
+                "analysis_fingerprint": analysis_fingerprint,
+                "analysis_spec_json": analysis_spec_json,
+                "scoring_version_id": scoring_version_id,
+            },
         )
         if inherited is not None:
             if job_id is None:

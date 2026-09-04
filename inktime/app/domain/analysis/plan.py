@@ -46,6 +46,21 @@ def fingerprint(value: Mapping[str, Any]) -> str:
     return hashlib.sha256(canonical_json(value).encode("utf-8")).hexdigest()
 
 
+def reusable_analysis_fingerprint(plan: Mapping[str, Any]) -> str:
+    """Compare semantic plans without local ranking/version metadata.
+
+    Prompt/rubric, provider, model, captions, safety and pixel inputs remain
+    part of the identity. This does not replace a frozen Batch request hash.
+    """
+    identity = dict(plan)
+    for field in (
+        "caption_display_controls", "repair_policy", "ranking_weights",
+        "favorite_bonus", "scoring_profile_id",
+    ):
+        identity.pop(field, None)
+    return fingerprint(identity)
+
+
 def provider_prompt_contract_sha256(
     *,
     prompt_version: str,

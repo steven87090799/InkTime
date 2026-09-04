@@ -142,12 +142,12 @@ class SchedulerRunner:
         batch_poll_seconds = int(settings.get("batch.poll_seconds", 300))
         if time.monotonic() - self.last_batch_poll_at >= max(60, batch_poll_seconds):
             try:
-                self.app.extensions["inktime_batch_analysis_service"].poll_due(limit=20)
+                self.app.extensions["inktime_batch_analysis_service"].enqueue_poll()
             except Exception as exc:
                 log_event(
                     LOGGER,
                     logging.ERROR,
-                    "Batch 遠端輪詢失敗；下次排程會重試",
+                    "Batch 輪詢工作建立失敗；下次排程會重試",
                     event="analysis_batch_poll_failed",
                     error_code="BATCH-POLL-001",
                     details={"error_type": exc.__class__.__name__},

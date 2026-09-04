@@ -144,6 +144,48 @@ def test_orientation_consistency(rotation, confidence, ambiguous, evidence, vali
             validate_analysis_result(value)
 
 
+def test_model_orientation_normalization_is_conservative_and_keeps_input_immutable():
+    from inktime.app.domain.analysis.schema import validate_model_response
+
+    value = valid_result(visual_orientation={
+        "rotation_cw": 90, "confidence": 0.9, "ambiguous": False,
+        "evidence": ["faces_upright", "insufficient_visual_cues"],
+    })
+    result = validate_model_response(value)
+    assert result["visual_orientation"] == {
+        "rotation_cw": None, "confidence": 0.5, "ambiguous": True,
+        "evidence": ["insufficient_visual_cues"],
+    }
+    assert value["visual_orientation"]["rotation_cw"] == 90
+    assert validate_analysis_result(result) == result
+
+
+@pytest.mark.parametrize("field,invalid", [
+    ("confidence", "0.9"), ("confidence", float("nan")), ("confidence", 2),
+    ("rotation_cw", 45), ("ambiguous", "false"), ("evidence", ["invalid"]),
+])
+def test_model_normalization_still_rejects_invalid_schema(field, invalid):
+    from inktime.app.domain.analysis.schema import validate_model_response
+
+    value = valid_result()
+    value["visual_orientation"][field] = invalid
+    with pytest.raises(AnalysisValidationError):
+        validate_model_response(value)
+
+
+def test_model_normalization_does_not_fill_missing_fields_or_remove_safety_fields():
+    from inktime.app.domain.analysis.schema import validate_model_response
+
+    value = valid_result()
+    del value["visual_orientation"]["rotation_cw"]
+    with pytest.raises(AnalysisValidationError):
+        validate_model_response(value)
+    value = valid_result()
+    value["content_filter"]["unexpected"] = False
+    with pytest.raises(AnalysisValidationError):
+        validate_model_response(value)
+
+
 @pytest.mark.parametrize("stage", ["single", "full", "stage_one", "scoring_test"])
 def test_single_schema_for_every_photo_stage(stage):
     assert json_schema_for_stage(stage) == ANALYSIS_JSON_SCHEMA

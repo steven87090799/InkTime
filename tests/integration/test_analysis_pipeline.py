@@ -1155,7 +1155,25 @@ def test_identical_photo_inherits_without_model_call(app, tmp_path):
     assert second.analyze_calls == 0
 
 
-def test_worker_context_inherits_only_the_same_frozen_plan_and_keeps_source_trace(app, tmp_path):
+def test_orientation_contradiction_needs_no_paid_repair_and_stays_reusable(app, tmp_path):
+    _, ids, service = prepare(app, tmp_path, duplicate=True)
+    value = valid_result()
+    value["visual_orientation"].update(rotation_cw=None, ambiguous=False)
+    provider = MockProvider([value])
+    first = service.analyze_photo(
+        photo_id=ids[0], job_id=None, provider=provider, strategy="high_quality", high_model="mock"
+    )
+    assert first["analysis"]["visual_orientation"]["ambiguous"] is True
+    assert provider.analyze_calls == 1 and provider.repair_calls == 0
+    second = service.analyze_photo(
+        photo_id=ids[1], job_id=None, provider=provider, strategy="high_quality", high_model="mock"
+    )
+    assert second["stage"] == "inherited"
+    assert provider.analyze_calls == 1 and provider.repair_calls == 0
+
+
+@pytest.mark.parametrize("rename_profile", [False, True])
+def test_worker_context_inherits_only_the_same_frozen_plan_and_keeps_source_trace(app, tmp_path, rename_profile):
     _, ids, _service = prepare(app, tmp_path, duplicate=True)
     settings = app.extensions["inktime_settings_repository"]
     settings.update("analysis.ai_mode", "eligible", changed_by="test", source_ip="127.0.0.1")
@@ -1175,6 +1193,14 @@ def test_worker_context_inherits_only_the_same_frozen_plan_and_keeps_source_trac
     service.analyze_photo(
         photo_id=ids[0], job_id=None, provider=first, strategy="high_quality", analysis_plan=plan
     )
+    if rename_profile:
+        scoring = app.extensions["inktime_scoring_repository"]
+        renamed = scoring.create(
+            name="同規則新版本名稱", rules=str(plan["scoring_rules"]),
+            weights={"memory": 67.0, "visual": 33.0, "local_quality": 0.0},
+            favorite_bonus=1, created_by="test", source_ip="127.0.0.1",
+        )
+        plan = service.build_plan(strategy="high_quality", provider_route=[], scoring_profile=renamed)
     second = MockProvider([])
     inherited = service.analyze_photo(
         photo_id=ids[1], job_id=None, provider=second, strategy="high_quality", analysis_plan=plan
@@ -1196,7 +1222,11 @@ def test_worker_context_inherits_only_the_same_frozen_plan_and_keeps_source_trac
     identity_plan = dict(plan)
     identity_plan.pop("caption_display_controls", None)
     identity_plan.pop("repair_policy", None)
-    assert copied["analysis_fingerprint"] == fingerprint(identity_plan) == source["analysis_fingerprint"]
+    assert copied["analysis_fingerprint"] == fingerprint(identity_plan)
+    if rename_profile:
+        assert copied["analysis_fingerprint"] != source["analysis_fingerprint"]
+    else:
+        assert copied["analysis_fingerprint"] == source["analysis_fingerprint"]
     assert copied["vision_request_fingerprint"] == source["vision_request_fingerprint"]
     assert copied["vision_input_spec_json"] == source["vision_input_spec_json"]
     assert json.loads(copied["semantic_json"])["inherited_from"]["analysis_id"] == source["id"]

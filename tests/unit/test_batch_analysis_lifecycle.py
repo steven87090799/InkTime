@@ -1297,13 +1297,13 @@ def test_concurrent_submit_keeps_one_reservation_and_one_remote_batch(app, tmp_p
     fake = FakeBatchProvider()
     service = _wire_fake(app, fake)
     reservation_barrier = threading.Barrier(2)
-    original_create_with_items = service.batches.create_with_items
+    original_create = service.jobs.create
 
-    def synchronized_create_with_items(*args, **kwargs):
+    def synchronized_create(*args, **kwargs):
         reservation_barrier.wait(timeout=10)
-        return original_create_with_items(*args, **kwargs)
+        return original_create(*args, **kwargs)
 
-    service.batches.create_with_items = synchronized_create_with_items
+    service.jobs.create = synchronized_create
 
     def submit_once():
         try:
@@ -2187,3 +2187,57 @@ def test_batch_waits_for_local_checks_and_rechecks_quality(app, tmp_path, defect
     service = _wire_fake(app, FakeBatchProvider())
     estimate = service.estimate(scope="all_eligible_missing_analysis")
     assert estimate["candidate_count"] == 1
+
+
+def test_batch_candidates_exclude_realtime_owner_before_remote_upload(app, tmp_path):
+    photo_ids = _prepare_photos(app, tmp_path, count=1)
+    fake = FakeBatchProvider()
+    service = _wire_fake(app, fake)
+    service.jobs.create(
+        name="realtime", strategy="single", settings={}, created_by=None,
+        photo_ids=photo_ids, analysis_fingerprint="different-realtime-plan",
+    )
+    with pytest.raises(BatchLifecycleError) as caught:
+        service.submit(scope="manual_selection", photo_ids=photo_ids)
+    assert caught.value.code == "BATCH-CANDIDATE-001"
+    assert fake.custom_ids == [] and fake.batch_counter == 0
+
+
+@pytest.mark.parametrize("status", ["upload_unknown", "submission_unknown", "cancelling", "import_pending"])
+def test_remote_batch_keeps_reservation_after_parent_job_cancel(app, tmp_path, status):
+    from inktime.app.repositories.analysis_reservations import AnalysisReservationConflict
+
+    photo_ids = _prepare_photos(app, tmp_path, count=1)
+    service = _wire_fake(app, FakeBatchProvider())
+    submitted = service.submit(scope="manual_selection", photo_ids=photo_ids)
+    batch_id = submitted["batch_ids"][0]
+    batch = service.batches.get(batch_id)
+    service.jobs.cancel(str(batch["job_id"]))
+    service.batches.update_batch(batch_id, status=status)
+    assert list(service.jobs.iter_pending_photo_ids(analysis_fingerprint="changed", selection_mode="force_all")) == []
+    with pytest.raises(AnalysisReservationConflict):
+        service.jobs.create(
+            name="realtime", strategy="single", settings={}, created_by=None,
+            photo_ids=photo_ids, force_recompute=True,
+        )
+
+
+def test_poll_enqueue_is_database_only_deduplicated_and_restartable(app, monkeypatch):
+    from inktime.app.workers.runner import WorkerRunner
+
+    service = app.extensions["inktime_batch_analysis_service"]
+    monkeypatch.setattr(service.batches, "list_pollable_due", lambda **kwargs: [{"id": "due"}])
+    calls = []
+    monkeypatch.setattr(service, "poll_due", lambda **kwargs: calls.append(kwargs) or {"polled": 1})
+    first = service.enqueue_poll()
+    assert first is not None and calls == []
+    assert service.enqueue_poll() == first and calls == []
+    # Simulate restart between durable creation and start.
+    with service.database.session() as connection:
+        connection.execute("UPDATE jobs SET status='pending' WHERE id=?", (first,))
+    assert service.enqueue_poll() == first
+    assert service.jobs.get(first)["status"] == "running"
+    WorkerRunner(app).run_once()
+    assert calls == [{"limit": 2}]
+    assert service.jobs.get(first)["status"] == "completed"
+    assert service.enqueue_poll() != first
