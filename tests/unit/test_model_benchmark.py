@@ -182,11 +182,11 @@ def test_offline_benchmark_reports_no_network_or_production_mutation():
     assert report["production_mutations"] == 0
     assert report["quality_metrics"] is None
     assert report["ranking_metrics"] is None
-    assert report["ranking_policy"]["ranking_rule_version"] == "ranking-v4"
+    assert report["ranking_policy"]["ranking_rule_version"] == "ranking-v5-ai-first"
     assert report["ranking_policy"]["ranking_weights"] == {
-        "memory": 50.0,
-        "visual": 25.0,
-        "local_quality": 25.0,
+        "memory": 67.0,
+        "visual": 33.0,
+        "local_quality": 0.0,
     }
     assert report["ranking_policy"]["favorite_bonus_policy"]["applied"] is False
 

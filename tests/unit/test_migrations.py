@@ -32,7 +32,7 @@ def _run_capture_date_backfill(database_path: str, start, results) -> None:
 
 
 def test_fresh_database_is_migrated(tmp_path):
-    assert CURRENT_SCHEMA_VERSION == 57
+    assert CURRENT_SCHEMA_VERSION == 58
     database = Database(tmp_path / "inktime.db")
     assert migrate(database) == list(range(1, CURRENT_SCHEMA_VERSION + 1))
     assert database.integrity_check() == "ok"
@@ -537,7 +537,7 @@ def test_deployed_main_schema54_upgrades_without_rewriting_history(monkeypatch, 
     assert [row["score_kind"] for row in analyses_before] == ["semantic", "local_quality", "legacy"]
 
     monkeypatch.setattr(migrations_module, "MIGRATIONS", MIGRATIONS)
-    assert migrate(database, tmp_path / "backups") == [55, 56, 57]
+    assert migrate(database, tmp_path / "backups") == [55, 56, 57, 58]
     assert migrate(database) == []
     assert database.integrity_check() == "ok"
     with database.session() as connection:
@@ -570,7 +570,7 @@ def test_deployed_main_schema54_upgrades_without_rewriting_history(monkeypatch, 
     profiles = ScoringProfileRepository(database, settings)
     current = profiles.current()
     assert current["ranking_contract_version"] == 4
-    assert (current["memory_weight"], current["visual_weight"], current["local_weight"]) == (50, 25, 25)
+    assert (current["memory_weight"], current["visual_weight"], current["local_weight"]) == (67, 33, 0)
     assert profiles.get("legacy")["beauty_weight"] == 30
     with pytest.raises(ValueError, match="舊版評分契約"):
         profiles.restore("legacy", created_by="unused", source_ip="test")
@@ -1880,3 +1880,68 @@ def test_migration_24_updates_caption_defaults_only_as_one_legacy_set(monkeypatc
             for key in keys
         ]
     assert values == ["8", "12", "16"]
+
+
+def test_migration_58_recomposes_ai_scores_without_rewriting_evidence(monkeypatch, tmp_path):
+    database = Database(tmp_path / "ai-first-upgrade.db")
+    monkeypatch.setattr(migrations_module, "MIGRATIONS", MIGRATIONS[:57])
+    migrate(database)
+    now = "2026-09-03T00:00:00+00:00"
+    raw = '{"schema_version":4,"caption":"既有描述","side_caption":"既有文案"}'
+    with database.transaction() as connection:
+        connection.execute(
+            "INSERT INTO libraries(id,name,root_path,created_at,updated_at) VALUES ('lib','upgrade',?,?,?)",
+            (str(tmp_path), now, now),
+        )
+        connection.executemany(
+            "INSERT INTO photos(id,library_id,relative_path,status,created_at,updated_at) "
+            "VALUES (?,'lib',?,'analyzed',?,?)",
+            [(photo_id, f"{photo_id}.jpg", now, now) for photo_id in ("street", "portrait", "local", "legacy")],
+        )
+        connection.execute(
+            "UPDATE photos SET eligible=0,exclusion_status='manually_excluded',manual_override=1 WHERE id='portrait'"
+        )
+        connection.executemany(
+            "INSERT INTO photo_analysis(photo_id,schema_version,score_kind,stage,provider,model,"
+            "caption,side_caption,types_json,memory_score,visual_score,special_level,local_quality_score,"
+            "ranking_score,final_ranking_score,library_rarity_adjustment,raw_json,created_at) "
+            "VALUES (?,4,'semantic','single','saved','saved','既有描述','既有文案','[]',?,?,?,100,?,?,1,?,?)",
+            [("street", 55, 62, 2, 73, 73, raw, now), ("portrait", 58, 62, 1, 71.5, 71.5, raw, now)],
+        )
+        connection.executemany(
+            "INSERT INTO photo_analysis(photo_id,schema_version,score_kind,stage,provider,model,"
+            "caption,types_json,raw_json,created_at) VALUES (?,?,?,'single','saved','saved','歷史','[]',?,?)",
+            [("local", 4, "local_quality", '{"local":true}', now), ("legacy", 3, "legacy", '{"old":true}', now)],
+        )
+        connection.execute(
+            "INSERT INTO scoring_rule_versions(id,name,rules,memory_weight,beauty_weight,technical_weight,"
+            "emotion_weight,visual_weight,local_weight,ranking_contract_version,favorite_bonus,is_active,created_at) "
+            "VALUES ('old','我的自訂規則','保留自訂文字',50,25,25,0,25,25,4,1,1,?)", (now,),
+        )
+        photos_before = [dict(row) for row in connection.execute("SELECT * FROM photos ORDER BY id")]
+        non_semantic_before = [dict(row) for row in connection.execute(
+            "SELECT * FROM photo_analysis WHERE score_kind<>'semantic' ORDER BY id"
+        )]
+    monkeypatch.setattr(migrations_module, "MIGRATIONS", MIGRATIONS)
+    assert migrate(database) == [58]
+    assert migrate(database) == []
+    with database.session() as connection:
+        assert [dict(row) for row in connection.execute("SELECT * FROM photos ORDER BY id")] == photos_before
+        assert [dict(row) for row in connection.execute(
+            "SELECT * FROM photo_analysis WHERE score_kind<>'semantic' ORDER BY id"
+        )] == non_semantic_before
+        rows = {row["photo_id"]: dict(row) for row in connection.execute(
+            "SELECT * FROM photo_analysis WHERE score_kind='semantic'"
+        )}
+        assert rows["street"]["ranking_score"] == 62.31
+        assert rows["portrait"]["ranking_score"] == 61.32
+        for row in rows.values():
+            assert row["ranking_rule_version"] == "ranking-v5-ai-first"
+            assert row["library_rarity_adjustment"] == 0
+            assert row["local_quality_score"] == 100
+            assert row["raw_json"] == raw and row["side_caption"] == "既有文案"
+            assert row["semantic_score"] == row["base_ranking_score"]
+            assert row["final_ranking_score"] == row["ranking_score"]
+        profile = connection.execute("SELECT * FROM scoring_rule_versions WHERE id='old'").fetchone()
+        assert profile["is_active"] == 0 and profile["rules"] == "保留自訂文字"
+        assert profile["memory_weight"] == 50

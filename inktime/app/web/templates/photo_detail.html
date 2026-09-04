@@ -83,7 +83,7 @@
 </section>
 
 <section class="panel photo-analysis-panel">
-  <div class="panel-head"><div><p class="eyebrow">優先顯示與歷史分析</p><h2>模型與分析結果</h2><p class="analysis-history-note">優先顯示現行 v4 模型結果，其次為已保存的歷史模型紀錄，再顯示本機分析；歷史模型文字與原始分數可查閱，不參與現行排名。</p></div><span>顯示優先結果與最近記錄，共 {{ [analysis_total, 2]|min }} / {{ analysis_total }} 筆</span></div>
+  <div class="panel-head"><div><p class="eyebrow">本機品質門檻 → AI 挑選</p><h2>模型與分析結果</h2><p class="analysis-history-note">自動顯示須同時完成本機品質檢查與 v4 模型分析。本機負責排除不清楚的照片，AI 負責選片分；本機結果可直接併存在同一筆模型分析，不一定另有一張紀錄卡。歷史模型結果保留供查閱。</p></div><span>顯示優先結果與最近記錄，共 {{ [analysis_total, 2]|min }} / {{ analysis_total }} 筆</span></div>
   <div class="photo-analysis-grid">
     {% for a in analyses %}
     <article class="analysis-card">
@@ -95,11 +95,12 @@
       {% if a.score_kind == 'semantic' %}
       <dl>
         <dt>照片分類</dt><dd>{{ a.types|join('、') if a.types else '未分類' }}</dd>
-        <dt>照片庫鑑別分</dt><dd>{% if a.distinguishing_score is defined %}<strong>{{ a.distinguishing_score }}（{{ a.score_band }}）</strong>{% if a.ranking_percentile is not none %} · 優於約 {{ '%.0f'|format(a.ranking_percentile) }}% 已完成 AI 語意評分照片{% else %} · 照片不足，暫用原始分{% endif %}{% else %}—{% endif %}</dd>
-        <dt>原始綜合排序</dt><dd>{{ a.ranking_score if a.ranking_score is not none else '—' }}</dd>
-        <dt>排序組成</dt><dd>{% if a.provider == 'local' %}本機品質 {{ a.local_quality_score }}｜AI 語意評分：尚未分析{% else %}回憶 {{ a.memory_score }}｜視覺 {{ a.visual_score }}｜本機品質 {{ a.local_quality_score }}｜特殊程度 {{ a.effective_special_level }}{% endif %}</dd>
-        <dt>內容分類</dt><dd>{{ a.content_filter_json }}</dd>
+        <dt>AI 選片分</dt><dd><strong>{{ a.ranking_score if a.ranking_score is not none else '—' }}{% if a.score_band is defined %}（{{ a.score_band }}）{% endif %}</strong> · 不隨照片庫大小換算</dd>
+        <dt>排序組成</dt><dd>AI 回憶 {{ a.memory_score }} × 67% ＋ AI 視覺 {{ a.visual_score }} × 33% ＋ 特殊加分 {{ a.special_bonus|default(0) }}（有效等級 {{ a.effective_special_level }}）</dd>
+        <dt>本機品質門檻</dt><dd>{% if photo.local_features_status == 'complete' %}已完成 · {{ prefilter.decision_label }}{% else %}尚未完成，不進入自動顯示{% endif %}。本機品質參考分 {{ a.local_quality_score if a.local_quality_score is not none else '未記錄' }}，不加入 AI 排序；完整指標見下方。</dd>
+        <dt>內容過濾檢查</dt><dd>{% for item in a.content_filter_items|default([]) %}{{ item.label }}：{{ '有標記' if item.detected else '未標記' }}{% if item.detected %}（判斷信心 {{ '%.0f'|format(item.confidence * 100) }}%）{% endif %}{{ '；' if not loop.last else '' }}{% else %}未記錄{% endfor %}。這是排除項目檢查，不是照片類型或加分。</dd>
         <dt>評分版本</dt><dd>{{ a.scoring_version_name or '舊版／未記錄' }}</dd>
+        <dt>排序規則</dt><dd>{{ a.ranking_rule_version }}</dd>
       </dl>
       {% elif a.is_historical_model %}
       <dl>
@@ -120,8 +121,7 @@
         <dt>截圖機率</dt><dd>{{ '%.2f'|format(photo.screenshot_likelihood) if photo.screenshot_likelihood is not none else '無資料' }}</dd>
         <dt>E6 適合度</dt><dd>{{ '%.1f'|format(photo.e6_score) if photo.e6_score is not none else '無資料' }}</dd>
         <dt>AI 語意評分</dt><dd>{% if a.score_kind == 'local_quality' %}尚未進行{% else %}無法可靠判定（歷史來源不明）{% endif %}</dd>
-        <dt>照片庫鑑別分</dt><dd>尚未產生</dd>
-        <dt>原始綜合排序</dt><dd>尚未產生</dd>
+        <dt>AI 選片分</dt><dd>尚未產生</dd>
         <dt>判斷理由</dt><dd>{{ a.reason }}</dd>
         <dt>評分版本</dt><dd>{{ (a.local_quality.feature_version if a.local_quality else none) or a.ranking_rule_version or '本機品質規則' }}</dd>
       </dl>
@@ -149,7 +149,7 @@
     <article class="{{ 'has-alert' if prefilter.defect_count else '' }}"><span>命中規則</span><strong>{{ prefilter.defect_count }} 項</strong><small>{{ '請查看下方紅色規則' if prefilter.defect_count else '沒有規則達到門檻' }}</small></article>
     <article class="{{ 'has-alert' if prefilter.excluded else '' }}"><span>最終判斷</span><strong>{{ prefilter.decision_label }}</strong><small>{{ prefilter.reason_label }}</small></article>
   </div>
-  <p class="prefilter-summary">明確截圖、解析度過低或嚴重單項缺陷會直接排除；疑似缺陷只會降低優先順序。{% if prefilter.favorite_bypass %}這張照片已有人工保護，因此不會被自動排除。{% endif %}</p>
+  <p class="prefilter-summary">明確截圖、解析度過低或嚴重品質問題會直接排除；疑似缺陷保留供參考，不降低 AI 選片分。{% if prefilter.favorite_bypass %}這張照片已有人工保護，因此不會被自動排除。{% endif %}</p>
   <ul class="prefilter-rule-grid">
     {% for check in prefilter.checks %}
     <li class="prefilter-rule-card {{ 'is-hit' if check.hit and check.enabled and prefilter.enabled else 'is-disabled' if not prefilter.enabled or not check.enabled else 'is-clear' }}">

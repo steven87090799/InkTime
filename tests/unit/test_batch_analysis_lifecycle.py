@@ -208,7 +208,8 @@ def _prepare_photos(app, tmp_path, count=3):
     with app.extensions["inktime_database"].session() as connection:
         ids = [str(row[0]) for row in connection.execute("SELECT id FROM photos ORDER BY id").fetchall()]
         connection.executemany(
-            "UPDATE photos SET eligible=1,exclusion_status='eligible',manual_override=0 WHERE id=?",
+            "UPDATE photos SET eligible=1,exclusion_status='eligible',manual_override=0,"
+            "blur_score=500,contrast=40,overexposed_ratio=0,underexposed_ratio=0 WHERE id=?",
             [(photo_id,) for photo_id in ids],
         )
     return ids
@@ -2173,3 +2174,16 @@ def test_upload_and_submission_claims_receive_fresh_leases(app, tmp_path, monkey
     ]
     assert fake.upload_calls >= 1
     assert fake.create_calls >= 1
+
+
+@pytest.mark.parametrize("defect", ["incomplete", "severe_blur"])
+def test_batch_waits_for_local_checks_and_rechecks_quality(app, tmp_path, defect):
+    photo_ids = _prepare_photos(app, tmp_path, count=2)
+    with app.extensions["inktime_database"].session() as connection:
+        if defect == "incomplete":
+            connection.execute("UPDATE photos SET local_features_status='pending' WHERE id=?", (photo_ids[0],))
+        else:
+            connection.execute("UPDATE photos SET blur_score=10,contrast=5 WHERE id=?", (photo_ids[0],))
+    service = _wire_fake(app, FakeBatchProvider())
+    estimate = service.estimate(scope="all_eligible_missing_analysis")
+    assert estimate["candidate_count"] == 1

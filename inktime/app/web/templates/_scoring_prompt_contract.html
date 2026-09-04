@@ -1,0 +1,18 @@
+<section class="panel" id="prompt-contract">
+  <div class="panel-head"><div><p class="eyebrow">唯讀 · 已鎖定</p><h2>輸出欄位與必要規則</h2><p>所有欄位都必須保留。名稱、型別、值域與允許值由程式產生並驗證；下方評分參考不能覆寫。</p></div><span class="status">Schema v4 · 已鎖定</span></div>
+  <div class="prompt-formula-grid">
+    <article><strong>固定欄位與格式</strong><p>只接受 JSON；不可增加、刪除或改名。分數維持 0～100，特殊等級維持 0～4。</p></article>
+    <article><strong>固定分類與方向</strong><p>每張照片都要回傳三項內容分類與 visual_orientation，包含被排除的照片。</p></article>
+    <article><strong>可調整的判斷標準</strong><p>memory_score、visual_score 和 special_level 的參考條件與門檻，可在下一區修改。</p></article>
+  </div>
+  <details><summary>查看全部必填欄位、型別與範圍（{{ prompt_preview.fields|length }} 項）</summary>
+    <div class="table-wrap"><table><thead><tr><th>必填欄位 · 已鎖定</th><th>格式與允許值 · 已鎖定</th></tr></thead><tbody>
+      {% for field in prompt_preview.fields %}<tr><td><code>{{ field.name }}</code></td><td><pre class="prompt-constraint">{{ field.constraints }}</pre></td></tr>{% endfor %}
+    </tbody></table></div>
+    <p>caption 與 side_caption 可在設定頁調整字數，但只能在程式允許的 10～100／8～16 字範圍內；上表顯示目前生效限制。</p>
+  </details>
+  {% for section in prompt_preview.sections if section.key in ['contract', 'scoring_contract'] %}
+  <details><summary>{{ section.label }} · 唯讀原文</summary><pre class="prompt-text">{{ section.text }}</pre></details>
+  {% endfor %}
+  <p><a href="/settings#setting-analysis-advanced_caption_enabled">調整描述與文案風格、字數、禁用詞</a> · <a href="/settings#setting-analysis-exclude_sexualized_content">調整內容排除開關與信心門檻</a></p>
+</section>

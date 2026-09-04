@@ -4,11 +4,8 @@ import pytest
 from PIL import Image
 
 from inktime.app.domain.analysis.scoring import (
-    calculate_distinguishing_score,
-    calculate_library_percentile,
     calculate_ranking_score,
     LOCAL_QUALITY_SCORE_KIND,
-    prepare_score_distribution,
     resolve_score_kind,
     score_band,
     validate_ranking_weights,
@@ -26,15 +23,15 @@ SCORES = {
     "special_level": 0,
 }
 WEIGHTS = {
-    "memory": 50,
-    "visual": 25,
-    "local_quality": 25,
+    "memory": 67,
+    "visual": 33,
+    "local_quality": 0,
 }
 
 
 def test_ranking_score_preserves_components_and_applies_favorite_bonus():
-    assert calculate_ranking_score(SCORES, WEIGHTS) == 72.5
-    assert calculate_ranking_score(SCORES, WEIGHTS, favorite=True, favorite_bonus=5) == 74.5
+    assert calculate_ranking_score(SCORES, WEIGHTS) == 76.7
+    assert calculate_ranking_score(SCORES, WEIGHTS, favorite=True, favorite_bonus=5) == 78.7
 
 
 def test_ranking_weights_must_total_one_hundred():
@@ -48,31 +45,15 @@ def test_score_kind_does_not_misclassify_a_real_local_ai_provider():
     assert resolve_score_kind(provider="test-ai", stage="prefilter") == LOCAL_QUALITY_SCORE_KIND
 
 
-def test_library_percentile_spreads_narrow_scores_without_changing_order():
-    population = [70, 71, 72, 73, 74]
-
-    low, low_percentile = calculate_distinguishing_score(70, population)
-    middle, middle_percentile = calculate_distinguishing_score(72, population)
-    high, high_percentile = calculate_distinguishing_score(74, population)
-
-    assert (low_percentile, middle_percentile, high_percentile) == (0.0, 50.0, 100.0)
-    assert low < middle < high
-    assert high - low > 40
-    assert score_band(high_percentile, high) == "精選"
+@pytest.mark.parametrize("local_score", [None, 0, 40, 100])
+def test_local_quality_does_not_change_model_ranking(local_score):
+    assert calculate_ranking_score({**SCORES, "local_quality_score": local_score}) == 76.7
 
 
-def test_library_percentile_uses_average_rank_for_ties_and_falls_back_for_small_samples():
-    assert calculate_library_percentile(70, [70, 70, 80, 90, 100]) == 12.5
-    assert calculate_library_percentile(0, [70, 70, 80, 90, 100]) == 0.0
-    assert calculate_library_percentile(110, [70, 70, 80, 90, 100]) == 100.0
-    assert calculate_distinguishing_score(82, [80, 81, 82, 83]) == (82.0, None)
-
-
-def test_prepared_distribution_can_be_reused_for_large_photo_lists():
-    distribution = prepare_score_distribution([74, 70, 73, 71, 72])
-
-    assert distribution.values == (70.0, 71.0, 72.0, 73.0, 74.0)
-    assert calculate_library_percentile(72, distribution) == 50.0
+def test_score_labels_use_the_model_score_without_library_calibration():
+    assert score_band(91) == "精選"
+    assert score_band(78) == "推薦"
+    assert score_band(55) == "一般"
 
 
 def test_scoring_profile_create_and_restore_are_versioned(app):
@@ -91,9 +72,9 @@ def test_scoring_profile_create_and_restore_are_versioned(app):
     )
 
     assert created["is_active"] == 1
-    assert created["memory_weight"] == 50
+    assert created["memory_weight"] == 67
     assert created["ranking_contract_version"] == 4
-    assert (created["visual_weight"], created["local_weight"]) == (25, 25)
+    assert (created["visual_weight"], created["local_weight"]) == (33, 0)
     assert repository.get(str(initial["id"]))["is_active"] == 0
     with app.extensions["inktime_database"].session() as connection:
         history_count = connection.execute(

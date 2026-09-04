@@ -19,7 +19,6 @@ from inktime.app.domain.analysis.scoring import (
     SEMANTIC_SCORE_KIND,
     preferred_analysis_order_sql,
     ranking_components,
-    rarity_features,
     resolve_score_kind,
 )
 from inktime.app.domain.analysis.content_filter import CONTENT_FILTER_DEFAULTS, evaluate_content_filter
@@ -1561,10 +1560,17 @@ class PhotoRepository:
             ).fetchall()
 
     def eligible_photo_ids(self, *, limit: int | None = None, include_all_active: bool = False) -> list[str]:
-        where = "p.lifecycle_status='active'"
+        where = "p.lifecycle_status='active' AND p.local_features_status='complete'"
         if not include_all_active:
             where += " AND p.eligible=1"
-        query = f"SELECT p.id FROM photos p WHERE {where} ORDER BY p.local_candidate_score DESC,p.captured_at DESC,p.id"
+        # Advance through pending photos on successive bounded runs. Technical
+        # quality is a gate, not a permanent top-N admission score for the AI.
+        query = f"""SELECT p.id FROM photos p WHERE {where}
+            ORDER BY EXISTS(
+                SELECT 1 FROM photo_analysis a WHERE a.photo_id=p.id
+                AND a.schema_version=4 AND a.score_kind='semantic'
+                AND a.ranking_score IS NOT NULL
+            ),p.captured_at DESC,p.id"""  # noqa: S608 -- fixed internal predicate
         params: tuple = () if limit is None else (max(1, min(int(limit), 100_000)),)
         if limit is not None:
             query += " LIMIT ?"
@@ -2202,44 +2208,35 @@ class PhotoRepository:
 
     @staticmethod
     def _refresh_library_ranking(connection, library_id: str) -> None:
-        """Recompute from the current library, independent of analysis arrival order.
-
-        Only aggregate feature counts and a 500-row chunk live in Python.  Rows
-        whose level/score did not change incur no additional database writes.
-        """
+        """Recompute current semantic rows with the AI-first ranking contract."""
         peers = """SELECT a.*,p.favorite FROM photos p
             JOIN photo_analysis a ON a.id=(SELECT id FROM photo_analysis WHERE photo_id=p.id AND schema_version=4 AND score_kind=? ORDER BY created_at DESC,id DESC LIMIT 1)
             WHERE p.library_id=? AND p.eligible=1 AND p.lifecycle_status='active'
               AND p.exclusion_status NOT IN ('auto_excluded','manually_excluded')"""
-        rows = connection.execute(
-            f"""WITH peers AS ({peers}), features AS (
-                SELECT 'special:' || special.value AS feature
-                FROM peers,json_each(peers.special_codes_json) special
-                UNION ALL
-                SELECT 'special:' || special.value || '|type:' || photo_type.value
-                FROM peers,json_each(peers.special_codes_json) special,json_each(peers.types_json) photo_type
-                UNION ALL
-                SELECT 'special:group_photo|people:16+' FROM peers
-                WHERE people_count>=16 AND EXISTS (
-                    SELECT 1 FROM json_each(peers.special_codes_json) WHERE value='group_photo'
-                )
-            ) SELECT feature,COUNT(*) AS n FROM features GROUP BY feature
-            UNION ALL SELECT '__total__',COUNT(*) FROM peers""",
-            (SEMANTIC_SCORE_KIND, library_id),
-        ).fetchall()
-        counts = {row["feature"]: int(row["n"]) for row in rows}
-        total = counts.pop("__total__", 0)
         cursor = connection.execute(peers, (SEMANTIC_SCORE_KIND, library_id))
         while batch := cursor.fetchmany(500):
             updates = []
             for row in batch:
                 analysis = dict(row)
-                analysis.update(types=json.loads(row["types_json"]), special_codes=json.loads(row["special_codes_json"]))
-                rarity = int(total >= 21 and any((counts.get(feature, 0) - 1) / (total - 1) <= .05 for feature in rarity_features(analysis)))
-                scores = ranking_components(analysis, favorite=bool(row["favorite"]), rarity_adjustment=rarity)
-                if rarity != row["library_rarity_adjustment"] or scores["ranking_score"] != row["ranking_score"] or scores["effective_special_level"] != row["effective_special_level"]:
-                    updates.append((rarity, scores["effective_special_level"], scores["ranking_score"], scores["ranking_score"], scores["base_ranking_score"], row["id"]))
-            connection.executemany("UPDATE photo_analysis SET library_rarity_adjustment=?,effective_special_level=?,ranking_score=?,final_ranking_score=?,base_ranking_score=? WHERE id=?", updates)
+                scores = ranking_components(analysis, favorite=bool(row["favorite"]))
+                if (
+                    row["library_rarity_adjustment"] != 0
+                    or scores["ranking_score"] != row["ranking_score"]
+                    or scores["effective_special_level"] != row["effective_special_level"]
+                    or scores["base_ranking_score"] != row["base_ranking_score"]
+                    or row["ranking_rule_version"] != RANKING_RULE_VERSION
+                ):
+                    updates.append((
+                        0, scores["effective_special_level"], scores["ranking_score"],
+                        scores["ranking_score"], scores["base_ranking_score"],
+                        scores["base_ranking_score"], RANKING_RULE_VERSION, row["id"],
+                    ))
+            connection.executemany(
+                """UPDATE photo_analysis SET library_rarity_adjustment=?,effective_special_level=?,
+                   ranking_score=?,final_ranking_score=?,base_ranking_score=?,semantic_score=?,
+                   ranking_rule_version=? WHERE id=?""",
+                updates,
+            )
 
     @staticmethod
     def _refresh_favorite_ranking(connection, photo_id: str) -> None:
@@ -2251,8 +2248,14 @@ class PhotoRepository:
         ).fetchone()
         if row is None:
             return
-        scores = ranking_components(dict(row), favorite=bool(row["favorite"]), rarity_adjustment=int(row["library_rarity_adjustment"]))
-        connection.execute("UPDATE photo_analysis SET ranking_score=?,final_ranking_score=?,base_ranking_score=?,effective_special_level=? WHERE id=?", (scores["ranking_score"], scores["ranking_score"], scores["base_ranking_score"], scores["effective_special_level"], row["id"]))
+        scores = ranking_components(dict(row), favorite=bool(row["favorite"]))
+        connection.execute(
+            """UPDATE photo_analysis SET ranking_score=?,final_ranking_score=?,base_ranking_score=?,
+               semantic_score=?,effective_special_level=?,library_rarity_adjustment=0,
+               ranking_rule_version=? WHERE id=?""",
+            (scores["ranking_score"], scores["ranking_score"], scores["base_ranking_score"],
+             scores["base_ranking_score"], scores["effective_special_level"], RANKING_RULE_VERSION, row["id"]),
+        )
 
     def save_analysis(
         self,
@@ -2341,7 +2344,15 @@ class PhotoRepository:
                     self._apply_content_exclusion(connection, photo_id, content_evaluation, now)
                     current["eligible"] = 0
                     current["exclusion_status"] = "auto_excluded"
-                quality = local_candidate_score(current, evaluation=evaluate_local_quality(current, settings=self._local_quality_settings(connection)))
+                quality_evaluation = evaluate_local_quality(current, settings=self._local_quality_settings(connection))
+                if current["eligible"] and quality_evaluation["decision"] == "auto_excluded" and not protected:
+                    self._apply_content_exclusion(connection, photo_id, {
+                        **quality_evaluation, "rule": LOCAL_QUALITY_RULE,
+                        "rule_version": QUALITY_POLICY_VERSION,
+                    }, now)
+                    current["eligible"] = 0
+                    current["exclusion_status"] = "auto_excluded"
+                quality = local_candidate_score(current, evaluation=quality_evaluation)
                 rarity = 0
                 result.update(canonical, local_quality_score=quality)
                 semantic_available = score_kind == SEMANTIC_SCORE_KIND
@@ -2350,7 +2361,6 @@ class PhotoRepository:
                         ranking_components(
                             result,
                             favorite=bool(current["favorite"]),
-                            rarity_adjustment=rarity,
                         )
                     )
                 else:
@@ -2375,6 +2385,7 @@ class PhotoRepository:
                     "source": "model" if semantic_available else "local",
                     "score_kind": score_kind,
                     "semantic_scores_available": semantic_available,
+                    "local_quality": quality_evaluation,
                     "values": (
                         {
                             key: canonical[key]
@@ -2411,11 +2422,7 @@ class PhotoRepository:
                     "schema_kind": schema_kind,
                     "score_kind": score_kind,
                     "semantic_json": json.dumps(semantic, ensure_ascii=False), "local_score": quality,
-                    "semantic_score": (
-                        canonical["memory_score"] * .5 + canonical["visual_score"] * .25
-                        if semantic_available
-                        else None
-                    ),
+                    "semantic_score": result["base_ranking_score"] if semantic_available else None,
                     "base_ranking_score": result["base_ranking_score"], "final_ranking_score": result["ranking_score"],
                     "ranking_rule_version": RANKING_RULE_VERSION, "prompt_version": prompt_version,
                     "analysis_fingerprint": analysis_fingerprint, "analysis_spec_json": analysis_spec_json,

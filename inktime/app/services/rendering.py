@@ -38,9 +38,7 @@ from inktime.app.domain.analysis.execution_mode import execution_mode
 from inktime.app.domain.analysis.scoring import (
     LOCAL_QUALITY_SCORE_KIND,
     SEMANTIC_SCORE_KIND,
-    calculate_distinguishing_score,
     preferred_analysis_order_sql,
-    prepare_score_distribution,
 )
 from inktime.app.services.local_selection import LocalSelectionPolicy
 from inktime.app.domain.rendering.system_presets import DEFAULT_RENDER_DITHER, DEFAULT_RENDER_PROFILE
@@ -1079,13 +1077,11 @@ class RenderService:
         """Choose the domain for a single-domain history or pair query."""
         if execution_mode(self.settings) in {"local_only", "local_with_manual_ai", "disabled"}:
             return LOCAL_QUALITY_SCORE_KIND
-        return (
-            SEMANTIC_SCORE_KIND
-            if self.candidates.has_semantic_candidates()
-            else LOCAL_QUALITY_SCORE_KIND
-        )
+        return SEMANTIC_SCORE_KIND
 
     def _photo_score_kind(self, photo: dict[str, Any]) -> str:
+        if execution_mode(self.settings) == "automatic_ai":
+            return SEMANTIC_SCORE_KIND
         value = str(photo.get("score_kind") or photo.get("latest_score_kind") or "").strip()
         if value in {SEMANTIC_SCORE_KIND, LOCAL_QUALITY_SCORE_KIND}:
             return value
@@ -1904,7 +1900,6 @@ class RenderService:
         device_configs: dict[str, dict[str, Any]] | None = None,
         activate_pointers: bool = True,
         assign_device_releases: bool = True,
-        allow_local_fallback: bool = False,
     ) -> dict:
         publish_started = time.monotonic()
         log_event(
@@ -1928,14 +1923,12 @@ class RenderService:
         layout_key = str(self.settings.get("render.layout", "photo_info"))
         source_limit = quantity * 2 if layout_key in {"photo_pair", "photo_pair_caption"} else quantity
         selected = photo_ids[:source_limit]
-        automatically_selected = not selected
         if not selected:
             selected = self.select_candidates(source_limit)
         # 明確指定與自動選片都必須在發布前重新驗證；不得使用過期候選或遺失來源契約。
         required = self.candidates.require_for_execution_mode(
             selected,
             execution_mode(self.settings),
-            allow_local_fallback=allow_local_fallback or automatically_selected,
         )
         selected = [str(row["id"]) for row in required]
         eligibility_sources = {str(row["id"]): str(row["eligibility_source"]) for row in required}
@@ -2244,10 +2237,11 @@ class RenderService:
             def sort_key(item: tuple[int, dict[str, Any]]) -> tuple[Any, ...]:
                 index, row = item
                 distance = distances.get(str(row.get("captured_month_day")), 999) if distances else 0
-                adjusted = float(row.get("combined_score") or 0.0) - LocalSelectionPolicy._diversity_penalty(
-                    row, context
-                )
-                return distance, -adjusted, index, str(row.get("id") or "")
+                diversity = LocalSelectionPolicy._diversity_penalty(row, context)
+                semantic = row.get("score_kind") == SEMANTIC_SCORE_KIND
+                adjusted = float(row.get("combined_score") or 0.0) - (0.0 if semantic else diversity)
+                # AI rank wins; diversity only breaks ties between equal AI scores.
+                return distance, -adjusted, diversity if semantic else 0.0, index, str(row.get("id") or "")
 
             _, chosen = min(enumerate(remaining), key=sort_key)
             picked.append(chosen)
@@ -2268,8 +2262,6 @@ class RenderService:
         if score_kind not in {SEMANTIC_SCORE_KIND, LOCAL_QUALITY_SCORE_KIND}:
             raise ValueError("RENDER-005 不支援的選片評分來源")
         semantic_selection = score_kind == SEMANTIC_SCORE_KIND
-        memory_threshold = float(self.settings.get("render.memory_threshold", 70))
-        weight = float(self.settings.get("render.e6_weight", 20)) / 100.0
         predicate = (
             RenderCandidateRepository.SEMANTIC_SQL_PREDICATE
             if semantic_selection
@@ -2280,24 +2272,7 @@ class RenderService:
             if semantic_selection
             else "COALESCE(a.local_score,p.local_candidate_score,0)"
         )
-        with self.database.session() as connection:
-            library_ids = [
-                str(row["id"])
-                for row in connection.execute("SELECT id FROM libraries ORDER BY id").fetchall()
-            ]
-        distributions = {
-            library_id: prepare_score_distribution(self.photos.score_population(library_id))
-            for library_id in library_ids
-        }
-        combined_expression = (
-            f"(inktime_distinguishing_score({score_expression},p.library_id) * ? + "
-            "COALESCE(p.e6_score,50) * ?)"
-            if semantic_selection
-            else score_expression
-        )
-        score_parameters: tuple[Any, ...] = (1.0 - weight, weight) if semantic_selection else ()
-        memory_parameters: tuple[Any, ...] = (memory_threshold,) if semantic_selection else ()
-        memory_clause = "AND a.memory_score>=?" if semantic_selection else ""
+        combined_expression = score_expression
         result: list[dict[str, Any]] = []
         last_score: float | None = None
         last_id = ""
@@ -2307,15 +2282,6 @@ class RenderService:
         # existing burst-proximity signal consumed by LocalSelectionPolicy.
         while len(result) < max(limit, 1):
             with self.database.session() as connection:
-                connection.create_function(
-                    "inktime_distinguishing_score",
-                    2,
-                    lambda value, library_id: calculate_distinguishing_score(
-                        value,
-                        distributions.get(str(library_id), prepare_score_distribution(())),
-                    )[0],
-                    deterministic=True,
-                )
                 rows = connection.execute(
                     f"""
                     WITH ranked_candidates AS (
@@ -2339,7 +2305,6 @@ class RenderService:
                         ORDER BY {preferred_analysis_order_sql('latest')} LIMIT 1
                     )
                     WHERE {predicate}
-                      {memory_clause}
                       AND (?=0 OR p.captured_month_day IN (SELECT value FROM json_each(?)))
                       AND (?=0 OR (
                           p.captured_date IS NOT NULL
@@ -2353,8 +2318,6 @@ class RenderService:
                     ORDER BY combined_score DESC,id LIMIT 250
                     """,  # noqa: S608 -- eligibility predicate is a fixed class constant
                     (
-                        *score_parameters,
-                        *memory_parameters,
                         int(month_days is not None),
                         json.dumps(month_days or []),
                         int(older_only),
@@ -2413,16 +2376,9 @@ class RenderService:
             ranking = float(stored_ranking) if isinstance(stored_ranking, (int, float, str)) else 0.0
             row["raw_ranking_score"] = ranking
             if semantic_selection:
-                distinguishing, percentile = calculate_distinguishing_score(
-                    ranking,
-                    distributions.get(
-                        str(row["library_id"]), prepare_score_distribution(())
-                    ),
-                )
-                row["ranking_percentile"] = percentile
-                row["distinguishing_score"] = distinguishing
-                e6 = row["e6_score"] if row.get("e6_score") is not None else 50.0
-                raw_combined = distinguishing * (1.0 - weight) + float(e6) * weight
+                row["ranking_percentile"] = None
+                row["distinguishing_score"] = None
+                raw_combined = ranking
                 row["display_score"] = round(raw_combined, 2)
                 row["local_quality_score"] = None
             else:
@@ -2431,7 +2387,7 @@ class RenderService:
                 row["distinguishing_score"] = None
                 row["display_score"] = round(raw_combined, 2)
                 row["local_quality_score"] = round(raw_combined, 2)
-            adjustments = self._selection_adjustments(row, target=target, now=now)
+            adjustments = {} if semantic_selection else self._selection_adjustments(row, target=target, now=now)
             row["raw_combined_score"] = round(raw_combined, 2)
             row["score_components"] = {"base_combined_score": round(raw_combined, 2), **adjustments}
             row["combined_score"] = round(
@@ -2570,22 +2526,12 @@ class RenderService:
             return result["selected"][:limit]
 
         if mode == "automatic_ai":
-            semantic = self._select_candidates_for_score_kind(
+            return self._select_candidates_for_score_kind(
                 target=target,
                 limit=limit,
                 candidate_years=candidate_years,
                 score_kind=SEMANTIC_SCORE_KIND,
             )
-            if len(semantic) < limit:
-                local = self._select_candidates_for_score_kind(
-                    target=target,
-                    limit=limit - len(semantic),
-                    candidate_years=candidate_years,
-                    score_kind=LOCAL_QUALITY_SCORE_KIND,
-                    already_selected=semantic,
-                )
-                return [*semantic, *local][:limit]
-            return semantic
 
         return self._select_candidates_for_score_kind(
             target=target,

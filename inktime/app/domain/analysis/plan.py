@@ -8,7 +8,7 @@ from typing import Any, Mapping, Sequence
 
 
 VISION_INPUT_VERSION = "vision-input-v3"
-PROVIDER_PROMPT_CONTRACT_VERSION = "provider-prompt-contract-v2"
+PROVIDER_PROMPT_CONTRACT_VERSION = "provider-prompt-contract-v3"
 AI_IMAGE_JPEG_QUALITY = 88
 SCHEMA_VERSION = 4
 REASONING_EFFORTS = ("none", "low", "medium", "high", "xhigh", "max")
@@ -150,7 +150,7 @@ def build_analysis_plan(
         "provider_route": route,
         "favorite_override": bool(favorite_override),
         "scoring_profile_id": str(scoring_profile.get("id", "")),
-        "ranking_weights": {"memory": 50.0, "visual": 25.0, "local_quality": 25.0},
+        "ranking_weights": {"memory": 67.0, "visual": 33.0, "local_quality": 0.0},
         "favorite_bonus": 1,
         "scoring_rules_sha256": rules_sha256,
         "scoring_rules": str(scoring_rules),

@@ -9,7 +9,6 @@ from tests.conftest import create_admin, login
 from tests.integration.test_photo_quality_ai import CountingProvider, _scan
 from tests.integration.test_jobs import add_photos, create_job
 from tests.unit.test_analysis_schema import content_filter_result, valid_result
-from inktime.app.domain.analysis.scoring import calculate_distinguishing_score
 from inktime.app.domain.analysis.content_filter import CONTENT_FILTER_SWITCHES
 from inktime.app.domain.photos import PhotoPreprocessor
 from inktime.app.domain.photos.quality_policy import evaluate_local_quality, local_candidate_score
@@ -165,7 +164,7 @@ def test_real_service_uses_v4_and_content_policy(app, tmp_path):
     )
 
 
-def test_render_percentile_precedes_e6_and_excluded_is_never_selected(app, tmp_path, monkeypatch):
+def test_render_uses_model_rank_and_excluded_is_never_selected(app, tmp_path, monkeypatch):
     repo = app.extensions["inktime_photo_repository"]
     ids = add_photos(app, 6)
     for i in range(6):
@@ -184,12 +183,10 @@ def test_render_percentile_precedes_e6_and_excluded_is_never_selected(app, tmp_p
     render = app.extensions["inktime_render_service"]
     rows = render._candidate_query(target=date(2026, 9, 1), month_days=None, older_only=False, limit=10)
     assert len(rows) == 5 and ids[-1] not in {row["id"] for row in rows}
-    population = repo.score_population()
     for row in rows:
-        distinguishing, percentile = calculate_distinguishing_score(row["ranking_score"], population)
-        assert row["ranking_percentile"] == percentile
-        assert row["distinguishing_score"] == distinguishing
-        assert row["display_score"] == round(distinguishing * 0.8 + 90 * 0.2, 2)
+        assert row["ranking_percentile"] is None
+        assert row["distinguishing_score"] is None
+        assert row["display_score"] == row["ranking_score"]
 
 
 def test_reapply_uses_current_switch_and_favorite_inheritance_still_excludes(app):
@@ -216,7 +213,7 @@ def test_reapply_uses_current_switch_and_favorite_inheritance_still_excludes(app
     assert repo.get_with_path(ids[0])["eligible"] == 1
 
 
-def test_rarity_saved_from_same_library_only_and_excludes_rejected_peers(app):
+def test_adding_library_peers_does_not_add_special_levels(app):
     repo = app.extensions["inktime_photo_repository"]
     ids = add_photos(app, 21)
     for photo_id in ids[:-1]:
@@ -228,7 +225,7 @@ def test_rarity_saved_from_same_library_only_and_excludes_rejected_peers(app):
             "SELECT library_rarity_adjustment,effective_special_level FROM photo_analysis WHERE photo_id=? ORDER BY id DESC LIMIT 1",
             (ids[-1],),
         ).fetchone()
-    assert result["library_rarity_adjustment"] == 1 and result["effective_special_level"] == 3
+    assert result["library_rarity_adjustment"] == 0 and result["effective_special_level"] == 2
     other = add_photos(app, 1)[0]
     result = save(repo, other, types=["活動"], people_count=20, special_codes=["ceremony"], special_level=2)
     assert result["library_rarity_adjustment"] == 0
@@ -247,7 +244,7 @@ def test_server_quality_is_independent_of_e6(app):
     assert first["ranking_score"] == second["ranking_score"]
 
 
-def test_rarity_does_not_depend_on_analysis_arrival_order(app):
+def test_rank_does_not_depend_on_analysis_arrival_order(app):
     repo = app.extensions["inktime_photo_repository"]
     libraries = [add_photos(app, 21), add_photos(app, 21)]
     rare_ids = []
@@ -269,7 +266,7 @@ def test_rarity_does_not_depend_on_analysis_arrival_order(app):
             "SELECT library_rarity_adjustment,ranking_score FROM photo_analysis WHERE photo_id IN (?,?)",
             rare_ids,
         ).fetchall()
-    assert [row["library_rarity_adjustment"] for row in rows] == [1, 1]
+    assert [row["library_rarity_adjustment"] for row in rows] == [0, 0]
     assert rows[0]["ranking_score"] == rows[1]["ranking_score"]
     assert len(repo.score_population(repo.get_with_path(rare_ids[0])["library_id"])) == 21
 
@@ -451,6 +448,6 @@ def test_scoring_history_displays_legacy_weights_without_offering_v4_restore(app
     assert page.status_code == 200
     text = page.get_data(as_text=True)
     assert "美感 30.0／技術 40.0／情緒 10.0" in text
-    assert "Vision v4：回憶 50.0／視覺 25.0／本機品質 25.0" in text
+    assert "Vision v4：回憶 67.0／視覺 33.0／本機品質 0.0" in text
     assert 'data-id="legacy-profile"' not in text
     assert "原始四項模型分數" not in text

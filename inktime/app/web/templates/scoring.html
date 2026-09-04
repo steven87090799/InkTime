@@ -1,11 +1,12 @@
 {% extends "base.html" %}
-{% block title %}評分控制中心｜InkTime{% endblock %}
+{% block title %}提示詞與評分控制中心｜InkTime{% endblock %}
+{% block head %}<link rel="stylesheet" href="{{ url_for('static', filename='scoring.css') }}">{% endblock %}
 {% block content %}
 <div class="page-head">
   <div>
-    <p class="eyebrow">可版本化的照片排序</p>
-    <h1>評分控制中心</h1>
-    <p>AI 提供回憶與視覺分數，本機計算品質分數；依照片庫相對分布產生鑑別分，並保留原始分析。</p>
+    <p class="eyebrow">看清模型輸入，再調整評分</p>
+    <h1>提示詞與評分控制中心</h1>
+    <p>欄位與格式鎖定，評分參考由你調整。查看目前提示詞、預覽修改內容，並了解每個分數如何影響照片排序。</p>
   </div>
 </div>
 
@@ -18,34 +19,43 @@
   <article><span>原始分範圍</span><strong>{{ distribution.spread if distribution.spread is not none else '—' }}</strong></article>
 </section>
 
-<section class="panel calibration-panel">
-  <div class="panel-head"><div><h2>照片庫相對鑑別分</h2><p>解決模型常把照片集中打在相近區間、肉眼難以比較的問題。</p></div><span class="status {{ 'ok' if distribution.calibration_ready else 'muted' }}">{{ '校準已啟用' if distribution.calibration_ready else '等待更多照片' }}</span></div>
-  <div class="calibration-explainer">
-    <article><strong>1. 保留原始分</strong><p>保留 AI 回憶與視覺分數、本機品質與綜合排序，並區分各自來源。</p></article>
-    <article><strong>2. 比較整個照片庫</strong><p>至少 5 張且有 3 種分數後，以同分平均名次計算相對百分位。</p></article>
-    <article><strong>3. 顯示更有差異</strong><p>鑑別分以 35% 原始分＋65% 相對百分位呈現，排序方向不變。</p></article>
-  </div>
-  <p class="calibration-range">目前原始綜合分：{{ distribution.minimum if distribution.minimum is not none else '—' }}～{{ distribution.maximum if distribution.maximum is not none else '—' }}。照片庫、照片詳情與單張測試會同時標示原始分、鑑別分及「精選／推薦／一般／較弱」。</p>
-  <details class="scoring-research"><summary>為什麼採用這個方向？</summary><p>GitHub 上的 NIMA 將美感與本機品質分開，Siamese NIMA 用相對配對強化細微排序；Facet 也採多維品質與照片剔除。InkTime 保留現有輕量部署，不強制下載大型 PyTorch／TensorFlow 模型，先採同樣的「多維＋相對排序」原則。</p><p><a href="https://github.com/idealo/image-quality-assessment" target="_blank" rel="noopener noreferrer">NIMA 實作</a> · <a href="https://github.com/ryanfwy/image-quality" target="_blank" rel="noopener noreferrer">Siamese NIMA</a> · <a href="https://github.com/ncoevoet/facet" target="_blank" rel="noopener noreferrer">Facet</a></p></details>
-</section>
+<nav class="prompt-nav" aria-label="提示詞控制中心章節">
+  <a href="#prompt-contract">1. 鎖定契約</a><a href="#prompt-editor">2. 可調整參考</a><a href="#prompt-preview">3. 送出預覽</a><a href="#ranking-formula">4. 分數怎麼算</a>
+</nav>
+{% include "_scoring_prompt_contract.html" %}
 
-<section class="panel">
-  <div class="panel-head"><div><h2>規則與綜合權重</h2><p>固定公式：回憶 50%＋視覺 25%＋本機品質 25%，再加 Special；最愛提升 1 級，仍受內容排除；人工恢復可覆寫排除。儲存會建立新版本，不會覆蓋歷史。</p></div><div class="scoring-panel-actions">{% if g.user.role == 'administrator' %}<button class="secondary" type="button" id="distinctive-preset">套用高鑑別度範本</button>{% endif %}<strong id="weight-total" class="weight-total">100%</strong></div></div>
+<section class="panel" id="prompt-editor">
+  <div class="panel-head"><div><p class="eyebrow">可編輯</p><h2>評分參考內容</h2><p>調整各欄位的高低分條件、參考分數，或精簡用語。這段內容會取代預設評分參考，只送出一次。</p></div>{% if g.user.role == 'administrator' %}<button class="secondary" type="button" id="distinctive-preset">載入預設參考</button>{% endif %}</div>
+  <div class="prompt-guidance">
+    <p><strong>memory_score</strong>：例如「互動清楚的日常紀錄約 70 分，資訊薄弱約 30 分」。</p>
+    <p><strong>visual_score</strong>：例如「構圖占判斷 60%、光線 40%」。這是模型評分參考，不會改變伺服器的合成權重。</p>
+    <p><strong>special_level</strong>：可調整 0～4 級的情境門檻；每級對應加分由伺服器固定計算。</p>
+  </div>
+  {% if not prompt_preview.profile_matches_settings %}<p class="notice">評分參考曾從設定頁修改，與目前版本紀錄不同。下方顯示實際設定值；儲存新版本可讓版本紀錄同步。</p>{% endif %}
   {% if g.user.role == 'administrator' %}
   <form id="scoring-profile-form" class="scoring-form">
-    <label class="profile-name">版本名稱<input name="name" maxlength="80" value="{{ current_profile.name }} 的調整" required></label>
-    <div class="weight-grid">
-      <label>回憶價值 <output data-output="memory_weight">{{ current_profile.memory_weight }}%</output><input type="range" disabled name="memory_weight" min="0" max="100" step="1" value="{{ current_profile.memory_weight }}"></label>
-      <label>視覺 <output data-output="visual_weight">{{ current_profile.visual_weight }}%</output><input type="range" disabled name="visual_weight" min="0" max="100" step="1" value="{{ current_profile.visual_weight }}"></label>
-      <label>本機品質 <output data-output="local_weight">{{ current_profile.local_weight }}%</output><input type="range" disabled name="local_weight" min="0" max="100" step="1" value="{{ current_profile.local_weight }}"></label>
-      <label>最愛提升特殊程度 <output data-output="favorite_bonus">+{{ current_profile.favorite_bonus }}</output><input type="range" disabled name="favorite_bonus" min="0" max="30" step="1" value="{{ current_profile.favorite_bonus }}"></label>
-    </div>
-    <label class="rules-editor">照片高低分規則<small>高鑑別度範本會要求模型使用完整 0～100 範圍，避免不確定時一律給 75～80 分。</small><textarea name="rules" rows="28" minlength="100" maxlength="12000" required>{{ current_profile.rules }}</textarea></label>
-    <button class="primary" type="submit">儲存為新版本</button><span id="scoring-profile-status" role="status" aria-live="polite"></span>
+    <label class="profile-name">版本名稱<input name="name" maxlength="80" value="{{ current_profile.name[:74] }} 的調整" required></label>
+    <label class="rules-editor">可修改的評分參考<small>1～12,000 字元。只寫評分標準即可，不需重複 JSON、必填欄位或固定分類規則。</small><textarea name="rules" rows="12" minlength="1" maxlength="12000" required aria-describedby="rules-count">{{ prompt_preview.rules }}</textarea></label>
+    <small id="rules-count">{{ prompt_preview.rules_chars }} 字元</small>
+    <div class="prompt-actions"><button class="secondary" type="button" id="preview-prompt">預覽修改（不呼叫模型）</button><button class="primary" type="submit">儲存為新版本</button></div>
+    <span id="scoring-profile-status" role="status" aria-live="polite"></span>
   </form>
-  {% else %}
-  <pre>{{ current_profile.rules }}</pre>
-  {% endif %}
+  {% else %}<pre class="prompt-text">{{ prompt_preview.rules }}</pre><p>目前帳號可查看；只有管理員可以修改。</p>{% endif %}
+  <p class="notice">儲存後用於之後建立的分析工作；已建立的工作沿用建立時的提示詞快照，既有照片不會自動重新評分。下方單張測試使用已儲存的規則。</p>
+</section>
+{% include "_scoring_prompt_preview.html" %}
+<section class="panel" id="ranking-formula">
+  <div class="panel-head"><div><p class="eyebrow">伺服器計算 · 已鎖定</p><h2>分數怎麼算</h2><p>模型提供語意分數，程式負責合成、加分與排除。修改評分參考不會修改這些公式。</p></div></div>
+  <div class="prompt-formula-grid">
+    <article><strong>回憶 {{ prompt_preview.weights.memory|int }}%</strong><p>AI 回傳 memory_score，依上方評分參考判斷一般回看價值。</p></article>
+    <article><strong>視覺 {{ prompt_preview.weights.visual|int }}%</strong><p>AI 回傳 visual_score，判斷構圖、光線與畫面吸引力。</p></article>
+    <article><strong>本機品質：通過或排除</strong><p>先完成清晰度、曝光、解析度等技術品質檢查；通過後不加入排序。</p></article>
+  </div>
+  <p class="prompt-equation">AI 選片分 = 回憶 × 0.67 ＋ 視覺 × 0.33 ＋ 特殊加分，限制在 0～100。</p>
+  <p>有效特殊等級 = AI special_level ＋ 最愛（0 或 1），最高 4 級。等級 0／1／2／3／4 分別加 {{ prompt_preview.special_bonuses|join('／') }} 分。不再依照片庫稀有度加級，也不再轉換百分位；同一份模型結果不會因照片庫大小改變分數。</p>
+  <p><strong>例：</strong>回憶 80、視覺 60 → 基礎 {{ prompt_preview.example.base_ranking_score }} 分；特殊等級 2 加 {{ prompt_preview.example.special_bonus }} → AI 選片分 {{ prompt_preview.example.raw_ranking_score }} 分（未加最愛）。</p>
+  <p>自動顯示只接受本機與 AI 都已完成的照片；不足時只使用已完成候選，沒有候選則保留既有畫面，不用尚未完成 AI 的照片補位。內容排除依分類與信心門檻處理，高分與最愛不能繞過 AI 內容排除，人工恢復可覆寫。</p>
+  <p>E6 顯示適合度保留供參考，不混入 AI 排序，也不單憑 E6 分數排除。歷年同日模式先限定日期範圍，範圍內按 AI 分數排序；多樣性只在 AI 同分時作選擇，不加入日期或播放次數加減分。</p>
 </section>
 
 <section class="panel scoring-lab">
@@ -70,40 +80,31 @@
 </section>
 {% endblock %}
 
-{% block scripts %}{% if g.user.role == 'administrator' %}
+{% block scripts %}
+<script id="prompt-preview-data" type="application/json" nonce="{{ csp_nonce }}">{{ prompt_preview|tojson }}</script>
+<script src="{{ url_for('static', filename='scoring-prompt.js') }}" defer></script>
+{% if g.user.role == 'administrator' %}
 <script nonce="{{ csp_nonce }}">
 (() => {
   const profileForm = document.getElementById('scoring-profile-form');
-  const weightNames = ['memory_weight', 'visual_weight', 'local_weight'];
-  const total = document.getElementById('weight-total');
-  const updateWeights = () => {
-    let sum = 0;
-    profileForm.querySelectorAll('input[type="range"]').forEach(input => {
-      const output = profileForm.querySelector(`[data-output="${input.name}"]`);
-      output.textContent = input.name === 'favorite_bonus' ? `+${input.value}` : `${input.value}%`;
-      if (weightNames.includes(input.name)) sum += Number(input.value);
-    });
-    total.textContent = `${sum}%`;
-    total.classList.toggle('invalid', sum !== 100);
-    return sum;
-  };
-  profileForm.querySelectorAll('input[type="range"]').forEach(input => input.addEventListener('input', updateWeights));
-  updateWeights();
-
   profileForm.addEventListener('submit', async event => {
     event.preventDefault();
     const profileStatus = document.getElementById('scoring-profile-status');
-    if (updateWeights() !== 100) return window.inktimeSetStatus(profileStatus, '三項權重合計必須等於 100%', 'error');
-    const body = window.inktimeFormJson(profileForm, {
-      memory_weight: 'integer', visual_weight: 'integer', local_weight: 'integer',
-      favorite_bonus: 'integer'
-    });
-    const response = await window.inktimeFetch('/api/v1/scoring/profiles', {
-      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)
-    });
-    const data = await window.inktimeDecodeJson(response);
-    if (!response.ok) return window.inktimeSetStatus(profileStatus, data.message || '儲存失敗', 'error');
-    location.reload();
+    const button = profileForm.querySelector('button[type="submit"]');
+    button.disabled = true;
+    try {
+      const response = await window.inktimeFetch('/api/v1/scoring/profiles', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({name: profileForm.elements.name.value, rules: profileForm.elements.rules.value})
+      });
+      const data = await window.inktimeDecodeJson(response);
+      if (!response.ok) throw new Error(data.message || '儲存失敗');
+      location.reload();
+    } catch (error) {
+      window.inktimeSetStatus(profileStatus, error?.message || '儲存失敗', 'error');
+    } finally {
+      button.disabled = false;
+    }
   });
 
   document.querySelectorAll('.restore-profile').forEach(button => button.addEventListener('click', async () => {
@@ -146,7 +147,7 @@
         return node;
       };
       const cards = element('div', '', 'score-cards');
-      [['鑑別分', data.distinguishing_score], ['原始綜合', data.ranking_score], ['回憶', analysis.memory_score], ['視覺', analysis.visual_score], ['本機品質', analysis.local_quality_score]].forEach(([label, value]) => {
+      [['AI 選片分', data.ranking_score], ['AI 回憶（67%）', analysis.memory_score], ['AI 視覺（33%）', analysis.visual_score], ['本機品質（僅門檻）', analysis.local_quality_score]].forEach(([label, value]) => {
         const card = document.createElement('article');
         card.append(element('span', label), element('strong', String(value)));
         cards.append(card);
@@ -193,9 +194,10 @@
   });
 
   document.getElementById('distinctive-preset').addEventListener('click', async () => {
-    if (!await window.inktimeConfirm('會將編輯器內容換成高鑑別度範本；尚未儲存的文字會被取代，確定？', {title: '套用高鑑別度範本'})) return;
+    if (!await window.inktimeConfirm('會將編輯器內容換成預設評分參考；尚未儲存的文字會被取代，確定？', {title: '套用預設評分參考'})) return;
     profileForm.elements.rules.value = {{ recommended_rules|tojson }};
-    profileForm.elements.name.value = '高鑑別度評分規則';
+    profileForm.elements.name.value = '預設評分參考';
+    profileForm.elements.rules.dispatchEvent(new Event('input'));
     profileForm.elements.rules.focus();
   });
 })();

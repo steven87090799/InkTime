@@ -318,6 +318,7 @@ class BatchAnalysisService:
               AND COALESCE(p.never_upload,0)=0
               AND COALESCE(p.exclusion_status,'')!='manually_excluded'
               AND COALESCE(p.sha256,'')!=''
+              AND p.local_features_status='complete'
               AND NOT EXISTS (
                   SELECT 1 FROM photo_analysis a
                   WHERE a.photo_id=p.id AND a.analysis_fingerprint=? AND COALESCE(a.schema_kind,'basic')='full'
@@ -368,9 +369,20 @@ class BatchAnalysisService:
             )
         safe_rows: list[dict[str, Any]] = []
         confirmed_screenshot_excluded = 0
+        prefilter = dict(plan.get("prefilter") or {})
+        policy_settings = {
+            "analysis.prefilter_enabled": bool(prefilter.get("enabled", True)),
+            "analysis.prefilter_screenshots": bool(prefilter.get("screenshots_enabled", True)),
+            "analysis.prefilter_low_quality": bool(prefilter.get("low_quality_enabled", True)),
+            "analysis.prefilter_sensitivity": str(prefilter.get("sensitivity", "conservative")),
+            "analysis.e6_prefilter_enabled": bool(prefilter.get("e6_enabled", True)),
+            "analysis.e6_min_score": float(prefilter.get("e6_min_score", 25)),
+        }
         for row in rows:
             if is_confirmed_screenshot(row):
                 confirmed_screenshot_excluded += 1
+                continue
+            if self.analysis.prefilter_snapshot(row, policy_settings=policy_settings)["excluded"]:
                 continue
             try:
                 source = safe_join(Path(str(row["root_path"])), str(row["relative_path"]))
