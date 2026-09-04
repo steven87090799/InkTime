@@ -318,6 +318,32 @@ def test_retry_failed_control_restarts_the_job_in_one_action(client, app):
     assert repository.list_items(job_id)[0]["status"] == "pending"
 
 
+def test_retry_failed_control_reports_analysis_reservation_conflict(client, app):
+    administrator_id = create_admin(app)
+    login(client)
+    repository = app.extensions["inktime_job_repository"]
+    photo_ids = add_photos(app, 1)
+    job_id = repository.create(
+        name="failed analysis", strategy="single", settings={},
+        created_by=administrator_id, photo_ids=photo_ids,
+    )
+    with app.extensions["inktime_database"].session() as connection:
+        connection.execute("UPDATE jobs SET status='completed_with_errors',failed_items=1 WHERE id=?", (job_id,))
+        connection.execute("UPDATE job_items SET status='failed' WHERE job_id=?", (job_id,))
+    owner = repository.create(
+        kind="analysis_batch", name="Batch owner", strategy="single", settings={},
+        created_by=administrator_id, photo_ids=photo_ids,
+    )
+    response = client.post(
+        f"/api/v1/jobs/{job_id}/retry-failed", headers={"X-CSRF-Token": csrf(client)},
+    )
+    assert response.status_code == 409
+    assert response.json["error_code"] == "ANALYSIS-RESERVATION-CONFLICT"
+    assert repository.get(job_id)["status"] == "completed_with_errors"
+    assert repository.list_items(job_id)[0]["status"] == "failed"
+    assert repository.get(owner)["status"] == "pending"
+
+
 def test_simulator_superseded_compare_aborts_fetch_and_poll_delay(client, app):
     create_admin(app)
     login(client)

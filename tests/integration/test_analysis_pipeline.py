@@ -1214,11 +1214,12 @@ def test_worker_context_inherits_only_the_same_frozen_plan_and_keeps_source_trac
             (ids[0],),
         ).fetchone()
         copied = connection.execute(
-            "SELECT stage,analysis_fingerprint,vision_request_fingerprint,vision_input_spec_json,semantic_json "
+            "SELECT stage,schema_kind,analysis_fingerprint,vision_request_fingerprint,vision_input_spec_json,semantic_json "
             "FROM photo_analysis WHERE photo_id=?",
             (ids[1],),
         ).fetchone()
     assert copied["stage"] == "inherited"
+    assert copied["schema_kind"] == "full"
     identity_plan = dict(plan)
     identity_plan.pop("caption_display_controls", None)
     identity_plan.pop("repair_policy", None)

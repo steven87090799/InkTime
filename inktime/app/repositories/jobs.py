@@ -80,7 +80,7 @@ class JobRepository:
                     SUM(CASE WHEN NOT EXISTS (SELECT 1 FROM photo_analysis a WHERE a.photo_id=p.id) THEN 1 ELSE 0 END) AS never_analyzed,
                     SUM(CASE WHEN {current} THEN 1 ELSE 0 END) AS already_current,
                     SUM(CASE WHEN {queued} THEN 1 ELSE 0 END) AS already_queued,
-                    SUM(CASE WHEN p.eligible=1 AND COALESCE(p.screenshot_likelihood,0)<0.95 AND {predicate} AND NOT ({queued}) THEN 1 ELSE 0 END) AS pending_total,
+                    SUM(CASE WHEN p.eligible=1 AND p.local_features_status='complete' AND COALESCE(p.screenshot_likelihood,0)<0.95 AND {predicate} AND NOT ({queued}) THEN 1 ELSE 0 END) AS pending_total,
                     SUM(CASE WHEN COALESCE(p.screenshot_likelihood,0)>=0.95 THEN 1 ELSE 0 END) AS screenshot_excluded,
                     SUM(CASE WHEN NOT ({current}) AND EXISTS (
                         SELECT 1 FROM job_items ji JOIN jobs j ON j.id=ji.job_id
@@ -144,7 +144,7 @@ class JobRepository:
                 params.append(size)
                 rows = connection.execute(
                     f"SELECT p.id,COALESCE(p.local_candidate_score,-1) AS candidate_score FROM photos p "
-                    f"WHERE p.lifecycle_status='active' AND p.eligible=1 AND COALESCE(p.screenshot_likelihood,0)<0.95 AND "
+                    f"WHERE p.lifecycle_status='active' AND p.eligible=1 AND p.local_features_status='complete' AND COALESCE(p.screenshot_likelihood,0)<0.95 AND "
                     f"(COALESCE(p.local_candidate_score,-1) < ? OR (COALESCE(p.local_candidate_score,-1)=? AND p.id>?)) "
                     f"AND {predicate} AND NOT ({queued}) ORDER BY candidate_score DESC,p.id ASC LIMIT ?",
                     params,
@@ -1495,7 +1495,7 @@ class JobRepository:
         with self.database.session() as connection:
             connection.execute("BEGIN IMMEDIATE")
             try:
-                job = connection.execute("SELECT status FROM jobs WHERE id=?", (job_id,)).fetchone()
+                job = connection.execute("SELECT status,kind FROM jobs WHERE id=?", (job_id,)).fetchone()
                 if job is None:
                     connection.execute("COMMIT")
                     return 0
@@ -1504,6 +1504,21 @@ class JobRepository:
                     # must never be revived by a retry endpoint.
                     connection.execute("COMMIT")
                     return 0
+                # Failed items release their reservation. Another job may have
+                # claimed them since then, so retry must reacquire ownership
+                # under the same writer lock used by new submissions.
+                if job["kind"] in {"analysis", "analysis_batch"}:
+                    conflict = connection.execute(
+                        f"""SELECT 1 FROM photos p
+                            JOIN job_items retry_item ON retry_item.photo_id=p.id
+                            WHERE retry_item.job_id=? AND retry_item.status='failed'
+                              AND {reserved_analysis_sql()} LIMIT 1""",  # noqa: S608 -- fixed predicate and bound job ID.
+                        (job_id,),
+                    ).fetchone()
+                    if conflict is not None:
+                        raise AnalysisReservationConflict(
+                            "照片已有尚未結束的即時或 Batch 分析，請等待完成後再重試"
+                        )
                 cursor = connection.execute(
                     """
                     UPDATE job_items SET status='pending', available_at=?, error_code=NULL, completed_at=NULL,

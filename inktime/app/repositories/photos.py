@@ -1156,6 +1156,7 @@ class PhotoRepository:
             "inherited",
             ranking_score=row["ranking_score"],
             scoring_version_id=(analysis_context or {}).get("scoring_version_id") or row["scoring_version_id"],
+            schema_kind=row["schema_kind"],
             score_kind=source_kind,
             local_score=result.get("local_score"),
             semantic_score=row["semantic_score"] if semantic_available else None,

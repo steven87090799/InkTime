@@ -2203,6 +2203,32 @@ def test_batch_candidates_exclude_realtime_owner_before_remote_upload(app, tmp_p
     assert fake.custom_ids == [] and fake.batch_counter == 0
 
 
+def test_inherited_full_analysis_is_not_submitted_to_batch_again(app, tmp_path):
+    source_id, target_id = _prepare_photos(app, tmp_path, count=2)
+    fake = FakeBatchProvider()
+    service = _wire_fake(app, fake)
+    plan, analysis_fp, model = service._plan()
+    source = service.photos.get_with_path(source_id)
+    target = service.photos.get_with_path(target_id)
+    # Make the second fixture an actual byte-identical photo before inheriting.
+    (Path(target["root_path"]) / target["relative_path"]).write_bytes(
+        (Path(source["root_path"]) / source["relative_path"]).read_bytes()
+    )
+    with service.database.session() as connection:
+        connection.execute("UPDATE photos SET sha256=? WHERE id=?", (source["sha256"], target_id))
+    result = valid_result()
+    service.photos.save_analysis(
+        source_id, None, "single", "fake-batch", model, result, json.dumps(result),
+        schema_kind="full", score_kind="semantic", analysis_fingerprint=analysis_fp,
+        analysis_spec_json=json.dumps(plan),
+    )
+    assert service.photos.inherit_existing_analysis(
+        target_id, None, analysis_context={"analysis_fingerprint": analysis_fp},
+    ) is not None
+    assert service.estimate(scope="all_eligible_missing_analysis")["candidate_count"] == 0
+    assert fake.custom_ids == [] and fake.batch_counter == 0
+
+
 @pytest.mark.parametrize("status", ["upload_unknown", "submission_unknown", "cancelling", "import_pending"])
 def test_remote_batch_keeps_reservation_after_parent_job_cancel(app, tmp_path, status):
     from inktime.app.repositories.analysis_reservations import AnalysisReservationConflict
