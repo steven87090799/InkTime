@@ -18,7 +18,9 @@ from pathlib import Path
 import re
 import resource
 import sqlite3
+import threading
 import time
+from contextlib import contextmanager
 from typing import Any, Callable, Iterable, Literal, Mapping
 from uuid import uuid4
 
@@ -62,6 +64,12 @@ class BatchLifecycleError(RuntimeError):
     def __init__(self, message: str, code: str = "BATCH-001") -> None:
         super().__init__(message)
         self.code = code
+
+
+class _CleanupLockEntry:
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.users = 0
 
 
 def _peak_rss_bytes() -> int:
@@ -201,6 +209,25 @@ class BatchAnalysisService:
         os.chmod(self.batch_root, 0o700)
         self.observability = observability
         self.scoring_repository = scoring_repository
+        self._cleanup_locks: dict[str, _CleanupLockEntry] = {}
+        self._cleanup_locks_guard = threading.Lock()
+
+    @contextmanager
+    def _cleanup_lock(self, batch_id: str):
+        with self._cleanup_locks_guard:
+            entry = self._cleanup_locks.get(batch_id)
+            if entry is None:
+                entry = _CleanupLockEntry()
+                self._cleanup_locks[batch_id] = entry
+            entry.users += 1
+        try:
+            with entry.lock:
+                yield
+        finally:
+            with self._cleanup_locks_guard:
+                entry.users -= 1
+                if entry.users == 0 and self._cleanup_locks.get(batch_id) is entry:
+                    del self._cleanup_locks[batch_id]
 
     def _activity(self, severity: str, event: str, message: str, **fields: Any) -> None:
         safe_fields = {
@@ -2367,6 +2394,10 @@ class BatchAnalysisService:
                     pass
 
     def _cleanup_remote(self, batch: dict[str, Any], plan: dict[str, Any]) -> bool:
+        with self._cleanup_lock(str(batch["id"])):
+            return self._cleanup_remote_locked(batch, plan)
+
+    def _cleanup_remote_locked(self, batch: dict[str, Any], plan: dict[str, Any]) -> bool:
         batch = dict(batch)
 
         files = (
