@@ -25,3 +25,12 @@ CVE-2026-57432
 CVE-2026-57433
 CVE-2026-8376
 CVE-2026-9538
+# util-linux CVEs disclosed 2026-09-02 through 2026-09-04. Debian trixie and
+# forky do not publish a fixed package yet (FixedVersion is absent in Trivy).
+# The runtime is a non-root user with no fstab-authorized X-mount path, does not
+# invoke mount/nsenter helpers, and does not retain the privileges these issues
+# require. Recheck the pinned base and remove these entries before 2026-09-30.
+CVE-2026-76642
+CVE-2026-78408
+CVE-2026-78409
+CVE-2026-78410
