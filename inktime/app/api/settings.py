@@ -35,6 +35,7 @@ from inktime.app.repositories.settings import (
     SETTING_DEFINITIONS,
 )
 from inktime.app.web.ai_readiness import ai_readiness_snapshot
+from inktime.app.services.usage_periods import usage_periods
 from inktime.app.web.access import administrator_required, login_required
 from inktime.app.web.control_glossary import action_entries, setting_entries
 from inktime.app.domain.rendering.system_presets import SYSTEM_PRESETS
@@ -793,20 +794,23 @@ def save_provider_pricing(provider_id: str):
 @bp.get("/costs")
 @login_required
 def costs_page():
+    periods = usage_periods(
+        str(current_app.extensions["inktime_settings_repository"].get("general.timezone", "Asia/Taipei"))
+    )
     database = current_app.extensions["inktime_database"]
     with database.session() as connection:
         summary = connection.execute(
             """
-            SELECT COALESCE(SUM(CASE WHEN cost_source<>'unknown' AND date(started_at)=date('now') THEN COALESCE(actual_cost,estimated_cost) ELSE 0 END),0) today,
-                   COALESCE(SUM(CASE WHEN cost_source<>'unknown' AND started_at>=datetime('now','-7 day') THEN COALESCE(actual_cost,estimated_cost) ELSE 0 END),0) week,
-                   COALESCE(SUM(CASE WHEN cost_source<>'unknown' AND strftime('%Y-%m',started_at)=strftime('%Y-%m','now') THEN COALESCE(actual_cost,estimated_cost) ELSE 0 END),0) month,
+            SELECT COALESCE(SUM(CASE WHEN cost_source<>'unknown' AND started_at >= :day_start AND started_at < :day_end THEN COALESCE(actual_cost,estimated_cost) ELSE 0 END),0) today,
+                   COALESCE(SUM(CASE WHEN cost_source<>'unknown' AND started_at >= :week_start AND started_at <= :now THEN COALESCE(actual_cost,estimated_cost) ELSE 0 END),0) week,
+                   COALESCE(SUM(CASE WHEN cost_source<>'unknown' AND started_at >= :month_start AND started_at < :month_end THEN COALESCE(actual_cost,estimated_cost) ELSE 0 END),0) month,
                    COALESCE(SUM(CASE WHEN cost_source='unknown' AND (
                        COALESCE(input_tokens,0)>0 OR COALESCE(output_tokens,0)>0 OR COALESCE(cached_tokens,0)>0
                        OR COALESCE(reasoning_tokens,0)>0 OR COALESCE(cache_write_tokens,0)>0
                        OR COALESCE(request_body_bytes,0)>0 OR COALESCE(image_bytes,0)>0
                        OR COALESCE(actual_cost,0)>0 OR COALESCE(estimated_cost,0)>0
                    ) THEN 1 ELSE 0 END),0) unknown_count,
-                   COALESCE(SUM(CASE WHEN cost_source='unknown' AND date(started_at)=date('now') AND (
+                   COALESCE(SUM(CASE WHEN cost_source='unknown' AND started_at >= :day_start AND started_at < :day_end AND (
                        COALESCE(input_tokens,0)>0 OR COALESCE(output_tokens,0)>0 OR COALESCE(cached_tokens,0)>0
                        OR COALESCE(reasoning_tokens,0)>0 OR COALESCE(cache_write_tokens,0)>0
                        OR COALESCE(request_body_bytes,0)>0 OR COALESCE(image_bytes,0)>0
@@ -814,7 +818,8 @@ def costs_page():
                    ) THEN 1 ELSE 0 END),0) today_unknown_count,
                    COALESCE(SUM(input_tokens),0) input_tokens,COALESCE(SUM(output_tokens),0) output_tokens
             FROM api_usage
-            """
+            """,
+            periods,
         ).fetchone()
         by_model = connection.execute(
             """SELECT provider,model,SUM(input_tokens) input_tokens,SUM(output_tokens) output_tokens,

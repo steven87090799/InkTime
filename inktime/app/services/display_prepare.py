@@ -18,7 +18,6 @@ from inktime.app.domain.photopainter.offline_schedule import (
     resolve_offline_schedule_max_slots,
     validate_offline_schedule,
 )
-from inktime.app.domain.analysis.scoring import LOCAL_QUALITY_SCORE_KIND
 from inktime.app.domain.rendering import current_local_date
 from inktime.app.domain.rendering.system_presets import DEFAULT_RENDER_PROFILE
 
@@ -309,8 +308,6 @@ class DisplayPreparationService:
                 publish_kwargs["device_ids"] = list(config.device_ids)
             else:
                 publish_kwargs["profile_keys"] = self._profiles(config)
-            if any(str(row.get("score_kind") or "") == LOCAL_QUALITY_SCORE_KIND for row in candidates):
-                publish_kwargs["allow_local_fallback"] = True
             result = self.render_service.publish(photo_ids, created_by, **publish_kwargs)
         except Exception as exc:
             if config.render_fallback == "keep_current":
@@ -458,9 +455,6 @@ class DisplayPreparationService:
                     device_configs={device_id: dict(device)},
                     activate_pointers=False,
                     assign_device_releases=False,
-                    allow_local_fallback=(
-                        str(candidate.get("score_kind") or "") == LOCAL_QUALITY_SCORE_KIND
-                    ),
                 )
                 release_ids.append(self._offline_release_id(result, device_id))
 

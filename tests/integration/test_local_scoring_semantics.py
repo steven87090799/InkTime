@@ -4,7 +4,10 @@ import json
 from datetime import date
 from pathlib import Path
 
+import pytest
 from PIL import Image
+
+from inktime.app.repositories.render_candidates import IneligiblePhotoError
 
 from inktime.app.domain.analysis.scoring import LOCAL_QUALITY_SCORE_KIND, SEMANTIC_SCORE_KIND
 from inktime.app.domain.photos import PhotoPreprocessor
@@ -336,8 +339,7 @@ def test_local_detail_does_not_render_compatibility_values_as_ai_scores(client, 
     assert "本機影像分析" in body
     assert "本機候選品質分" in body
     assert "AI 語意評分</dt><dd>尚未進行" in body
-    assert "照片庫鑑別分</dt><dd>尚未產生" in body
-    assert "原始綜合排序</dt><dd>尚未產生" in body
+    assert "AI 選片分</dt><dd>尚未產生" in body
     assert "語意四項分數" not in body
     assert "回憶 50｜美觀 50｜技術 50｜情緒 50" not in body
     assert "此結果僅為本機影像品質分析，不等同 AI" in body
@@ -347,7 +349,7 @@ def test_local_detail_does_not_render_compatibility_values_as_ai_scores(client, 
     assert listing.status_code == 200
     assert "本機候選品質" in listing_body
     assert "AI 語意評分：尚未分析" in listing_body
-    assert "照片庫鑑別分：尚未產生" in listing_body
+    assert "AI 選片分：尚未產生" in listing_body
     assert "AI 原始綜合" not in listing_body
     assert "語意四項分數" not in listing_body
 
@@ -391,7 +393,7 @@ def test_local_only_and_ai_disabled_use_local_selection_without_semantic_rank(ap
     assert row["local_score"] is not None
 
 
-def test_automatic_ai_selects_semantic_then_local_fallback_by_tier(app, tmp_path):
+def test_automatic_ai_never_fills_shortage_with_local_only_photos(app, tmp_path):
     settings = app.extensions["inktime_settings_repository"]
     settings.update("analysis.execution_mode", "automatic_ai", changed_by="test", source_ip="test")
     settings.update("render.selection_mode", "top_ranked", changed_by="test", source_ip="test")
@@ -407,12 +409,11 @@ def test_automatic_ai_selects_semantic_then_local_fallback_by_tier(app, tmp_path
 
     selected = app.extensions["inktime_render_service"].select_candidates_details(5)
 
-    assert len(selected) == 5
-    assert [row["score_kind"] for row in selected[:3]] == [SEMANTIC_SCORE_KIND] * 3
-    assert [row["score_kind"] for row in selected[3:]] == [LOCAL_QUALITY_SCORE_KIND] * 2
+    assert len(selected) == 3
+    assert [row["score_kind"] for row in selected] == [SEMANTIC_SCORE_KIND] * 3
 
 
-def test_history_today_uses_local_fallback_to_fill_semantic_shortage(app, tmp_path):
+def test_history_today_waits_for_model_results_instead_of_local_fallback(app, tmp_path):
     settings = app.extensions["inktime_settings_repository"]
     settings.update("analysis.execution_mode", "automatic_ai", changed_by="test", source_ip="test")
     root = tmp_path / "history-tiered-selection"
@@ -429,14 +430,9 @@ def test_history_today_uses_local_fallback_to_fill_semantic_shortage(app, tmp_pa
         4, target_date=date(2026, 7, 20)
     )
 
-    assert len(selected) == 4
-    assert [row["score_kind"] for row in selected] == [
-        SEMANTIC_SCORE_KIND,
-        LOCAL_QUALITY_SCORE_KIND,
-        LOCAL_QUALITY_SCORE_KIND,
-        LOCAL_QUALITY_SCORE_KIND,
-    ]
-    assert [row["match_type"] for row in selected] == ["exact_day"] * 4
+    assert len(selected) == 1
+    assert selected[0]["score_kind"] == SEMANTIC_SCORE_KIND
+    assert selected[0]["match_type"] == "exact_day"
 
 
 def test_automatic_ai_never_compares_local_score_with_semantic_score(app, tmp_path):
@@ -456,7 +452,7 @@ def test_automatic_ai_never_compares_local_score_with_semantic_score(app, tmp_pa
     assert selected[0]["score_kind"] == SEMANTIC_SCORE_KIND
 
 
-def test_semantic_detail_retains_v4_ranking_percentile_and_components(client, app, tmp_path):
+def test_semantic_detail_explains_model_rank_and_local_gate(client, app, tmp_path):
     root = tmp_path / "semantic-detail"
     _insert_photo(app, root, "semantic-detail")
     _save_semantic(app, "semantic-detail", 78)
@@ -471,13 +467,14 @@ def test_semantic_detail_retains_v4_ranking_percentile_and_components(client, ap
     body = response.get_data(as_text=True)
     assert response.status_code == 200
     assert "模型判斷" in body
-    assert "照片庫鑑別分" in body
-    assert "原始綜合排序</dt><dd>78.0" in body or "原始綜合排序</dt><dd>78" in body
+    assert "AI 選片分" in body
+    assert "暫用原始分" not in body
     assert "排序組成" in body
     assert "回憶 78" in body
     assert "視覺 78" in body
-    assert "本機品質 78" in body
-    assert "已完成 AI 語意評分照片" in body
+    assert "本機品質參考分 78" in body
+    assert "內容過濾檢查" in body
+    assert "成人裸露：未標記" in body
 
 
 def _save_model_history(app, photo_id: str, *, stage: str = "single") -> int:
@@ -567,3 +564,59 @@ def test_current_model_precedes_history_and_model_counts_do_not_include_local(
     login(client)
     dashboard = client.get("/dashboard").get_data(as_text=True)
     assert "現行 v4 1／歷史 0" in dashboard
+
+
+@pytest.mark.parametrize("status", ["pending", "failed", "complete"])
+def test_automatic_ai_requires_both_results_at_selection_and_release(app, tmp_path, status):
+    settings = app.extensions["inktime_settings_repository"]
+    settings.update("analysis.execution_mode", "automatic_ai", changed_by="test", source_ip="test")
+    settings.update("render.selection_mode", "top_ranked", changed_by="test", source_ip="test")
+    _insert_photo(app, tmp_path / "both-results", "both-results")
+    _save_semantic(app, "both-results", 58)
+    with app.extensions["inktime_database"].session() as connection:
+        connection.execute("UPDATE photos SET local_features_status=? WHERE id='both-results'", (status,))
+    selected = app.extensions["inktime_render_service"].select_candidates_details(1)
+    candidates = app.extensions["inktime_render_candidate_repository"]
+    if status == "complete":
+        assert [row["id"] for row in selected] == ["both-results"]
+        assert selected[0]["combined_score"] == 58
+        assert candidates.require_for_execution_mode(["both-results"], "automatic_ai")
+    else:
+        assert selected == []
+        with pytest.raises(IneligiblePhotoError, match="PHOTO-ELIGIBILITY-007"):
+            candidates.require_for_execution_mode(["both-results"], "automatic_ai")
+
+
+def test_ai_rank_has_no_memory_floor_or_date_or_local_quality_bonus(app, tmp_path):
+    settings = app.extensions["inktime_settings_repository"]
+    settings.update("analysis.execution_mode", "automatic_ai", changed_by="test", source_ip="test")
+    settings.update("render.selection_mode", "top_ranked", changed_by="test", source_ip="test")
+    root = tmp_path / "transparent-rank"
+    _insert_photo(app, root, "ai-best", local_score=45)
+    _insert_photo(app, root, "date-match", local_score=100)
+    _save_semantic(app, "date-match", 72)
+    _set_capture_date(app, "date-match", "2020-07-20T10:00:00")
+    result = valid_result(memory_score=55, visual_score=95, special_level=2)
+    app.extensions["inktime_photo_repository"].save_analysis(
+        "ai-best", None, "single", "test-ai", "test", result, json.dumps(result)
+    )
+    selected = app.extensions["inktime_render_service"].select_candidates_details(
+        2, target_date=date(2026, 7, 20)
+    )
+    assert [row["id"] for row in selected] == ["ai-best", "date-match"]
+    assert [row["combined_score"] for row in selected] == [73.2, 72]
+    assert all(row["combined_score"] == row["ranking_score"] for row in selected)
+
+
+def test_bounded_ai_queue_advances_past_completed_photos(app, tmp_path):
+    root = tmp_path / "queue-progress"
+    _insert_photo(app, root, "a-completed", local_score=100)
+    _insert_photo(app, root, "b-pending", local_score=45)
+    _insert_photo(app, root, "c-unscanned", local_score=100)
+    _save_semantic(app, "a-completed", 90)
+    with app.extensions["inktime_database"].session() as connection:
+        connection.execute("UPDATE photos SET local_features_status='pending' WHERE id='c-unscanned'")
+    photos = app.extensions["inktime_photo_repository"]
+    assert photos.eligible_photo_ids(limit=1) == ["b-pending"]
+    assert photos.is_top_candidate("b-pending", 1)
+    assert "c-unscanned" not in photos.eligible_photo_ids()

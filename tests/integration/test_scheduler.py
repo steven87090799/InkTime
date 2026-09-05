@@ -1577,3 +1577,16 @@ def test_offline_prefetch_deadline_query_orders_due_devices_and_reports_bounded_
     )
     assert [str(device["id"]) for device in batch] == sorted(device_ids[:10])
     assert has_more is False
+
+
+def test_scheduler_enqueues_poll_without_running_remote_work(app, monkeypatch):
+    service = app.extensions["inktime_batch_analysis_service"]
+    enqueue = Mock()
+    remote = Mock(side_effect=AssertionError("Scheduler must not run remote polling"))
+    monkeypatch.setattr(service, "enqueue_poll", enqueue)
+    monkeypatch.setattr(service, "poll_due", remote)
+    runner = SchedulerRunner(app)
+    runner.last_batch_poll_at = -10000
+    runner.tick()
+    enqueue.assert_called_once_with()
+    remote.assert_not_called()

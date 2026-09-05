@@ -282,3 +282,35 @@ def test_provider_refuses_raw_heif_before_reading_bytes(tmp_path):
             )
     finally:
         provider.close()
+
+
+@pytest.mark.parametrize("cached_size", [None, 512, 1600])
+def test_missing_original_keeps_history_and_serves_retained_preview(app, client, tmp_path, cached_size):
+    root = tmp_path / "library"
+    root.mkdir()
+    source = root / "retained.jpg"
+    make_image(source)
+    scan(app, root, build_thumbnails=False)
+    photo = photo_rows(app)[0]
+    cache = app.extensions["inktime_thumbnail_cache"]
+    expected = None
+    if cached_size:
+        expected = cache.get_or_create(source, photo["sha256"], cached_size).read_bytes()
+    source.unlink()
+    with app.extensions["inktime_database"].session() as connection:
+        connection.execute("UPDATE photos SET lifecycle_status='missing' WHERE id=?", (photo["id"],))
+    create_admin(app)
+    login(client)
+    response = client.get(f"/api/v1/photos/{photo['id']}/preview")
+    if expected:
+        assert response.status_code == 200 and response.data == expected
+        assert response.headers["X-InkTime-Photo-Source"] == "retained-preview"
+    else:
+        assert response.status_code == 404
+        assert response.json["error_code"] == "IMG-MISSING"
+    detail = client.get(f"/photos/{photo['id']}")
+    assert detail.status_code == 200
+    assert "來源原檔無法使用" in detail.text
+    assert "符合候選資格" not in detail.text
+    assert ("目前只剩保留縮圖" if expected else "也沒有可用的保留縮圖") in detail.text
+    assert len(photo_rows(app)) == 1

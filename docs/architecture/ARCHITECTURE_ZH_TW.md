@@ -96,7 +96,7 @@ flowchart LR
 | `visual_score` | 構圖、光線與整體視覺吸引力 | 視覺模型依固定 Prompt 判斷 |
 | `local_quality_score` | 清晰、曝光、解析度與截圖特徵 | Server 本機規則計算 |
 
-`memory_score` 不是加權總分；它是模型直接輸出的回憶分。只有 `score_kind=semantic` 的分析才保存 v4 語意分數與 `ranking_score`。固定公式為回憶 50%、視覺 25%、本機品質 25%，再依 `special_level`、同照片庫稀有度與最愛提升套用固定 bonus。`score_kind=local_quality` 只表示本機影像品質候選分，正式 semantic ranking 欄位為 `NULL`，不參與照片庫 percentile；`automatic_ai` 只在 semantic 候選不足時以獨立層級補入 local quality。`legacy` 表示來源無法可靠判定，舊 schema 不會正規化成 v4。`analysis.stage_two_threshold` 僅是舊設定讀取相容欄位，`render.memory_threshold` 才是電子紙候選的最低回憶分門檻。
+`memory_score` 是模型直接輸出的回看價值。只有有效 Schema v4 的 `score_kind=semantic` 結果保存 AI 排名：回憶 67%、視覺 33%，再依特殊程度與最愛提升套用固定 bonus。`automatic_ai` 須本機特徵與模型分析都完成，且照片合格；本機品質只過濾，不加分、不補位。不使用 percentile、照片庫稀有度、E6 加權或最低回憶分。歷史日期模式先限定日期範圍，再依 AI 分數排序。`local_quality` 僅保留品質證據與本機模式候選分；`legacy` 保留歷史，不轉換為 v4。
 
 ### 不改程式碼可以調整的項目
 
@@ -108,13 +108,13 @@ flowchart LR
 | `model.low_model`／`model.high_model` | 舊版模型設定 | 僅讀取相容，不恢復第二次圖片請求 |
 | 「評分」控制中心 | v4 規則、固定排名公式、版本歷史與單張測試 | 內建 Schema v4 規則 |
 | `analysis.stage_two_threshold` | 舊版兩階段設定的讀取相容欄位 | 65 |
-| `render.memory_threshold` | 電子紙候選照片最低回憶分 | 70 |
+| `render.memory_threshold` | 舊設定相容欄位，自動 AI 選片已不使用 | 70 |
 
 建立工作時可在「工作」頁選擇 `local` 或 `single`。`low_cost`、`smart`、`smart_two_stage`、`high_quality` 與 `single_high` 是舊輸入的讀取相容別名，會正規化為 `single`，不會再次啟用兩階段圖片請求。Provider、Base URL、API Key、價格與 Provider 專屬 `model` 在「模型」頁管理；全域 `model.analysis_model` 在「設定」頁。一般 AI 工作另要求 `analysis.execution_mode=automatic_ai`，新安裝預設 `local_only`。
 
 ### 要改評分規則時看哪裡
 
-- 可編輯 v4 Prompt 評分細則：管理介面「評分」頁；儲存時建立不可覆寫的歷史版本。排名的 50／25／25 公式與特殊程度 bonus 固定。
+- 可編輯 v4 Prompt 評分細則：管理介面「評分」頁；儲存時建立不可覆寫的歷史版本。排名的 67／33／0 公式與特殊程度 bonus 固定。
 - 單張測試：`api/scoring.py` 暫存與刪除上傳檔，`services/scoring_lab.py` 呼叫目前高品質模型並記錄用量。
 - 版本保存與還原：`repositories/scoring.py` 與 SQLite `scoring_rule_versions`。
 - 評分規則版本化預設：`inktime/app/domain/analysis/scoring.py` 的 `DEFAULT_SCORING_RULES`。

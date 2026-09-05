@@ -27,8 +27,8 @@ def test_schedule_resolves_devices_limits_years_and_commits_history_after_publis
                 INSERT INTO photos(
                     id,library_id,relative_path,status,captured_at,captured_date,
                     captured_month_day,capture_date_status,eligible,lifecycle_status,
-                    local_candidate_score,created_at,updated_at
-                ) VALUES (?,?,?,'analyzed',?,?,?,'valid',1,'active',?,?,?)
+                    local_features_status,local_candidate_score,created_at,updated_at
+                ) VALUES (?,?,?,'analyzed',?,?,?,'valid',1,'active','complete',?,?,?)
                 """,
                 (
                     photo_id,
@@ -110,8 +110,8 @@ def test_enhanced_device_preparation_publishes_one_release_per_slot_and_is_idemp
                 INSERT INTO photos(
                     id,library_id,relative_path,status,captured_at,captured_date,
                     captured_month_day,capture_date_status,eligible,lifecycle_status,
-                    local_candidate_score,created_at,updated_at
-                ) VALUES (?,?,?,'analyzed',?,?,?,'valid',1,'active',?,?,?)
+                    local_features_status,local_candidate_score,created_at,updated_at
+                ) VALUES (?,?,?,'analyzed',?,?,?,'valid',1,'active','complete',?,?,?)
                 """,
                 (
                     photo_id,
@@ -255,8 +255,9 @@ def test_enhanced_prepare_fails_closed_when_device_config_changes_before_commit(
             """
             INSERT INTO photos(
                 id,library_id,relative_path,status,captured_at,captured_date,captured_month_day,
-                capture_date_status,eligible,lifecycle_status,local_candidate_score,created_at,updated_at
-            ) VALUES (?,?,?,'analyzed',?,?,?,'valid',1,'active',?,?,?)
+                capture_date_status,eligible,lifecycle_status,local_features_status,
+                local_candidate_score,created_at,updated_at
+            ) VALUES (?,?,?,'analyzed',?,?,?,'valid',1,'active','complete',?,?,?)
             """,
             (photo_id, library_id, filename, "2020-07-22", "2020-07-22", "07-22", 90, now, now),
         )

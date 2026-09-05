@@ -30,6 +30,7 @@ from inktime.app.domain.analysis.execution_mode import (
     permits_manual_ai,
 )
 from inktime.app.domain.analysis.scoring import (
+    normalize_scoring_rules,
     DEFAULT_FAVORITE_BONUS,
     DEFAULT_RANKING_WEIGHTS,
     LOCAL_QUALITY_SCORE_KIND,
@@ -37,7 +38,7 @@ from inktime.app.domain.analysis.scoring import (
     ranking_components,
     resolve_score_kind,
 )
-from inktime.app.domain.analysis.schema import normalize_caption_controls
+from inktime.app.domain.analysis.schema import normalize_caption_controls, validate_model_response
 from inktime.app.domain.photos import ThumbnailCache
 from inktime.app.domain.photos.quality_policy import (
     FEATURE_VERSION,
@@ -62,7 +63,7 @@ class AnalysisDisabledError(RuntimeError):
     code = "ANALYSIS-DISABLED"
 
 
-PROMPT_VERSION = "photo-analysis-v4-content-special"
+PROMPT_VERSION = "photo-analysis-v4-ai-first-literary"
 # Maximum bounded response: 100 caption + 16 side-caption characters, five
 # types, two codes, six orientation evidence codes and JSON keys.  1200 tokens
 # leaves headroom for multi-token Traditional Chinese and provider formatting.
@@ -183,8 +184,8 @@ class PhotoAnalysisService:
             "side_caption_target_chars": int(settings.get("analysis.side_caption_target_chars", 12)),
             "side_caption_max_chars": int(settings.get("analysis.side_caption_max_chars", 16)),
             "copy_default_style": str(settings.get("analysis.copy_default_style", "literary")),
-            "copy_humor_level": int(settings.get("analysis.copy_humor_level", 1)),
-            "copy_poetic_level": int(settings.get("analysis.copy_poetic_level", 2)),
+            "copy_humor_level": int(settings.get("analysis.copy_humor_level", 2)),
+            "copy_poetic_level": int(settings.get("analysis.copy_poetic_level", 3)),
             "copy_avoid_cliche": bool(settings.get("analysis.copy_avoid_cliche", True)),
             "copy_avoid_direct_description": bool(
                 settings.get("analysis.copy_avoid_direct_description", True)
@@ -278,7 +279,7 @@ class PhotoAnalysisService:
             caption_display_controls=display_controls,
             prefilter=prefilter,
             execution_policy=execution_policy,
-            scoring_rules=str(settings.get("analysis.scoring_rules", "")),
+            scoring_rules=normalize_scoring_rules(settings.get("analysis.scoring_rules", "")),
             reasoning_effort="none",
             repair_policy=repair_policy,
         )
@@ -351,7 +352,7 @@ class PhotoAnalysisService:
             "auto_excluded": "自動排除",
             "disabled": "預篩選停用",
             "protected": "人工保護，繼續保留",
-            "low_priority": "保留，但降低優先順序",
+            "low_priority": "保留（疑似品質問題）",
             "pass": "通過預篩選",
         }
         reason_labels = {
@@ -506,7 +507,7 @@ class PhotoAnalysisService:
         result["local_quality_score"] = self._local_quality(photo)
         result.update(ranking_components(result, favorite=bool(photo["favorite"])))
         result["local_score"] = result["local_quality_score"]
-        result["semantic_score"] = result["memory_score"] * 0.5 + result["visual_score"] * 0.25
+        result["semantic_score"] = result["base_ranking_score"]
         return result
 
     def _save_result(
@@ -1372,7 +1373,7 @@ class PhotoAnalysisService:
         try:
             local_json = extract_json_value(response.content)
             candidate = local_json if isinstance(local_json, dict) else response.content
-            result = self._apply_caption_variant(validate_analysis_result(candidate), caption_controls)
+            result = self._apply_caption_variant(validate_model_response(candidate), caption_controls)
             raw = response.content
             parsed_at = datetime.now(timezone.utc).isoformat()
             self._trace_write(
@@ -1573,7 +1574,7 @@ class PhotoAnalysisService:
             repaired_candidate = extract_json_value(repaired.content)
             try:
                 result = self._apply_caption_variant(
-                    validate_analysis_result(
+                    validate_model_response(
                         repaired_candidate
                         if isinstance(repaired_candidate, dict)
                         else repaired.content
@@ -1686,8 +1687,8 @@ class PhotoAnalysisService:
                 scoring_profile={
                     "id": scoring_version_id or "",
                     "memory_weight": (ranking_weights or DEFAULT_RANKING_WEIGHTS)["memory"],
-                    "visual_weight": 25.0,
-                    "local_weight": 25.0,
+                    "visual_weight": DEFAULT_RANKING_WEIGHTS["visual"],
+                    "local_weight": DEFAULT_RANKING_WEIGHTS["local_quality"],
                     "favorite_bonus": favorite_bonus,
                 },
                 caption_controls=self._caption_generation_controls(self._caption_controls()),
@@ -1800,13 +1801,16 @@ class PhotoAnalysisService:
             advanced_caption=bool(caption_controls),
         )
         weights = ranking_weights or DEFAULT_RANKING_WEIGHTS
-        # Identical bytes can only inherit an analysis that was produced by the
-        # exact same frozen plan.  Reusing a different prompt/schema/Vision
-        # Input would make selection-preview incorrectly consider it current.
+        # Reuse identical bytes and semantic inputs across local ranking/version
+        # changes, while retaining the current full plan for result provenance.
         inherited = self.photos.inherit_existing_analysis(
             photo_id,
             job_id,
-            analysis_context={"analysis_fingerprint": analysis_fingerprint},
+            analysis_context={
+                "analysis_fingerprint": analysis_fingerprint,
+                "analysis_spec_json": analysis_spec_json,
+                "scoring_version_id": scoring_version_id,
+            },
         )
         if inherited is not None:
             if job_id is None:
@@ -1916,7 +1920,7 @@ class PhotoAnalysisService:
             raise ProviderUnavailableError("VLM-008 尚未設定可用 Provider")
 
         sha = str(photo["sha256"] or "")
-        if not sha:
+        if not sha or str(photo["local_features_status"] or "") != "complete":
             raise ValueError("IMG-003 照片尚未完成本地預處理")
         total_cost = 0.0
 

@@ -330,6 +330,67 @@ def test_retry_failed_does_not_revive_running_or_cancelled_jobs(app):
     assert repository.get(cancelled_id)["status"] == "cancelled"
 
 
+@pytest.mark.parametrize("owner_kind", ["analysis", "analysis_batch"])
+def test_retry_failed_reacquires_reservations_atomically(app, owner_kind):
+    from inktime.app.repositories.analysis_reservations import AnalysisReservationConflict
+
+    service, repository, job_id = create_job(app, 2)
+    with app.extensions["inktime_database"].session() as connection:
+        connection.execute("UPDATE jobs SET status='completed_with_errors',failed_items=2 WHERE id=?", (job_id,))
+        connection.execute("UPDATE job_items SET status='failed',error_code='VLM-TEST' WHERE job_id=?", (job_id,))
+    photo_id = repository.list_items(job_id)[0]["photo_id"]
+    owner = repository.create(
+        kind=owner_kind, name="new owner", strategy="single", settings={}, created_by=None,
+        photo_ids=[photo_id], analysis_fingerprint="new-plan",
+    )
+    before_job = dict(repository.get(job_id))
+    before_items = [dict(item) for item in repository.list_items(job_id)]
+    with pytest.raises(AnalysisReservationConflict):
+        service.retry_failed(job_id)
+    assert dict(repository.get(job_id)) == before_job
+    assert [dict(item) for item in repository.list_items(job_id)] == before_items
+    repository.cancel(owner)
+    assert service.retry_failed(job_id) == 2
+    with pytest.raises(AnalysisReservationConflict):
+        repository.create(
+            kind=owner_kind, name="racing owner", strategy="single", settings={}, created_by=None,
+            photo_ids=[photo_id],
+        )
+
+
+def test_retry_and_new_batch_cannot_acquire_the_same_photo(app):
+    import threading
+    from inktime.app.repositories.analysis_reservations import AnalysisReservationConflict
+
+    service, repository, job_id = create_job(app, 1)
+    with app.extensions["inktime_database"].session() as connection:
+        connection.execute("UPDATE jobs SET status='completed_with_errors',failed_items=1 WHERE id=?", (job_id,))
+        connection.execute("UPDATE job_items SET status='failed' WHERE job_id=?", (job_id,))
+    photo_id = repository.list_items(job_id)[0]["photo_id"]
+    barrier = threading.Barrier(2)
+
+    def acquire(action):
+        barrier.wait(timeout=5)
+        try:
+            if action == "retry":
+                return service.retry_failed(job_id) == 1
+            return bool(repository.create(
+                kind="analysis_batch", name="new Batch", strategy="single", settings={},
+                created_by=None, photo_ids=[photo_id],
+            ))
+        except AnalysisReservationConflict:
+            return False
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(acquire, ["retry", "batch"]))
+    assert sum(results) == 1
+    with app.extensions["inktime_database"].session() as connection:
+        owners = connection.execute(
+            "SELECT COUNT(*) FROM job_items WHERE photo_id=? AND status='pending'", (photo_id,),
+        ).fetchone()[0]
+    assert owners == 1
+
+
 def test_explicit_analysis_idempotency_key_reuses_terminal_job(app):
     dedupe_key = scoped_idempotency_key("analysis", "tester", "test-key")
     request_fp = request_fingerprint({"name": "測試工作", "strategy": "local", "settings": {}})
@@ -494,7 +555,8 @@ def test_analysis_selector_keyset_returns_1200_unique_eligible_active_photos(app
     repository = app.extensions["inktime_job_repository"]
     with app.extensions["inktime_database"].session() as connection:
         connection.execute(
-            "UPDATE photos SET local_candidate_score=CAST(substr(relative_path,1,instr(relative_path,'.')-1) AS REAL) % 101"
+            "UPDATE photos SET local_features_status='complete',"
+            "local_candidate_score=CAST(substr(relative_path,1,instr(relative_path,'.')-1) AS REAL) % 101"
         )
         connection.execute("UPDATE photos SET eligible=0 WHERE id=?", (photo_ids[0],))
         connection.execute("UPDATE photos SET lifecycle_status='missing' WHERE id=?", (photo_ids[1],))
@@ -517,6 +579,24 @@ def test_analysis_selector_keyset_returns_1200_unique_eligible_active_photos(app
         ]
     assert selected == expected
     assert list(repository.iter_pending_photo_ids(analysis_fingerprint="plan-a", limit=137)) == expected[:137]
+
+
+@pytest.mark.parametrize("selection_mode", ["pending", "force_all"])
+def test_analysis_selector_waits_for_local_preprocessing(app, selection_mode):
+    ready, pending, failed = add_photos(app, 3)
+    repository = app.extensions["inktime_job_repository"]
+    with app.extensions["inktime_database"].session() as connection:
+        connection.execute("UPDATE photos SET local_features_status='complete' WHERE id=?", (ready,))
+        connection.execute("UPDATE photos SET local_features_status='failed' WHERE id=?", (failed,))
+    options = {"analysis_fingerprint": "plan-a", "selection_mode": selection_mode}
+    preview = repository.selection_preview(**options)
+    assert preview["total_active"] == 3
+    assert preview["pending_total"] == preview["limited_to"] == 1
+    assert list(repository.iter_pending_photo_ids(**options)) == [ready]
+    with app.extensions["inktime_database"].session() as connection:
+        connection.execute("UPDATE photos SET local_features_status='complete' WHERE id=?", (pending,))
+    assert repository.selection_preview(**options)["pending_total"] == 2
+    assert set(repository.iter_pending_photo_ids(**options)) == {ready, pending}
 
 
 def test_active_dedupe_key_prevents_duplicate_maintenance_work(app):
@@ -608,3 +688,53 @@ def test_preview_capacity_failure_leaves_no_job_item_or_event(app):
         leaked = connection.execute("SELECT COUNT(*) FROM jobs WHERE name='must roll back'").fetchone()[0]
     assert after == before
     assert int(leaked) == 0
+
+
+@pytest.mark.parametrize("first_kind,second_kind", [("analysis", "analysis_batch"), ("analysis_batch", "analysis")])
+def test_analysis_reservation_rechecks_explicit_ids_inside_transaction(app, first_kind, second_kind):
+    from inktime.app.repositories.analysis_reservations import AnalysisReservationConflict
+
+    photo_id = add_photos(app, 1)[0]
+    repository = app.extensions["inktime_job_repository"]
+    first = repository.create(
+        kind=first_kind, name="first", strategy="single", settings={}, created_by=None,
+        photo_ids=[photo_id], analysis_fingerprint="first-plan",
+    )
+    with pytest.raises(AnalysisReservationConflict):
+        repository.create(
+            kind=second_kind, name="second", strategy="single", settings={}, created_by=None,
+            photo_ids=[photo_id], analysis_fingerprint="different-plan", force_recompute=True,
+        )
+    preview = repository.selection_preview(analysis_fingerprint="different-plan", selection_mode="force_all")
+    assert preview["already_queued"] == 1 and preview["pending_total"] == 0
+    assert list(repository.iter_pending_photo_ids(analysis_fingerprint="different-plan", selection_mode="force_all")) == []
+    assert len(repository.list()) == 1
+    repository.cancel(first)
+    assert repository.create(
+        kind=second_kind, name="after cancel", strategy="single", settings={}, created_by=None,
+        photo_ids=[photo_id], analysis_fingerprint="different-plan",
+    )
+
+
+def test_realtime_and_batch_reserve_one_owner_when_candidates_race(app):
+    import threading
+    from inktime.app.repositories.analysis_reservations import AnalysisReservationConflict
+
+    photo_id = add_photos(app, 1)[0]
+    repository = app.extensions["inktime_job_repository"]
+    barrier = threading.Barrier(2)
+
+    def reserve(kind):
+        barrier.wait(timeout=5)
+        try:
+            return repository.create(
+                kind=kind, name=kind, strategy="single", settings={}, created_by=None,
+                photo_ids=[photo_id], analysis_fingerprint=kind,
+            )
+        except AnalysisReservationConflict:
+            return None
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(reserve, ["analysis", "analysis_batch"]))
+    assert sum(result is not None for result in results) == 1
+    assert len(repository.list()) == 1

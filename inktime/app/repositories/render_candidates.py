@@ -45,6 +45,7 @@ class RenderCandidateRepository:
         {_BASE_SQL_PREDICATE}
         AND a.score_kind='{SEMANTIC_SCORE_KIND}'
         AND a.ranking_score IS NOT NULL
+        AND p.local_features_status='complete'
     """
     LOCAL_SQL_PREDICATE = f"""
         {_BASE_SQL_PREDICATE}
@@ -147,8 +148,6 @@ class RenderCandidateRepository:
         self,
         photo_ids: Iterable[str],
         execution: str,
-        *,
-        allow_local_fallback: bool = False,
     ) -> list[dict[str, Any]]:
         """Resolve one release contract per requested photo, without N+1 queries.
 
@@ -156,8 +155,8 @@ class RenderCandidateRepository:
         photos and scanner-only photos.  A contract is never chosen for the
         whole batch: doing so made a valid old photo fail merely because a
         second photo had only local features (and vice versa).  Automatic AI
-        callers remain strict for explicitly supplied IDs; the opt-in local
-        fallback is reserved for IDs produced by the tiered selector.
+        callers require both scanner features and a valid current model
+        result. Local-only rows never fill an automatic AI release.
         """
         ids = list(dict.fromkeys(str(value).strip() for value in photo_ids if str(value).strip()))
         if len(ids) > self.MAX_REQUESTED:
@@ -170,7 +169,7 @@ class RenderCandidateRepository:
             rows = connection.execute(
                 f"""
                 SELECT p.*, l.root_path, l.enabled AS library_enabled,
-                       a.id AS latest_analysis_id,a.score_kind,a.ranking_score
+                       a.id AS latest_analysis_id,a.score_kind,a.ranking_score,a.schema_version
                 FROM photos p
                 LEFT JOIN libraries l ON l.id=p.library_id
                 LEFT JOIN photo_analysis a ON a.id=(
@@ -204,18 +203,17 @@ class RenderCandidateRepository:
                 and bool(row.get("eligible"))
                 and row.get("latest_analysis_id") is not None
                 and str(row.get("score_kind") or "") == SEMANTIC_SCORE_KIND
+                and row.get("schema_version") == 4
                 and row.get("ranking_score") is not None
             )
             local_eligible = (
                 bool(row.get("eligible")) and str(row.get("local_features_status") or "") == "complete"
             )
             if execution == "automatic_ai":
-                if analysis_eligible:
+                if analysis_eligible and local_eligible:
                     source = "analysis"
-                elif allow_local_fallback and local_eligible:
-                    source = "local"
                 else:
-                    raise IneligiblePhotoError(photo_id, "PHOTO-ELIGIBILITY-007 缺少有效正式分析")
+                    raise IneligiblePhotoError(photo_id, "PHOTO-ELIGIBILITY-007 尚未同時完成本機品質檢查與有效 AI 正式分析")
             elif analysis_eligible:
                 source = "analysis"
             elif local_eligible:

@@ -4,6 +4,7 @@ from hashlib import sha256
 import json
 from typing import Any
 
+from inktime.app.domain.analysis.scoring import normalize_scoring_rules
 from inktime.app.providers.openai_compatible import OpenAICompatibleProvider
 from inktime.app.providers.config import (
     capabilities_for,
@@ -36,7 +37,7 @@ class ProviderService:
             return None
         channels = []
         rules = (
-            str(self.settings.get("analysis.scoring_rules", ""))
+            normalize_scoring_rules(self.settings.get("analysis.scoring_rules", ""))
             if scoring_rules is None
             else str(scoring_rules)
         )

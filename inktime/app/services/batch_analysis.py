@@ -34,10 +34,15 @@ from inktime.app.domain.analysis import (
     validate_analysis_result,
 )
 from inktime.app.domain.analysis.plan import SCHEMA_VERSION, provider_prompt_contract_sha256
+from inktime.app.domain.analysis.schema import validate_model_response
 from inktime.app.domain.photos.quality_policy import is_confirmed_screenshot
 from inktime.app.services.analysis import CAPTION_VARIANTS_TOKEN_CAP, FULL_ANALYSIS_TOKEN_CAP
 from inktime.app.providers.base import Usage
 from inktime.app.providers.openai_compatible import calculate_usage_cost
+from inktime.app.repositories.analysis_reservations import (
+    AnalysisReservationConflict,
+    reserved_analysis_sql,
+)
 from inktime.app.repositories.analysis_batches import (
     ACTIVE_BATCH_STATUSES,
     TERMINAL_BATCH_STATUSES,
@@ -342,9 +347,11 @@ class BatchAnalysisService:
             SELECT p.*,l.root_path
             FROM photos p JOIN libraries l ON l.id=p.library_id
             WHERE p.lifecycle_status='active' AND p.eligible=1
+              AND NOT {reserved_analysis_sql()}
               AND COALESCE(p.never_upload,0)=0
               AND COALESCE(p.exclusion_status,'')!='manually_excluded'
               AND COALESCE(p.sha256,'')!=''
+              AND p.local_features_status='complete'
               AND NOT EXISTS (
                   SELECT 1 FROM photo_analysis a
                   WHERE a.photo_id=p.id AND a.analysis_fingerprint=? AND COALESCE(a.schema_kind,'basic')='full'
@@ -395,9 +402,20 @@ class BatchAnalysisService:
             )
         safe_rows: list[dict[str, Any]] = []
         confirmed_screenshot_excluded = 0
+        prefilter = dict(plan.get("prefilter") or {})
+        policy_settings = {
+            "analysis.prefilter_enabled": bool(prefilter.get("enabled", True)),
+            "analysis.prefilter_screenshots": bool(prefilter.get("screenshots_enabled", True)),
+            "analysis.prefilter_low_quality": bool(prefilter.get("low_quality_enabled", True)),
+            "analysis.prefilter_sensitivity": str(prefilter.get("sensitivity", "conservative")),
+            "analysis.e6_prefilter_enabled": bool(prefilter.get("e6_enabled", True)),
+            "analysis.e6_min_score": float(prefilter.get("e6_min_score", 25)),
+        }
         for row in rows:
             if is_confirmed_screenshot(row):
                 confirmed_screenshot_excluded += 1
+                continue
+            if self.analysis.prefilter_snapshot(row, policy_settings=policy_settings)["excluded"]:
                 continue
             try:
                 source = safe_join(Path(str(row["root_path"])), str(row["relative_path"]))
@@ -1057,18 +1075,21 @@ class BatchAnalysisService:
             raise BatchLifecycleError("Batch 模型價格不完整，無法安全估算成本；請先補齊 input/cached/output 定價", "BATCH-COST-UNKNOWN")
         if budget_limit is not None and estimate["estimated_cost"] > float(budget_limit):
             raise BatchLifecycleError("整批估算成本超過 Job Budget，未提交任何分片", "BATCH-BUDGET-001")
-        job_id = self.jobs.create(
-            kind="analysis_batch",
-            name=f"OpenAI Batch：{scope}",
-            strategy="single",
-            settings={"processing_mode": "batch", "scope": scope, "sample_seed": seed},
-            photo_ids=[str(item["photo"]["id"]) for item in candidates],
-            created_by=created_by,
-            budget_limit=budget_limit,
-            selection_mode=scope,
-            analysis_fingerprint=analysis_fp,
-            analysis_spec=plan,
-        )
+        try:
+            job_id = self.jobs.create(
+                kind="analysis_batch",
+                name=f"OpenAI Batch：{scope}",
+                strategy="single",
+                settings={"processing_mode": "batch", "scope": scope, "sample_seed": seed},
+                photo_ids=[str(item["photo"]["id"]) for item in candidates],
+                created_by=created_by,
+                budget_limit=budget_limit,
+                selection_mode=scope,
+                analysis_fingerprint=analysis_fp,
+                analysis_spec=plan,
+            )
+        except AnalysisReservationConflict as exc:
+            raise BatchLifecycleError(str(exc), "BATCH-RESERVATION-CONFLICT") from exc
         job_items = self.jobs.list_items(job_id, limit=max(100, len(candidates)))
         job_items_by_photo = {str(item["photo_id"]): item for item in job_items}
         estimated_each = float(estimate["estimated_cost"] or 0) / max(1, len(candidates))
@@ -1310,6 +1331,31 @@ class BatchAnalysisService:
         )
         self._enqueue_import(batch_id, cleanup_only=True)
         return True
+
+    def enqueue_poll(self) -> str | None:
+        """Schedule bounded remote work; the Scheduler only reads/writes SQLite."""
+        active_sql = """SELECT id,status FROM jobs WHERE kind='analysis_batch_poll'
+            AND status IN ('pending','preparing','running','pausing','retrying','paused','budget_exceeded')
+            ORDER BY created_at,id LIMIT 1"""
+        with self.database.session() as connection:
+            active = connection.execute(active_sql).fetchone()
+        if active is not None:
+            if active["status"] == "pending":
+                self.job_service.start(str(active["id"]))
+            return str(active["id"])
+        if not self.batches.list_pollable_due(limit=1):
+            return None
+        job_id = self.jobs.create_maintenance_atomic(
+            kind="analysis_batch_poll",
+            name="Batch 狀態輪詢",
+            settings={"trigger_source": "scheduler", "max_attempts": 1},
+            created_by=None,
+            priority=4,
+            transaction_guard=lambda connection: connection.execute(active_sql).fetchone() is None,
+        )
+        if job_id is not None:
+            self.job_service.start(job_id)
+        return job_id
 
     def poll_due(self, *, limit: int = 20) -> dict[str, int]:
         rows = self.batches.list_pollable_due(limit=limit)
@@ -2140,7 +2186,7 @@ class BatchAnalysisService:
             )
             return "schema_invalid"
         try:
-            result = validate_analysis_result(json.loads(raw_content))
+            result = validate_model_response(json.loads(raw_content))
         except (ValueError, TypeError, json.JSONDecodeError, AnalysisValidationError) as exc:
             self._mark_item_error(
                 item, "schema_invalid", str(exc), "schema_invalid", job_id=str(batch["job_id"])

@@ -27,8 +27,7 @@ from inktime.app.domain.analysis.execution_mode import execution_mode, permits_a
 from inktime.app.domain.analysis.scoring import (
     LOCAL_QUALITY_SCORE_KIND,
     SEMANTIC_SCORE_KIND,
-    calculate_distinguishing_score,
-    prepare_score_distribution,
+    SPECIAL_BONUSES,
     resolve_score_kind,
     score_band,
 )
@@ -164,9 +163,6 @@ def photos_page():
         limit=PHOTO_PAGE_SIZE,
         offset=offset,
     )
-    e6_weight = (
-        float(current_app.extensions["inktime_settings_repository"].get("render.e6_weight", 20)) / 100.0
-    )
     settings = current_app.extensions["inktime_settings_repository"]
     quality_settings = {
         key: settings.get(key, default)
@@ -191,7 +187,6 @@ def photos_page():
         "explicit_nudity": "成人裸露",
         "female_glamour_portrait": "女性單人寫真",
     }
-    distributions = {library_id: prepare_score_distribution(_repository().score_population(library_id)) for library_id in {str(row["library_id"]) for row in rows}}
     photos = []
     for stored_row in rows:
         photo = dict(stored_row)
@@ -211,16 +206,9 @@ def photos_page():
         )
         photo["quality_decision"] = quality["decision"]
         photo["quality_reason"] = str(quality["primary_reason"])
-        calibrated_score = None
-        percentile = None
-        if ranking_score is not None and not hard_excluded:
-            calibrated_score, percentile = calculate_distinguishing_score(
-                float(ranking_score), distributions[str(photo["library_id"])]
-            )
+        if ranking_score is not None and not hard_excluded and photo.get("local_features_status") == "complete":
             photo["raw_ranking_score"] = round(float(ranking_score), 1)
-            photo["ranking_percentile"] = percentile
-            photo["score_band"] = score_band(percentile, calibrated_score)
-            photo["distinguishing_score"] = calibrated_score
+            photo["score_band"] = score_band(float(ranking_score))
         photo["selection_score"] = None
         photo["model_score"] = round(float(ranking_score), 1) if ranking_score is not None else None
         photo["e6_display_score"] = round(float(e6_score), 1) if e6_score is not None else None
@@ -237,19 +225,13 @@ def photos_page():
                 photo["total_score_source"] = f"本機候選品質（已排除：{exclusion_labels.get(reason, reason)}）"
             else:
                 photo["total_score_source"] = f"已排除：{exclusion_labels.get(reason, reason)}"
-        elif ranking_score is not None and e6_score is not None:
-            photo["total_score"] = round(
-                float(calibrated_score) * (1.0 - e6_weight) + float(e6_score) * e6_weight,
-                1,
-            )
-            photo["selection_score"] = photo["total_score"]
-            photo["total_score_source"] = (
-                "AI 相對評分＋E6" if percentile is not None else "AI 原始綜合＋E6"
-            )
+        elif ranking_score is not None and photo.get("local_features_status") != "complete":
+            photo["total_score"] = None
+            photo["total_score_source"] = "等待本機品質檢查完成"
         elif ranking_score is not None:
-            photo["total_score"] = calibrated_score
-            photo["selection_score"] = calibrated_score
-            photo["total_score_source"] = "AI 相對評分" if percentile is not None else "AI 原始綜合"
+            photo["total_score"] = round(float(ranking_score), 1)
+            photo["selection_score"] = photo["total_score"]
+            photo["total_score_source"] = "AI 選片分"
         elif score_kind == LOCAL_QUALITY_SCORE_KIND or str(photo.get("local_features_status") or "") == "complete":
             photo["local_quality_score"] = (
                 round(float(photo.get("local_score")), 2)
@@ -644,6 +626,15 @@ def photo_detail(photo_id: str):
     except (OSError, ValueError):
         # 原檔暫時離線時仍允許查看既有中繼資料與模型結果。
         pass
+    source_available = False
+    retained_preview = False
+    try:
+        source_available = safe_join(Path(photo["root_path"]), photo["relative_path"]).is_file()
+    except (OSError, ValueError, UnsafePathError):
+        pass
+    if not source_available and photo["sha256"]:
+        with current_app.extensions["inktime_thumbnail_cache"].acquire_existing(str(photo["sha256"]), 1600) as cached:
+            retained_preview = cached is not None
     location_name = current_app.extensions["inktime_location_resolver"].resolve(
         photo["gps_lat"],
         photo["gps_lon"],
@@ -695,7 +686,6 @@ def photo_detail(photo_id: str):
     )
     analysis_rows = analysis_rows[:2]
     analyses = []
-    score_distribution = prepare_score_distribution(_repository().score_population(str(photo["library_id"])))
     for index, row in enumerate(analysis_rows):
         analysis = dict(row)
         try:
@@ -721,17 +711,36 @@ def photo_detail(photo_id: str):
         analysis["score_kind"] = score_kind
         analysis["semantic_scores_available"] = score_kind == SEMANTIC_SCORE_KIND
         analysis["origin_label"] = {
-            SEMANTIC_SCORE_KIND: "模型判斷",
+            SEMANTIC_SCORE_KIND: "AI 模型判斷",
             LOCAL_QUALITY_SCORE_KIND: "本機影像分析",
         }.get(score_kind, "歷史模型判斷" if analysis["is_historical_model"] else "歷史分析（來源不明）")
         if score_kind == SEMANTIC_SCORE_KIND and analysis.get("ranking_score") is not None:
-            calibrated, percentile = calculate_distinguishing_score(
-                float(analysis["ranking_score"]), score_distribution
-            )
-            analysis["distinguishing_score"] = calibrated
-            analysis["ranking_percentile"] = percentile
-            analysis["score_band"] = score_band(percentile, calibrated)
-        elif score_kind == LOCAL_QUALITY_SCORE_KIND:
+            analysis["score_band"] = score_band(float(analysis["ranking_score"]))
+            analysis["special_bonus"] = SPECIAL_BONUSES[
+                max(0, min(4, int(analysis.get("effective_special_level") or 0)))
+            ]
+        if analysis.get("content_filter_json"):
+            try:
+                content_filter = json.loads(str(analysis["content_filter_json"]))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                content_filter = {}
+            if not isinstance(content_filter, dict):
+                content_filter = {}
+            labels = {
+                "sexualized_content": "性暗示內容",
+                "explicit_nudity": "成人裸露",
+                "female_glamour_portrait": "女性單人寫真",
+            }
+            analysis["content_filter_items"] = [
+                {
+                    "label": labels.get(code, code),
+                    "detected": bool(value.get("detected")),
+                    "confidence": float(value.get("confidence", 0.0)),
+                }
+                for code, value in content_filter.items()
+                if isinstance(value, dict)
+            ]
+        if score_kind == LOCAL_QUALITY_SCORE_KIND:
             try:
                 payload = json.loads(str(analysis.get("semantic_json") or "{}"))
             except (TypeError, ValueError, json.JSONDecodeError):
@@ -765,6 +774,8 @@ def photo_detail(photo_id: str):
     ).as_dict()
     return render_template(
         "photo_detail.html",
+        source_available=source_available,
+        retained_preview=retained_preview,
         photo=photo,
         analyses=analyses,
         analysis_total=analysis_total,

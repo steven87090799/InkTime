@@ -1,0 +1,14 @@
+.prompt-nav, .prompt-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin: 16px 0; }
+.prompt-nav a { padding: 8px 12px; border: 1px solid var(--line); border-radius: 8px; }
+.prompt-formula-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; margin: 18px 0; }
+.prompt-formula-grid article { padding: 16px; border: 1px solid var(--line); border-radius: 10px; }
+.prompt-formula-grid p, .prompt-guidance p { margin-bottom: 0; }
+.prompt-text { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 32rem; overflow: auto; padding: 16px; line-height: 1.7; border: 1px solid var(--line); border-radius: 8px; }
+.prompt-constraint { white-space: pre-wrap; overflow-wrap: anywhere; min-width: 220px; max-width: 55rem; margin: 0; }
+.prompt-equation { font-weight: 600; padding: 16px 0; }
+#prompt-contract, #prompt-editor, #prompt-preview, #ranking-formula { scroll-margin-top: 90px; }
+#prompt-contract details, #prompt-preview details { margin-top: 16px; }
+#prompt-contract summary, #prompt-preview summary { cursor: pointer; font-weight: 600; padding: 8px 0; }
+#prompt-provider-formats article + article { margin-top: 24px; }
+#prompt-preview-status { overflow-wrap: anywhere; }
+@media (max-width: 760px) { .prompt-formula-grid { grid-template-columns: 1fr; } .prompt-text { padding: 12px; } }

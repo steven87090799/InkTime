@@ -2264,8 +2264,41 @@ MIGRATIONS = (
             """,
         ),
     ),
+    Migration(
+        58,
+        "以本機品質門檻與 AI 選片分取代混合排序",
+        (
+            "UPDATE scoring_rule_versions SET is_active=0 WHERE is_active=1",
+        ),
+    ),
 )
 
+
+def _apply_migration_58_data_fixes(connection) -> None:
+    """Recompose saved v4 scores without another model request or raw-data edits."""
+    # Freeze this migration's formula so a later ranking change cannot alter
+    # the meaning of an upgrade from schema 57.
+    cursor = connection.execute(
+        """SELECT a.*,p.favorite FROM photo_analysis a JOIN photos p ON p.id=a.photo_id
+           WHERE a.schema_version=4 AND a.score_kind='semantic'
+             AND a.memory_score IS NOT NULL AND a.visual_score IS NOT NULL
+             AND a.special_level IS NOT NULL"""
+    )
+    while batch := cursor.fetchmany(500):
+        updates = []
+        for row in batch:
+            base = round(float(row["memory_score"]) * 0.67 + float(row["visual_score"]) * 0.33, 2)
+            level = max(0, min(4, int(row["special_level"]) + int(bool(row["favorite"]))))
+            ranking = round(max(0.0, min(100.0, base + (0, 2, 5, 9, 14)[level])), 2)
+            updates.append((
+                base, base, ranking, ranking, level, "ranking-v5-ai-first", row["id"],
+            ))
+        connection.executemany(
+            """UPDATE photo_analysis SET base_ranking_score=?,semantic_score=?,
+               ranking_score=?,final_ranking_score=?,effective_special_level=?,
+               library_rarity_adjustment=0,ranking_rule_version=? WHERE id=?""",
+            updates,
+        )
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -2856,6 +2889,8 @@ def migrate(database: Database, backup_dir: Path | None = None) -> list[int]:
                         _apply_migration_48_data_fixes(connection)
                     if migration.version == 53:
                         _apply_migration_53_data_fixes(connection)
+                    if migration.version == 58:
+                        _apply_migration_58_data_fixes(connection)
                     connection.execute(
                         "INSERT INTO schema_migrations(version, name, applied_at) VALUES (?, ?, ?)",
                         (migration.version, migration.name, _utc_now()),
@@ -2957,7 +2992,7 @@ def migrate(database: Database, backup_dir: Path | None = None) -> list[int]:
                     "migration_name": migration.name,
                 },
             )
-        if 54 in applied or 57 in applied:
+        if 54 in applied or 57 in applied or 58 in applied:
             # Migrations 54 and 57 change which historical rows are eligible for the
             # semantic population.  Clear an already-loaded process-local
             # distribution before any caller can reuse it.

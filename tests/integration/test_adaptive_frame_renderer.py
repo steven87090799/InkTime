@@ -28,8 +28,8 @@ def _analyzed_photo(
         connection.execute(
             """
             INSERT INTO photos(id,library_id,relative_path,width,height,status,eligible,lifecycle_status,
-                               captured_at,created_at,updated_at)
-            VALUES (?,?,?,?,?,'analyzed',1,'active',?,?,?)
+                               local_features_status,captured_at,created_at,updated_at)
+            VALUES (?,?,?,?,?,'analyzed',1,'active','complete',?,?,?)
             """,
             (photo_id, library_id, f"{photo_id}.jpg", *size, captured_at, captured_at, captured_at),
         )

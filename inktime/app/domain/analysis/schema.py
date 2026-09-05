@@ -252,6 +252,35 @@ def _validate(value: Any, schema: dict[str, Any], path: str) -> None:
         raise AnalysisValidationError(f"{path} 長度不合法")
 
 
+def validate_model_response(raw: str | dict) -> dict:
+    """Normalize only conservative orientation contradictions at model ingress.
+
+    Validate the complete shape first: missing fields, invalid enums/types,
+    nonfinite scores and safety fields must still fail strict validation.
+    Never invent a rotation or increase its confidence.
+    """
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except json.JSONDecodeError:
+            return validate_analysis_result(raw)
+    value = to_taiwan_traditional(deepcopy(raw))
+    _validate(value, ANALYSIS_JSON_SCHEMA["schema"], "analysis")
+    if not isinstance(value, dict):
+        raise AnalysisValidationError("analysis 必須是 object")
+    orientation = value["visual_orientation"]
+    if orientation["rotation_cw"] is None:
+        orientation["ambiguous"] = True
+    if "insufficient_visual_cues" in orientation["evidence"]:
+        orientation.update(
+            rotation_cw=None,
+            ambiguous=True,
+            confidence=min(orientation["confidence"], 0.5),
+            evidence=["insufficient_visual_cues"],
+        )
+    return validate_analysis_result(value)
+
+
 def validate_analysis_result(raw: str | dict) -> dict:
     if isinstance(raw, str):
         try:

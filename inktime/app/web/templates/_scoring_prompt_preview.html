@@ -1,0 +1,17 @@
+<section class="panel" id="prompt-preview">
+  <div class="panel-head"><div><p class="eyebrow">送入模型的文字</p><h2>提示詞預覽</h2><p>依目前設定組裝，不會發送模型請求。已執行或執行中的工作，請到 <a href="/ai/traces">AI 即時追蹤</a> 查看當次實際請求。</p></div></div>
+  <div class="prompt-actions">
+    <label>預覽用途<select id="prompt-scope"><option value="analysis" {% if prompt_preview.scope == 'analysis' %}selected{% endif %}>新建照片分析工作</option><option value="scoring_test" {% if prompt_preview.scope == 'scoring_test' %}selected{% endif %}>下方單張照片測試台</option></select></label>
+    <button class="secondary" type="button" id="copy-prompt">複製完整 System 提示詞</button>
+  </div>
+  <p id="prompt-preview-status" role="status" aria-live="polite">目前已儲存設定的預覽。</p>
+  <p id="prompt-size">System 文字 {{ prompt_preview.prompt_chars }} 字元 · 評分參考 {{ prompt_preview.rules_chars }} 字元</p>
+  <p class="notice">字元數不是 Token 數。實際輸入用量還包含圖片、JSON Schema 與服務商封裝，請以 AI 即時追蹤的用量為準。單張測試台目前不套用進階文案設定。</p>
+  <details open><summary>System · 完整提示詞（唯讀）</summary><pre id="prompt-system" class="prompt-text">{{ prompt_preview.system_prompt }}</pre></details>
+  <details><summary>User · 固定指令與圖片</summary><pre class="prompt-text">{{ prompt_preview.user_prompt }}</pre><p>接著附上當次照片的影像輸入；此預覽尚未選擇照片。</p></details>
+  <details><summary>各模型服務的 response_format · 唯讀</summary><div id="prompt-provider-formats">
+    {% for provider in prompt_preview.providers %}<article><h3>{{ provider.name }} / {{ provider.model }}</h3>{% if provider.response_format %}<p>Schema 封裝 {{ provider.schema_chars }} 字元</p><pre class="prompt-text">{{ provider.response_format|tojson(indent=2) }}</pre>{% else %}<p>此服務未啟用 JSON Schema；請求不附 response_format，回應仍受伺服器的 Schema v4 驗證。</p>{% endif %}</article>
+    {% else %}<p>目前沒有啟用模型服務。固定欄位仍可在上方查看，新增服務後會顯示對應封裝。</p>{% endfor %}
+  </div><p>OpenRouter 傳輸格式會移除不支援的 uniqueItems；伺服器仍檢查重複值。</p></details>
+  <details><summary>JSON 修復 · 僅在回應驗證失敗時使用</summary><pre class="prompt-text">{{ prompt_preview.repair_prompt }}</pre><p>另附當次 Schema、錯誤原因與待修復文字；不重送照片。這不是每次分析都會送出的提示詞。</p></details>
+</section>

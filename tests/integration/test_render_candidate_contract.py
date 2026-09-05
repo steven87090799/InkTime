@@ -16,8 +16,8 @@ def _candidate(app, root, photo_id: str, *, eligible: int = 1, lifecycle: str = 
         connection.execute(
             """
             INSERT INTO photos(id,library_id,relative_path,status,eligible,lifecycle_status,
-                               captured_at,created_at,updated_at)
-            VALUES (?,?,?,'analyzed',?,?, '2020-07-22T00:00:00',?,?)
+                               local_features_status,captured_at,created_at,updated_at)
+            VALUES (?,?,?,'analyzed',?,?,'complete', '2020-07-22T00:00:00',?,?)
             """,
             (photo_id, library, f"{photo_id}.jpg", eligible, lifecycle, now, now),
         )

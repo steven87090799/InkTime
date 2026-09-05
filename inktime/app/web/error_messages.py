@@ -47,6 +47,7 @@ _register("QUEUE-NO-WORKER JOB-HEARTBEAT-STALE", "背景工作沒有持續回報
 _register("NO_PHOTOS NO_CONTENT NO_ELIGIBLE_CANDIDATES", "目前沒有符合條件的照片可處理", "照片可能已排除、已處理、尚未完成掃描，或不符合本次篩選。", "核對照片庫數量、排除條件與選片範圍後再建立工作。")
 _register("ANALYSIS_DISABLED ANALYSIS-DISABLED", "照片分析目前已停用", "系統設定禁止建立新的分析工作。", "到「系統設定」確認分析執行模式，再選擇本機或模型分析。")
 _register("CONFIG_INVALID UNSUPPORTED_CONFIGURATION", "目前設定無法執行這個操作", "設定值、模型能力或工作建立時保存的設定不相容。", "查看具體欄位原因，修正設定後重新建立工作。")
+_register("ANALYSIS-RESERVATION-CONFLICT", "這張照片已有分析工作處理中", "另一個即時或 Batch 工作已保留這張照片，系統因此停止重複送出模型請求。", "查看原工作是否仍在執行；等待完成或確認遠端結果後再重試，避免重複計費。")
 _register("AI-CACHE-001", "等待相同照片的分析結果逾時", "另一個工作正在計算相同分析，尚未取得可沿用的結果。", "查看原工作是否仍在執行，完成後再試，避免重複送入模型。")
 _register("ACTIVITY-001 AI-TRACE-001 DECISION-001 REVIEW-001 HISTORY-001", "篩選或查詢條件不合法", "分頁位置、日期、照片範圍或篩選值不符合要求。", "清除篩選或重新整理頁面，再輸入符合欄位提示的條件。")
 _register("AI-TRACE-404 TRACE-404", "找不到這筆模型呼叫紀錄", "紀錄可能不存在，或已依資料保留規則清理。", "返回 AI 即時追蹤，使用照片或工作查找仍保留的紀錄。")

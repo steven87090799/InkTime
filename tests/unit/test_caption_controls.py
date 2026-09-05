@@ -41,7 +41,7 @@ def test_caption_feature_defaults_enable_one_literary_caption():
     assert SETTING_DEFINITIONS["analysis.advanced_caption_enabled"]["default"] is True
     assert SETTING_DEFINITIONS["analysis.caption_variants_enabled"]["default"] is False
     assert SETTING_DEFINITIONS["analysis.copy_default_style"]["default"] == "literary"
-    assert SETTING_DEFINITIONS["analysis.copy_poetic_level"]["default"] == 2
+    assert SETTING_DEFINITIONS["analysis.copy_poetic_level"]["default"] == 3
     assert SETTING_DEFINITIONS["render.caption_wrap_enabled"]["default"] is False
     assert json_schema_for_stage("single_high") == FULL_ANALYSIS_JSON_SCHEMA
     assert PhotoAnalysisService._prompt_version(None) == PROMPT_VERSION
@@ -68,6 +68,10 @@ def test_single_caption_prompt_is_literary_compact_and_omits_empty_fields(tmp_pa
     assert "不需要為了湊字數" in prompt
     assert "不可確認內容" in prompt
     assert "不虛構" in prompt
+    assert "句意必須完整" in prompt
+    assert "不留下半截比喻" in prompt
+    assert "欄杆負責認真，我們負責等" in prompt
+    assert "不照抄內容" in prompt
     assert "禁止詞：無" not in prompt
     assert "禁止句型：無" not in prompt
     assert "自訂規則：無" not in prompt
@@ -87,7 +91,8 @@ def test_single_caption_prompt_is_literary_compact_and_omits_empty_fields(tmp_pa
     )
     assert body["messages"][1]["content"][0]["text"] == "分析這張照片。"
     assert provider.last_request_metrics["prompt_chars"] == len(prompt)
-    assert provider.last_request_metrics["prompt_chars"] < 2000
+    # The two short literary examples add bounded input; output limits are unchanged.
+    assert provider.last_request_metrics["prompt_chars"] < 2400
     assert provider.last_request_metrics["schema_chars"] <= 6634
 
 

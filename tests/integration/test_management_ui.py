@@ -5,6 +5,7 @@ from io import BytesIO
 from pathlib import Path
 
 from PIL import Image
+import pytest
 
 from inktime.app.repositories.settings import SETTING_DEFINITIONS
 from inktime.app.workers.runner import WorkerRunner
@@ -315,6 +316,32 @@ def test_retry_failed_control_restarts_the_job_in_one_action(client, app):
     assert response.json["affected"] == 1
     assert repository.get(job_id)["status"] == "running"
     assert repository.list_items(job_id)[0]["status"] == "pending"
+
+
+def test_retry_failed_control_reports_analysis_reservation_conflict(client, app):
+    administrator_id = create_admin(app)
+    login(client)
+    repository = app.extensions["inktime_job_repository"]
+    photo_ids = add_photos(app, 1)
+    job_id = repository.create(
+        name="failed analysis", strategy="single", settings={},
+        created_by=administrator_id, photo_ids=photo_ids,
+    )
+    with app.extensions["inktime_database"].session() as connection:
+        connection.execute("UPDATE jobs SET status='completed_with_errors',failed_items=1 WHERE id=?", (job_id,))
+        connection.execute("UPDATE job_items SET status='failed' WHERE job_id=?", (job_id,))
+    owner = repository.create(
+        kind="analysis_batch", name="Batch owner", strategy="single", settings={},
+        created_by=administrator_id, photo_ids=photo_ids,
+    )
+    response = client.post(
+        f"/api/v1/jobs/{job_id}/retry-failed", headers={"X-CSRF-Token": csrf(client)},
+    )
+    assert response.status_code == 409
+    assert response.json["error_code"] == "ANALYSIS-RESERVATION-CONFLICT"
+    assert repository.get(job_id)["status"] == "completed_with_errors"
+    assert repository.list_items(job_id)[0]["status"] == "failed"
+    assert repository.get(owner)["status"] == "pending"
 
 
 def test_simulator_superseded_compare_aborts_fetch_and_poll_delay(client, app):
@@ -742,7 +769,7 @@ def test_theme_toggle_is_available_before_and_after_login(client, app):
     assert "深色模式" in dashboard
 
 
-def test_scoring_rules_and_weights_create_a_new_version(client, app):
+def test_scoring_rules_create_a_new_locked_weight_version(client, app):
     create_admin(app)
     login(client)
     page = client.get("/scoring").get_data(as_text=True)
@@ -756,11 +783,6 @@ def test_scoring_rules_and_weights_create_a_new_version(client, app):
         json={
             "name": "家庭照片優先",
             "rules": custom_rules,
-            "memory_weight": 55,
-            "beauty_weight": 15,
-            "technical_weight": 10,
-            "emotion_weight": 20,
-            "favorite_bonus": 8,
         },
         headers={"X-CSRF-Token": csrf(client)},
     )
@@ -1041,7 +1063,7 @@ def test_photo_cards_show_total_score_and_e6_estimate(client, app):
     login(client)
     analyzed_id, estimated_id = add_photos(app, 2)
     with app.extensions["inktime_database"].session() as connection:
-        connection.execute("UPDATE photos SET e6_score=100 WHERE id=?", (analyzed_id,))
+        connection.execute("UPDATE photos SET e6_score=100,local_features_status='complete' WHERE id=?", (analyzed_id,))
         connection.execute("UPDATE photos SET e6_score=91.9 WHERE id=?", (estimated_id,))
     app.extensions["inktime_photo_repository"].save_analysis(
         analyzed_id,
@@ -1063,9 +1085,9 @@ def test_photo_cards_show_total_score_and_e6_estimate(client, app):
 
     body = client.get("/photos").get_data(as_text=True)
 
-    expected_selection = round(raw_score * 0.8 + 100 * 0.2, 1)
-    assert f"AI 選片分 {expected_selection}（AI 原始綜合＋E6）" in body
-    assert "AI 語意評分：尚未分析 · 照片庫鑑別分：尚未產生" in body
+    expected_selection = round(raw_score, 1)
+    assert f"AI 選片分 {expected_selection}（AI 選片分）" in body
+    assert "AI 語意評分：尚未分析 · AI 選片分：尚未產生" in body
     assert "E6 顯示適合度 91.9（暫估，未納入正式選片分）" in body
 
 
@@ -1090,7 +1112,8 @@ def test_photo_detail_shows_only_two_latest_analyses_and_compact_type_picker(cli
 
     assert body.count('class="analysis-card"') == 2
     assert "顯示優先結果與最近記錄，共 2 / 3 筆" in body
-    assert "優先顯示現行 v4 模型結果，其次為已保存的歷史模型紀錄，再顯示本機分析" in body
+    assert "自動顯示須同時完成本機品質檢查與 v4 模型分析" in body
+    assert "歷史模型結果保留供查閱" in body
     assert 'class="photo-orientation-actions"' in body
     assert 'class="secondary orientation-set orientation-clear"' in body
     assert 'class="photo-type-picker"' in body
@@ -1133,7 +1156,7 @@ def test_model_analysis_stays_preferred_after_newer_local_fallback(client, app):
     assert "完整模型判斷" in listing
     assert "模型短句" in listing
     assert "只有本機特徵" not in listing
-    assert "優先顯示 · 模型判斷 · Vision 模型分析" in detail
+    assert "優先顯示 · AI 模型判斷 · Vision 模型分析" in detail
     assert detail.index("完整模型判斷") < detail.index("只有本機特徵")
 
 
@@ -1182,13 +1205,14 @@ def test_photo_cards_never_present_excluded_screenshot_or_severe_blur_as_high_sc
     listing = client.get("/photos").get_data(as_text=True)
     assert "本機候選品質 0.0" in listing
     assert "本機候選品質分開顯示" in listing
-    assert "E6 顯示適合度只在有正式 AI 排序時納入 AI 選片分" in listing
+    assert "E6 顯示適合度僅供參考，不加入 AI 選片分" in listing
 
     detail = client.get(f"/photos/{blurry_id}").get_data(as_text=True)
     assert "本機品質分" in detail
     assert "模糊 44.54／對比 11.80" in detail
     assert "模糊 &lt; 60 且對比 &lt; 15" in detail
-    assert "明確截圖、解析度過低或嚴重單項缺陷會直接排除" in detail
+    assert "明確截圖、解析度過低或嚴重品質問題會直接排除" in detail
+    assert "疑似缺陷保留供參考，不降低 AI 選片分" in detail
 
 
 def test_photo_cards_force_ineligible_selection_score_to_zero_but_keep_diagnostics(client, app):
@@ -1221,7 +1245,7 @@ def test_photo_cards_force_ineligible_selection_score_to_zero_but_keep_diagnosti
     body = client.get("/photos").get_data(as_text=True)
 
     assert "AI 選片分 0.0（已排除：" in body
-    assert f"AI 原始綜合 {round(raw_score, 1)}" in body
+    assert f"模型原評分 {round(raw_score, 1)}" in body
     assert "E6 顯示適合度 99.0" in body
 
 
@@ -1283,7 +1307,10 @@ def test_review_thumbnail_accepts_string_root_and_rejects_invalid_sources(
     assert valid.mimetype == "image/jpeg"
 
     (root / "photo.jpg").unlink()
-    assert client.get(f"/api/v1/review/photos/{photo_id}/thumbnail").status_code == 404
+    retained = client.get(f"/api/v1/review/photos/{photo_id}/thumbnail")
+    assert retained.status_code == 200
+    assert retained.mimetype == "image/jpeg"
+    assert retained.headers["X-InkTime-Photo-Source"] == "retained-preview"
 
     with app.extensions["inktime_database"].session() as connection:
         connection.execute("UPDATE photos SET relative_path='../outside.jpg' WHERE id=?", (photo_id,))
@@ -1337,6 +1364,11 @@ def test_rendering_console_exposes_layout_e6_and_manual_crop_controls(client, ap
         "{}",
         ranking_score=88,
     )
+    with app.extensions["inktime_database"].session() as connection:
+        connection.execute(
+            "UPDATE photos SET local_features_status='complete' WHERE id=?",
+            (photo_id,),
+        )
 
     page = client.get("/rendering")
     body = page.get_data(as_text=True)
@@ -1419,3 +1451,111 @@ def test_photo_detail_backfills_local_e6_and_crop_without_model(client, app, tmp
     assert photo["crop_focus_x"] is not None
     assert photo["crop_method"] in {"faces", "saliency"}
     assert usage_count == 0
+
+
+@pytest.mark.parametrize("field", ["schema", "system_prompt", "memory_weight", "favorite_bonus"])
+def test_scoring_rejects_locked_contract_changes(client, app, field):
+    create_admin(app)
+    login(client)
+    repo = app.extensions["inktime_scoring_repository"]
+    before = repo.current()
+    for path in ("/api/v1/scoring/profiles", "/api/v1/scoring/prompt/preview"):
+        payload = {"rules": "互動清楚約 70 分。", field: 99}
+        if path.endswith("profiles"):
+            payload["name"] = "不合法的契約變更"
+        response = client.post(path, json=payload, headers={"X-CSRF-Token": csrf(client)})
+        assert response.status_code == 400
+    assert repo.current() == before
+
+
+def test_prompt_preview_has_no_side_effects_and_uses_live_settings(client, app, monkeypatch):
+    actor = create_admin(app)
+    login(client)
+    repo = app.extensions["inktime_scoring_repository"]
+    settings = app.extensions["inktime_settings_repository"]
+    before = repo.current()
+    # Settings can be changed independently of a scoring-profile history row.
+    settings.update("analysis.scoring_rules", "目前設定的短版規則", changed_by=actor, source_ip="test")
+    providers = app.extensions["inktime_provider_repository"]
+    providers.save({"name": "Preview fixture", "kind": "openai_compatible",
+                    "base_url": "https://provider.invalid/v1", "enabled": True,
+                    "api_key": "secret-preview-fixture", "model": "fixture-vision"}, user_id=actor)
+
+    def forbid_transport(*_args, **_kwargs):
+        pytest.fail("A prompt preview must not construct or call a provider")
+
+    monkeypatch.setattr(app.extensions["inktime_provider_service"], "build_router", forbid_transport)
+    saved = client.get("/api/v1/scoring/prompt")
+    assert saved.status_code == 200
+    assert saved.json["rules"] == "目前設定的短版規則"
+    assert saved.json["profile_matches_settings"] is False
+    assert saved.json["providers"][0]["model"] == "fixture-vision"
+    assert "secret-preview-fixture" not in saved.get_data(as_text=True)
+    assert "provider.invalid" not in saved.get_data(as_text=True)
+    draft_rules = "memory_score：互動清楚約 70 分。"
+    response = client.post("/api/v1/scoring/prompt/preview", json={"rules": draft_rules},
+                           headers={"X-CSRF-Token": csrf(client)})
+    assert response.status_code == 200
+    assert response.json["is_draft"] is True
+    assert response.json["system_prompt"].count(draft_rules) == 1
+    assert response.json["schema"] == saved.json["schema"]
+    assert response.json["char_delta"] == len(draft_rules) - len(saved.json["rules"])
+    assert repo.current() == before
+    assert settings.get("analysis.scoring_rules") == "目前設定的短版規則"
+    lab = client.get("/api/v1/scoring/prompt?scope=scoring_test").json
+    assert "【進階照片描述與相框文案】" in saved.json["system_prompt"]
+    assert "【進階照片描述與相框文案】" not in lab["system_prompt"]
+    assert client.get("/api/v1/scoring/prompt?scope=unknown").status_code == 400
+
+
+@pytest.mark.parametrize("rules", [None, {}, 12, "", "   ", "字" * 12001])
+def test_prompt_editor_rejects_invalid_rules(client, app, rules):
+    create_admin(app)
+    login(client)
+    for path in ("/api/v1/scoring/profiles", "/api/v1/scoring/prompt/preview"):
+        payload = {"rules": rules}
+        if path.endswith("profiles"):
+            payload["name"] = "無效參考"
+        response = client.post(path, json=payload, headers={"X-CSRF-Token": csrf(client)})
+        assert response.status_code == 400
+
+
+def test_prompt_short_rules_save_restore_and_escape_html(client, app):
+    create_admin(app)
+    login(client)
+    repo = app.extensions["inktime_scoring_repository"]
+    before = repo.current()
+    rules = "memory_score：互動 70 分。<script>alert(1)</script>"
+    response = client.post("/api/v1/scoring/profiles", json={"name": "短版", "rules": rules},
+                           headers={"X-CSRF-Token": csrf(client)})
+    assert response.status_code == 201
+    saved = client.get("/api/v1/scoring/prompt").json
+    assert saved["rules"] == rules
+    assert saved["profile_matches_settings"] is True
+    page = client.get("/scoring").get_data(as_text=True)
+    assert '<script>alert(1)</script>' not in page
+    assert '&lt;script&gt;alert(1)&lt;/script&gt;' in page
+    assert 'type="range"' not in page
+    for section in ("prompt-contract", "prompt-editor", "prompt-preview", "ranking-formula"):
+        assert f'id="{section}"' in page
+    restored = client.post(f"/api/v1/scoring/profiles/{before['id']}/restore",
+                           headers={"X-CSRF-Token": csrf(client)})
+    assert restored.status_code == 201
+    assert restored.json["id"] != before["id"]
+    assert client.get("/api/v1/scoring/prompt").json["rules"] == before["rules"]
+
+
+def test_prompt_permissions_and_csrf(client, app):
+    create_admin(app)
+    assert client.get("/api/v1/scoring/prompt").status_code == 401
+    login(client)
+    payload = {"rules": "互動清楚約 70 分。"}
+    assert client.post("/api/v1/scoring/prompt/preview", json=payload).status_code == 403
+    app.extensions["inktime_auth_repository"].create_user("prompt-viewer", "safe-viewer-password", "viewer")
+    login(client, "prompt-viewer", "safe-viewer-password")
+    assert client.get("/api/v1/scoring/prompt").status_code == 200
+    assert 'id="scoring-profile-form"' not in client.get("/scoring").get_data(as_text=True)
+    assert client.post("/api/v1/scoring/prompt/preview", json=payload,
+                       headers={"X-CSRF-Token": csrf(client)}).status_code == 403
+    assert client.post("/api/v1/scoring/profiles", json={"name": "拒絕", **payload},
+                       headers={"X-CSRF-Token": csrf(client)}).status_code == 403

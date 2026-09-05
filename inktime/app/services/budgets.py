@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from inktime.app.db import Database
 from inktime.app.repositories.settings import SettingsRepository
+from inktime.app.services.usage_periods import usage_periods
 
 
 class BudgetExceeded(RuntimeError):
@@ -26,27 +27,28 @@ class BudgetService:
 
     def snapshot(self, job_id: str | None = None, photo_id: str | None = None) -> dict:
         evidence = self._billable_evidence_sql()
+        periods = usage_periods(str(self.settings.get("general.timezone", "Asia/Taipei")))
         with self.database.session() as connection:
             row = connection.execute(
                 f"""
                 SELECT
                     COALESCE(SUM(CASE WHEN cost_source<>'unknown'
-                        AND date(started_at)=date('now') THEN COALESCE(actual_cost,estimated_cost) ELSE 0 END),0) daily_known,
+                        AND started_at >= :day_start AND started_at < :day_end THEN COALESCE(actual_cost,estimated_cost) ELSE 0 END),0) daily_known,
                     COALESCE(SUM(CASE WHEN cost_source<>'unknown'
-                        AND strftime('%Y-%m',started_at)=strftime('%Y-%m','now')
+                        AND started_at >= :month_start AND started_at < :month_end
                         THEN COALESCE(actual_cost,estimated_cost) ELSE 0 END),0) monthly_known,
-                    COALESCE(SUM(CASE WHEN cost_source<>'unknown' AND photo_id=?
+                    COALESCE(SUM(CASE WHEN cost_source<>'unknown' AND photo_id=:photo_id
                         THEN COALESCE(actual_cost,estimated_cost) ELSE 0 END),0) photo_known,
                     COALESCE(SUM(CASE WHEN cost_source='unknown' AND {evidence} THEN 1 ELSE 0 END),0) unknown_count,
                     COALESCE(SUM(CASE WHEN cost_source='unknown' AND {evidence}
-                        AND date(started_at)=date('now') THEN 1 ELSE 0 END),0) daily_unknown_count,
+                        AND started_at >= :day_start AND started_at < :day_end THEN 1 ELSE 0 END),0) daily_unknown_count,
                     COALESCE(SUM(CASE WHEN cost_source='unknown' AND {evidence}
-                        AND strftime('%Y-%m',started_at)=strftime('%Y-%m','now') THEN 1 ELSE 0 END),0) monthly_unknown_count,
-                    COALESCE(SUM(CASE WHEN cost_source='unknown' AND {evidence} AND photo_id=? THEN 1 ELSE 0 END),0) photo_unknown_count,
-                    COALESCE(SUM(CASE WHEN cost_source='unknown' AND {evidence} AND job_id=? THEN 1 ELSE 0 END),0) job_unknown_count
+                        AND started_at >= :month_start AND started_at < :month_end THEN 1 ELSE 0 END),0) monthly_unknown_count,
+                    COALESCE(SUM(CASE WHEN cost_source='unknown' AND {evidence} AND photo_id=:photo_id THEN 1 ELSE 0 END),0) photo_unknown_count,
+                    COALESCE(SUM(CASE WHEN cost_source='unknown' AND {evidence} AND job_id=:job_id THEN 1 ELSE 0 END),0) job_unknown_count
                 FROM api_usage
                 """,
-                (photo_id, photo_id, job_id),
+                periods | {"photo_id": photo_id, "job_id": job_id},
             ).fetchone()
             job = (
                 connection.execute("SELECT spent,budget_limit FROM jobs WHERE id=?", (job_id,)).fetchone()

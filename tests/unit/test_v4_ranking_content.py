@@ -2,9 +2,7 @@ import pytest
 from inktime.app.domain.analysis.scoring import (
     calculate_ranking_score,
     ranking_components,
-    library_rarity_adjustment,
     DEFAULT_RANKING_WEIGHTS,
-    calculate_distinguishing_score,
 )
 from inktime.app.domain.analysis.content_filter import evaluate_content_filter, CONTENT_FILTER_SWITCHES
 from inktime.app.domain.analysis.schema import validate_analysis_result
@@ -18,13 +16,13 @@ from tests.unit.test_analysis_schema import content_filter_result, valid_result
 def test_special_and_ranking_formula(level, bonus):
     value = valid_result(memory_score=80, visual_score=60, special_level=level)
     value["local_quality_score"] = 40
-    assert calculate_ranking_score(value, DEFAULT_RANKING_WEIGHTS) == 65 + bonus
+    assert calculate_ranking_score(value, DEFAULT_RANKING_WEIGHTS) == pytest.approx(73.4 + bonus)
 
 
-def test_favorite_and_rarity_are_levels_and_clamped():
+def test_favorite_is_one_level_and_clamped():
     value = valid_result(special_level=2) | {"local_quality_score": 80}
-    parts = ranking_components(value, favorite=True, rarity_adjustment=1)
-    assert parts["effective_special_level"] == 4 and parts["special_bonus"] == 14
+    parts = ranking_components(value, favorite=True)
+    assert parts["effective_special_level"] == 3 and parts["special_bonus"] == 9
     assert (
         calculate_ranking_score(
             valid_result(memory_score=100, visual_score=100, special_level=4) | {"local_quality_score": 100}
@@ -33,20 +31,10 @@ def test_favorite_and_rarity_are_levels_and_clamped():
     )
 
 
-def test_rarity_is_local_and_requires_enough_peers():
-    ordinary = valid_result(types=["風景"], special_codes=[], people_count=0)
-    rare = valid_result(types=["活動"], special_codes=["ceremony"], people_count=20)
-    assert library_rarity_adjustment(rare, [ordinary] * 19) == 0
-    assert library_rarity_adjustment(rare, [ordinary] * 20) == 1
-    assert library_rarity_adjustment(ordinary, [ordinary] * 20) == 0
-
-
-def test_people_count_cannot_trigger_rarity_without_a_meaningful_code():
-    ordinary = valid_result(types=["風景"], special_codes=[], people_count=0)
-    crowd = valid_result(types=["活動"], special_codes=[], people_count=30)
-    group = valid_result(types=["活動"], special_codes=["group_photo"], people_count=30)
-    assert library_rarity_adjustment(crowd, [ordinary] * 20) == 0
-    assert library_rarity_adjustment(group, [ordinary] * 20) == 1
+def test_types_and_people_count_do_not_add_hidden_rarity_bonus():
+    ordinary = valid_result(types=["風景"], special_codes=[], people_count=0, special_level=2)
+    group = valid_result(types=["活動"], special_codes=["group_photo"], people_count=30, special_level=2)
+    assert ranking_components(ordinary) == ranking_components(group)
 
 
 @pytest.mark.parametrize("code", list(CONTENT_FILTER_SWITCHES))
@@ -89,12 +77,10 @@ def test_prompt_guardrails_and_no_duplicate_default_rubric():
     provider.close()
 
 
-def test_percentile_then_e6_contract():
-    distinguishing, percentile = calculate_distinguishing_score(72, [70, 71, 72, 73, 74])
-    assert percentile == 50
-    assert distinguishing == 57.7
-    assert distinguishing * 0.8 + 90 * 0.2 == pytest.approx(64.16)
-    assert distinguishing * 0.8 + 10 * 0.2 == pytest.approx(48.16)
+def test_e6_is_reference_only_and_cannot_change_model_rank():
+    value = valid_result(memory_score=72, visual_score=72, special_level=0)
+    assert calculate_ranking_score({**value, "e6_score": 10}) == 72
+    assert calculate_ranking_score({**value, "e6_score": 90}) == 72
 
 
 @pytest.mark.parametrize("switch_mask", range(8))

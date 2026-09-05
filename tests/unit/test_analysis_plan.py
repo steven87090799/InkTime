@@ -6,6 +6,7 @@ from inktime.app.domain.analysis.plan import (
     canonical_json,
     fingerprint,
     normalize_analysis_plan,
+    reusable_analysis_fingerprint,
 )
 
 
@@ -47,6 +48,21 @@ def test_analysis_plan_is_canonical_non_secret_and_input_specific():
     assert fingerprint(plan) != fingerprint(_plan(high_image_max_side=1024))
     assert plan["reasoning_effort"] == "none"
     assert fingerprint(plan) != fingerprint(_plan(reasoning_effort="low"))
+
+
+def test_reuse_ignores_local_scoring_metadata_but_keeps_model_contract():
+    plan = _plan()
+    local_changes = plan | {
+        "scoring_profile_id": "renamed", "ranking_weights": {"memory": 60}, "favorite_bonus": 9,
+    }
+    assert fingerprint(local_changes) != fingerprint(plan)
+    assert reusable_analysis_fingerprint(local_changes) == reusable_analysis_fingerprint(plan)
+    for changed in (
+        _plan(prompt_version="changed"), _plan(scoring_rules="changed rubric"),
+        _plan(caption_controls={"copy_banned_words": ["changed"]}),
+        _plan(high_image_max_side=1024), _plan(high_model="different-model"),
+    ):
+        assert reusable_analysis_fingerprint(changed) != reusable_analysis_fingerprint(plan)
 
 
 def test_repair_policy_is_frozen_bounded_and_legacy_plans_are_upgraded():

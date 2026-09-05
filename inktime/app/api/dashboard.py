@@ -3,6 +3,7 @@ from __future__ import annotations
 from flask import Blueprint, current_app, render_template
 
 from inktime.app.web.ai_readiness import MODE_LABELS, ai_readiness_snapshot
+from inktime.app.services.usage_periods import usage_periods
 from inktime.app.web.access import login_required
 from inktime.app.repositories.analysis_history import historical_model_sql
 
@@ -212,6 +213,9 @@ def _setup_overview(connection) -> dict:
 @bp.get("/dashboard")
 @login_required
 def dashboard():
+    periods = usage_periods(
+        str(current_app.extensions["inktime_settings_repository"].get("general.timezone", "Asia/Taipei"))
+    )
     database = current_app.extensions["inktime_database"]
     with database.session() as connection:
         counts = {
@@ -227,16 +231,18 @@ def dashboard():
                 "SELECT COUNT(*) FROM jobs WHERE status IN ('preparing','running','pausing','retrying')"
             ).fetchone()[0],
             "today_tokens": connection.execute(
-                "SELECT COALESCE(SUM(input_tokens+output_tokens),0) FROM api_usage WHERE date(started_at)=date('now')"
+                "SELECT COALESCE(SUM(input_tokens+output_tokens),0) FROM api_usage WHERE started_at >= :day_start AND started_at < :day_end",
+                periods,
             ).fetchone()[0],
             "month_cost": connection.execute(
-                "SELECT COALESCE(SUM(CASE WHEN cost_source<>'unknown' THEN COALESCE(actual_cost, estimated_cost) ELSE 0 END),0) FROM api_usage WHERE strftime('%Y-%m',started_at)=strftime('%Y-%m','now')"
+                "SELECT COALESCE(SUM(CASE WHEN cost_source<>'unknown' THEN COALESCE(actual_cost, estimated_cost) ELSE 0 END),0) FROM api_usage WHERE started_at >= :month_start AND started_at < :month_end",
+                periods,
             ).fetchone()[0],
             "month_unknown_count": connection.execute(
                 """
                 SELECT COUNT(*) FROM api_usage
                 WHERE cost_source='unknown'
-                  AND strftime('%Y-%m',started_at)=strftime('%Y-%m','now')
+                  AND started_at >= :month_start AND started_at < :month_end
                   AND (
                       COALESCE(input_tokens,0)>0 OR COALESCE(output_tokens,0)>0
                       OR COALESCE(cached_tokens,0)>0 OR COALESCE(reasoning_tokens,0)>0
@@ -244,7 +250,8 @@ def dashboard():
                       OR COALESCE(image_bytes,0)>0 OR COALESCE(actual_cost,0)>0
                       OR COALESCE(estimated_cost,0)>0
                   )
-                """
+                """,
+                periods,
             ).fetchone()[0],
         }
         model_counts = connection.execute(

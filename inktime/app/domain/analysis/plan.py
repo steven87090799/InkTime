@@ -8,7 +8,7 @@ from typing import Any, Mapping, Sequence
 
 
 VISION_INPUT_VERSION = "vision-input-v3"
-PROVIDER_PROMPT_CONTRACT_VERSION = "provider-prompt-contract-v2"
+PROVIDER_PROMPT_CONTRACT_VERSION = "provider-prompt-contract-v3"
 AI_IMAGE_JPEG_QUALITY = 88
 SCHEMA_VERSION = 4
 REASONING_EFFORTS = ("none", "low", "medium", "high", "xhigh", "max")
@@ -44,6 +44,21 @@ def canonical_json(value: Mapping[str, Any]) -> str:
 
 def fingerprint(value: Mapping[str, Any]) -> str:
     return hashlib.sha256(canonical_json(value).encode("utf-8")).hexdigest()
+
+
+def reusable_analysis_fingerprint(plan: Mapping[str, Any]) -> str:
+    """Compare semantic plans without local ranking/version metadata.
+
+    Prompt/rubric, provider, model, captions, safety and pixel inputs remain
+    part of the identity. This does not replace a frozen Batch request hash.
+    """
+    identity = dict(plan)
+    for field in (
+        "caption_display_controls", "repair_policy", "ranking_weights",
+        "favorite_bonus", "scoring_profile_id",
+    ):
+        identity.pop(field, None)
+    return fingerprint(identity)
 
 
 def provider_prompt_contract_sha256(
@@ -150,7 +165,7 @@ def build_analysis_plan(
         "provider_route": route,
         "favorite_override": bool(favorite_override),
         "scoring_profile_id": str(scoring_profile.get("id", "")),
-        "ranking_weights": {"memory": 50.0, "visual": 25.0, "local_quality": 25.0},
+        "ranking_weights": {"memory": 67.0, "visual": 33.0, "local_quality": 0.0},
         "favorite_bonus": 1,
         "scoring_rules_sha256": rules_sha256,
         "scoring_rules": str(scoring_rules),

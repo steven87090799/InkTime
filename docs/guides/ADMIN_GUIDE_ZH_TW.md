@@ -19,7 +19,7 @@
 | 本機預篩選 | 啟用 | 截圖／明顯低品質可分別停用 | 排除項目 0 Token；不刪原檔 | 否 |
 | `analysis.prefilter_sensitivity` | conservative | conservative／balanced／aggressive | 越積極越省 Token，也越可能誤排除 | 否 |
 | `analysis.scoring_rules` | 內建完整規則 | 100–12000 字元 | 影響新分析結果 | 否 |
-| 綜合排序公式 | 50／25／25 | 固定為回憶／視覺／本機品質 | 公式不可由舊版權重介面改寫 | 否 |
+| 綜合排序公式 | 67／33／0 | 固定為回憶／視覺／本機品質 | 公式不可由舊版權重介面改寫 | 否 |
 | 最愛照片提升 | 特殊程度 +1 | 固定且最高為 level 4 | 影響 v4 排名，不改模型原始分 | 否 |
 | `analysis.concurrency` | 1 | 1–8，Intel N100 建議 1；確認 RSS 後最多先試 2 | 過高觸發限流／圖片記憶體尖峰 | 否 |
 | `worker.queue_multiplier` | 1 | 1–4，N100 建議 1 | 增加記憶體中 Future | 否 |
@@ -39,12 +39,12 @@
 | `budget.job_default` | 10.0 | ≥0 美元 | 工作達到後暫停 | 否 |
 | `budget.photo_max` | 0.25 | ≥0 美元 | 過低會阻擋單次模型分析 | 否 |
 | `budget.max_tokens` | 8000 | 256–1,000,000 | 需符合模型能力 | 否 |
-| `render.memory_threshold` | 70 | 0–100 | 過高可能無候選 | 否 |
+| `render.memory_threshold` | 70 | 0–100 | 舊設定相容欄位，已不影響自動選片 | 否 |
 | `render.quantity` | 5 | 1–50 | 增加下載量 | 否 |
 | `render.selection_mode` | history_today | history_today／top_ranked | 歷年今日會依系統時區與 EXIF 拍攝日選片 | 否 |
 | `render.history_today_window_days` | 7 | 0–31 | 0 只接受完全相同月日 | 否 |
 | `render.history_today_fallback` | nearby_then_ranked | nearby_then_ranked／nearby_only／ranked／none | 限制越嚴格越可能沒有足量候選 | 否 |
-| `render.e6_weight` | 20 | 0–60% | 過高會讓面板顯示效果凌駕回憶分 | 否 |
+| `render.e6_weight` | 20 | 0–60% | 舊設定相容欄位，E6 已不加權 | 否 |
 | `render.layout` | photo_info | full／postcard／photo_info／photo_pair／photo_pair_caption／adaptive_memory／calendar／weather_sensor | 日曆與天氣版型的照片區較小 | 否 |
 | `render.show_capture_date` | true | true／false | EXIF 日期錯誤時也會跟著顯示 | 否 |
 | `render.font_path` | builtin:iansui | 內建手寫／文青風格或已上傳 TTF／OTF／TTC | 缺字會停止發布，不會 fallback | 否 |
@@ -107,7 +107,7 @@
 
 「渲染」頁提供即時六色預覽。智慧裁切先用本機 OpenCV 尋找正面人臉；沒有可信人臉時，改以邊緣、色彩與中央先驗估計主體。裁切會盡量保留偵測到的主體範圍，管理員也可用水平／垂直滑桿覆寫焦點並儲存，或恢復自動模式。這些操作只儲存 0–1 的相對位置，不修改原始照片。
 
-E6 適合度完全在本機計算，量測正式六色色盤量化後的對比、主體、膚色與文字／邊緣保留；只參與顯示分數，不再作自動排除門檻，也不計入本機品質分。補算 E6 不會呼叫 Provider。Migration 57 只解除符合舊 E6 規則且未人工覆寫的自動排除；其他排除與人工決定保留。
+E6 適合度完全在本機計算，量測正式六色色盤量化後的對比、主體、膚色與文字／邊緣保留；只供顯示效果參考，不作自動排除門檻，不計入本機品質分或 AI 選片分。補算 E6 不會呼叫 Provider。Migration 57 只解除符合舊 E6 規則且未人工覆寫的自動排除；其他排除與人工決定保留。
 
 八種版型為全版照片、明信片、照片＋日期地點、純雙照片、雙照片各自一句話、智慧自適應回憶、月曆相框、天氣＋室內溫溼度；後兩種只支援直向。預覽可暫時切換版型，按「設為預設版型」才會改正式發布設定。天氣資料為選用功能，從 Open-Meteo 取得目前天氣、溼度與當日高低溫並快取 30 分鐘；外部服務失敗時照片仍正常發布。室內資料來自 PhotoPainter 裝置狀態回報；沒有感測值時畫面會明確顯示尚無回報。
 
@@ -134,11 +134,11 @@ ExifTool 能提供 MIME、相機、軟體、拍攝時間與 GPS 等中繼資料�
 
 ## 照片評分與門檻
 
-真正完成 Vision v4 分析時，模型輸出回憶與視覺兩個 0–100 分數及特殊程度；資料列以 `score_kind=semantic` 標記。Server 加入本機品質後，以固定的回憶 50%、視覺 25%、本機品質 25% 計算基礎分，再套用特殊程度、同照片庫稀有度與最愛提升。本機影像分析以 `score_kind=local_quality` 標記，只保存本機品質特徵與 `local_score`，不會產生或參與 semantic `ranking_score`、percentile；`automatic_ai` 只在 semantic 候選不足時用本機候選另層補足。舊資料無法可靠辨識時標為 `legacy`，且不會轉成 v4 排名。`analysis.stage_two_threshold` 僅保留舊設定讀取相容，`render.memory_threshold` 才是電子紙候選的最低回憶分門檻。
+真正完成 Vision v4 分析時，模型輸出回憶與視覺兩個 0–100 分數及特殊程度；資料列以 `score_kind=semantic` 標記。固定排序為回憶 67%、視覺 33%，再套用特殊程度 bonus（0／2／5／9／14；最愛提升 1 級）。本機只負責基本品質門檻；automatic_ai 必須本機與有效 AI 分析都完成。未完成不補位，不再使用照片庫稀有度、percentile、E6 加權或最低回憶分。日期主題仍依設定限制候選範圍；範圍內依 AI 分數排序，不加入播放次數加減分。舊版分析保留且不轉成 v4；Migration 58 只重算已有 v4 的衍生排序，不重跑模型。
 
 - 改模型：在「設定」調整 `model.analysis_model`，並在「模型」頁設定 Provider。
 - 舊版 `model.low_model`／`model.high_model` 與 `analysis.stage_two_threshold` 僅供相容讀取，不會恢復第二次圖片請求。
-- 改電子紙最低回憶分：調整 `render.memory_threshold`。
+- 改 AI 選片偏好：在提示詞與評分控制中心調整評分參考；`render.memory_threshold` 已停用。
 - 查看模型評分規則與固定排名公式：到「評分」頁；Schema v4 不提供舊版四項權重調整。
 - 測試照片：在「評分」頁選一張照片並確認付費請求；暫存檔會在請求結束後刪除，Token、費用與延遲仍寫入成本紀錄。
 - 還原：版本歷史的「還原此版本」會建立一個新的目前版本，不會刪除或覆寫任何歷史。

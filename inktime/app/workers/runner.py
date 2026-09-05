@@ -199,6 +199,8 @@ class WorkerRunner:
                     raise AnalysisDisabledError("Frozen Analysis Plan 指定完全停用；工作項目已拒絕")
                 if provider_error is not None:
                     raise provider_error
+                if job["kind"] == "analysis_batch_poll":
+                    return self.app.extensions["inktime_batch_analysis_service"].poll_due(limit=2)
                 if job["kind"] == "analysis_batch_import":
                     return self.app.extensions["inktime_batch_analysis_service"].import_batch(
                         str(settings["batch_id"]),

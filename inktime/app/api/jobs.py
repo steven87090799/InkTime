@@ -18,6 +18,7 @@ from inktime.app.domain.analysis.plan import canonical_json, fingerprint, normal
 from inktime.app.domain.analysis.execution_mode import execution_mode, permits_automatic_ai
 from inktime.app.web.ai_readiness import ai_readiness_snapshot
 from inktime.app.services.jobs import InvalidJobTransition, JobService
+from inktime.app.repositories.analysis_reservations import AnalysisReservationConflict
 from inktime.app.web.access import administrator_required, login_required
 from inktime.app.web.error_messages import explain_error
 
@@ -604,7 +605,7 @@ def control_job(job_id: str, action: str):
             if not isinstance(result, int) or result < 1:
                 raise InvalidJobTransition("沒有可重跑的失敗項目")
             _service().start(job_id)
-    except InvalidJobTransition as exc:
+    except (InvalidJobTransition, AnalysisReservationConflict) as exc:
         return {"error_code": exc.code, "message": str(exc)}, 409
     return {"status": "ok", "affected": result if isinstance(result, int) else None}
 

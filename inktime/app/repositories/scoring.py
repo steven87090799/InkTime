@@ -5,7 +5,7 @@ import json
 from uuid import uuid4
 
 from inktime.app.db import Database
-from inktime.app.domain.analysis.scoring import DEFAULT_RANKING_WEIGHTS, validate_ranking_weights
+from inktime.app.domain.analysis.scoring import DEFAULT_RANKING_WEIGHTS, validate_ranking_weights, normalize_scoring_rules
 from inktime.app.repositories.settings import SettingsRepository
 
 
@@ -20,8 +20,8 @@ class ScoringProfileRepository:
 
     def _settings_snapshot(self) -> dict:
         return {
-            "rules": str(self.settings.get(SETTING_KEYS["rules"], "")),
-            "memory_weight": 50.0, "visual_weight": 25.0, "local_weight": 25.0,
+            "rules": normalize_scoring_rules(self.settings.get(SETTING_KEYS["rules"], "")),
+            "memory_weight": 67.0, "visual_weight": 33.0, "local_weight": 0.0,
             "favorite_bonus": 1,
         }
 
@@ -44,7 +44,7 @@ class ScoringProfileRepository:
                         id,name,rules,memory_weight,visual_weight,local_weight,
                         beauty_weight,technical_weight,emotion_weight,ranking_contract_version,
                         favorite_bonus,is_active,created_by,created_at
-                    ) VALUES (?,?,?,?,?,?,25,25,0,4,?,1,NULL,?)
+                    ) VALUES (?,?,?,?,?,?,33,0,0,4,?,1,NULL,?)
                     """,
                     (
                         version_id,
@@ -90,11 +90,9 @@ class ScoringProfileRepository:
         source_ip: str,
     ) -> dict:
         clean_name = name.strip()
-        clean_rules = rules.strip()
+        clean_rules = normalize_scoring_rules(rules)
         if not clean_name or len(clean_name) > 80:
             raise ValueError("版本名稱必須為 1 到 80 個字元")
-        if len(clean_rules) < 100 or len(clean_rules) > 12000:
-            raise ValueError("照片評分規則必須為 100 到 12000 個字元")
         values = validate_ranking_weights(weights)
         bonus = 1
 
@@ -155,7 +153,7 @@ class ScoringProfileRepository:
                         id,name,rules,memory_weight,visual_weight,local_weight,
                         beauty_weight,technical_weight,emotion_weight,ranking_contract_version,
                         favorite_bonus,is_active,created_by,created_at
-                    ) VALUES (?,?,?,?,?,?,25,25,0,4,?,1,?,?)
+                    ) VALUES (?,?,?,?,?,?,33,0,0,4,?,1,?,?)
                     """,
                     (
                         version_id,
