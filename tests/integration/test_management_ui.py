@@ -1307,7 +1307,10 @@ def test_review_thumbnail_accepts_string_root_and_rejects_invalid_sources(
     assert valid.mimetype == "image/jpeg"
 
     (root / "photo.jpg").unlink()
-    assert client.get(f"/api/v1/review/photos/{photo_id}/thumbnail").status_code == 404
+    retained = client.get(f"/api/v1/review/photos/{photo_id}/thumbnail")
+    assert retained.status_code == 200
+    assert retained.mimetype == "image/jpeg"
+    assert retained.headers["X-InkTime-Photo-Source"] == "retained-preview"
 
     with app.extensions["inktime_database"].session() as connection:
         connection.execute("UPDATE photos SET relative_path='../outside.jpg' WHERE id=?", (photo_id,))
