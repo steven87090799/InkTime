@@ -321,7 +321,12 @@ def test_manual_ai_idempotency_key_is_namespaced_per_endpoint(client, app, tmp_p
     actor = create_admin(app)
     login(client)
     _enable_fake_usable_provider(app)
-    excluded_id = _manual_excluded_photo(app, tmp_path, actor=actor)
+    single_root = tmp_path / "single"
+    batch_root = tmp_path / "batch"
+    single_root.mkdir()
+    batch_root.mkdir()
+    excluded_id = _manual_excluded_photo(app, single_root, actor=actor)
+    batch_id = _manual_excluded_photo(app, batch_root, actor=actor)
     _setting(app, "analysis.ai_mode", "off")
     _setting(app, "analysis.execution_mode", "local_with_manual_ai")
     headers = {"X-CSRF-Token": csrf(client), "Idempotency-Key": "shared-manual-key"}
@@ -329,7 +334,7 @@ def test_manual_ai_idempotency_key_is_namespaced_per_endpoint(client, app, tmp_p
     single = client.post(f"/api/v1/photos/{excluded_id}/ai", headers=headers)
     batch = client.post(
         "/api/v1/photos/exclusions/ai",
-        json={"photo_ids": [excluded_id]},
+        json={"photo_ids": [batch_id]},
         headers=headers,
     )
 

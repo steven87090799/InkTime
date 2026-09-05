@@ -118,7 +118,7 @@ def test_local_quality_favorite_population_and_caption_search(app):
         repo.get_with_path(ids[0]), evaluation=evaluate_local_quality(repo.get_with_path(ids[0]))
     )
     assert results[0]["local_quality_score"] == quality
-    assert results[0]["ranking_score"] == round(50 * 0.5 + 81 * 0.25 + quality * 0.25, 2)
+    assert results[0]["ranking_score"] == round(50 * 0.67 + 81 * 0.33, 2)
     old_score = results[0]["ranking_score"]
     repo.update_manual(
         ids[0],

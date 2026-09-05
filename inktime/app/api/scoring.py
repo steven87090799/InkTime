@@ -106,7 +106,11 @@ def _prompt_preview(rules: str | None = None) -> dict:
 
 
 def _editable_payload(*, preview: bool = False) -> dict:
-    payload = json_object_payload(request, maximum_bytes=64 * 1024, error_prefix="SET-002")
+    # The editable rules contract allows up to 12,000 characters.  A UTF-8
+    # payload at that limit can exceed 64 KiB before validation, so keep the
+    # transport bound above the field limit and let normalize_scoring_rules
+    # return the documented 400 for an overlong rules value.
+    payload = json_object_payload(request, maximum_bytes=256 * 1024, error_prefix="SET-002")
     allowed = {"rules"} if preview else {"name", "rules"}
     if set(payload) - allowed:
         abort(400, description="SET-002 只能修改版本名稱與評分參考；輸出契約與排序權重已鎖定")

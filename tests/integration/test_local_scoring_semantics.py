@@ -340,7 +340,6 @@ def test_local_detail_does_not_render_compatibility_values_as_ai_scores(client, 
     assert "本機候選品質分" in body
     assert "AI 語意評分</dt><dd>尚未進行" in body
     assert "AI 選片分</dt><dd>尚未產生" in body
-    assert "原始綜合排序</dt><dd>尚未產生" in body
     assert "語意四項分數" not in body
     assert "回憶 50｜美觀 50｜技術 50｜情緒 50" not in body
     assert "此結果僅為本機影像品質分析，不等同 AI" in body

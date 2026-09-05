@@ -1174,6 +1174,7 @@ def test_orientation_contradiction_needs_no_paid_repair_and_stays_reusable(app, 
 
 @pytest.mark.parametrize("rename_profile", [False, True])
 def test_worker_context_inherits_only_the_same_frozen_plan_and_keeps_source_trace(app, tmp_path, rename_profile):
+    actor = create_admin(app)
     _, ids, _service = prepare(app, tmp_path, duplicate=True)
     settings = app.extensions["inktime_settings_repository"]
     settings.update("analysis.ai_mode", "eligible", changed_by="test", source_ip="127.0.0.1")
@@ -1198,7 +1199,7 @@ def test_worker_context_inherits_only_the_same_frozen_plan_and_keeps_source_trac
         renamed = scoring.create(
             name="同規則新版本名稱", rules=str(plan["scoring_rules"]),
             weights={"memory": 67.0, "visual": 33.0, "local_quality": 0.0},
-            favorite_bonus=1, created_by="test", source_ip="127.0.0.1",
+            favorite_bonus=1, created_by=actor, source_ip="127.0.0.1",
         )
         plan = service.build_plan(strategy="high_quality", provider_route=[], scoring_profile=renamed)
     second = MockProvider([])
