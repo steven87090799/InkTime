@@ -1617,7 +1617,7 @@ class PhotoRepository:
         return blocked
 
     def active_hashes_for(self, cache_hashes: Sequence[str]) -> set[str]:
-        """Look up only cache-visible SHA values; never materialize the photo library."""
+        """Look up retained records, including missing sources, for cache-visible SHA values."""
         requested = list(
             dict.fromkeys(
                 value.casefold() for value in cache_hashes if _SHA256_RE.fullmatch(value.casefold())
@@ -1630,7 +1630,7 @@ class PhotoRepository:
                 active.update(
                     str(row["sha256"]).casefold()
                     for row in connection.execute(
-                        f"SELECT DISTINCT sha256 FROM photos WHERE lifecycle_status='active' AND sha256 IN ({placeholders})",  # noqa: S608
+                        f"SELECT DISTINCT sha256 FROM photos WHERE sha256 IN ({placeholders})",  # noqa: S608
                         tuple(chunk),
                     ).fetchall()
                 )

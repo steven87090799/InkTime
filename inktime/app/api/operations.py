@@ -539,7 +539,7 @@ def _active_thumbnail_hashes() -> set[str]:
         return {
             str(row[0]).casefold()
             for row in connection.execute(
-                "SELECT DISTINCT sha256 FROM photos WHERE lifecycle_status='active' AND sha256 IS NOT NULL"
+                "SELECT DISTINCT sha256 FROM photos WHERE sha256 IS NOT NULL"
             )
         }
 

@@ -17,9 +17,14 @@ def photo_derivative_response(photo_id: str, size: int, *, invalid_path_status: 
             raise ImageSourceError("IMG-MISSING", "找不到照片", 404)
         suffix = Path(photo["relative_path"]).suffix.lower()
         path = safe_join(Path(photo["root_path"]), photo["relative_path"])
-        if not path.is_file():
-            raise ImageSourceError("IMG-MISSING", "原始照片不存在", 404)
         cache = current_app.extensions["inktime_thumbnail_cache"]
+        if not path.is_file():
+            with cache.acquire_existing(str(photo["sha256"]), size) as derivative:
+                if derivative is not None:
+                    response = send_file(derivative, mimetype=DERIVATIVE_MEDIA_TYPE, conditional=True, max_age=0)
+                    response.headers["X-InkTime-Photo-Source"] = "retained-preview"
+                    return response
+            raise ImageSourceError("IMG-MISSING", "找不到來源原檔，也沒有可用的保留縮圖；請確認來源掛載或還原原檔", 404)
         # send_file opens the file while the shard is held, so cleanup cannot
         # remove it between generation and open. Streaming owns that open fd.
         with cache.acquire_for_use(path, str(photo["sha256"]), size) as derivative:

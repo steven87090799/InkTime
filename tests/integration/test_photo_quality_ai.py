@@ -1148,5 +1148,5 @@ def test_thumbnail_cleanup_only_queries_hashes_visible_in_cache(app, tmp_path):
         connection.execute("UPDATE photos SET lifecycle_status='missing' WHERE id=?", (photo_ids[1],))
 
     assert repository.active_hashes_for([str(first["sha256"]), str(second["sha256"]), "not-a-sha"]) == {
-        str(first["sha256"])
+        str(first["sha256"]), str(second["sha256"])
     }

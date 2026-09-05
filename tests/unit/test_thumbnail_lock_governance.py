@@ -3,6 +3,7 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 from hashlib import sha256
 import multiprocessing
+import os
 from pathlib import Path
 import threading
 import time
@@ -165,3 +166,20 @@ def test_cleanup_reuses_an_explicit_empty_inventory(tmp_path, monkeypatch):
         active_hashes=set(),
         inventory=[],
     ) == {"files": 0, "bytes": 0}
+
+
+def test_retained_preview_survives_expiry_and_capacity_until_record_removed(tmp_path):
+    source, digest = _source(tmp_path)
+    cache = ThumbnailCache(tmp_path / "cache")
+    thumbnail = cache.get_or_create(source, digest, 512)
+    large = cache.get_or_create(source, digest, 1600)
+    os.utime(thumbnail, (1, 1))
+    source.unlink()
+    result = cache.cleanup(max_bytes=0, retention_days=1, active_hashes={digest})
+    assert result["files"] == 1
+    assert thumbnail.exists() and not large.exists()
+    with cache.acquire_existing(digest, 1600) as retained:
+        assert retained == thumbnail
+    cache.cleanup(max_bytes=0, retention_days=1, active_hashes=set())
+    with cache.acquire_existing(digest, 1600) as retained:
+        assert retained is None

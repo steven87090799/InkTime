@@ -158,6 +158,20 @@ class ThumbnailCache:
             assert acquired
             yield self._get_or_create_locked(source, normalized_hash, destination, size)
 
+    @contextmanager
+    def acquire_existing(self, content_hash: str, size: int):
+        """Read a retained preview without requiring or recreating the original."""
+        for candidate_size in sorted(self.ALLOWED_SIZES, reverse=True):
+            if candidate_size > size:
+                continue
+            _, destination = self._destination(content_hash, candidate_size)
+            with self._generation_lock(destination.stem) as acquired:
+                assert acquired
+                if destination.is_file() and self._validate(destination, candidate_size):
+                    yield destination
+                    return
+        yield None
+
     def size_bytes(self) -> int:
         return sum(path.stat().st_size for path in self.root.glob("*.jpg") if path.is_file())
 
@@ -249,10 +263,12 @@ class ThumbnailCache:
             entries.append((path, bytes_used, accessed, size, orphan))
         selected: list[Path] = []
         total = sum(bytes_used for _, bytes_used, _, _, _ in entries)
-        # Always clear invalid/orphaned and expired files before evicting valid
-        # cache entries.  Capacity eviction then drops the largest derivatives
-        # first (1600, 1024, 512), preserving the fastest preview cache.
+        # Preserve the basic 512px preview for every retained photo record,
+        # including missing sources. Other derivatives remain an evictable
+        # cache; the configured capacity is a soft limit for retained previews.
         for path, bytes_used, accessed, _size, orphan in entries:
+            if not orphan and _size == 512:
+                continue  # Keep a basic preview while its photo record exists.
             if orphan or (retention_seconds and now - accessed > retention_seconds):
                 selected.append(path)
                 total -= bytes_used
@@ -261,6 +277,8 @@ class ThumbnailCache:
         ):
             if total <= max_bytes:
                 break
+            if not _orphan and _size == 512:
+                continue
             if path not in selected:
                 selected.append(path)
                 total -= bytes_used

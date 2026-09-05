@@ -12,8 +12,8 @@
 </div>
 
 <section class="panel photo-state-strip">
-  <div><p class="eyebrow">目前最終狀態</p><h2>{% if photo.exclusion_status == 'auto_excluded' %}已自動排除{% elif photo.exclusion_status == 'manually_excluded' %}已人工排除{% elif photo.exclusion_status == 'pending_review' %}待人工確認{% else %}符合候選資格{% endif %}</h2></div>
-  <p>{{ photo.reject_reason or '這張照片目前沒有排除原因，可繼續參與候選與分析。' }}</p>
+  <div><p class="eyebrow">目前最終狀態</p><h2>{% if not source_available %}來源原檔無法使用{% elif photo.lifecycle_status == 'missing' %}等待重新掃描確認來源{% elif photo.exclusion_status == 'auto_excluded' %}已自動排除{% elif photo.exclusion_status == 'manually_excluded' %}已人工排除{% elif photo.exclusion_status == 'pending_review' %}待人工確認{% else %}符合候選資格{% endif %}</h2></div>
+  <p>{% if not source_available %}找不到來源原檔，可能已刪除、移動或來源尚未掛載。{% if retained_preview %}目前只剩保留縮圖可供瀏覽。{% else %}也沒有可用的保留縮圖。{% endif %}分析與歷史資料仍保留；請還原來源後重新掃描，再進行分析或發布到相框。{% elif photo.lifecycle_status == 'missing' %}來源已可讀取，請重新掃描以恢復候選狀態。{% else %}{{ photo.reject_reason or '這張照片目前沒有排除原因，可繼續參與候選與分析。' }}{% endif %}</p>
 </section>
 
 {% if g.user.role == 'administrator' %}
@@ -43,7 +43,8 @@
   <div class="panel-head"><div><p class="eyebrow">照片與本機資料</p><h2>檔案與本地特徵</h2></div><a href="/rendering">到渲染頁調整裁切</a></div>
   <div class="photo-overview-layout">
     <div class="photo-preview-column">
-      <img class="detail-photo" src="/api/v1/photos/{{ photo.id }}/preview" alt="{{ photo.relative_path }}">
+      {% if not source_available %}<p class="notice" role="status">{% if retained_preview %}顯示保留縮圖，非原始照片。縮圖可能不足以支援相框裁切，目前不會自動替代原檔發布。{% else %}原檔與可用縮圖皆無法取得，請確認來源或還原備份。{% endif %}</p>{% endif %}
+      {% if source_available or retained_preview %}<img class="detail-photo" src="/api/v1/photos/{{ photo.id }}/preview" alt="{{ photo.relative_path }}">{% endif %}
       <p>{{ photo.width }} × {{ photo.height }} {{ photo.format }} · {{ location_name or ('有 GPS，但附近找不到城市' if photo.gps_lat is not none and photo.gps_lon is not none else '照片沒有 GPS') }}</p>
     </div>
     <div class="photo-facts-column">

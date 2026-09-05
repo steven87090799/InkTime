@@ -626,6 +626,15 @@ def photo_detail(photo_id: str):
     except (OSError, ValueError):
         # 原檔暫時離線時仍允許查看既有中繼資料與模型結果。
         pass
+    source_available = False
+    retained_preview = False
+    try:
+        source_available = safe_join(Path(photo["root_path"]), photo["relative_path"]).is_file()
+    except (OSError, ValueError, UnsafePathError):
+        pass
+    if not source_available and photo["sha256"]:
+        with current_app.extensions["inktime_thumbnail_cache"].acquire_existing(str(photo["sha256"]), 1600) as cached:
+            retained_preview = cached is not None
     location_name = current_app.extensions["inktime_location_resolver"].resolve(
         photo["gps_lat"],
         photo["gps_lon"],
@@ -765,6 +774,8 @@ def photo_detail(photo_id: str):
     ).as_dict()
     return render_template(
         "photo_detail.html",
+        source_available=source_available,
+        retained_preview=retained_preview,
         photo=photo,
         analyses=analyses,
         analysis_total=analysis_total,

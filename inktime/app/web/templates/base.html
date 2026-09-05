@@ -14,7 +14,7 @@
         const placeholder = document.createElement('div');
         placeholder.className = 'notice error';
         placeholder.setAttribute('role', 'status');
-        placeholder.textContent = '縮圖無法產生，請稍後重試或查看執行監控。';
+        placeholder.textContent = '縮圖無法產生。請在照片詳細資訊確認來源檔案與保留縮圖狀態，或查看執行監控。';
         image.replaceWith(placeholder);
       }, true);
       let savedTheme = null;
