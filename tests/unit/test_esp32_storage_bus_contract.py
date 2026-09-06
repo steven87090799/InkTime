@@ -32,9 +32,50 @@ def test_enhanced_offline_converts_once_then_writes_only_formal_frame():
         '"/inktime/frames/%s-r%u.tmp"',
         '"/inktime/frames/%s-r%u.bak"',
         "validateFormalFrameHeader",
-        "SD.rename(temporaryPath, finalPath)",
+        "FFat.rename(temporaryPath, finalPath)",
     ):
         assert marker in support
+
+
+def test_internal_storage_capacity_and_interrupted_replacement_guards():
+    support = SUPPORT.read_text(encoding="utf-8")
+    assert "#include <FFat.h>" in support
+    assert "SD." not in support
+    assert "kFormalFrameMaximumFiles = 40U" in support
+    assert "kFormalFrameStorageReserveBytes = 1536ULL * 1024ULL" in support
+    assert "formalFrameFiles < kFormalFrameMaximumFiles" in support
+    assert "formalFrameFiles <= kFormalFrameMaximumFiles" not in support
+    assert "return incomplete ? kFormalFrameMaximumFiles : count" in support
+    write = support[support.index("bool PhotoPainterSupport::writeFormalFrame(") :]
+    assert write.index("!FFat.remove(temporaryPath)") < write.index("FFat.freeBytes()")
+    for method in ("writeFormalFrame", "writeActiveSchedule", "writeStagedNextSchedule"):
+        start = support.index(f"bool PhotoPainterSupport::{method}(")
+        end = support.index("\nbool PhotoPainterSupport::", start + 1)
+        block = support[start:end]
+        assert block.index("restoreStorageBackup(finalPath, backupPath)") < block.index(
+            "FFat.remove(backupPath)"
+        )
+        assert block.index("file.flush()") < block.index(
+            "FFat.rename(temporaryPath, finalPath)"
+        )
+    promote = support[support.index("bool PhotoPainterSupport::promoteStagedNextSchedule()") :]
+    assert promote.index("restoreStorageBackup(activeFinal, activeBackup)") < promote.index(
+        "FFat.remove(activeBackup)"
+    )
+
+
+def test_online_frames_remain_restorable_and_cached_queue_frames_are_not_rewritten():
+    firmware = FIRMWARE.read_text(encoding="utf-8")
+    start = firmware.index("bool downloadLatestPhotoBin(Config &cfg) {")
+    end = firmware.index("static bool downloadOfflineScheduleSlot", start)
+    online = firmware[start:end]
+    assert "(void)photoPainter.writeFormalFrame(" in online
+    assert online.index("if (!photoPainter.convertFrame(") < online.index(
+        "(void)photoPainter.writeFormalFrame("
+    )
+    assert "formalFrameCached || photoPainter.writeFormalFrame(" in firmware
+    assert "if (enhancedOffline && !formalFrameStored)" in firmware
+    assert "if (slots.size() == 0U || slots.size() > 16U)" in firmware
 
 
 def test_i2c_retry_is_shared_bounded_and_fail_closed():
@@ -77,7 +118,7 @@ def test_formal_frame_gc_has_protection_fences_and_bounded_telemetry():
         "kFormalFrameFreeSpaceFloorBytes",
         "kFormalFrameMaximumFiles",
         "kFormalFrameGcMaxDeletesPerWake = 4U",
-        "kFormalFrameGcMaxScansPerWake = 32U",
+        "kFormalFrameGcMaxScansPerWake = 64U",
         "slots.size() > kFormalFrameReferenceLimit",
         "scanned < kFormalFrameGcMaxScansPerWake",
         "activeScheduleJson",
@@ -87,7 +128,7 @@ def test_formal_frame_gc_has_protection_fences_and_bounded_telemetry():
         "recoveryFrameSha256",
         "protectedFrames.contains(sourceSha256)",
         'String("/inktime/frames/") + entryName',
-        "SD.remove(path.c_str())",
+        "FFat.remove(path.c_str())",
         "gcDeletedFiles_",
         "gcDeletedBytes_",
         "gcSkippedProtected_",
@@ -139,7 +180,7 @@ def test_epd_uses_official_spi3_write_path_and_observed_busy_cycles():
     support = SUPPORT.read_text(encoding="utf-8")
     assert "display(board)," in support
     assert "earlyEpdTransportReady_ = prepareSpectra6ColdBootTransport(board_)" in support
-    assert "sdSpi(FSPI)," in support
+    assert "sdSpi" not in support
     assert 'lastError_ = "EPD-SPI-INIT"' in spectra
     assert 'lastError_ = "EPD-SPI-WRITE"' in spectra
 

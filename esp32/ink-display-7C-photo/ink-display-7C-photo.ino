@@ -3380,7 +3380,11 @@ static bool performAutomaticPairing(Config &cfg) {
   JsonObject capabilities = pairingRequest["capabilities"].to<JsonObject>();
   capabilities["automatic_pairing"] = true;
   capabilities["ab_credential_store"] = true;
+#if INKTIME_PHOTOPAINTER_ENABLED
   capabilities["offline_schedule_max_slots"] = 16;
+#else
+  capabilities["offline_schedule_max_slots"] = 24;
+#endif
   capabilities["stock_compatibility"] = true;
   capabilities["deep_sleep"] = true;
   String requestBody;
@@ -4153,6 +4157,10 @@ bool downloadLatestPhotoBin(Config &cfg) {
       }
       continue;
     }
+    // Keep a formal copy for KEY1 last-photo restore. Storage is optional
+    // for online display, so a capacity/mount failure must not discard RAM.
+    (void)photoPainter.writeFormalFrame(
+      expectedSha.c_str(), rotation, nativeFrame, inktime::kPhotoPainterFrameBytes);
     heap_caps_free(packed);
     frameData = nativeFrame;
     frameDataSize = inktime::kPhotoPainterFrameBytes;
@@ -4536,7 +4544,8 @@ static bool downloadOfflineScheduleAndFrames(Config &cfg, bool targetNext = fals
     return false;
   }
   const JsonArrayConst slots = rawSlots.as<JsonArrayConst>();
-  if (slots.size() == 0U || slots.size() > inktime::kMaxOfflineSlots) {
+  // Bound new network schedules; existing local 24-slot data remains readable.
+  if (slots.size() == 0U || slots.size() > 16U) {
     lastDeviceErrorCode = "DEVICE-OFFLINE-SCHEDULE-COUNT";
     lastDeviceErrorMessage = "離線排程 Slot 數量超過裝置上限";
     return false;
@@ -5179,7 +5188,9 @@ static QueueDownloadResult downloadQueuePhotoBin(Config &cfg) {
     ? inktime::DisplayRotation::Rotate180
     : inktime::DisplayRotation::Rotate0;
   uint8_t* nativeFrame = nullptr;
-  if (!photoPainter.loadFormalFrame(selectedSha.c_str(), rotation, &nativeFrame)
+  const bool formalFrameCached = !photoPainter.forceNetworkRefresh()
+    && photoPainter.loadFormalFrame(selectedSha.c_str(), rotation, &nativeFrame);
+  if (!formalFrameCached
       && !photoPainter.convertFrame(packed, packedSize, indexed4, rotation, &nativeFrame)) {
     heap_caps_free(packed);
     frameData = nullptr;
@@ -5192,8 +5203,11 @@ static QueueDownloadResult downloadQueuePhotoBin(Config &cfg) {
   frameDataSize = inktime::kPhotoPainterFrameBytes;
   frameIndexed4 = true;
   frameNativePalette = true;
-  if (enhancedOffline && !photoPainter.writeFormalFrame(
-        selectedSha.c_str(), rotation, nativeFrame, inktime::kPhotoPainterFrameBytes)) {
+  // Verified cache hits need no Flash rewrite. Online queues retain a
+  // best-effort copy; only offline delivery requires durable storage.
+  const bool formalFrameStored = formalFrameCached || photoPainter.writeFormalFrame(
+    selectedSha.c_str(), rotation, nativeFrame, inktime::kPhotoPainterFrameBytes);
+  if (enhancedOffline && !formalFrameStored) {
     heap_caps_free(nativeFrame);
     frameData = nullptr;
     frameDataSize = 0;

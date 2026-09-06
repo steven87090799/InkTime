@@ -91,12 +91,17 @@ Stock 原始碼使用相對秒數 timer，不足以證明支援 InkTime 的任�
   `FormalFrameHeader`／`ITF2`、rotation、CRC32、SHA-256 與尺寸驗證。Internal Flash
   最多保留 40 個 `.itf` 實體檔案；對 Server 宣告的 Enhanced offline schedule
   capability 最多 16 slots/day。
+  目前 Server 只認 12／24，會將 16 解析為 12；端到端 16-slot 支援仍待獨立
+  Server／migration 更新。新下載排程在韌體端最多接受 16 slots，舊本機 24-slot 資料仍可讀。
 - Formal Frame GC 每次最多掃描 64 個 entry、刪除 4 個，保護 active、staged-next、
   current、last-good、recovery 與 in-flight references；free-space floor 為約
   1.5 MiB 加一張 formal Frame transaction 的空間。
+  到達 40 張時即啟動回收，避免寫入上限與 GC 門檻互相卡住；目錄掃描未完成時拒絕
+  新增 frame。一般線上照片也盡力保存正式 ITF 供 KEY1 恢復，儲存失敗仍可由 RAM 顯示。
 - Active／staged schedule 與 frame 寫入仍採同目錄 `.tmp`，flush／close 後將舊檔 rename
   為 `.bak`、再把 temporary rename 成 final；final 缺失時恢復 `.bak`，不把尺寸錯誤或
   CRC／SHA 驗證失敗的檔案當成有效畫面。
+  重試寫入或 promote 前先恢復僅剩的 `.bak`，避免下一次 transaction 提前刪掉唯一舊副本。
 
 ## I²C、PMIC、RTC 與感測器
 

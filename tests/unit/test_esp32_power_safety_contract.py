@@ -36,7 +36,7 @@ def test_photopainter_ext1_user_wake_validates_gpio4_and_preserves_timer_wake():
     begin = _between(
         support,
         "bool PhotoPainterSupport::begin()",
-        "bool PhotoPainterSupport::loadCachedFrame",
+        "bool PhotoPainterSupport::loadFormalFrame",
     )
     wake = _between(
         support,
@@ -261,7 +261,7 @@ def test_shared_i2c_bus_uses_open_drain_recovery_before_probe_and_retry():
     begin = _between(
         support,
         "bool PhotoPainterSupport::begin()",
-        "bool PhotoPainterSupport::loadCachedFrame",
+        "bool PhotoPainterSupport::loadFormalFrame",
     )
     assert begin.index("recoverI2cBusLines(board_.i2c)") < begin.index("Wire.begin(")
 
@@ -406,7 +406,7 @@ def test_key_double_click_power_page_is_read_only_and_keeps_boot_reserved():
     begin = _between(
         support,
         "bool PhotoPainterSupport::begin()",
-        "bool PhotoPainterSupport::loadCachedFrame",
+        "bool PhotoPainterSupport::loadFormalFrame",
     )
     power_page = _between(
         support,
@@ -444,8 +444,8 @@ def test_power_page_restore_uses_only_verified_local_last_successful_frame():
     assert "stored.valid" in restore and "stored.succeeded" in restore
     assert "stored.boardProfile != String(kBoardConfig.name)" in restore
     assert "photoPainter.loadFormalFrame(" in restore
-    assert "photoPainter.loadCachedFrame(" in restore
-    assert "inktime::sourceHash32(stored.sha256.c_str())" in restore
+    assert "photoPainter.loadCachedFrame(" not in restore
+    assert "inktime::sourceHash32(stored.sha256.c_str())" not in restore
     assert "photoPainter.displayFrame(" in restore
     assert "WiFi" not in restore
     assert "HTTP" not in restore

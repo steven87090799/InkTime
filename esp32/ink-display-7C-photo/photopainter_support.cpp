@@ -62,6 +62,13 @@ namespace {
 
 size_t countFormalFrameFiles();
 
+// A reset can leave the only committed copy in .bak. Restore it before a
+// new transaction is allowed to remove that backup.
+bool restoreStorageBackup(const char* finalPath, const char* backupPath) {
+  return FFat.exists(finalPath) || !FFat.exists(backupPath)
+      || FFat.rename(backupPath, finalPath);
+}
+
 }  // namespace
 
 const uint8_t kBlankGlyph[5] = {0, 0, 0, 0, 0};
@@ -1004,8 +1011,20 @@ bool PhotoPainterSupport::writeFormalFrame(
     cacheStatus_ = CacheStatus::Error;
     return false;
   }
+  if (!restoreStorageBackup(finalPath, backupPath)) {
+    lastError_ = "STORAGE-RECOVERY";
+    cacheStatus_ = CacheStatus::Error;
+    return false;
+  }
   if (!FFat.exists(finalPath) && countFormalFrameFiles() >= kFormalFrameMaximumFiles) {
     lastError_ = "STORAGE-FRAME-LIMIT";
+    cacheStatus_ = CacheStatus::Error;
+    return false;
+  }
+  // An interrupted attempt's .tmp is never committed data. Reclaim it before
+  // checking space, otherwise retrying that same frame can stay STORAGE-FULL.
+  if (FFat.exists(temporaryPath) && !FFat.remove(temporaryPath)) {
+    lastError_ = "STORAGE-TEMP-CLEANUP";
     cacheStatus_ = CacheStatus::Error;
     return false;
   }
@@ -1015,7 +1034,6 @@ bool PhotoPainterSupport::writeFormalFrame(
     cacheStatus_ = CacheStatus::Error;
     return false;
   }
-  FFat.remove(temporaryPath);
   File file = FFat.open(temporaryPath, FILE_WRITE);
   if (!file) {
     cacheStatus_ = CacheStatus::Error;
@@ -1130,7 +1148,8 @@ size_t countFormalFrameFiles() {
   File directory = FFat.open("/inktime/frames");
   if (!directory || !directory.isDirectory()) {
     if (directory) directory.close();
-    return 0U;
+    // A failed inventory must not grant permission to create a new frame.
+    return kFormalFrameMaximumFiles;
   }
   size_t count = 0U;
   size_t scanned = 0U;
@@ -1143,8 +1162,12 @@ size_t countFormalFrameFiles() {
     file.close();
     file = directory.openNextFile();
   }
+  const bool incomplete = static_cast<bool>(file);
+  if (file) file.close();
   directory.close();
-  return count;
+  // Transaction artifacts can consume the scan budget before all .itf files
+  // are seen. Fail closed rather than undercounting the hard capacity limit.
+  return incomplete ? kFormalFrameMaximumFiles : count;
 }
 
 }  // namespace
@@ -1183,7 +1206,7 @@ bool PhotoPainterSupport::runFormalFrameGc(
   const size_t formalFrameFiles = countFormalFrameFiles();
   const uint64_t freeBytes = FFat.freeBytes();
   const bool pressure = freeBytes < kFormalFrameFreeSpaceFloorBytes;
-  if (!pressure && formalFrameFiles <= kFormalFrameMaximumFiles) return true;
+  if (!pressure && formalFrameFiles < kFormalFrameMaximumFiles) return true;
 
   File directory = FFat.open("/inktime/frames");
   if (!directory || !directory.isDirectory()) {
@@ -1231,6 +1254,11 @@ bool PhotoPainterSupport::writeActiveSchedule(const char* json, size_t length) {
   char backupPath[64] = {0};
   if (!makeActiveSchedulePaths(
         finalPath, temporaryPath, backupPath, sizeof(finalPath))) {
+    cacheStatus_ = CacheStatus::Error;
+    return false;
+  }
+  if (!restoreStorageBackup(finalPath, backupPath)) {
+    lastError_ = "STORAGE-RECOVERY";
     cacheStatus_ = CacheStatus::Error;
     return false;
   }
@@ -1338,6 +1366,11 @@ bool PhotoPainterSupport::writeStagedNextSchedule(const char* json, size_t lengt
   char backupPath[64] = {0};
   if (!makeStagedNextSchedulePaths(
         finalPath, temporaryPath, backupPath, sizeof(finalPath))) {
+    cacheStatus_ = CacheStatus::Error;
+    return false;
+  }
+  if (!restoreStorageBackup(finalPath, backupPath)) {
+    lastError_ = "STORAGE-RECOVERY";
     cacheStatus_ = CacheStatus::Error;
     return false;
   }
@@ -1459,6 +1492,11 @@ bool PhotoPainterSupport::promoteStagedNextSchedule() {
   if (!FFat.exists(stagedFinal) && FFat.exists(stagedBackup)) FFat.rename(stagedBackup, stagedFinal);
   if (!FFat.exists(stagedFinal)) {
     cacheStatus_ = CacheStatus::Miss;
+    return false;
+  }
+  if (!restoreStorageBackup(activeFinal, activeBackup)) {
+    lastError_ = "STORAGE-RECOVERY";
+    cacheStatus_ = CacheStatus::Error;
     return false;
   }
   FFat.remove(activeBackup);
