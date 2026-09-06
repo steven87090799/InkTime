@@ -224,8 +224,9 @@ static_assert(
 
 #if INKTIME_PHOTOPAINTER_ENABLED
 // Waveshare ESP32-S3-PhotoPainter official baseline (a5e8f757): keep every
-// board-facing signal pinned to the factory wiring. The SD card is used in
-// conservative SPI mode, where SDMMC D3/D0/CMD map to CS/MISO/MOSI.
+// board-facing signal pinned to the factory wiring. The physical SD slot and
+// GPIO wiring remain part of the board contract; InkTime Enhanced no longer
+// mounts or requires microSD at runtime.
 static_assert(kBoardConfig.display.dc == 8 && kBoardConfig.display.spi.cs == 9
               && kBoardConfig.display.spi.sck == 10
               && kBoardConfig.display.spi.mosi == 11

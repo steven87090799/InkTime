@@ -195,7 +195,7 @@ GxEPD2_7C<
 #define DEVICE_PAIRING_CLAIM_PATH "/api/device/v1/pairing/claim"
 #define DEVICE_PAIRING_CONFIRM_PATH "/api/device/v1/pairing/confirm"
 #define DEVICE_PAIRING_REPAIR_PERMISSION_PATH "/api/device/v1/pairing/repair-permission"
-#define INKTIME_FIRMWARE_VERSION "2.8.6"
+#define INKTIME_FIRMWARE_VERSION "2.8.7"
 
 static constexpr uint8_t kQueueAckBatchMaxEvents = 8U;
 static constexpr size_t kQueueAckBatchMaxBodyBytes = 12U * 1024U;
@@ -865,12 +865,7 @@ static bool restoreLastSuccessfulPhoto() {
       ? inktime::DisplayRotation::Rotate180
       : inktime::DisplayRotation::Rotate0;
   uint8_t* restoredFrame = nullptr;
-  if (!photoPainter.loadFormalFrame(stored.sha256.c_str(), rotation, &restoredFrame)
-      && !photoPainter.loadCachedFrame(
-        inktime::sourceHash32(stored.sha256.c_str()),
-        rotation,
-        &restoredFrame,
-        stored.sha256.c_str())) {
+  if (!photoPainter.loadFormalFrame(stored.sha256.c_str(), rotation, &restoredFrame)) {
     lastDeviceErrorCode = "DEVICE-POWER-RESTORE";
     lastDeviceErrorMessage = "最後成功照片的本地 Frame 不存在或完整性驗證失敗";
     return false;
@@ -3385,7 +3380,7 @@ static bool performAutomaticPairing(Config &cfg) {
   JsonObject capabilities = pairingRequest["capabilities"].to<JsonObject>();
   capabilities["automatic_pairing"] = true;
   capabilities["ab_credential_store"] = true;
-  capabilities["offline_schedule_max_slots"] = 24;
+  capabilities["offline_schedule_max_slots"] = 16;
   capabilities["stock_compatibility"] = true;
   capabilities["deep_sleep"] = true;
   String requestBody;
@@ -4063,12 +4058,12 @@ bool downloadLatestPhotoBin(Config &cfg) {
         || !inktime::isSha256Hex(expectedSha.c_str())) continue;
 
 #if INKTIME_PHOTOPAINTER_ENABLED
-    const uint32_t sourceHash = inktime::sourceHash32(expectedSha.c_str());
     const inktime::DisplayRotation rotation = cfg.rotate180
       ? inktime::DisplayRotation::Rotate180
       : inktime::DisplayRotation::Rotate0;
     uint8_t* cachedFrame = nullptr;
-    if (photoPainter.loadCachedFrame(sourceHash, rotation, &cachedFrame, expectedSha.c_str())) {
+    if (!photoPainter.forceNetworkRefresh()
+        && photoPainter.loadFormalFrame(expectedSha.c_str(), rotation, &cachedFrame)) {
       heap_caps_free(packed);
       if (frameData) heap_caps_free(frameData);
       frameData = cachedFrame;
@@ -4148,14 +4143,7 @@ bool downloadLatestPhotoBin(Config &cfg) {
     if (frameData) heap_caps_free(frameData);
 #if INKTIME_PHOTOPAINTER_ENABLED
     uint8_t* nativeFrame = nullptr;
-    if (!photoPainter.convertAndCache(
-          packed,
-          packedSize,
-          indexed4,
-          sourceHash,
-          rotation,
-          &nativeFrame,
-          expectedSha.c_str())) {
+    if (!photoPainter.convertFrame(packed, packedSize, indexed4, rotation, &nativeFrame)) {
       frameData = nullptr;
       lastDeviceErrorCode = photoPainter.lastError();
       lastDeviceErrorMessage = "PhotoPainter framebuffer 轉換失敗";
@@ -4332,7 +4320,7 @@ static bool downloadOfflineScheduleSlot(
   heap_caps_free(nativeFrame);
   if (!written) {
     lastDeviceErrorCode = "DEVICE-OFFLINE-FRAME";
-    lastDeviceErrorMessage = "離線排程正式 Frame 無法原子寫入 SD";
+    lastDeviceErrorMessage = "離線排程正式 Frame 無法原子寫入 Internal Flash";
     return false;
   }
   return true;
@@ -5187,14 +5175,12 @@ static QueueDownloadResult downloadQueuePhotoBin(Config &cfg) {
 
   if (frameData) heap_caps_free(frameData);
 #if INKTIME_PHOTOPAINTER_ENABLED
-  const uint32_t sourceHash = inktime::sourceHash32(selectedSha.c_str());
   const inktime::DisplayRotation rotation = cfg.rotate180
     ? inktime::DisplayRotation::Rotate180
     : inktime::DisplayRotation::Rotate0;
   uint8_t* nativeFrame = nullptr;
-  if (!photoPainter.loadCachedFrame(sourceHash, rotation, &nativeFrame, selectedSha.c_str())
-      && !photoPainter.convertAndCache(
-        packed, packedSize, indexed4, sourceHash, rotation, &nativeFrame, selectedSha.c_str())) {
+  if (!photoPainter.loadFormalFrame(selectedSha.c_str(), rotation, &nativeFrame)
+      && !photoPainter.convertFrame(packed, packedSize, indexed4, rotation, &nativeFrame)) {
     heap_caps_free(packed);
     frameData = nullptr;
     lastDeviceErrorCode = photoPainter.lastError();
@@ -5212,7 +5198,7 @@ static QueueDownloadResult downloadQueuePhotoBin(Config &cfg) {
     frameData = nullptr;
     frameDataSize = 0;
     lastDeviceErrorCode = "DEVICE-OFFLINE-FRAME";
-    lastDeviceErrorMessage = "Enhanced Formal Frame 無法原子寫入 SD";
+    lastDeviceErrorMessage = "Enhanced Formal Frame 無法原子寫入 Internal Flash";
     return QueueDownloadResult::Failed;
   }
 #else
@@ -5988,7 +5974,7 @@ void reportDeviceStatus(Config &cfg, bool displayUpdated) {
   payload["psram_bytes"] = ESP.getPsramSize();
   payload["flash_ready"] = photoPainter.flashReady();
   payload["psram_ready"] = photoPainter.psramReady();
-  payload["sd_card"] = photoPainter.sdReady();
+  payload["sd_card"] = photoPainter.storageReady();
   payload["rtc"] = photoPainter.rtcReady();
   payload["cache_status"] = inktime::cacheStatusName(photoPainter.cacheStatus());
   payload["pmic_type"] = inktime::pmicTypeName(photoPainter.pmicType());
@@ -6008,9 +5994,10 @@ void reportDeviceStatus(Config &cfg, bool displayUpdated) {
     payload["humidity_percent"] = photoPainter.humidityPercent();
   }
   payload["button_wakeup"] = photoPainter.wokeFromUserButton();
-  payload["sd_read_bytes"] = photoPainter.sdReadBytes();
-  payload["sd_write_bytes"] = photoPainter.sdWriteBytes();
-  payload["sd_write_ms"] = photoPainter.sdWriteDurationMs();
+  // Legacy wire field names retained for server compatibility; values now represent internal frame storage I/O.
+  payload["sd_read_bytes"] = photoPainter.storageReadBytes();
+  payload["sd_write_bytes"] = photoPainter.storageWriteBytes();
+  payload["sd_write_ms"] = photoPainter.storageWriteDurationMs();
 #endif
   payload["last_refresh_duration_ms"] = lastRefreshDurationMs;
   payload["epd_transfer_ms"] = runtimeTelemetry.epd_transfer_ms;
@@ -6659,8 +6646,8 @@ void setup() {
     INK_LOG_ERROR("photopainter_init_failed", photoPainter.lastError());
   } else {
     INK_LOG_INFO("photopainter_ready", "PhotoPainter Flash and PSRAM checks passed");
-    if (!photoPainter.sdReady()) {
-      INK_LOG_WARN("photopainter_sd_unavailable", "SD cache is unavailable; continuing without SD cache");
+    if (!photoPainter.storageReady()) {
+      INK_LOG_WARN("photopainter_storage_unavailable", "Internal Flash storage is unavailable");
     }
     if (!photoPainter.rtcReady()) {
       INK_LOG_WARN("photopainter_rtc_unavailable", "RTC is unavailable; network time remains required");

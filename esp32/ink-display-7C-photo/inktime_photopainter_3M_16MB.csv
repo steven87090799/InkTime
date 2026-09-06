@@ -1,8 +1,10 @@
 # InkTime Waveshare PhotoPainter ESP32-S3 partition table.
 # The enlarged NVS partition is required by the bounded 32-entry ACK journal
 # COW/migration peak.  Keep otadata/app0 at the offsets used by the pinned
-# Arduino-ESP32 upload recipe; place NVS after both 3 MiB OTA slots.  Image
-# cache uses external SD, so the reduced FAT reservation is safe here.
+# Arduino-ESP32 upload recipe; place NVS after both 3 MiB OTA slots. Enhanced
+# PhotoPainter stores bounded native 4bpp formal frames and offline schedule
+# metadata in the internal wear-levelled FAT partition; microSD is not
+# required by the InkTime Enhanced runtime.
 # Name,   Type, SubType, Offset,  Size,    Flags
 otadata,  data, ota,     0xE000,  0x2000,
 app0,     app,  ota_0,   0x10000, 0x300000,

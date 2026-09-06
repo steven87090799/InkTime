@@ -1,6 +1,6 @@
 # PhotoPainter 交付模式與相容邊界
 
-本版 Enhanced 韌體 2.8.6 使用 Config Store v5；可用 12／24 slots 由配對能力決定。先讀[自動配對](ESP32_AUTOMATIC_PAIRING_ZH_TW.md)，不要將本機 schema、wire Manifest schema 與排程容量混為一個版本。
+本版 Enhanced 韌體 2.8.7 使用 Config Store v5；對 Server 正式宣告最多 16 slots，Config Store v5 仍保留 24-slot read compatibility。先讀[自動配對](ESP32_AUTOMATIC_PAIRING_ZH_TW.md)，不要將本機 schema、wire Manifest schema 與排程容量混為一個版本。
 
 本文件是目前程式碼、韌體與 Stock upstream 交叉核對後的操作契約。它把「既有 Online」、「Stock PhotoPainter 相容」與「InkTime Enhanced 離線排程」分開；三者不可用同一個預設值混淆。
 
@@ -10,7 +10,7 @@
 |---|---|---|---|---|
 | `legacy_online` | 既有 generic device | `/api/device/v1/releases/latest` | 每次喚醒可連線 | Migration 27 對既有裝置的保留預設 |
 | `stock_compat` | 明確選擇 Stock PhotoPainter Mode 1 的裝置 | InkTime Production BIN → server-side 24-bit BMP → Stock `/dataUP` | 管理端到同一 LAN 的 Stock Host | 不自動切換；不要求刷入 InkTime Enhanced 韌體 |
-| `inktime_offline_schedule` | 明確選擇 Enhanced 韌體與離線排程的裝置 | Release → Queue Item → device local schedule | 預先準備時需要；顯示時可完全離線 | 需要 `offline_prefetch_allowed=true`、每日準備與裝置端正式 Frame |
+| `inktime_offline_schedule` | 明確選擇 Enhanced 韌體與離線排程的裝置 | Release → Queue Item → device local schedule → ESP32 Internal FFat formal Frame | 預先準備時需要；顯示時可完全離線 | 需要 `offline_prefetch_allowed=true`、每日準備與裝置端正式 Frame |
 
 建立或升級 generic device 不會自動變成 Stock；只有管理員在裝置設定選擇 `stock_compat` 才會啟用相容路徑。
 
@@ -58,7 +58,7 @@ HTTP timeout、read timeout、redirect、解析失敗或上傳後的未知回應
 ## 5. Enhanced 離線排程契約
 
 - Migration 27 建立 `device_offline_schedules`、`device_offline_schedule_slots` 與 queue 的 `offline_prefetch_allowed`。
-- `schedule_times` 排序、去重，裝置端最多 12 個正式 Slot；`prefetch_lead_minutes` 為 0–120。
+- `schedule_times` 排序、去重；PhotoPainter Enhanced 2.8.7 對外能力上限為 16 個正式 Slot，舊 Config Store v5 payload 的 24-slot 讀取相容性仍保留；`prefetch_lead_minutes` 為 0–120。
 - 一日準備是單一 SQLite transaction：每個 Slot 恰好一個 Release、恰好一個 Queue Item、恰好一個完整 SHA-256；中途任一 Release 不合法時整批 rollback。
 - 裝置使用 `GET /api/device/v1/offline-schedule` 取得 target date、timezone、config version、show-at 與完整 SHA-256；回應不含照片路徑或原圖。
 - 今日排程尚未準備好時回傳 bounded JSON `{"error":"schedule_not_ready","retry_after_epoch":...,"next_slot_epoch":...}`；若尚未到今日第一個 prepare point，重試點是今日 prepare point；若第一個 prepare point 已過但今日仍有未來 Slot，重試點留在今日且嚴格早於 `next_slot_epoch`；只有今日沒有剩餘 Slot 才能睡到明日第一個 prepare point。`next_slot_epoch` 沒有剩餘 Slot 時為 `null`，HTTP `Retry-After` 仍保留。
@@ -77,6 +77,6 @@ HTTP timeout、read timeout、redirect、解析失敗或上傳後的未知回應
 - 裝置端點只接受 `?target=current`（預設）或 `?target=next`；日期、`+1`、history 與其他任意值一律拒絕。`target=next` 僅代表裝置 IANA 本地日的下一天。
 - current 的 200 回應同時帶 `next_target_start_epoch` 與 `next_schedule_prefetch_epoch`。後者由伺服器 IANA 時區計算為明日第一個 Slot 減 `prefetch_lead_minutes`；若技術截止已過，值為 0，韌體不得猜測。
 - Scheduler 將 today 與 tomorrow 分開判斷：today 仍有 `show_at > local_now` 才保留 today；tomorrow 在本地 prepare hour 與「明日第一 Slot 減 lead 與 server margin」兩者較早者到達時獨立建立。
-- 韌體對 `target=next` 的 Slot 先下載、驗證 SHA、以遠端 rotation 轉換並寫入 `/inktime/schedule/staged_next.json`；不覆寫 active、不套用未來 config。`.tmp`／`.bak` 與 rename 失敗會 rollback。
+- 韌體對 `target=next` 的 Slot 先下載、驗證 SHA、以遠端 rotation 轉換成 ESP32 Internal FFat formal Frame，並寫入 `/inktime/schedule/staged_next.json`；不覆寫 active、不套用未來 config。`.tmp`／`.bak` 與 rename 失敗會 rollback。
 - RTC 確認跨過 target start 後，韌體重新驗證 target date、`target_start == active.target_end`、config version、Slot epoch、Queue identity、SHA、面板與 rotation，再原子 promote staged-next，套用 future snapshot；因此 00:00 Slot 可以正式顯示。
 - `MANIFEST_RECEIVED`、`DOWNLOAD_STARTED`、`DOWNLOAD_COMPLETED`、`HASH_VERIFIED` 是 pre-midnight non-terminal 事件；真正面板刷新前不會送 display terminal event。`local_next` 預覽也不會清除 formal retry state。

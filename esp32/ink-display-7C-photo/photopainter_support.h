@@ -29,12 +29,6 @@ class PhotoPainterSupport {
 
   bool begin();
   uint8_t* allocateWireBuffer(size_t length) const;
-  bool loadCachedFrame(
-    uint32_t sourceHash,
-    DisplayRotation rotation,
-    uint8_t** output,
-    const char* sourceSha256 = nullptr
-  );
   bool loadFormalFrame(
     const char* sourceSha256,
     DisplayRotation rotation,
@@ -46,15 +40,6 @@ class PhotoPainterSupport {
     bool indexed4,
     DisplayRotation rotation,
     uint8_t** output
-  );
-  bool convertAndCache(
-    const uint8_t* wire,
-    size_t wireLength,
-    bool indexed4,
-    uint32_t sourceHash,
-    DisplayRotation rotation,
-    uint8_t** output,
-    const char* sourceSha256 = nullptr
   );
   bool writeFormalFrame(
     const char* sourceSha256,
@@ -98,7 +83,7 @@ class PhotoPainterSupport {
   bool psramReady() const { return psramReady_; }
   bool flashReady() const { return flashReady_; }
   bool hardwareReady() const { return hardwareReady_; }
-  bool sdReady() const { return sdReady_; }
+  bool storageReady() const { return storageReady_; }
   bool rtcReady() const { return rtcReady_; }
   bool shtc3Ready() const { return shtc3Ready_; }
   bool forceNetworkRefresh() const { return forceNetworkRefresh_; }
@@ -114,9 +99,9 @@ class PhotoPainterSupport {
   float humidityPercent() const { return humidityPercent_; }
   bool environmentValid() const { return environmentValid_; }
   uint32_t lastRefreshDurationMs() const { return lastRefreshDurationMs_; }
-  uint32_t sdReadBytes() const { return sdReadBytes_; }
-  uint32_t sdWriteBytes() const { return sdWriteBytes_; }
-  uint32_t sdWriteDurationMs() const { return sdWriteDurationMs_; }
+  uint32_t storageReadBytes() const { return storageReadBytes_; }
+  uint32_t storageWriteBytes() const { return storageWriteBytes_; }
+  uint32_t storageWriteDurationMs() const { return storageWriteDurationMs_; }
   uint32_t i2cRetryCount() const;
   uint32_t i2cBusResetCount() const;
   uint32_t i2cFailClosedCount() const;
@@ -136,7 +121,7 @@ class PhotoPainterSupport {
   bool psramReady_ = false;
   bool flashReady_ = false;
   bool hardwareReady_ = false;
-  bool sdReady_ = false;
+  bool storageReady_ = false;
   bool rtcReady_ = false;
   bool shtc3Ready_ = false;
   bool forceNetworkRefresh_ = false;
@@ -149,9 +134,9 @@ class PhotoPainterSupport {
   float temperatureC_ = 0.0f;
   float humidityPercent_ = 0.0f;
   uint32_t lastRefreshDurationMs_ = 0;
-  uint32_t sdReadBytes_ = 0;
-  uint32_t sdWriteBytes_ = 0;
-  uint32_t sdWriteDurationMs_ = 0;
+  uint32_t storageReadBytes_ = 0;
+  uint32_t storageWriteBytes_ = 0;
+  uint32_t storageWriteDurationMs_ = 0;
   uint32_t gcDeletedFiles_ = 0;
   uint32_t gcDeletedBytes_ = 0;
   uint32_t gcSkippedProtected_ = 0;
