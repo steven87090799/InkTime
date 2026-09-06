@@ -128,9 +128,11 @@ Stock 原始碼使用相對秒數 timer，不足以證明支援 InkTime 的任�
   實板曾在清除該 rail 後的 ESP-only reset 觀察到共享 I²C 線持續為 low，完整斷電前
   無法再由 ESP 存取 PMIC，因此不在一般 refresh／deep-sleep 路徑關閉它。任一步失敗
   都不送出電子紙更新命令。
-- 韌體不寫 TG28 的 DCDC、充電、全機 shutdown、fast-power-on 或其他 LDO register。
+- 韌體不寫 TG28 的 DCDC、充電、全機 shutdown 或 fast-power-on；除了原有 ALDO4
+  顯示控制，只增加下述 ALDO3 未使用音訊關閉。
   status、VBAT 與 fuel-gauge register 僅供遙測，也不作低電壓刷新門檻。
-- 本專案不需要音訊，因此不初始化 ES7210／ES8311；PA GPIO 7 維持 LOW。
+- 本專案不需要音訊，因此不初始化 ES7210／ES8311；PA GPIO 7 維持 LOW，I²S
+  GPIO14～18 設為 input；確認 TG28 可讀後只清除 `REG90[2]`，關閉 ALDO3／Audio_VCC。
 
 ## 按鍵、喚醒與網路邊界
 
@@ -157,8 +159,9 @@ Stock 原始碼使用相對秒數 timer，不足以證明支援 InkTime 的任�
 - 開機後 PWR 紅燈維持亮起，電子紙傳輸期間 ACT 綠燈亮起；進入 deep sleep 前兩燈
   都會熄滅。燈號是狀態提示，不取代 BUSY cycle 與實際面板變化的刷新判定。
 - Wi-Fi、HTTP、NTP、AP 與 EPD 都有有限 timeout。Wi-Fi 失敗時先嘗試由 RTC 與正式
-  快取完成到期的離線 Slot；否則進入有界設定入口。PMIC 辨識與電池讀值不參與這個
-  決策，因此讀不到電源資訊時仍能看見並修正網路或設定問題。
+  快取完成到期的離線 Slot；已配對的自動 timer wake 接著依排程／恢復策略睡眠，
+  其他喚醒則保留有界設定入口。PMIC 辨識與電池讀值不參與這個決策，因此讀不到
+  電源資訊時仍能以手動喚醒進入設定／診斷。
 - PhotoPainter 的 10 分鐘 max-awake supervisor 以 RTC no-init memory 記錄連續 timeout，
   不會每次喚醒寫 NVS。前兩次 timeout 仍以 restart 嘗試恢復；第三次後不再持續 boot loop，
   而是保留 GPIO4 與 timer wake、關閉網路／LED，按 `1h → 6h → 24h → 每日一次` 退避；每次只允許一次 probation。正常進入 sleep、
@@ -179,6 +182,88 @@ Stock 原始碼使用相對秒數 timer，不足以證明支援 InkTime 的任�
   [ESP32 TLS／配網信任根配置](ESP32_TLS_PROVISIONING_ZH_TW.md)。
 - 韌體目前沒有 MQTT／Home Assistant client，因此沒有 Topic、Discovery entity 或
   callback 可遷移；既有 Bearer Token Manifest／Status API 保持不變。
+
+## 耗電異常恢復與診斷
+
+- 已配對 PhotoPainter 的 timer wake 在 Wi-Fi 失敗時，先保留到期的本地正式照片
+  fallback，再直接依既有排程／恢復策略睡眠，不自動開啟五分鐘設定熱點。未配對、
+  冷啟動與 KEY 手動喚醒仍保留原設定入口；長按 KEY 的明確 recovery 不受此分支攔截。
+  這不新增每 15 分鐘連網；有可靠時間時沿用原本的排程選擇。
+- 離線模式時間未知、或 schedule transaction 受阻時，改為 `15m → 30m → 60m → 每小時`
+  重試。獨立 `dashcfg/pwr_retry` 只在進度變更時寫入，飽和後不反覆寫 NVS；時間與交易
+  恢復、進入有效離線排程計算時清除。NVS 開啟／寫入失敗則該輪保守睡一小時。
+  不改 RTC memory 保留策略；factory reset 同時清除此 key。正常到期照片與既有
+  有時間戳的 schedule retry 繼續使用原流程。
+- 睡前序列事件 `sleep_diagnostics` 回報 `awake_ms`、實際選定的 `sleep_seconds`
+  與 `wake_cause`；醒著時間計算至睡前紀錄處，不包括該紀錄自身輸出時間。
+  `sleep_pmic_rails` 唯讀回報 REG90、ALDO3／ALDO4 enable bit；讀取失敗明確記為
+  unknown，不寫入其他電源軌。enable bit 不代表耗電量，睡前 log 也不等於已量到
+  deep-sleep 電流。
+- 這些紀錄不增加連網、不保存到能源頁，也未補齊離線／刷新後的延後 Status 上傳。
+  音訊關閉只在啟動階段執行，睡前仍只讀 PMIC；不關閉 ALDO4，不改 GPIO0／5／21、
+  充電、分割區或面板命令。
+  實際待機電流與每日電量改善仍須新版韌體實機比較，不能由程式或 CI 宣稱已改善。
+
+## 2026-09-06 官方省電流程與音訊／SD 修正
+
+本節重新取得官方 main，固定為 commit
+[`a5e8f757ba0cafbb5586f07d3e83bda3184c0845`](https://github.com/waveshareteam/ESP32-S3-PhotoPainter/tree/a5e8f757ba0cafbb5586f07d3e83bda3184c0845)，
+並檢查中文 Wiki 的 [Rev2.0 原理圖](https://www.waveshare.net/w/upload/a/ae/ESP32-S3-PhotoPainter-Schematic-v2.0.pdf)。
+原理圖第 1 頁 UP1 pin 16 ALDO3 接 Audio_VCC，pin 19 ALDO2 未接，pin 15 ALDO4
+接 EPD_VCC。**先前交接文件將音訊誤寫為 ALDO2；應以本次接線更正為準。**
+
+官方有兩種不同的睡眠流程：
+
+- [一般照片模式 Basic_mode.cpp](https://github.com/waveshareteam/ESP32-S3-PhotoPainter/blob/a5e8f757ba0cafbb5586f07d3e83bda3184c0845/01_Example/xiaozhi-esp32/components/user_app_bsp/mode_src/Basic_mode.cpp#L52)：
+  啟用 GPIO0／4 EXT1 與 ESP timer，再進入 ESP deep sleep；兩處
+  `axp_basic_sleep_start()` 都被註解掉。因此官方功能程式本身不能證明已使用下述
+  PMIC 關電策略或達到 Wiki 的待機規格。
+- [功耗測試 GoSLeep](https://github.com/waveshareteam/ESP32-S3-PhotoPainter/blob/a5e8f757ba0cafbb5586f07d3e83bda3184c0845/04_PowerConsumptionTest/01_Arduino_Src/01_Fac_Test/01_Fac_Test.ino#L25)
+  先清除所有 wake source，只設 GPIO0 EXT1，沒有 timer；接著
+  [axp_basic_sleep_start](https://github.com/waveshareteam/ESP32-S3-PhotoPainter/blob/a5e8f757ba0cafbb5586f07d3e83bda3184c0845/04_PowerConsumptionTest/01_Arduino_Src/01_Fac_Test/bsp_fac.h#L221)
+  停用／清除 IRQ、設定 REG26 wake/sleep、停用電池電壓量測／偵測，關閉 DC2～5、
+  ALDO1～4、BLDO1／2、CPUSLDO、DLDO1／2；沒有關閉 DC1。測試還把 GPIO21 當輸出
+  拉動，InkTime 不採用該行為，也不搬用整組 PMIC sleep 或電池偵測修改。
+
+與省電相關的 GPIO 定義，以原理圖及官方
+[config.h](https://github.com/waveshareteam/ESP32-S3-PhotoPainter/blob/a5e8f757ba0cafbb5586f07d3e83bda3184c0845/01_Example/xiaozhi-esp32/main/boards/waveshare-s3-PhotoPainter/config.h)
+和 [bsp_config.h](https://github.com/waveshareteam/ESP32-S3-PhotoPainter/blob/a5e8f757ba0cafbb5586f07d3e83bda3184c0845/04_PowerConsumptionTest/01_Arduino_Src/01_Fac_Test/bsp_config.h) 為準：
+
+| GPIO | 功能 | InkTime 處理 |
+|---|---|---|
+| 0／4／5 | BOOT／KEY1／PWR 狀態 | 保留 BOOT、KEY1 EXT1 喚醒，PWR 不作輸出 |
+| 1／2 | SD D1／D2，有外部 pull-up | SPI 模式未使用，不拉低 |
+| 3 | PMIC CHGLED | 不當一般 LED 驅動 |
+| 6 | RTC_INT，連到 PWRON 網路 | 不改接、不啟用新的全機斷電喚醒 |
+| 7 | 喇叭功放 AudioCTR | LOW；不是麥克風電源開關 |
+| 8／9／10／11／12／13 | EPD DC／CS／SCK／MOSI／RST／BUSY | 維持已驗證刷新流程 |
+| 14／15／16／17／18 | I²S MCLK／BCLK／WS／DOUT／DIN | 無音訊，input、不輸出時鐘 |
+| 19／20 | 原生 USB D−／D+ | 保留燒錄與除錯 |
+| 21 | TG28 IRQ | 不驅動 |
+| 38／39／40／41 | SD CS／CLK／MISO／MOSI | 睡前結束 SD/SPI，再 input 並關內部 pulls |
+| 42／45 | ACT 綠燈／PWR 紅燈，active-low | 睡前 HIGH 關燈 |
+| 43／44 | UART0 | 不作額外板級控制 |
+| 47／48 | 共用 I²C SDA／SCL | 只用 open-drain，不強拉高 |
+
+本次依使用者明確要求關閉未使用音訊，增加 `photopainter_audio_power.h`。官方
+[ALDO3 driver](https://github.com/waveshareteam/ESP32-S3-PhotoPainter/blob/a5e8f757ba0cafbb5586f07d3e83bda3184c0845/01_Example/xiaozhi-esp32/components/pmicpower/src/XPowersAXP2101.tpp#L1845)
+以 REG90 bit 2 控制此 rail；沿用官方命名不代表把 Rev2.0 PMIC 改判為 AXP2101。
+啟動時 PA LOW、I²S input 後，讀 REG90，只清 bit 2 並完整讀回比對；已關閉不寫。
+只允許一次不重播的寫入，失敗／讀回不符標記 PMIC unknown 並跳過本輪後續的
+sensor/RTC 初始化，同時拒絕 EPD 供電命令，不猜測性寫回整組電源狀態。這也會關閉
+共用 Audio_VCC 的播放 codec，未來若要恢復音訊必須重新設計上電／codec 初始化。
+ALDO4、DCDC1、充電和全機 sleep registers 不變。
+
+SD 的 TF1 pin 4 直接接 DCDC1 的 VCC3V3，與 ESP32／SHTC3 共用，**無獨立開關**。
+因此不能靠韌體做到「只關 SD 電源、ESP timer 繼續睡眠計時」。現有檔案存取完成後
+會 close，睡前 SD.end／SPI.end，再釋放主機腳位讓外部 10k pull-up 保持取消選取；
+不能用把所有 SD 腳拉 LOW 的方法省電。下一次 deep-sleep wake 重新初始化 SD 後讀檔。
+這是停止通訊／卡片閒置，不是 SD 斷電；也不承諾特定卡的 standby current。
+
+驗證範圍：新增 host 測試覆蓋 REG90 全部 256 組狀態、重複喚醒不重寫、初讀失敗、
+寫入失敗、讀回失敗與其他 rail bit 意外變動；另有 boot／sleep 接線契約測試。
+Hosted CI／編譯與實板 cold boot、KEY／timer wake、共享 I²C、SD 讀寫、電流比較
+尚未執行。本分支尚未刷機，不能宣稱每天掉電 20% 已修復。
 
 ## 自動能源遙測
 
