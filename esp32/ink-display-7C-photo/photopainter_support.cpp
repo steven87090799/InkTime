@@ -73,7 +73,8 @@ bool storagePartitionErased() {
   if (partition == nullptr) return false;
   uint8_t bytes[4096];
   for (size_t offset = 0; offset < partition->size; offset += sizeof(bytes)) {
-    const size_t length = min(sizeof(bytes), partition->size - offset);
+    const size_t remaining = static_cast<size_t>(partition->size) - offset;
+    const size_t length = min(sizeof(bytes), remaining);
     if (esp_partition_read(partition, offset, bytes, length) != ESP_OK) return false;
     for (size_t index = 0; index < length; ++index) {
       if (bytes[index] != 0xff) return false;
