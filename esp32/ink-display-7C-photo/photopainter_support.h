@@ -53,7 +53,9 @@ class PhotoPainterSupport {
     const char* currentFrameSha256,
     const char* lastGoodFrameSha256,
     const char* inFlightFrameSha256,
-    const char* recoveryFrameSha256
+    const char* recoveryFrameSha256,
+    const char* incomingScheduleJson = nullptr,
+    DisplayRotation incomingRotation = DisplayRotation::Rotate0
   );
   bool writeActiveSchedule(const char* json, size_t length);
   bool readActiveSchedule(String& json);
@@ -84,6 +86,9 @@ class PhotoPainterSupport {
   bool flashReady() const { return flashReady_; }
   bool hardwareReady() const { return hardwareReady_; }
   bool storageReady() const { return storageReady_; }
+  const char* storageState() const {
+    return storageCorrupt_ ? "STORAGE_CORRUPT" : (storageReady_ ? "ready" : "unavailable");
+  }
   bool rtcReady() const { return rtcReady_; }
   bool shtc3Ready() const { return shtc3Ready_; }
   bool forceNetworkRefresh() const { return forceNetworkRefresh_; }
@@ -115,6 +120,7 @@ class PhotoPainterSupport {
   const char* lastError() const { return lastError_; }
 
  private:
+  void recoverFormalFrameArtifacts();
   struct Impl;
   const BoardConfig& board_;
   Impl* impl_ = nullptr;
@@ -122,6 +128,7 @@ class PhotoPainterSupport {
   bool flashReady_ = false;
   bool hardwareReady_ = false;
   bool storageReady_ = false;
+  bool storageCorrupt_ = false;
   bool rtcReady_ = false;
   bool shtc3Ready_ = false;
   bool forceNetworkRefresh_ = false;

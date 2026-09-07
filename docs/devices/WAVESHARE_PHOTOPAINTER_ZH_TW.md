@@ -94,15 +94,31 @@ Stock 原始碼使用相對秒數 timer，不足以證明支援 InkTime 的任�
   Server 自 Migration 59 起將 16 保存為 `confirmed_16`，配對、每日預取與管理頁均接受
   此能力。曾被舊 Server 降為 12 的裝置須重新配對／Repair；既有能力不自動推升。
   新下載排程在韌體端最多接受 16 slots，舊本機 24-slot 資料仍可讀。
+  Authenticated status heartbeat 也回報 16；較新 heartbeat 若宣告低於 DB 的容量，
+  Server 會保留排程與版本，轉入既有 `legacy_ambiguous` quarantine（保守值 12），
+  停止預取，並記錄 `DEVICE-CAPABILITY-CONFLICT`，等待重新配對／Repair。
 - Formal Frame GC 每次最多掃描 64 個 entry、刪除 4 個，保護 active、staged-next、
   current、last-good、recovery 與 in-flight references；free-space floor 為約
   1.5 MiB 加一張 formal Frame transaction 的空間。
-  到達 40 張時即啟動回收，避免寫入上限與 GC 門檻互相卡住；目錄掃描未完成時拒絕
+  新批次下載前先以 SHA＋rotation 驗證、去重，計算缺少的 frame；保護新批次與原有
+  references，最多掃 64 entries、刪 40 個未引用 frame，直到整批張數與空間足夠。
+  受保護資料無法讓出足夠容量時，下載前回報 `STORAGE-BATCH-CAPACITY`。
+  一般開機 GC 仍最多刪 4 個；目錄掃描未完成時拒絕
   新增 frame。一般線上照片也盡力保存正式 ITF 供 KEY1 恢復，儲存失敗仍可由 RAM 顯示。
 - Active／staged schedule 與 frame 寫入仍採同目錄 `.tmp`，flush／close 後將舊檔 rename
   為 `.bak`、再把 temporary rename 成 final；final 缺失時恢復 `.bak`，不把尺寸錯誤或
   CRC／SHA 驗證失敗的檔案當成有效畫面。
   重試寫入或 promote 前先恢復僅剩的 `.bak`，避免下一次 transaction 提前刪掉唯一舊副本。
+
+- 正常掛載使用 `formatOnFail=false`。僅整個 FAT partition 都是 `0xff` 時允許首次
+  格式化；已有任何資料而 mount fail 時保留原分割區，回報 `STORAGE_CORRUPT`。
+  本流程不會自動修復／格式化損壞的 filesystem。
+- 開機 recovery sweep 最多掃 64 entries，先關閉目錄再處理合法 frame 檔名的殘檔：
+  刪除 `.tmp`，final 缺失時恢復 `.bak`；兩者存在時完整驗證 final 或恢復 backup。
+  正式讀取恢復 `.bak` 後會在同一次呼叫最多重試一次。
+- Status 增加 `storage_backend=ffat`、`internal_storage_ready`、`storage_read_bytes`、
+  `storage_write_bytes`、`storage_write_ms` 與 `storage_state`；Server 保存於 status event details。
+  `sd_card`／`sd_*` 暫時保留相容，表示相同的內部儲存狀態／I/O。
 
 ## I²C、PMIC、RTC 與感測器
 

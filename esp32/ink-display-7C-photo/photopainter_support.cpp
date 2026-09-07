@@ -11,6 +11,7 @@
 #include <driver/rtc_io.h>
 #include <esp_heap_caps.h>
 #include <esp_sleep.h>
+#include <esp_partition.h>
 #include <new>
 #include <sys/time.h>
 
@@ -56,11 +57,29 @@ constexpr uint64_t kFormalFrameFreeSpaceFloorBytes =
 constexpr size_t kFormalFrameMaximumFiles = 40U;
 constexpr uint8_t kFormalFrameGcMaxDeletesPerWake = 4U;
 constexpr uint8_t kFormalFrameGcMaxScansPerWake = 64U;
-constexpr size_t kFormalFrameReferenceLimit = 64U;
+constexpr size_t kFormalFrameReferenceLimit = 80U;
 
 namespace {
 
 size_t countFormalFrameFiles();
+
+// Only a completely erased partition is evidence of first initialization.
+// Missing NVS markers alone must never authorize destroying an existing FAT.
+bool storagePartitionErased() {
+  const esp_partition_t* partition = esp_partition_find_first(
+    ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_FAT, "fat");
+  if (partition == nullptr) return false;
+  uint8_t bytes[4096];
+  for (size_t offset = 0; offset < partition->size; offset += sizeof(bytes)) {
+    const size_t length = min(sizeof(bytes), partition->size - offset);
+    if (esp_partition_read(partition, offset, bytes, length) != ESP_OK) return false;
+    for (size_t index = 0; index < length; ++index) {
+      if (bytes[index] != 0xff) return false;
+    }
+    yield();
+  }
+  return true;
+}
 
 // A reset can leave the only committed copy in .bak. Restore it before a
 // new transaction is allowed to remove that backup.
@@ -840,14 +859,20 @@ bool PhotoPainterSupport::begin() {
            shtc3Ready_ ? 1 : 0, rtcReady_ ? 1 : 0);
   }
 
+  const bool pristineStorage = storagePartitionErased();
   storageReady_ = FFat.begin(
-    true,       // formatOnFail: this partition contains rebuildable runtime data only.
+    false,      // A mount error must never erase committed runtime data.
     "/ffat",
     8,
     "fat"
   );
+  if (!storageReady_ && pristineStorage) {
+    char partitionLabel[] = "fat";
+    storageReady_ = FFat.format(false, partitionLabel) && FFat.begin(false, "/ffat", 8, "fat");
+  }
   if (!storageReady_) {
-    lastError_ = "STORAGE-MOUNT";
+    storageCorrupt_ = true;
+    lastError_ = "STORAGE_CORRUPT";
   } else {
     const char* directories[] = {
       "/inktime", "/inktime/schedule",
@@ -871,6 +896,7 @@ bool PhotoPainterSupport::begin() {
       lastError_ = "STORAGE-BOUNCE-BUFFER";
     } else {
       cacheStatus_ = CacheStatus::Miss;
+      recoverFormalFrameArtifacts();
     }
   }
   PP_LOG("[FFAT] ready=%d cache=%s\n", storageReady_ ? 1 : 0, cacheStatusName(cacheStatus_));
@@ -908,54 +934,61 @@ bool PhotoPainterSupport::loadFormalFrame(
     return false;
   }
   if (!FFat.exists(finalPath) && FFat.exists(backupPath)) FFat.rename(backupPath, finalPath);
-  File file = FFat.open(finalPath, FILE_READ);
-  if (!file || static_cast<size_t>(file.size())
-      != sizeof(FormalFrameHeader) + kPhotoPainterFrameBytes) {
-    if (file) file.close();
-    if (FFat.exists(finalPath)) FFat.remove(finalPath);
-    if (FFat.exists(backupPath)) FFat.rename(backupPath, finalPath);
-    cacheStatus_ = CacheStatus::Miss;
-    return false;
-  }
-  FormalFrameHeader header = {};
-  const size_t headerReceived = file.read(reinterpret_cast<uint8_t*>(&header), sizeof(header));
-  storageReadBytes_ += static_cast<uint32_t>(headerReceived);
-  if (headerReceived != sizeof(header)) {
+  for (uint8_t attempt = 0; attempt < 2; ++attempt) {
+    File file = FFat.open(finalPath, FILE_READ);
+    if (!file || static_cast<size_t>(file.size())
+        != sizeof(FormalFrameHeader) + kPhotoPainterFrameBytes) {
+      if (file) file.close();
+      if (FFat.exists(finalPath)) FFat.remove(finalPath);
+      if (attempt == 0 && FFat.exists(backupPath)
+          && FFat.rename(backupPath, finalPath)) continue;
+      cacheStatus_ = CacheStatus::Miss;
+      return false;
+    }
+    FormalFrameHeader header = {};
+    const size_t headerReceived = file.read(reinterpret_cast<uint8_t*>(&header), sizeof(header));
+    storageReadBytes_ += static_cast<uint32_t>(headerReceived);
+    if (headerReceived != sizeof(header)) {
+      file.close();
+      FFat.remove(finalPath);
+      if (attempt == 0 && FFat.exists(backupPath)
+          && FFat.rename(backupPath, finalPath)) continue;
+      cacheStatus_ = CacheStatus::Invalid;
+      return false;
+    }
+    uint8_t* framebuffer = allocateWireBuffer(kPhotoPainterFrameBytes);
+    if (framebuffer == nullptr) {
+      file.close();
+      cacheStatus_ = CacheStatus::Error;
+      lastError_ = "DEVICE-PSRAM-ALLOC";
+      return false;
+    }
+    size_t total = 0;
+    while (total < kPhotoPainterFrameBytes) {
+      const size_t requested = min(kIoChunkSize, kPhotoPainterFrameBytes - total);
+      const size_t received = file.read(impl_->ioBuffer, requested);
+      storageReadBytes_ += static_cast<uint32_t>(received);
+      if (received != requested) break;
+      memcpy(framebuffer + total, impl_->ioBuffer, received);
+      total += received;
+    }
     file.close();
-    FFat.remove(finalPath);
-    if (FFat.exists(backupPath)) FFat.rename(backupPath, finalPath);
-    cacheStatus_ = CacheStatus::Invalid;
-    return false;
+    if (total != kPhotoPainterFrameBytes
+        || validateFormalFrameHeader(
+             header, sourceSha256, rotation, framebuffer, total) != CacheValidation::Valid) {
+      heap_caps_free(framebuffer);
+      FFat.remove(finalPath);
+      if (attempt == 0 && FFat.exists(backupPath)
+          && FFat.rename(backupPath, finalPath)) continue;
+      cacheStatus_ = CacheStatus::Invalid;
+      return false;
+    }
+    FFat.remove(backupPath);
+    *output = framebuffer;
+    cacheStatus_ = CacheStatus::Hit;
+    return true;
   }
-  uint8_t* framebuffer = allocateWireBuffer(kPhotoPainterFrameBytes);
-  if (framebuffer == nullptr) {
-    file.close();
-    cacheStatus_ = CacheStatus::Error;
-    lastError_ = "DEVICE-PSRAM-ALLOC";
-    return false;
-  }
-  size_t total = 0;
-  while (total < kPhotoPainterFrameBytes) {
-    const size_t requested = min(kIoChunkSize, kPhotoPainterFrameBytes - total);
-    const size_t received = file.read(impl_->ioBuffer, requested);
-    storageReadBytes_ += static_cast<uint32_t>(received);
-    if (received != requested) break;
-    memcpy(framebuffer + total, impl_->ioBuffer, received);
-    total += received;
-  }
-  file.close();
-  if (total != kPhotoPainterFrameBytes
-      || validateFormalFrameHeader(
-           header, sourceSha256, rotation, framebuffer, total) != CacheValidation::Valid) {
-    heap_caps_free(framebuffer);
-    FFat.remove(finalPath);
-    if (FFat.exists(backupPath)) FFat.rename(backupPath, finalPath);
-    cacheStatus_ = CacheStatus::Invalid;
-    return false;
-  }
-  *output = framebuffer;
-  cacheStatus_ = CacheStatus::Hit;
-  return true;
+  return false;
 }
 
 bool PhotoPainterSupport::convertFrame(
@@ -1081,12 +1114,14 @@ namespace {
 
 class ProtectedFormalFrames final {
  public:
-  void add(const char* sourceSha256) {
-    if (!isSha256Hex(sourceSha256)) return;
+  bool add(const char* sourceSha256) {
+    if (!isSha256Hex(sourceSha256)) return true;
     for (size_t index = 0; index < count_; ++index) {
-      if (values_[index].equalsIgnoreCase(sourceSha256)) return;
+      if (values_[index].equalsIgnoreCase(sourceSha256)) return true;
     }
-    if (count_ < kFormalFrameReferenceLimit) values_[count_++] = sourceSha256;
+    if (count_ >= kFormalFrameReferenceLimit) return false;
+    values_[count_++] = sourceSha256;
+    return true;
   }
 
   bool contains(const String& sourceSha256) const {
@@ -1116,7 +1151,7 @@ bool addScheduleFrameReferences(
     const JsonVariantConst rawSlot = slots[index];
     if (!rawSlot.is<JsonObjectConst>()) continue;
     const String sourceSha256 = rawSlot["sha256"] | "";
-    protectedFrames.add(sourceSha256.c_str());
+    if (!protectedFrames.add(sourceSha256.c_str())) return false;
   }
   return true;
 }
@@ -1143,6 +1178,7 @@ bool formalFrameShaFromPath(const String& path, String& sourceSha256) {
   sourceSha256 = filename.substring(0, 64U);
   return isSha256Hex(sourceSha256.c_str());
 }
+
 
 size_t countFormalFrameFiles() {
   File directory = FFat.open("/inktime/frames");
@@ -1172,13 +1208,50 @@ size_t countFormalFrameFiles() {
 
 }  // namespace
 
+void PhotoPainterSupport::recoverFormalFrameArtifacts() {
+  // Inventory first: mutating an open directory iterator can skip entries.
+  String paths[kFormalFrameGcMaxScansPerWake];
+  size_t count = 0;
+  File directory = FFat.open("/inktime/frames");
+  if (!directory || !directory.isDirectory()) return;
+  File file = directory.openNextFile();
+  while (file && count < kFormalFrameGcMaxScansPerWake) {
+    String name = file.name();
+    paths[count++] = file.isDirectory() ? String("")
+      : (name.startsWith("/") ? name : String("/inktime/frames/") + name);
+    file.close();
+    file = directory.openNextFile();
+  }
+  if (file) file.close();
+  directory.close();
+  for (size_t index = 0; index < count; ++index) {
+    const String path = paths[index];
+    if (!path.endsWith(".tmp") && !path.endsWith(".bak")) continue;
+    const String finalPath = path.substring(0, path.length() - 4) + ".itf";
+    String sha;
+    if (!formalFrameShaFromPath(finalPath, sha)) continue;
+    if (path.endsWith(".tmp")) FFat.remove(path.c_str());
+    else if (!FFat.exists(finalPath.c_str())) FFat.rename(path.c_str(), finalPath.c_str());
+    else {
+      uint8_t* frame = nullptr;
+      const DisplayRotation rotation = finalPath.endsWith("-r180.itf")
+        ? DisplayRotation::Rotate180 : DisplayRotation::Rotate0;
+      // load validates the final, retries its backup, and removes only invalid
+      // copies or a backup made redundant by a fully validated final.
+      if (loadFormalFrame(sha.c_str(), rotation, &frame)) heap_caps_free(frame);
+    }
+  }
+}
+
 bool PhotoPainterSupport::runFormalFrameGc(
   const char* activeScheduleJson,
   const char* stagedNextScheduleJson,
   const char* currentFrameSha256,
   const char* lastGoodFrameSha256,
   const char* inFlightFrameSha256,
-  const char* recoveryFrameSha256
+  const char* recoveryFrameSha256,
+  const char* incomingScheduleJson,
+  DisplayRotation incomingRotation
 ) {
   if (!storageReady_) return false;
   if (!scheduleJsonSafeForGc(
@@ -1195,52 +1268,91 @@ bool PhotoPainterSupport::runFormalFrameGc(
       || !addScheduleFrameReferences(stagedNextScheduleJson, protectedFrames)) {
     return false;
   }
-  protectedFrames.add(currentFrameSha256);
-  protectedFrames.add(lastGoodFrameSha256);
-  protectedFrames.add(inFlightFrameSha256);
-  protectedFrames.add(recoveryFrameSha256);
+  if (!protectedFrames.add(currentFrameSha256)
+      || !protectedFrames.add(lastGoodFrameSha256)
+      || !protectedFrames.add(inFlightFrameSha256)
+      || !protectedFrames.add(recoveryFrameSha256)) return false;
   // The internal guard covers a formal write that is in progress even if the
   // caller did not pass the optional in-flight reference explicitly.
-  protectedFrames.add(formalFrameInFlightSha256_.c_str());
+  if (!protectedFrames.add(formalFrameInFlightSha256_.c_str())) return false;
 
+  size_t missing = 0;
+  if (incomingScheduleJson != nullptr) {
+    JsonDocument incoming;
+    if (deserializeJson(incoming, incomingScheduleJson) || incoming.overflowed()
+        || !incoming["slots"].is<JsonArrayConst>()) return false;
+    const JsonArrayConst slots = incoming["slots"].as<JsonArrayConst>();
+    if (slots.size() > 16) return false;
+    for (size_t index = 0; index < slots.size(); ++index) {
+      const JsonVariantConst slot = slots[index];
+      const String sha = slot["sha256"] | "";
+      if (!isSha256Hex(sha.c_str())) return false;
+      bool duplicate = false;
+      for (size_t previous = 0; previous < index; ++previous) {
+        const String previousSha = slots[previous]["sha256"] | "";
+        if (sha.equalsIgnoreCase(previousSha)) duplicate = true;
+      }
+      if (duplicate) continue;
+      if (!protectedFrames.add(sha.c_str())) return false;
+      uint8_t* frame = nullptr;
+      if (loadFormalFrame(sha.c_str(), incomingRotation, &frame)) heap_caps_free(frame);
+      else ++missing;
+    }
+  }
   const size_t formalFrameFiles = countFormalFrameFiles();
   const uint64_t freeBytes = FFat.freeBytes();
-  const bool pressure = freeBytes < kFormalFrameFreeSpaceFloorBytes;
-  if (!pressure && formalFrameFiles < kFormalFrameMaximumFiles) return true;
+  const uint64_t requiredFree = kFormalFrameFreeSpaceFloorBytes
+    + missing * kFormalFrameRecordBytes;
+  const bool pressure = freeBytes < requiredFree;
+  const bool batch = incomingScheduleJson != nullptr;
+  if (!pressure && (batch ? formalFrameFiles + missing <= kFormalFrameMaximumFiles
+                          : formalFrameFiles < kFormalFrameMaximumFiles)) return true;
 
   File directory = FFat.open("/inktime/frames");
   if (!directory || !directory.isDirectory()) {
     if (directory) directory.close();
     return false;
   }
-  uint8_t deletedThisWake = 0U;
-  uint8_t scannedThisWake = 0U;
+  String paths[kFormalFrameGcMaxScansPerWake];
+  uint32_t sizes[kFormalFrameGcMaxScansPerWake] = {};
+  size_t scannedThisWake = 0;
   File file = directory.openNextFile();
-  while (file && deletedThisWake < kFormalFrameGcMaxDeletesPerWake
-      && scannedThisWake < kFormalFrameGcMaxScansPerWake) {
-    ++scannedThisWake;
-    String sourceSha256;
+  while (file && scannedThisWake < kFormalFrameGcMaxScansPerWake) {
     const String entryName = file.name();
     const String path = entryName.startsWith("/")
-      ? entryName
-      : String("/inktime/frames/") + entryName;
-    const uint32_t fileBytes = static_cast<uint32_t>(file.size());
-    const bool candidate = !file.isDirectory()
-      && formalFrameShaFromPath(path, sourceSha256);
-    const bool protectedReference = candidate && protectedFrames.contains(sourceSha256);
+      ? entryName : String("/inktime/frames/") + entryName;
+    String sourceSha256;
+    if (!file.isDirectory() && formalFrameShaFromPath(path, sourceSha256)) {
+      paths[scannedThisWake] = path;
+      sizes[scannedThisWake] = static_cast<uint32_t>(file.size());
+    }
+    ++scannedThisWake;
     file.close();
-    if (protectedReference) {
+    file = directory.openNextFile();
+  }
+  if (file) file.close();
+  directory.close();
+  uint8_t deletedThisWake = 0U;
+  for (size_t index = 0; index < scannedThisWake
+      && deletedThisWake < (batch ? kFormalFrameMaximumFiles : kFormalFrameGcMaxDeletesPerWake);
+      ++index) {
+    const String path = paths[index];
+    String sourceSha256;
+    if (!formalFrameShaFromPath(path, sourceSha256)) continue;
+    const uint32_t fileBytes = sizes[index];
+    if (protectedFrames.contains(sourceSha256)) {
       if (gcSkippedProtected_ < UINT32_MAX) ++gcSkippedProtected_;
-    } else if (candidate && FFat.remove(path.c_str())) {
+    } else if (FFat.remove(path.c_str())) {
       if (gcDeletedFiles_ < UINT32_MAX) ++gcDeletedFiles_;
       if (UINT32_MAX - gcDeletedBytes_ < fileBytes) gcDeletedBytes_ = UINT32_MAX;
       else gcDeletedBytes_ += fileBytes;
       ++deletedThisWake;
+      if (batch && formalFrameFiles - deletedThisWake + missing <= kFormalFrameMaximumFiles
+          && FFat.freeBytes() >= requiredFree) break;
     }
-    file = directory.openNextFile();
   }
-  directory.close();
-  return true;
+  return !batch || (countFormalFrameFiles() + missing <= kFormalFrameMaximumFiles
+    && FFat.freeBytes() >= requiredFree);
 }
 
 bool PhotoPainterSupport::writeActiveSchedule(const char* json, size_t length) {

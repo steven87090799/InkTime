@@ -425,3 +425,29 @@ def test_photopainter_boot_and_pairing_display_failures_are_release_visible():
     assert "INK_LOG_" in pairing_block
     assert "INK_LOG_INFO(\"pairing_display_ready\", apPassword" not in pairing_block
     assert "INK_LOG_ERROR(\"pairing_display_failed\", apPassword" not in pairing_block
+
+
+def test_batch_preflight_and_mount_recovery_are_fail_closed():
+    support = SUPPORT.read_text(encoding="utf-8")
+    firmware = FIRMWARE.read_text(encoding="utf-8")
+    assert "false,      // A mount error" in support
+    assert "!storageReady_ && pristineStorage" in support
+    assert "bytes[index] != 0xff" in support
+    assert 'lastError_ = "STORAGE_CORRUPT"' in support
+    assert "formalFrameFiles + missing <= kFormalFrameMaximumFiles" in support
+    assert "sha.equalsIgnoreCase(previousSha)" in support
+    assert "protectedFrames.add(sha.c_str())" in support
+    assert "FFat.freeBytes() >= requiredFree" in support
+    download = firmware[firmware.index("static bool downloadOfflineScheduleAndFrames("):]
+    assert download.index("runFormalFrameGcForWake(incomingJson.c_str()") < download.index(
+        "|| !downloadOfflineScheduleSlot("
+    )
+    load = support[support.index("bool PhotoPainterSupport::loadFormalFrame("):
+                   support.index("bool PhotoPainterSupport::convertFrame(")]
+    assert "attempt < 2" in load
+    assert load.count("&& FFat.rename(backupPath, finalPath)) continue;") == 3
+    sweep = support[support.index("void PhotoPainterSupport::recoverFormalFrameArtifacts()"):
+                    support.index("bool PhotoPainterSupport::runFormalFrameGc(")]
+    assert "count < kFormalFrameGcMaxScansPerWake" in sweep
+    assert sweep.index("directory.close()") < sweep.index('path.endsWith(".tmp")')
+    assert "loadFormalFrame(sha.c_str(), rotation, &frame)" in sweep

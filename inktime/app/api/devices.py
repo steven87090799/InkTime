@@ -1091,6 +1091,10 @@ def report_status():
     )
     status_sequence = optional_int("status_sequence", 0, 2_147_483_647)
     status_reported_at = optional_text("status_reported_at", 64)
+    advertised_slots = optional_int("offline_schedule_max_slots", 1, 24)
+    if advertised_slots is not None and advertised_slots not in (12, 16, 24):
+        abort(400, description="DEVICE-004 offline_schedule_max_slots 必須是 12、16 或 24")
+    storage_backend = optional_text("storage_backend", 32)
     telemetry = {
         "wifi_connect_ms": optional_int("wifi_connect_ms", 0, 120_000),
         "network_session_ms": optional_int("network_session_ms", 0, 600_000),
@@ -1098,6 +1102,9 @@ def report_status():
         "tls_handshake_count": optional_int("tls_handshake_count", 0, 128),
         "ntp_sync_ms": optional_int("ntp_sync_ms", 0, 120_000),
         "download_bytes": optional_int("download_bytes", 0, 4_294_967_295),
+        "storage_read_bytes": optional_int("storage_read_bytes", 0, 4_294_967_295),
+        "storage_write_bytes": optional_int("storage_write_bytes", 0, 4_294_967_295),
+        "storage_write_ms": optional_int("storage_write_ms", 0, 600_000),
         "sd_read_bytes": optional_int("sd_read_bytes", 0, 4_294_967_295),
         "sd_write_bytes": optional_int("sd_write_bytes", 0, 4_294_967_295),
         "sd_write_ms": optional_int("sd_write_ms", 0, 600_000),
@@ -1150,6 +1157,7 @@ def report_status():
             "flash_ready",
             "psram_ready",
             "sd_card",
+            "internal_storage_ready",
             "rtc",
             "usb_power",
             "battery_percent_estimated",
@@ -1191,6 +1199,13 @@ def report_status():
                 "psram_bytes": optional_int("psram_bytes", 0, 2_147_483_647),
                 "flash_ready": boolean_details["flash_ready"],
                 "psram_ready": boolean_details["psram_ready"],
+                "offline_schedule_max_slots": advertised_slots,
+                "storage_backend": storage_backend,
+                "storage_state": optional_text("storage_state", 32),
+                "internal_storage_ready": boolean_details["internal_storage_ready"],
+                "storage_read_bytes": telemetry["storage_read_bytes"],
+                "storage_write_bytes": telemetry["storage_write_bytes"],
+                "storage_write_ms": telemetry["storage_write_ms"],
                 "sd_card": boolean_details["sd_card"],
                 "rtc": boolean_details["rtc"],
                 "cache_status": str(payload.get("cache_status", ""))[:32],

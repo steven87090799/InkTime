@@ -802,7 +802,10 @@ static StoredDisplayRecord loadDisplayRecord() {
 }
 
 #if INKTIME_PHOTOPAINTER_ENABLED
-static void runFormalFrameGcForWake() {
+static bool runFormalFrameGcForWake(
+  const char* incoming = nullptr,
+  inktime::DisplayRotation rotation = inktime::DisplayRotation::Rotate0
+) {
   String activeScheduleJson;
   String stagedNextScheduleJson;
   (void)photoPainter.readActiveSchedule(activeScheduleJson);
@@ -815,16 +818,16 @@ static void runFormalFrameGcForWake() {
     && inktime::isSha256Hex(currentPayloadSha256.c_str())
     ? currentPayloadSha256.c_str()
     : nullptr;
-  // Formal Frame GC is best-effort.  Transactional .tmp/.bak artifacts remain
-  // outside the candidate set, while the active/staged/current/last-good and
-  // recovery references are explicit protection fences.
-  (void)photoPainter.runFormalFrameGc(
+  // Wake GC is best-effort; an incoming batch requires a successful reservation.
+  // Transaction artifacts stay outside GC; recovery sweeps handle them.
+  // Active/staged/current/last-good/recovery and incoming references are protected.
+  return photoPainter.runFormalFrameGc(
     activeScheduleJson.c_str(),
     stagedNextScheduleJson.c_str(),
     currentPayloadSha256.c_str(),
     lastGoodSha256,
     photoPainter.inFlightFormalFrameSha256(),
-    recoverySha256);
+    recoverySha256, incoming, rotation);
 }
 #endif
 
@@ -4746,6 +4749,14 @@ static bool downloadOfflineScheduleAndFrames(Config &cfg, bool targetNext = fals
     return false;
   }
   scheduleCandidate.prefetch_lead_minutes = static_cast<uint16_t>(remoteLead);
+  String incomingJson;
+  serializeJson(schedule, incomingJson);
+  if (!runFormalFrameGcForWake(incomingJson.c_str(), remoteRotation == 180
+        ? inktime::DisplayRotation::Rotate180 : inktime::DisplayRotation::Rotate0)) {
+    lastDeviceErrorCode = "STORAGE-BATCH-CAPACITY";
+    lastDeviceErrorMessage = "儲存空間不足以安全容納整批離線圖片";
+    return false;
+  }
   for (size_t index = 0; index < slots.size(); ++index) {
     const JsonVariantConst rawSlot = slots[index];
     if (!rawSlot.is<JsonObjectConst>()) {
@@ -5988,6 +5999,13 @@ void reportDeviceStatus(Config &cfg, bool displayUpdated) {
   payload["psram_bytes"] = ESP.getPsramSize();
   payload["flash_ready"] = photoPainter.flashReady();
   payload["psram_ready"] = photoPainter.psramReady();
+  payload["offline_schedule_max_slots"] = 16;
+  payload["storage_backend"] = "ffat";
+  payload["storage_state"] = photoPainter.storageState();
+  payload["internal_storage_ready"] = photoPainter.storageReady();
+  payload["storage_read_bytes"] = photoPainter.storageReadBytes();
+  payload["storage_write_bytes"] = photoPainter.storageWriteBytes();
+  payload["storage_write_ms"] = photoPainter.storageWriteDurationMs();
   payload["sd_card"] = photoPainter.storageReady();
   payload["rtc"] = photoPainter.rtcReady();
   payload["cache_status"] = inktime::cacheStatusName(photoPainter.cacheStatus());
@@ -6661,7 +6679,7 @@ void setup() {
   } else {
     INK_LOG_INFO("photopainter_ready", "PhotoPainter Flash and PSRAM checks passed");
     if (!photoPainter.storageReady()) {
-      INK_LOG_WARN("photopainter_storage_unavailable", "Internal Flash storage is unavailable");
+      INK_LOG_WARN("photopainter_storage_unavailable", photoPainter.storageState());
     }
     if (!photoPainter.rtcReady()) {
       INK_LOG_WARN("photopainter_rtc_unavailable", "RTC is unavailable; network time remains required");
