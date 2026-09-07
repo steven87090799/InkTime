@@ -499,7 +499,8 @@ def test_explicit_recovery_precedes_normal_display_network_shutdown():
     assert "&& !photoPainter.forceNetworkRefresh()" in local_key
     assert "const bool forcedRefresh = photoPainter.forceNetworkRefresh();" in firmware
     support = SUPPORT.read_text(encoding="utf-8")
-    assert "if (forceNetworkRefresh_ ||" in support
+    assert "forceNetworkRefresh_ = shouldForceNetworkRefresh(heldMs);" in support
+    assert "recoveryServiceRequested_ = shouldRequestRecoveryService(heldMs);" in support
 
     wifi_failure = _between(setup, "if (!connectWiFi(g_cfg))", "startConfigPortal();")
     offline_fallback = _between(

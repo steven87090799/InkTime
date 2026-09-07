@@ -410,7 +410,7 @@ def test_photopainter_boot_and_pairing_display_failures_are_release_visible():
     for marker in (
         'INK_LOG_ERROR("photopainter_init_failed", photoPainter.lastError())',
         'INK_LOG_INFO("photopainter_ready"',
-        'INK_LOG_WARN("photopainter_sd_unavailable"',
+        'INK_LOG_WARN("photopainter_storage_unavailable"',
         'INK_LOG_WARN("photopainter_rtc_unavailable"',
         'INK_LOG_WARN("photopainter_sensor_unavailable"',
         'INK_LOG_INFO("pairing_display_ready"',
