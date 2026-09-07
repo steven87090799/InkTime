@@ -34,6 +34,7 @@ struct Config;
 #if INKTIME_PHOTOPAINTER_ENABLED
 #include "photopainter_support.h"
 #include "power_manager.h"
+#include "power_policy.h"
 #else
 #include <GxEPD2_7C.h>
 #endif
@@ -622,7 +623,7 @@ static void clearConfigNVS() {
     if (legacyCleared && prefs.begin("dashcfg", true)) {
       const char* keys[] = {
         "last_epoch", "last_ntp", "wifi_bssid", "wifi_channel",
-        "offretry_attempt", "offretry_epoch", "offretry_next",
+        "offretry_attempt", "offretry_epoch", "offretry_next", "pwr_retry",
         "ack_item", "ack_version", "ack_event", "ack_attempt", "ack_next",
         "ssid", "pass", "hostport", "ca_pem", "devtoken", "tzmin", "tz",
         "hour", "minute", "rot180", "prefetch", "delivery", "button", "cfgver", "scnt",
@@ -675,6 +676,34 @@ static bool loadLastTimeEpoch(time_t &epochOut) {
 }
 
 #if INKTIME_PHOTOPAINTER_ENABLED
+// Separate from schedule/ACK retries: these faults have no reliable epoch.
+// Only write on a change; a persistent hourly fault does not wear NVS.
+static uint64_t nextPowerRecoverySeconds() {
+  uint8_t attempt = 0U;
+  if (prefs.begin("dashcfg", false)) {
+    attempt = prefs.getUChar("pwr_retry", 0U);
+    const uint8_t next = inktime::nextPowerRecoveryAttempt(attempt);
+    if (next != attempt) {
+      if (prefs.putUChar("pwr_retry", next) > 0U) recordNvsWrite();
+      else attempt = 2U;  // Failed persistence still uses the hourly bound.
+    }
+    prefs.end();
+  } else {
+    // A storage fault must not turn recovery into the fastest retry loop.
+    attempt = 2U;
+  }
+  const uint64_t seconds = inktime::powerRecoverySeconds(attempt);
+  INK_LOG_WARN("power_recovery_backoff",
+    String("attempt=") + String(attempt) + " sleep_seconds=" + String((uint32_t)seconds));
+  return seconds;
+}
+
+static void clearPowerRecoveryAttempt() {
+  if (!prefs.begin("dashcfg", false)) return;
+  if (prefs.isKey("pwr_retry") && prefs.remove("pwr_retry")) recordNvsWrite();
+  prefs.end();
+}
+
 static bool loadOfflineRetryState(
   uint8_t &attemptOut, int64_t &epochOut, int64_t &nextSlotOut) {
   prefs.begin("dashcfg", true);
@@ -2413,6 +2442,12 @@ static void enterDeepSleepSeconds(uint64_t seconds, bool retainMaxAwakeRecovery)
   }
 #endif
 
+#if INKTIME_PHOTOPAINTER_ENABLED
+  INK_LOG_INFO("sleep_diagnostics",
+    String("awake_ms=") + String(millis())
+      + " sleep_seconds=" + String((uint32_t)seconds)
+      + " wake_cause=" + String((int)esp_sleep_get_wakeup_cause()));
+#endif
 #if DEBUG_LOG
   DBG_PRINTLN("[SLEEP] go deep sleep");
 #endif
@@ -6162,13 +6197,13 @@ bool drawFromFrameData(const Config &cfg) {
 void sleepUntilNextSchedule(const Config &cfg, bool hasTime, const struct tm &now) {
 #if INKTIME_PHOTOPAINTER_ENABLED
   if (offlineScheduleTxnBlocked) {
-    goDeepSleepSeconds(inktime::kOfflineRetryFirstSeconds);
+    goDeepSleepSeconds(nextPowerRecoverySeconds());
     return;
   }
   if (cfg.delivery_mode == "inktime_offline_schedule") {
     if (!hasTime) {
       // Unknown time is a bounded recovery wake, never a 24-hour blind sleep.
-      goDeepSleepSeconds(inktime::kOfflineRetryFirstSeconds);
+      goDeepSleepSeconds(nextPowerRecoverySeconds());
       return;
     }
     time_t nowEpoch = time(nullptr);
@@ -6177,6 +6212,7 @@ void sleepUntilNextSchedule(const Config &cfg, bool hasTime, const struct tm &no
       if (photoPainter.readRtc(rtcEpoch)) nowEpoch = rtcEpoch;
     }
     if (nowEpoch > 0) {
+      clearPowerRecoveryAttempt();
       time_t nextDisplay = 0;
       time_t targetEnd = 0;
       time_t nextSchedulePrefetch = 0;
@@ -6220,15 +6256,15 @@ void sleepUntilNextSchedule(const Config &cfg, bool hasTime, const struct tm &no
         // a missing schedule, instead of a one-minute storm.
         const time_t recoveryEpoch = scheduleOfflineRecovery(nowEpoch);
         if (recoveryEpoch > nowEpoch) goDeepSleepUntilEpoch(nowEpoch, recoveryEpoch);
-        else goDeepSleepSeconds(inktime::kOfflineRetryFirstSeconds);
+        else goDeepSleepSeconds(nextPowerRecoverySeconds());
         return;
       }
       const time_t recoveryEpoch = scheduleOfflineRecovery(nowEpoch);
       if (recoveryEpoch > nowEpoch) goDeepSleepUntilEpoch(nowEpoch, recoveryEpoch);
-      else goDeepSleepSeconds(inktime::kOfflineRetryFirstSeconds);
+      else goDeepSleepSeconds(nextPowerRecoverySeconds());
       return;
     }
-    goDeepSleepSeconds(inktime::kOfflineRetryFirstSeconds);
+    goDeepSleepSeconds(nextPowerRecoverySeconds());
     return;
   }
 #endif
@@ -6838,6 +6874,14 @@ void setup() {
       // A due 00:00/current formal slot is serviceable from the active
       // cache even when the network recovery attempt fails.
       runOfflineLocalCycle();
+      return;
+    }
+    if (inktime::useAutomaticWifiRecovery(
+          g_cfg.auth_state == "paired" && !deviceAuthInvalid,
+          timerWake, explicitRecoveryRequested)) {
+      INK_LOG_WARN("wifi_automatic_sleep",
+        "Paired timer wake has no Wi-Fi; preserving schedule without opening a portal");
+      sleepUntilNextSchedule(g_cfg, hasOfflineTime, offlineTime);
       return;
     }
 #endif

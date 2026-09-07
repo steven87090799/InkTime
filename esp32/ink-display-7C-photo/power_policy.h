@@ -32,6 +32,21 @@ inline ConnectAction nextConnectAction(bool hintValid, bool fastAttempted, bool 
   return ConnectAction::Sleep;
 }
 
+// Saturate persisted progress after two failures: 15m, 30m, then hourly.
+// Does not depend on a working RTC and does not change max-awake recovery.
+constexpr uint8_t nextPowerRecoveryAttempt(uint8_t attempt) {
+  return attempt < 2U ? static_cast<uint8_t>(attempt + 1U) : 2U;
+}
+
+constexpr uint64_t powerRecoverySeconds(uint8_t attempt) {
+  return attempt == 0U ? 15ULL * 60ULL
+       : attempt == 1U ? 30ULL * 60ULL : 60ULL * 60ULL;
+}
+
+constexpr bool useAutomaticWifiRecovery(bool paired, bool timerWake, bool explicitRecovery) {
+  return paired && timerWake && !explicitRecovery;
+}
+
 struct PanelCapabilities {
   bool supportsPartialRefresh;
   bool requiresFullRefresh;
