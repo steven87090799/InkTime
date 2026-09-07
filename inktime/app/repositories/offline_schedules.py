@@ -1450,7 +1450,7 @@ class OfflineScheduleRepository:
                 FROM devices
                 WHERE enabled=1 AND delivery_mode='inktime_offline_schedule'
                   AND offline_prefetch_allowed=1
-                  AND offline_schedule_capability_state IN ('unknown_12','confirmed_24')
+                  AND offline_schedule_capability_state IN ('unknown_12','confirmed_16','confirmed_24')
                   AND next_offline_prepare_at<=?
                 ORDER BY next_offline_prepare_at,id LIMIT ?
                 """,
@@ -1474,7 +1474,7 @@ class OfflineScheduleRepository:
             WHERE enabled=1
               AND delivery_mode='inktime_offline_schedule'
               AND offline_prefetch_allowed=1
-              AND offline_schedule_capability_state IN ('unknown_12','confirmed_24')
+              AND offline_schedule_capability_state IN ('unknown_12','confirmed_16','confirmed_24')
               AND COALESCE(next_offline_prepare_at,'')<>?
             """,
             (OFFLINE_PREPARE_BOOTSTRAP_AT, OFFLINE_PREPARE_BOOTSTRAP_AT),

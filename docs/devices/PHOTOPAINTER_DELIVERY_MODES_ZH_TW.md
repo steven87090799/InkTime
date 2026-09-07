@@ -2,7 +2,9 @@
 
 本版 Enhanced 韌體 2.8.7 使用 Config Store v5；對 Server 正式宣告最多 16 slots，Config Store v5 仍保留 24-slot read compatibility。先讀[自動配對](ESP32_AUTOMATIC_PAIRING_ZH_TW.md)，不要將本機 schema、wire Manifest schema 與排程容量混為一個版本。
 
-目前 Server 的 capability resolver 與資料庫 trigger 仍只接受 12／24；收到 16 時會保守解析為 12，因此本版配對後實際最多 12 slots，尚未打通端到端 16-slot 支援。啟用 16 需要獨立 Server／migration 更新。韌體拒絕新下載的超過 16-slot 排程，避免已配對舊裝置仍獲派 24 slots 而耗盡 Internal Flash；既有本機資料不改寫。
+Server 自 Migration 59 起辨識 12／16／24 slots，16 會保存為 `confirmed_16`，並納入每日預取與管理頁顯示。Migration 保留既有裝置能力、排程與憑證，不會僅憑 firmware version 推定能力。曾被舊 Server 解析成 12 的 2.8.7 裝置，需透過重新配對／Repair 確認 16；舊 24-slot 裝置若目前排程超過 16，配對會顯示 `PAIR-CAPABILITY-CONFLICT`，須先由管理員調整排程，不能自動截斷。韌體拒絕新下載的超過 16-slot 排程，既有本機 24-slot 資料仍可讀。
+
+部署順序為先更新 Server 至 schema 59，再配對 2.8.7。升級沿用資料庫 migration 交易與備份機制；要回退至僅支援 schema 58 的 Server，必須恢復升級前備份，不能讓舊程式寫入 schema 59。
 
 本文件是目前程式碼、韌體與 Stock upstream 交叉核對後的操作契約。它把「既有 Online」、「Stock PhotoPainter 相容」與「InkTime Enhanced 離線排程」分開；三者不可用同一個預設值混淆。
 

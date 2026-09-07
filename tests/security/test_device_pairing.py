@@ -364,14 +364,15 @@ def _confirm(client, body: dict, secret: str, version: int):
     )
 
 
-def test_explicit_24_slot_capability_survives_pairing_confirm(client, app):
-    schedule_times = [f"{hour:02d}:00" for hour in range(24)]
+@pytest.mark.parametrize("maximum", [16, 24])
+def test_explicit_slot_capability_survives_pairing_confirm(client, app, maximum):
+    schedule_times = [f"{hour:02d}:00" for hour in range(maximum)]
     payload = _pairing_payload(
         "esp32-24-slot-contract",
         capabilities={
             "automatic_pairing": True,
             "ab_credential_store": True,
-            "offline_schedule_max_slots": 24,
+            "offline_schedule_max_slots": maximum,
         },
     )
     requested = client.post(PAIRING_PATH, json=payload)
@@ -416,12 +417,14 @@ def test_explicit_24_slot_capability_survives_pairing_confirm(client, app):
             "SELECT offline_schedule_max_slots,offline_schedule_capability_state,schedule_times_json FROM devices WHERE id=?",
             (payload["device_id"],),
         ).fetchone()
-    assert device["offline_schedule_max_slots"] == 24
-    assert device["offline_schedule_capability_state"] == "confirmed_24"
-    assert len(json.loads(str(device["schedule_times_json"]))) == 24
+    assert device["offline_schedule_max_slots"] == maximum
+    assert device["offline_schedule_capability_state"] == f"confirmed_{maximum}"
+    assert len(json.loads(str(device["schedule_times_json"]))) == maximum
+    assert f"已確認支援 {maximum} 個離線時段" in client.get("/devices").get_data(as_text=True)
 
 
-def test_capability_downgrade_is_pending_and_admin_visible_without_mutating_schedule(client, app):
+@pytest.mark.parametrize("advertised", [12, 16])
+def test_capability_downgrade_is_pending_and_admin_visible_without_mutating_schedule(client, app, advertised):
     schedule_times = [f"{hour:02d}:00" for hour in range(24)]
     device_id, _token = app.extensions["inktime_device_repository"].create(
         "24 Slot Repair",
@@ -434,7 +437,8 @@ def test_capability_downgrade_is_pending_and_admin_visible_without_mutating_sche
     payload = _pairing_payload(
         device_id,
         nonce="nonce-for-capability-downgrade-0123456789",
-        capabilities={"automatic_pairing": True, "ab_credential_store": True},
+        capabilities={"automatic_pairing": True, "ab_credential_store": True,
+                      "offline_schedule_max_slots": advertised},
     )
 
     response = client.post(PAIRING_PATH, json=payload)

@@ -91,8 +91,9 @@ Stock 原始碼使用相對秒數 timer，不足以證明支援 InkTime 的任�
   `FormalFrameHeader`／`ITF2`、rotation、CRC32、SHA-256 與尺寸驗證。Internal Flash
   最多保留 40 個 `.itf` 實體檔案；對 Server 宣告的 Enhanced offline schedule
   capability 最多 16 slots/day。
-  目前 Server 只認 12／24，會將 16 解析為 12；端到端 16-slot 支援仍待獨立
-  Server／migration 更新。新下載排程在韌體端最多接受 16 slots，舊本機 24-slot 資料仍可讀。
+  Server 自 Migration 59 起將 16 保存為 `confirmed_16`，配對、每日預取與管理頁均接受
+  此能力。曾被舊 Server 降為 12 的裝置須重新配對／Repair；既有能力不自動推升。
+  新下載排程在韌體端最多接受 16 slots，舊本機 24-slot 資料仍可讀。
 - Formal Frame GC 每次最多掃描 64 個 entry、刪除 4 個，保護 active、staged-next、
   current、last-good、recovery 與 in-flight references；free-space floor 為約
   1.5 MiB 加一張 formal Frame transaction 的空間。
