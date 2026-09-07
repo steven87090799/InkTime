@@ -628,7 +628,7 @@ def test_sleep_diagnostics_only_read_pmic_and_do_not_start_network():
 def test_unused_audio_shutdown_is_at_boot_after_pa_low_not_at_sleep():
     support = SUPPORT.read_text(encoding="utf-8")
     begin = _between(
-        support, "bool PhotoPainterSupport::begin()", "bool PhotoPainterSupport::loadCachedFrame"
+        support, "bool PhotoPainterSupport::begin()", "bool PhotoPainterSupport::loadFormalFrame"
     )
     assert begin.index("digitalWrite(board_.audio.paEnable, LOW)") < begin.index(
         "impl_->power.powerDownUnusedAudio()"
@@ -644,7 +644,6 @@ def test_unused_audio_shutdown_is_at_boot_after_pa_low_not_at_sleep():
         "void PhotoPainterSupport::enableWakeSources()",
     )
     assert "powerDownUnusedAudio(" not in sleep
-    assert sleep.index("SD.end();") < sleep.index("pinMode(pin, INPUT);")
-    assert "gpio_pulldown_dis" in sleep and "gpio_pullup_dis" in sleep
-    assert "sdReady_ = false" in sleep
-    assert "digitalWrite(board_.sd" not in sleep
+    assert "FFat.end();" in sleep
+    assert "SD.end();" not in sleep
+    assert "sdReady_" not in sleep
