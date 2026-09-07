@@ -32,7 +32,7 @@ def _run_capture_date_backfill(database_path: str, start, results) -> None:
 
 
 def test_fresh_database_is_migrated(tmp_path):
-    assert CURRENT_SCHEMA_VERSION == 58
+    assert CURRENT_SCHEMA_VERSION == 59
     database = Database(tmp_path / "inktime.db")
     assert migrate(database) == list(range(1, CURRENT_SCHEMA_VERSION + 1))
     assert database.integrity_check() == "ok"
@@ -537,7 +537,7 @@ def test_deployed_main_schema54_upgrades_without_rewriting_history(monkeypatch, 
     assert [row["score_kind"] for row in analyses_before] == ["semantic", "local_quality", "legacy"]
 
     monkeypatch.setattr(migrations_module, "MIGRATIONS", MIGRATIONS)
-    assert migrate(database, tmp_path / "backups") == [55, 56, 57, 58]
+    assert migrate(database, tmp_path / "backups") == list(range(55, CURRENT_SCHEMA_VERSION + 1))
     assert migrate(database) == []
     assert database.integrity_check() == "ok"
     with database.session() as connection:
@@ -1882,6 +1882,62 @@ def test_migration_24_updates_caption_defaults_only_as_one_legacy_set(monkeypatc
     assert values == ["8", "12", "16"]
 
 
+def test_migration_59_failure_rolls_back_column_and_constraints(monkeypatch, tmp_path):
+    database = Database(tmp_path / "capacity-rollback.db")
+    monkeypatch.setattr(migrations_module, "MIGRATIONS", MIGRATIONS[:58])
+    migrate(database)
+    with database.session() as connection:
+        before = [tuple(row) for row in connection.execute(
+            "SELECT type,name,sql FROM sqlite_master WHERE tbl_name='devices' ORDER BY type,name"
+        )]
+    migration = MIGRATIONS[58]
+    broken = Migration(59, migration.name, migration.statements[:7] + ("SELECT * FROM absent_capacity_table",))
+    monkeypatch.setattr(migrations_module, "MIGRATIONS", MIGRATIONS[:58] + (broken,))
+    with pytest.raises(MigrationError, match="Rollback"):
+        migrate(database)
+    with database.session() as connection:
+        assert [tuple(row) for row in connection.execute(
+            "SELECT type,name,sql FROM sqlite_master WHERE tbl_name='devices' ORDER BY type,name"
+        )] == before
+        assert connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 58
+
+
+def test_migration_59_preserves_devices_and_enforces_16_slot_state(monkeypatch, tmp_path):
+    from inktime.app.repositories.devices import DeviceRepository
+
+    database = Database(tmp_path / "capacity-upgrade.db")
+    monkeypatch.setattr(migrations_module, "MIGRATIONS", MIGRATIONS[:58])
+    migrate(database)
+    repository = DeviceRepository(database, pepper="migration-contract")
+    ids = [repository.create(f"capacity-{n}", offline_schedule_max_slots=n)[0] for n in (12, 24)]
+    with database.transaction() as connection:
+        connection.execute(
+            "INSERT INTO device_events(device_id,level,event,message,created_at) "
+            "VALUES (?,'info','retained','retained',datetime('now'))", (ids[0],),
+        )
+        before = [dict(row) for row in connection.execute("SELECT * FROM devices ORDER BY id")]
+        events_before = [dict(row) for row in connection.execute("SELECT * FROM device_events ORDER BY id")]
+    monkeypatch.setattr(migrations_module, "MIGRATIONS", MIGRATIONS)
+    assert migrate(database) == [59]
+    assert migrate(database) == []
+    with database.transaction() as connection:
+        assert [dict(row) for row in connection.execute("SELECT * FROM devices ORDER BY id")] == before
+        assert [dict(row) for row in connection.execute("SELECT * FROM device_events ORDER BY id")] == events_before
+        assert not connection.execute("PRAGMA foreign_key_check").fetchall()
+        for maximum, state in ((16, 'unknown_12'), (24, 'confirmed_16'), (13, 'confirmed_16')):
+            with pytest.raises(sqlite3.IntegrityError, match="DEVICE-008"):
+                connection.execute(
+                    "UPDATE devices SET offline_schedule_max_slots=?,offline_schedule_capability_state=? WHERE id=?",
+                    (maximum, state, ids[0]),
+                )
+        connection.execute(
+            "UPDATE devices SET offline_schedule_max_slots=16,offline_schedule_capability_state='confirmed_16' WHERE id=?",
+            (ids[0],),
+        )
+    new_id, _ = repository.create("new-16", offline_schedule_max_slots=16)
+    assert repository.get(new_id)["offline_schedule_capability_state"] == "confirmed_16"
+
+
 def test_migration_58_recomposes_ai_scores_without_rewriting_evidence(monkeypatch, tmp_path):
     database = Database(tmp_path / "ai-first-upgrade.db")
     monkeypatch.setattr(migrations_module, "MIGRATIONS", MIGRATIONS[:57])
@@ -1923,7 +1979,7 @@ def test_migration_58_recomposes_ai_scores_without_rewriting_evidence(monkeypatc
             "SELECT * FROM photo_analysis WHERE score_kind<>'semantic' ORDER BY id"
         )]
     monkeypatch.setattr(migrations_module, "MIGRATIONS", MIGRATIONS)
-    assert migrate(database) == [58]
+    assert migrate(database) == list(range(58, CURRENT_SCHEMA_VERSION + 1))
     assert migrate(database) == []
     with database.session() as connection:
         assert [dict(row) for row in connection.execute("SELECT * FROM photos ORDER BY id")] == photos_before

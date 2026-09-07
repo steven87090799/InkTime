@@ -759,6 +759,12 @@ def test_device_status_is_recorded_without_exposing_token(client, app):
             "flash_ready": True,
             "psram_ready": True,
             "sd_card": True,
+            "storage_backend": "ffat",
+            "storage_state": "ready",
+            "internal_storage_ready": True,
+            "storage_read_bytes": 192000,
+            "storage_write_bytes": 96000,
+            "storage_write_ms": 240,
             "rtc": True,
             "cache_status": "hit",
             "pmic_type": "axp2101",
@@ -821,6 +827,12 @@ def test_device_status_is_recorded_without_exposing_token(client, app):
     assert details["board_profile"] == "waveshare-esp32-s3-photopainter"
     assert details["pmic_type"] == "axp2101"
     assert details["cache_status"] == "hit"
+    assert details["storage_backend"] == "ffat"
+    assert details["storage_state"] == "ready"
+    assert details["internal_storage_ready"] is True
+    assert details["storage_write_bytes"] == details["sd_write_bytes"] == 96000
+    assert details["storage_read_bytes"] == details["sd_read_bytes"] == 192000
+    assert details["storage_write_ms"] == details["sd_write_ms"] == 240
     assert details["last_refresh_duration_ms"] == 25000
     assert details["display_skipped"] is True
     assert details["display_skip_reason"] == "same_sha256"
@@ -1184,3 +1196,60 @@ def test_device_receives_only_its_panel_profile_release(client, app):
     assert body["render_profile"] == "gdep073e01_6c"
     assert body["pixel_format"] == "indexed4"
     assert body["files"][0]["size"] == 192_000
+
+
+@pytest.mark.parametrize("advertised", [12, 16])
+def test_status_capability_downgrade_quarantines_and_preserves_schedule(client, app, advertised):
+    repository = app.extensions["inktime_device_repository"]
+    device_id, token = repository.create(
+        "Firmware downgrade", delivery_mode="inktime_offline_schedule",
+        schedule_times=[f"{hour:02d}:00" for hour in range(24)],
+        offline_schedule_max_slots=24,
+    )
+    before = next(row for row in repository.list() if row["id"] == device_id)
+    headers = {"Authorization": f"Bearer {token}"}
+    for sequence in (1, 2):
+        response = client.post("/api/device/v1/status", headers=headers, json={
+            "firmware_version": "2.8.7", "status_sequence": sequence,
+            "offline_schedule_max_slots": advertised,
+        })
+        assert response.status_code == 200
+    after = next(row for row in repository.list() if row["id"] == device_id)
+    assert after["offline_schedule_capability_state"] == "legacy_ambiguous"
+    assert after["offline_schedule_max_slots"] == 12
+    assert after["next_offline_prepare_at"] is None
+    assert client.get("/api/device/v1/offline-schedule", headers=headers).status_code == 409
+    for key in ("schedule_times_json", "offline_schedule_json", "config_version", "offline_schedule_version"):
+        assert after[key] == before[key]
+    conflicts = [event for event in repository.list_events()
+                 if event["event"] == "offline_schedule_capability_quarantined"]
+    assert len(conflicts) == 1
+    assert json.loads(conflicts[0]["details_json"]) == {
+        "stored_max_slots": 24, "advertised_max_slots": advertised,
+    }
+
+
+@pytest.mark.parametrize("advertised", [None, 24])
+def test_status_missing_or_unchanged_capability_preserves_confirmation(client, app, advertised):
+    repository = app.extensions["inktime_device_repository"]
+    device_id, token = repository.create("Confirmed", offline_schedule_max_slots=24)
+    payload = {"status_sequence": 10}
+    if advertised is not None:
+        payload["offline_schedule_max_slots"] = advertised
+    headers = {"Authorization": f"Bearer {token}"}
+    assert client.post("/api/device/v1/status", headers=headers, json=payload).status_code == 200
+    # Replayed downgrade cannot mutate capability after freshness rejection.
+    assert client.post("/api/device/v1/status", headers=headers, json={
+        "status_sequence": 9, "offline_schedule_max_slots": 16,
+    }).status_code == 200
+    after = next(row for row in repository.list() if row["id"] == device_id)
+    assert after["offline_schedule_capability_state"] == "confirmed_24"
+    assert after["offline_schedule_max_slots"] == 24
+
+
+@pytest.mark.parametrize("value", [True, "16", 15, 25])
+def test_status_rejects_invalid_capability(client, app, value):
+    _, token = app.extensions["inktime_device_repository"].create("Capability validation")
+    response = client.post("/api/device/v1/status", json={"offline_schedule_max_slots": value},
+                           headers={"Authorization": f"Bearer {token}"})
+    assert response.status_code == 400

@@ -2271,6 +2271,50 @@ MIGRATIONS = (
             "UPDATE scoring_rule_versions SET is_active=0 WHERE is_active=1",
         ),
     ),
+    Migration(
+        59,
+        "支援已確認的 16-slot PhotoPainter 能力",
+        (
+            # Replace only the constrained state column; preserve every device
+            # and its foreign-key identity, credentials, schedules and deadlines.
+            """DROP INDEX idx_devices_offline_prepare_due""",
+            """DROP TRIGGER trg_devices_offline_schedule_slots_insert""",
+            """DROP TRIGGER trg_devices_offline_schedule_slots_update""",
+            """ALTER TABLE devices RENAME COLUMN offline_schedule_capability_state TO offline_schedule_capability_state_v58""",
+            """ALTER TABLE devices ADD COLUMN offline_schedule_capability_state TEXT NOT NULL DEFAULT 'unknown_12' CHECK(offline_schedule_capability_state IN ('unknown_12','confirmed_16','confirmed_24','legacy_ambiguous'))""",
+            """UPDATE devices SET offline_schedule_capability_state=offline_schedule_capability_state_v58""",
+            """ALTER TABLE devices DROP COLUMN offline_schedule_capability_state_v58""",
+            """CREATE INDEX idx_devices_offline_prepare_due ON devices(next_offline_prepare_at,id) WHERE enabled=1 AND delivery_mode='inktime_offline_schedule' AND offline_prefetch_allowed=1 AND offline_schedule_capability_state IN ('unknown_12','confirmed_16','confirmed_24') AND next_offline_prepare_at IS NOT NULL""",
+            """CREATE TRIGGER trg_devices_offline_schedule_slots_insert
+            BEFORE INSERT ON devices
+            WHEN NEW.offline_schedule_max_slots NOT IN (12,16,24)
+              OR NOT (
+                    (NEW.offline_schedule_capability_state IN ('unknown_12','legacy_ambiguous')
+                     AND NEW.offline_schedule_max_slots=12)
+                 OR (NEW.offline_schedule_capability_state='confirmed_16'
+                     AND NEW.offline_schedule_max_slots=16)
+                 OR (NEW.offline_schedule_capability_state='confirmed_24'
+                     AND NEW.offline_schedule_max_slots=24)
+              )
+            BEGIN
+                SELECT RAISE(ABORT,'DEVICE-008 offline slot capability state is inconsistent');
+            END""",
+            """CREATE TRIGGER trg_devices_offline_schedule_slots_update
+            BEFORE UPDATE OF offline_schedule_max_slots,offline_schedule_capability_state ON devices
+            WHEN NEW.offline_schedule_max_slots NOT IN (12,16,24)
+              OR NOT (
+                    (NEW.offline_schedule_capability_state IN ('unknown_12','legacy_ambiguous')
+                     AND NEW.offline_schedule_max_slots=12)
+                 OR (NEW.offline_schedule_capability_state='confirmed_16'
+                     AND NEW.offline_schedule_max_slots=16)
+                 OR (NEW.offline_schedule_capability_state='confirmed_24'
+                     AND NEW.offline_schedule_max_slots=24)
+              )
+            BEGIN
+                SELECT RAISE(ABORT,'DEVICE-008 offline slot capability state is inconsistent');
+            END""",
+        ),
+    ),
 )
 
 

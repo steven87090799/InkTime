@@ -28,6 +28,9 @@ from inktime.app.repositories.offline_schedules import OfflineScheduleRepository
     [
         ({}, LEGACY_MAX_OFFLINE_SLOTS),
         ({"offline_schedule_max_slots": 12}, LEGACY_MAX_OFFLINE_SLOTS),
+        ({"offline_schedule_max_slots": 16}, 16),
+        ({"offline_schedule_max_slots": "16"}, LEGACY_MAX_OFFLINE_SLOTS),
+        ({"offline_schedule_max_slots": 16.0}, LEGACY_MAX_OFFLINE_SLOTS),
         ({"offline_schedule_max_slots": 24}, MAX_OFFLINE_SLOTS),
         ({"offline_schedule_max_slots": 13}, LEGACY_MAX_OFFLINE_SLOTS),
         ({"offline_schedule_max_slots": "24"}, LEGACY_MAX_OFFLINE_SLOTS),
@@ -39,6 +42,8 @@ def test_offline_schedule_capability_resolver_defaults_unknown_to_legacy(capabil
 
 def test_offline_schedule_capability_state_distinguishes_safe_unknown_and_explicit_24():
     assert offline_schedule_capability_state(12) == "unknown_12"
+    assert offline_schedule_capability_state(16) == "confirmed_16"
+    assert offline_schedule_capability_is_usable("confirmed_16")
     assert offline_schedule_capability_state(24) == "confirmed_24"
     assert offline_schedule_capability_is_usable("unknown_12")
     assert offline_schedule_capability_is_usable("confirmed_24")
@@ -50,6 +55,29 @@ def test_offline_schedule_capability_boundary_rejects_legacy_13th_slot():
     with pytest.raises(ValueError, match="1 到 12"):
         validate_offline_schedule(schedule, maximum=LEGACY_MAX_OFFLINE_SLOTS)
     assert len(validate_offline_schedule(schedule, maximum=MAX_OFFLINE_SLOTS)) == 13
+
+
+def test_confirmed_16_is_due_and_policy_changes_rearm_it(app):
+    device_id, _ = app.extensions["inktime_device_repository"].create(
+        "16-slot", delivery_mode="inktime_offline_schedule", offline_schedule_max_slots=16,
+        schedule_times=[f"{h:02d}:00" for h in range(16)],
+    )
+    database = app.extensions["inktime_database"]
+    repository = OfflineScheduleRepository(database)
+    rows, _ = repository.due_prefetch_devices(now="2026-09-07T00:00:00+00:00")
+    assert device_id in {row["id"] for row in rows}
+    with database.transaction() as connection:
+        connection.execute("UPDATE devices SET next_offline_prepare_at='2099-01-01T00:00:00+00:00' WHERE id=?", (device_id,))
+        repository.invalidate_prepare_deadlines_for_policy_change(connection=connection)
+    rows, _ = repository.due_prefetch_devices(now="2026-09-07T00:00:00+00:00")
+    assert device_id in {row["id"] for row in rows}
+
+
+def test_confirmed_16_rejects_seventeenth_slot():
+    maximum = resolve_offline_schedule_max_slots({"offline_schedule_max_slots": 16})
+    assert len(validate_offline_schedule([f"{h:02d}:00" for h in range(16)], maximum=maximum)) == 16
+    with pytest.raises(ValueError, match="1 到 16"):
+        validate_offline_schedule([f"{h:02d}:00" for h in range(17)], maximum=maximum)
 
 
 def test_offline_schedule_capability_boundaries_accept_legacy_12_and_confirmed_24():
