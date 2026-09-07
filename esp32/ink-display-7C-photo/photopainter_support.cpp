@@ -18,6 +18,8 @@
 #include "photopainter_core.h"
 #include "photopainter_wake_core.h"
 #include "power_manager.h"
+#include "photopainter_audio_power.h"
+#include "firmware_observability.h"
 #include "spectra6_73.h"
 
 #ifndef INKTIME_DEBUG_LOG
@@ -36,7 +38,7 @@
 namespace inktime {
 
 // PhotoPainter Rev2.0 schematic: TG28 UP1 is at 0x34 and ALDO4 feeds EPD_VCC.
-// Only the two EPD-rail registers below may be mutated by this driver.
+// EPD writes remain REG95[4:0]/REG90[3]; the unused-audio helper only clears REG90[2].
 constexpr uint8_t kPhotoPainterPmicAddress = 0x34;
 constexpr uint8_t kTg28Status1 = 0x00;
 constexpr uint8_t kTg28Status2 = 0x01;
@@ -393,6 +395,22 @@ class ProbePowerManager final : public PowerManager {
     return true;
   }
 
+  bool powerDownUnusedAudio() {
+    if (type_ != PmicType::TG28) return false;
+    const photopainter_audio::Result result = photopainter_audio::powerDownUnusedAudio(bus_);
+    if (result == photopainter_audio::Result::AlreadyOff
+        || result == photopainter_audio::Result::Disabled) {
+      INK_LOG_INFO("audio_power_off", "Unused Audio_VCC ALDO3 verified off");
+      return true;
+    }
+    lastError_ = "PMIC-AUDIO-OFF";
+    type_ = PmicType::Unknown;
+    INK_LOG_ERROR("audio_power_off_failed",
+      String("result=") + String(static_cast<unsigned>(result))
+        + "; stop board I2C/EPD work; no further rail writes");
+    return false;
+  }
+
   bool prepareDisplayPower() {
     lastError_ = "";
     if (type_ != PmicType::TG28) {
@@ -518,6 +536,17 @@ class ProbePowerManager final : public PowerManager {
     // The official runtime keeps ALDO4 available and powers down the EPD
     // controller by command. Do not strand the shared board in an I2C-low
     // state by changing PMIC rails immediately before ESP-only deep sleep.
+    // Diagnostic read only: an enabled rail is not a measurement of its load.
+    uint8_t rails = 0U;
+    if (type_ == PmicType::TG28
+        && bus_.readRegister(kPhotoPainterPmicAddress, kTg28LdoEnable0, &rails, 1)) {
+      INK_LOG_INFO("sleep_pmic_rails",
+        String("reg90=0x") + String(rails, HEX)
+          + " audio_aldo3=" + String((rails >> 2U) & 1U)
+          + " epd_aldo4=" + String((rails >> 3U) & 1U));
+    } else {
+      INK_LOG_WARN("sleep_pmic_rails", "unknown; no PMIC power changes attempted");
+    }
   }
 
  private:
@@ -819,6 +848,13 @@ bool PhotoPainterSupport::begin() {
     pinMode(board_.audio.paEnable, OUTPUT);
     digitalWrite(board_.audio.paEnable, LOW);
   }
+  const int audioPins[] = {
+    board_.audio.mclk, board_.audio.ws, board_.audio.bclk,
+    board_.audio.din, board_.audio.dout,
+  };
+  for (const int pin : audioPins) {
+    if (pin != kNoPin) pinMode(pin, INPUT);
+  }
   if (userButtonWake) {
     wokeFromUserButton_ = true;
     delay(30);
@@ -846,9 +882,15 @@ bool PhotoPainterSupport::begin() {
       && Wire.begin(board_.i2c.sda, board_.i2c.scl, board_.i2c.clockHz)) {
     Wire.setTimeOut(kI2cTimeoutMs);
     const bool pmicReady = impl_->power.begin();
-    (void)pmicReady;
-    shtc3Ready_ = impl_->sensor.begin();
-    rtcReady_ = impl_->rtc.begin();
+    // Audio is unused in InkTime. Shut down its dedicated ALDO3 once at boot,
+    // never in the sleep transition. Preserve ALDO4 and the main 3V3 rail.
+    const bool audioReady = !pmicReady || impl_->power.powerDownUnusedAudio();
+    if (audioReady) {
+      shtc3Ready_ = impl_->sensor.begin();
+      rtcReady_ = impl_->rtc.begin();
+    } else {
+      lastError_ = impl_->power.lastError();
+    }
     PP_LOG("[I2C] pmic=%s ready=%d shtc3=%d rtc=%d\n",
            pmicTypeName(impl_->power.type()), pmicReady ? 1 : 0,
            shtc3Ready_ ? 1 : 0, rtcReady_ ? 1 : 0);
@@ -1839,6 +1881,17 @@ void PhotoPainterSupport::prepareForDeepSleep() {
     if (sdReady_) {
       SD.end();
       impl_->sdSpi.end();
+      sdReady_ = false;
+    }
+    // Rev2.0 has external 10k pull-ups on all SD lines and no card power gate.
+    // Release host drivers/pulls after unmount; do not drive those lines LOW.
+    // Each deep-sleep wake runs beginSd() again before accessing files.
+    const int sdPins[] = {board_.sd.cs, board_.sd.sck, board_.sd.miso, board_.sd.mosi};
+    for (const int pin : sdPins) {
+      if (pin == kNoPin) continue;
+      pinMode(pin, INPUT);
+      gpio_pullup_dis(static_cast<gpio_num_t>(pin));
+      gpio_pulldown_dis(static_cast<gpio_num_t>(pin));
     }
     if (board_.audio.paEnable != kNoPin) {
       pinMode(board_.audio.paEnable, OUTPUT);

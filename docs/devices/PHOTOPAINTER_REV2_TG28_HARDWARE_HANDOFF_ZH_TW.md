@@ -1,5 +1,11 @@
 # PhotoPainter Rev2.0 TG28 實板除錯交接紀錄
 
+> 2026-09-06 原理圖更正：重新放大官方 Rev2.0 原理圖確認，UP1 pin 16 **ALDO3**
+> 才是 `Audio_VCC`，pin 19 ALDO2 未接；下方歷史稽核中的 ALDO2 音訊敘述已更正。
+> ALDO4／EPD 的歷史實板證據不變。本次使用者明確授權關閉未使用音訊；新增
+> `REG90[2]` 單一位元關閉與讀回的候選程式，尚未進行實板電流／I²C 驗收。
+> 現行實作與來源見 [PhotoPainter 指南](WAVESHARE_PHOTOPAINTER_ZH_TW.md)。
+
 > 2026-08-31 文件校對註：以下實板數字／commit／未驗收項目保留原始日期，不改寫為本次測量。現行 2.8.6 的 KEY1 電源頁與 SD 原圖恢復、v5 Config Store 及 `1h → 6h → 24h` 故障退避，以[現行 PhotoPainter 指南](WAVESHARE_PHOTOPAINTER_ZH_TW.md)為準；本頁舊 60 分鐘退避是當時版本紀錄。
 
 > 狀態日期：2026-08-23
@@ -45,7 +51,8 @@ InkTime 暖啟動可能刷新，但完整斷電後只開 ALDO3，電子紙 contr
 | 指示燈 | GPIO45 PWR 紅燈、GPIO42 ACT 綠燈，皆 active-low；不是 GPIO5 PWR 按鍵 |
 | Flash／PSRAM | 16 MiB Flash、8 MiB OPI PSRAM；app offset `0x10000` |
 
-TG28 的 narrow write allowlist 只有 `REG95` 的 ALDO4 voltage bits 與 `REG90[3]`。程式
+下列是 2026-08-23 的歷史邊界；2026-09-06 音訊授權例外見頁首與 AGENTS.md。
+當時 TG28 的 narrow write allowlist 只有 `REG95` 的 ALDO4 voltage bits 與 `REG90[3]`。程式
 以 read-modify-write 保存其他 bit，並在每次寫入後 readback。不要寫 DCDC、充電、
 全機 shutdown、fast-power-on 或其他 LDO register。
 
@@ -66,7 +73,7 @@ TG28 的 narrow write allowlist 只有 `REG95` 的 ALDO4 voltage bits 與 `REG90
 | GPIO6 | PCF85063 `RTC_INT`，並經二極體接到 PWRON 網路 | 不配置 | 尚未使用 RTC alarm；不是目前 ESP timer wake 的必要腳位 |
 | GPIO7 | NS4150B `AudioCTR`／PA enable | 固定 LOW | 正確；只關閉功放，不等於 ES7210／ES8311 的 `Audio_VCC` 已斷電 |
 | GPIO8～13 | EPD DC／CS／SCK／DIN／RST／BUSY | 完全同官方接線；BUSY active-low | 正確；BUSY cycle 與畫面變化才是刷新證據 |
-| GPIO14～18 | I²S MCLK／SCLK／LRCK／DSDIN／DSOUT | 不初始化音訊 | 接線定義正確；閒置音訊晶片是否耗電仍取決於 ALDO2／codec 狀態 |
+| GPIO14～18 | I²S MCLK／SCLK／LRCK／DSDIN／DSOUT | 不初始化音訊 | 接線定義正確；閒置音訊晶片是否耗電仍取決於 ALDO3／codec 狀態 |
 | GPIO19／20 | ESP32-S3 原生 USB D-／D+ | USB CDC／JTAG | 正確；不得另作一般 GPIO |
 | GPIO21 | TG28 IRQ，open-drain，4.7 kΩ pull-up | 完全不驅動 | 正確；官方功耗測試範例曾把它設 output 拉低／高，InkTime 不複製此危險動作 |
 | GPIO38～41 | SD CS／CLK／MISO／MOSI | 獨立 SPI bus，20 MHz→4 MHz fallback | 正確；與 EPD SPI3 無重疊 |
@@ -75,7 +82,8 @@ TG28 的 narrow write allowlist 只有 `REG95` 的 ALDO4 voltage bits 與 `REG90
 | GPIO45 | PWR 紅燈 cathode，4.7 kΩ、active-low；也是 ESP32-S3 strap 腳 | global constructor 階段拉 LOW，deep sleep 前拉 HIGH | 接線／極性正確；strap 在 reset 時已取樣，constructor 才驅動不會改變本次 strap；亮燈不等於 boot 已完成 |
 | GPIO46 與未列出的 module 腳 | schematic 未配置為 PhotoPainter 功能，部分腳亦受 N16R8 memory／strap 限制 | 不使用 | 正確；不得因「看似空閒」自行分配 |
 | I²C GPIO47／48 | Audio、TG28、PCF85063、SHTC3 共用 SDA／SCL | 100 kHz、open-drain recovery、bounded retry | 正確；官方 app 也是 100 kHz，factory 測試的 300 kHz 不應蓋過共享裝置保守值 |
-| TG28 ALDO2 | schematic 僅接 `Audio_VCC` | 不寫 REG90[1]／REG93 | 安全但功耗未定；PA LOW 不能證明 codec rail 關閉 |
+| TG28 ALDO3 | schematic 接 `Audio_VCC`（2026-09-06 更正） | 當時未關閉音訊電源 | PA LOW 不能證明 codec rail 關閉；現行候選見指南 |
+| TG28 ALDO2 | schematic pin 19 未接（2026-09-06 更正） | 不作音訊電源控制 | 關閉 ALDO2 不能代表已關閉麥克風 |
 | TG28 ALDO4 | schematic 直接接 `EPD_VCC` | 3.3 V、refresh 前確保 enabled；deep sleep 保持 enabled | 刷新正確；待機功耗仍須量測，不能直接關閉 |
 | TG28 DCDC1 | `VCC3V3`，供 ESP32、SD、SHTC3 等板級負載 | 不改 PMIC 設定 | 正確；ESP timer／GPIO4 wake 需要主系統仍可運作 |
 
@@ -104,10 +112,10 @@ TG28 的 narrow write allowlist 只有 `REG95` 的 ALDO4 voltage bits 與 `REG90
    自己也把 `axp_basic_sleep_start()` 註解掉；只有功耗測試範例會設定 REG26 PMIC sleep
    並關閉多路 LDO。InkTime 與官方功能程式一樣採 ESP deep sleep、EPD `POWER_OFF`，
    不能用官方規格反推 InkTime 已達標。
-2. **Audio_VCC 可能是未量測的常駐負載。** schematic 證明 ALDO2 只供 ES7210／ES8311，
-   但 InkTime 目前只將 GPIO7 PA 拉 LOW。先增加 REG90／REG93 的唯讀診斷與 A/B 電流
+2. **Audio_VCC 可能是未量測的常駐負載。** schematic 證明 ALDO3 供 ES7210／ES8311（2026-09-06 更正），
+   但 InkTime 目前只將 GPIO7 PA 拉 LOW。先增加 REG90／REG94 的唯讀診斷與 A/B 電流
    證據；未量測前不要擴大 PMIC write allowlist。若證明差異顯著，再以獨立測試分支只做
-   REG90[1] read-modify-write，並驗證 cold boot、I²C、音訊保留與 full recovery。
+   REG90[2] read-modify-write，並驗證 cold boot、I²C、音訊保留與 full recovery。
 3. **ALDO4／EPD_VCC 待機成本未知。** 不可直接套用 factory 的全 LDO shutdown；先前廣泛
    rail 變更曾讓共享 I²C 在 ESP-only reset 後卡 low。優先量測；若 ALDO4 是主要差異，
    才設計「sleep 前 snapshot REG80／90／91、受控 PMIC sleep、wake 後 readback／restore」
