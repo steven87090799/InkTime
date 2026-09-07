@@ -7,6 +7,7 @@
 #include "max_awake_recovery_core.h"
 #include "offline_schedule_core.h"
 #include "power_policy.h"
+#include "photopainter_audio_power.h"
 
 using namespace inktime;
 
@@ -14,7 +15,78 @@ static uint8_t nativePixel(const std::vector<uint8_t>& frame, uint16_t x, uint16
   return readPacked4(frame.data(), static_cast<size_t>(y) * kPhotoPainterWidth + x);
 }
 
+struct AudioPowerBus {
+  uint8_t reg = 0xFF;
+  unsigned reads = 0;
+  unsigned writes = 0;
+  unsigned failRead = 0;
+  bool failWrite = false;
+  bool corruptReadback = false;
+
+  bool readRegister(uint8_t address, uint8_t index, uint8_t* out, size_t length) {
+    assert(address == 0x34 && index == 0x90 && length == 1U);
+    ++reads;
+    if (reads == failRead) return false;
+    *out = corruptReadback && reads > 1U ? static_cast<uint8_t>(reg ^ 0x08U) : reg;
+    return true;
+  }
+  bool writeRegisters(uint8_t address, uint8_t index, const uint8_t* data,
+                      size_t length, bool replaySafe) {
+    assert(address == 0x34 && index == 0x90 && length == 1U && !replaySafe);
+    ++writes;
+    if (failWrite) return false;
+    reg = *data;
+    return true;
+  }
+};
+
+static void testUnusedAudioPower() {
+  using namespace photopainter_audio;
+  // Every possible sibling-rail combination survives; only ALDO3 can change.
+  for (unsigned value = 0; value < 256U; ++value) {
+    AudioPowerBus bus;
+    bus.reg = static_cast<uint8_t>(value);
+    const Result result = powerDownUnusedAudio(bus);
+    assert(bus.reg == (value & 0xFBU));
+    assert(result == ((value & 0x04U) ? Result::Disabled : Result::AlreadyOff));
+    assert(bus.writes == ((value & 0x04U) ? 1U : 0U));
+    const unsigned writes = bus.writes;
+    assert(powerDownUnusedAudio(bus) == Result::AlreadyOff);
+    assert(bus.writes == writes);  // Subsequent wakes do not rewrite the rail.
+  }
+  AudioPowerBus readFailure;
+  readFailure.failRead = 1;
+  assert(powerDownUnusedAudio(readFailure) == Result::ReadFailed);
+  assert(readFailure.writes == 0);
+  AudioPowerBus writeFailure;
+  writeFailure.failWrite = true;
+  assert(powerDownUnusedAudio(writeFailure) == Result::WriteFailed);
+  assert(writeFailure.writes == 1 && writeFailure.reads == 1);
+  AudioPowerBus verifyFailure;
+  verifyFailure.failRead = 2;
+  assert(powerDownUnusedAudio(verifyFailure) == Result::VerifyFailed);
+  assert(verifyFailure.writes == 1);
+  AudioPowerBus siblingChanged;
+  siblingChanged.corruptReadback = true;
+  assert(powerDownUnusedAudio(siblingChanged) == Result::VerifyFailed);
+  assert(siblingChanged.writes == 1);  // Never retry/restore a guessed full register.
+}
+
 int main() {
+  testUnusedAudioPower();
+  uint8_t powerAttempt = 0U;
+  const uint64_t recoveryIntervals[] = {900U, 1800U, 3600U, 3600U};
+  for (const uint64_t expected : recoveryIntervals) {
+    assert(powerRecoverySeconds(powerAttempt) == expected);
+    powerAttempt = nextPowerRecoveryAttempt(powerAttempt);
+  }
+  assert(powerRecoverySeconds(255U) == 3600U);
+  assert(nextPowerRecoveryAttempt(255U) == 2U);
+  assert(useAutomaticWifiRecovery(true, true, false));
+  assert(!useAutomaticWifiRecovery(false, true, false));  // pairing still has portal
+  assert(!useAutomaticWifiRecovery(true, false, false));  // manual/cold boot recovery
+  assert(!useAutomaticWifiRecovery(true, true, true));    // explicit service request
+
   MaxAwakeRecoveryState maxAwakeRecovery = {};
   assert(maxAwakeRecoveryCount(maxAwakeRecovery) == 0U);
   assert(!shouldEnterMaxAwakeSafeSleep(maxAwakeRecovery));

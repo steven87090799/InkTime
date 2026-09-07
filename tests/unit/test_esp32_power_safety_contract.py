@@ -575,3 +575,76 @@ def test_existing_offline_timer_prefetch_and_key_actions_remain_routed():
         "photoPainter.forceNetworkRefresh()",
     ):
         assert marker in setup
+
+
+def test_paired_timer_wifi_failure_sleeps_after_due_frame_fallback_before_portal():
+    firmware = FIRMWARE.read_text(encoding="utf-8")
+    setup = firmware[firmware.index("void setup() {"):]
+    failure = _between(setup, "if (!connectWiFi(g_cfg))", "// Pairing is a one-time")
+    assert failure.index("runOfflineLocalCycle();") < failure.index(
+        "inktime::useAutomaticWifiRecovery("
+    ) < failure.index("startConfigPortal();")
+    automatic = _between(failure, "inktime::useAutomaticWifiRecovery(", "#endif")
+    assert 'g_cfg.auth_state == "paired" && !deviceAuthInvalid' in automatic
+    assert "timerWake, explicitRecoveryRequested" in automatic
+    assert "sleepUntilNextSchedule(g_cfg, hasOfflineTime, offlineTime);" in automatic
+    assert "return;" in automatic
+
+
+def test_clockless_retry_persists_without_rtc_domain_or_repeated_saturated_writes():
+    firmware = FIRMWARE.read_text(encoding="utf-8")
+    retry = _between(
+        firmware, "static uint64_t nextPowerRecoverySeconds()", "static bool loadOfflineRetryState("
+    )
+    assert 'prefs.getUChar("pwr_retry", 0U)' in retry
+    assert "if (next != attempt)" in retry
+    assert 'prefs.putUChar("pwr_retry", next)' in retry
+    assert "RTC_" not in retry
+    sleep = _between(
+        firmware, "void sleepUntilNextSchedule(", "static bool loadOfflineScheduledLocalFrame("
+    )
+    unknown = _between(sleep, "if (!hasTime)", "time_t nowEpoch")
+    assert "goDeepSleepSeconds(nextPowerRecoverySeconds());" in unknown
+    assert sleep.index("if (nowEpoch > 0)") < sleep.index("clearPowerRecoveryAttempt();")
+    assert "goDeepSleepUntilEpoch(nowEpoch, wakeEpoch);" in sleep
+
+
+def test_sleep_diagnostics_only_read_pmic_and_do_not_start_network():
+    support = SUPPORT.read_text(encoding="utf-8")
+    pmic_sleep = _between(support, "void prepareForDeepSleep() override", "private:")
+    assert "bus_.readRegister" in pmic_sleep
+    assert "kTg28LdoEnable0" in pmic_sleep
+    assert "writeRegister" not in pmic_sleep
+    firmware = FIRMWARE.read_text(encoding="utf-8")
+    sleep = _between(
+        firmware, "static void enterDeepSleepSeconds(", "static void goDeepSleepSeconds("
+    )
+    assert 'INK_LOG_INFO("sleep_diagnostics"' in sleep
+    assert "reportDeviceStatus(" not in sleep
+    assert "connectWiFi(" not in sleep
+    assert sleep.index('"sleep_diagnostics"') < sleep.index("esp_deep_sleep_start();")
+
+
+def test_unused_audio_shutdown_is_at_boot_after_pa_low_not_at_sleep():
+    support = SUPPORT.read_text(encoding="utf-8")
+    begin = _between(
+        support, "bool PhotoPainterSupport::begin()", "bool PhotoPainterSupport::loadCachedFrame"
+    )
+    assert begin.index("digitalWrite(board_.audio.paEnable, LOW)") < begin.index(
+        "impl_->power.powerDownUnusedAudio()"
+    ) < begin.index("impl_->rtc.begin()")
+    assert "if (audioReady)" in begin
+    pmic = _between(support, "bool powerDownUnusedAudio()", "bool prepareDisplayPower()")
+    assert "type_ != PmicType::TG28" in pmic
+    assert 'lastError_ = "PMIC-AUDIO-OFF"' in pmic
+    assert "type_ = PmicType::Unknown" in pmic
+    sleep = _between(
+        support,
+        "void PhotoPainterSupport::prepareForDeepSleep()",
+        "void PhotoPainterSupport::enableWakeSources()",
+    )
+    assert "powerDownUnusedAudio(" not in sleep
+    assert sleep.index("SD.end();") < sleep.index("pinMode(pin, INPUT);")
+    assert "gpio_pulldown_dis" in sleep and "gpio_pullup_dis" in sleep
+    assert "sdReady_ = false" in sleep
+    assert "digitalWrite(board_.sd" not in sleep
