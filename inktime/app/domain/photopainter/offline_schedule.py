@@ -20,10 +20,11 @@ MAXIMUM_ALLOWED_GAP_MINUTES = 360
 LEGACY_MAX_OFFLINE_SLOTS = 12
 MAX_OFFLINE_SLOTS = 24
 OFFLINE_CAPABILITY_UNKNOWN_12 = "unknown_12"
+OFFLINE_CAPABILITY_CONFIRMED_16 = "confirmed_16"
 OFFLINE_CAPABILITY_CONFIRMED_24 = "confirmed_24"
 OFFLINE_CAPABILITY_LEGACY_AMBIGUOUS = "legacy_ambiguous"
 OFFLINE_CAPABILITY_USABLE_STATES = frozenset(
-    {OFFLINE_CAPABILITY_UNKNOWN_12, OFFLINE_CAPABILITY_CONFIRMED_24}
+    {OFFLINE_CAPABILITY_UNKNOWN_12, OFFLINE_CAPABILITY_CONFIRMED_16, OFFLINE_CAPABILITY_CONFIRMED_24}
 )
 OFFLINE_PREPARE_BOOTSTRAP_AT = "1970-01-01T00:00:00+00:00"
 
@@ -64,14 +65,16 @@ def resolve_offline_schedule_max_slots(capabilities: Mapping[str, Any] | None) -
     if not isinstance(capabilities, Mapping):
         return LEGACY_MAX_OFFLINE_SLOTS
     value = capabilities.get("offline_schedule_max_slots")
-    if type(value) is int and value == MAX_OFFLINE_SLOTS:
-        return MAX_OFFLINE_SLOTS
+    if type(value) is int and value in (16, MAX_OFFLINE_SLOTS):
+        return value
     return LEGACY_MAX_OFFLINE_SLOTS
 
 
 def offline_schedule_capability_state(maximum_slots: int) -> str:
     """Return the persisted state for a safely resolved numeric capability."""
 
+    if resolve_offline_schedule_max_slots({"offline_schedule_max_slots": maximum_slots}) == 16:
+        return OFFLINE_CAPABILITY_CONFIRMED_16
     return (
         OFFLINE_CAPABILITY_CONFIRMED_24
         if resolve_offline_schedule_max_slots({"offline_schedule_max_slots": maximum_slots})

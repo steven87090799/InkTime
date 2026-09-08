@@ -969,7 +969,8 @@ class DeviceRepository:
             connection.execute("BEGIN IMMEDIATE")
             try:
                 current = connection.execute(
-                    "SELECT last_status_at,last_status_sequence FROM devices WHERE id=?",
+                    "SELECT last_status_at,last_status_sequence,offline_schedule_max_slots "
+                    "FROM devices WHERE id=?",
                     (device_id,),
                 ).fetchone()
                 if current is None:
@@ -992,6 +993,38 @@ class DeviceRepository:
                 if stale:
                     connection.execute("COMMIT")
                     return False
+                advertised = details.get("offline_schedule_max_slots")
+                if type(advertised) is int and advertised in (12, 16, 24):
+                    stored = int(current["offline_schedule_max_slots"])
+                    if advertised < stored:
+                        # Reuse the existing fail-closed quarantine contract.
+                        # Preserve all schedule JSON and versions for administrator repair.
+                        connection.execute(
+                            """
+                            UPDATE devices SET offline_schedule_max_slots=12,
+                                offline_schedule_capability_state='legacy_ambiguous',
+                                next_offline_prepare_at=NULL WHERE id=?
+                            """,
+                            (device_id,),
+                        )
+                        conflict = {
+                            "stored_max_slots": stored,
+                            "advertised_max_slots": advertised,
+                        }
+                        connection.execute(
+                            """
+                            INSERT INTO device_events(
+                                device_id,level,event,error_code,message,details_json,created_at
+                            ) VALUES (?,'warning','offline_schedule_capability_quarantined',
+                                      'DEVICE-CAPABILITY-CONFLICT',?,?,?)
+                            """,
+                            (
+                                device_id,
+                                "裝置回報較低離線容量；已保留排程並隔離，請重新配對或 Repair",
+                                json.dumps(conflict),
+                                now,
+                            ),
+                        )
                 connection.execute(
                     """
                     UPDATE devices SET firmware_version=?,wifi_rssi=?,battery_percent=?,

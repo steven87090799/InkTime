@@ -6,7 +6,9 @@
 > `REG90[2]` 單一位元關閉與讀回的候選程式，尚未進行實板電流／I²C 驗收。
 > 現行實作與來源見 [PhotoPainter 指南](WAVESHARE_PHOTOPAINTER_ZH_TW.md)。
 
-> 2026-08-31 文件校對註：以下實板數字／commit／未驗收項目保留原始日期，不改寫為本次測量。現行 2.8.6 的 KEY1 電源頁與 SD 原圖恢復、v5 Config Store 及 `1h → 6h → 24h` 故障退避，以[現行 PhotoPainter 指南](WAVESHARE_PHOTOPAINTER_ZH_TW.md)為準；本頁舊 60 分鐘退避是當時版本紀錄。
+> 2026-08-31 文件校對註：以下實板數字／commit／未驗收項目保留原始日期，不改寫為本次測量。當時 2.8.6 的 KEY1 電源頁與 SD 原圖恢復、v5 Config Store 及 `1h → 6h → 24h` 故障退避，以[現行 PhotoPainter 指南](WAVESHARE_PHOTOPAINTER_ZH_TW.md)為準；本頁舊 60 分鐘退避是當時版本紀錄。
+
+> 現行 Enhanced firmware 自 2.8.7 起改用 Internal FFat 保存正式 ITF frame 與 offline schedule metadata；本頁原日期的 SD／cache 描述與實測紀錄保留為歷史，不代表目前 Enhanced runtime 仍要求 microSD。
 
 > 狀態日期：2026-08-23
 >

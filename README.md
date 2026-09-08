@@ -1,6 +1,6 @@
 # InkTime｜照片分析與電子紙回憶管理平台
 
-> 原始碼核對：2026-09-03，主線 `51309e2`。SQLite Migration 57、AI Schema v4、ESP32 2.8.6；詳細版本、預設值與驗收邊界見[現行基線](docs/reference/CURRENT_STATE_ZH_TW.md)。
+> 原始碼核對：2026-09-03，主線 `51309e2`。SQLite Migration 59、AI Schema v4、ESP32 2.8.7；詳細版本、預設值與驗收邊界見[現行基線](docs/reference/CURRENT_STATE_ZH_TW.md)。
 
 [English README](README.en.md) · [HTML 手冊與文件入口](USER_MANUAL.html) · [完整 Markdown 文件地圖](docs/README.md) · [完整程式流程圖](#完整程式流程圖從啟動照片分析到電子紙顯示) · [快速開始](docs/getting-started/QUICK_START_ZH_TW.md) · [電子紙模擬器](docs/guides/EPAPER_SIMULATOR_ZH_TW.md) · [N100 Docker 部署規格](docs/operations/DOCKER_GUIDE_ZH_TW.md) · [完整上線指南](docs/operations/PRODUCTION_DEPLOYMENT_GUIDE_ZH_TW.md) · [NAS Tag 更新](docs/operations/NAS_TAG_DEPLOYMENT_ZH_TW.md) · [ESP32／電子紙指南](docs/devices/ESP32_GUIDE_ZH_TW.md) · [ESP32 自動配對與憑證](docs/devices/ESP32_AUTOMATIC_PAIRING_ZH_TW.md) · [Waveshare PhotoPainter](docs/devices/WAVESHARE_PHOTOPAINTER_ZH_TW.md) · [ESP32 TLS／配網信任根](docs/devices/ESP32_TLS_PROVISIONING_ZH_TW.md) · [OpenRouter Provider](docs/providers/OPENROUTER_ZH_TW.md) · [模型 Benchmark](docs/providers/MODEL_BENCHMARK_ZH_TW.md) · [資源與低功耗](docs/operations/N100_RESOURCE_GUIDE_ZH_TW.md) · [Log 指南](docs/operations/LOGGING_GUIDE_ZH_TW.md)
 

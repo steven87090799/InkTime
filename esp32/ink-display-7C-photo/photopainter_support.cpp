@@ -5,13 +5,13 @@
 #include <Arduino.h>
 #include <ArduinoJson.h>
 #include <FS.h>
-#include <SD.h>
-#include <SPI.h>
+#include <FFat.h>
 #include <Wire.h>
 #include <driver/gpio.h>
 #include <driver/rtc_io.h>
 #include <esp_heap_caps.h>
 #include <esp_sleep.h>
+#include <esp_partition.h>
 #include <new>
 #include <sys/time.h>
 
@@ -24,15 +24,6 @@
 
 #ifndef INKTIME_DEBUG_LOG
 #define INKTIME_DEBUG_LOG 0
-#endif
-
-// Arduino-ESP32 3.x names the ESP32-S3 SPI2/SPI3 hosts FSPI/HSPI. Older
-// compatible cores may expose the IDF host constants only.
-#ifndef FSPI
-#define FSPI SPI2_HOST
-#endif
-#ifndef HSPI
-#define HSPI SPI3_HOST
 #endif
 
 namespace inktime {
@@ -60,6 +51,47 @@ constexpr size_t kIoChunkSize = 4096;
 constexpr uint32_t kI2cTimeoutMs = 50;
 constexpr uint8_t kI2cMaximumAttempts = 3U;
 constexpr uint32_t kI2cRetryDelayMs = 2U;
+constexpr uint64_t kFormalFrameStorageReserveBytes = 1536ULL * 1024ULL;
+constexpr size_t kFormalFrameRecordBytes =
+    sizeof(FormalFrameHeader) + kPhotoPainterFrameBytes;
+constexpr uint64_t kFormalFrameFreeSpaceFloorBytes =
+    kFormalFrameStorageReserveBytes + kFormalFrameRecordBytes;
+constexpr size_t kFormalFrameMaximumFiles = 40U;
+constexpr uint8_t kFormalFrameGcMaxDeletesPerWake = 4U;
+constexpr uint8_t kFormalFrameGcMaxScansPerWake = 64U;
+constexpr size_t kFormalFrameReferenceLimit = 80U;
+
+namespace {
+
+size_t countFormalFrameFiles();
+
+// Only a completely erased partition is evidence of first initialization.
+// Missing NVS markers alone must never authorize destroying an existing FAT.
+bool storagePartitionErased() {
+  const esp_partition_t* partition = esp_partition_find_first(
+    ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_FAT, "fat");
+  if (partition == nullptr) return false;
+  uint8_t bytes[4096];
+  for (size_t offset = 0; offset < partition->size; offset += sizeof(bytes)) {
+    const size_t remaining = static_cast<size_t>(partition->size) - offset;
+    const size_t length = min(sizeof(bytes), remaining);
+    if (esp_partition_read(partition, offset, bytes, length) != ESP_OK) return false;
+    for (size_t index = 0; index < length; ++index) {
+      if (bytes[index] != 0xff) return false;
+    }
+    yield();
+  }
+  return true;
+}
+
+// A reset can leave the only committed copy in .bak. Restore it before a
+// new transaction is allowed to remove that backup.
+bool restoreStorageBackup(const char* finalPath, const char* backupPath) {
+  return FFat.exists(finalPath) || !FFat.exists(backupPath)
+      || FFat.rename(backupPath, finalPath);
+}
+
+}  // namespace
 
 const uint8_t kBlankGlyph[5] = {0, 0, 0, 0, 0};
 const uint8_t kFontDigits[10][5] = {
@@ -679,30 +711,6 @@ class Pcf85063Adapter {
   bool ready_ = false;
 };
 
-bool makeCachePaths(
-  uint32_t sourceHash,
-  DisplayRotation rotation,
-  char* finalPath,
-  char* temporaryPath,
-  char* backupPath,
-  size_t capacity
-) {
-  const unsigned rotationValue = static_cast<unsigned>(rotation);
-  const int finalLength = snprintf(
-    finalPath, capacity, "/cache/%08lx-r%u.itfc",
-    static_cast<unsigned long>(sourceHash), rotationValue);
-  const int temporaryLength = snprintf(
-    temporaryPath, capacity, "/cache/%08lx-r%u.tmp",
-    static_cast<unsigned long>(sourceHash), rotationValue);
-  const int backupLength = snprintf(
-    backupPath, capacity, "/cache/%08lx-r%u.bak",
-    static_cast<unsigned long>(sourceHash), rotationValue);
-  return finalLength > 0 && temporaryLength > 0 && backupLength > 0
-      && static_cast<size_t>(finalLength) < capacity
-      && static_cast<size_t>(temporaryLength) < capacity
-      && static_cast<size_t>(backupLength) < capacity;
-}
-
 bool makeFormalFramePaths(
   const char* sourceSha256,
   DisplayRotation rotation,
@@ -766,14 +774,12 @@ bool makeStagedNextSchedulePaths(
 
 struct PhotoPainterSupport::Impl {
   explicit Impl(const BoardConfig& board)
-      : sdSpi(FSPI),
-        display(board),
+      : display(board),
         i2c(Wire, board.i2c, i2cTelemetry),
         power(i2c),
         sensor(i2c),
         rtc(i2c) {}
 
-  SPIClass sdSpi;
   Spectra6_73 display;
   I2cRetryTelemetry i2cTelemetry;
   BoundedI2cBus i2c;
@@ -896,47 +902,49 @@ bool PhotoPainterSupport::begin() {
            shtc3Ready_ ? 1 : 0, rtcReady_ ? 1 : 0);
   }
 
-  auto beginSd = [this](uint32_t clockHz) {
-    impl_->sdSpi.begin(board_.sd.sck, board_.sd.miso, board_.sd.mosi, board_.sd.cs);
-    return SD.begin(board_.sd.cs, impl_->sdSpi, clockHz, "/sd", 8, false);
-  };
-  sdReady_ = beginSd(board_.sdClockHz);
-  if (!sdReady_) {
-    SD.end();
-    impl_->sdSpi.end();
-    sdReady_ = beginSd(board_.sdFallbackClockHz);
+  const bool pristineStorage = storagePartitionErased();
+  storageReady_ = FFat.begin(
+    false,      // A mount error must never erase committed runtime data.
+    "/ffat",
+    8,
+    "fat"
+  );
+  if (!storageReady_ && pristineStorage) {
+    char partitionLabel[] = "fat";
+    storageReady_ = FFat.format(false, partitionLabel) && FFat.begin(false, "/ffat", 8, "fat");
   }
-  if (sdReady_) {
+  if (!storageReady_) {
+    storageCorrupt_ = true;
+    lastError_ = "STORAGE_CORRUPT";
+  } else {
     const char* directories[] = {
-      "/originals", "/cache", "/config", "/logs", "/inktime", "/inktime/schedule",
+      "/inktime", "/inktime/schedule",
       "/inktime/frames", "/inktime/journal", "/inktime/state",
     };
     for (const char* directory : directories) {
-      if (!SD.exists(directory) && !SD.mkdir(directory)) {
-        sdReady_ = false;
-        lastError_ = "SD-DIRECTORY";
+      if (!FFat.exists(directory) && !FFat.mkdir(directory)) {
+        storageReady_ = false;
+        lastError_ = "STORAGE-DIRECTORY";
         break;
       }
     }
+    if (!storageReady_) FFat.end();
   }
-  if (!sdReady_) {
-    SD.end();
-    impl_->sdSpi.end();
-  }
-  if (sdReady_) {
+  if (storageReady_) {
     impl_->ioBuffer = static_cast<uint8_t*>(
       heap_caps_malloc(kIoChunkSize, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)
     );
     if (impl_->ioBuffer == nullptr) {
       cacheStatus_ = CacheStatus::Disabled;
-      lastError_ = "SD-BOUNCE-BUFFER";
+      lastError_ = "STORAGE-BOUNCE-BUFFER";
     } else {
       cacheStatus_ = CacheStatus::Miss;
+      recoverFormalFrameArtifacts();
     }
   }
-  PP_LOG("[SD] ready=%d cache=%s\n", sdReady_ ? 1 : 0, cacheStatusName(cacheStatus_));
+  PP_LOG("[FFAT] ready=%d cache=%s\n", storageReady_ ? 1 : 0, cacheStatusName(cacheStatus_));
   // Hardware readiness is fatal for framebuffer work and must take priority
-  // over optional SD/I2C diagnostics when setup reports its primary error.
+  // over optional storage/I2C diagnostics when setup reports its primary error.
   if (!psramReady_) lastError_ = "DEVICE-PSRAM";
   else if (!flashReady_) lastError_ = "DEVICE-FLASH";
   return hardwareReady_;
@@ -949,97 +957,6 @@ uint8_t* PhotoPainterSupport::allocateWireBuffer(size_t length) const {
   );
 }
 
-bool PhotoPainterSupport::loadCachedFrame(
-  uint32_t sourceHash,
-  DisplayRotation rotation,
-  uint8_t** output,
-  const char* sourceSha256
-) {
-  if (output == nullptr) return false;
-  *output = nullptr;
-  if (forceNetworkRefresh_ || !sdReady_ || impl_->ioBuffer == nullptr || sourceHash == 0) {
-    cacheStatus_ = sdReady_ ? CacheStatus::Miss : CacheStatus::Disabled;
-    return false;
-  }
-
-  char finalPath[64] = {0};
-  char temporaryPath[64] = {0};
-  char backupPath[64] = {0};
-  if (!makeCachePaths(
-        sourceHash, rotation, finalPath, temporaryPath, backupPath, sizeof(finalPath))) {
-    cacheStatus_ = CacheStatus::Error;
-    return false;
-  }
-  if (!SD.exists(finalPath) && SD.exists(backupPath)) SD.rename(backupPath, finalPath);
-  File file = SD.open(finalPath, FILE_READ);
-  if (!file) {
-    cacheStatus_ = CacheStatus::Miss;
-    return false;
-  }
-  const bool hasFullSource = isSha256Hex(sourceSha256);
-  CacheHeader legacyHeader = {};
-  CacheHeaderV2 fullHeader = {};
-  const bool useFullHeader = hasFullSource
-      && static_cast<size_t>(file.size()) == sizeof(CacheHeaderV2) + kPhotoPainterFrameBytes;
-  CacheValidation headerValidation = CacheValidation::BadLength;
-  if (useFullHeader) {
-    const size_t received = file.read(reinterpret_cast<uint8_t*>(&fullHeader), sizeof(fullHeader));
-    sdReadBytes_ += static_cast<uint32_t>(received);
-    if (received != sizeof(fullHeader)) {
-      file.close();
-      SD.remove(finalPath);
-      cacheStatus_ = CacheStatus::Invalid;
-      return false;
-    }
-  } else if (static_cast<size_t>(file.size()) == sizeof(CacheHeader) + kPhotoPainterFrameBytes) {
-    const size_t received = file.read(reinterpret_cast<uint8_t*>(&legacyHeader), sizeof(legacyHeader));
-    sdReadBytes_ += static_cast<uint32_t>(received);
-    if (received != sizeof(legacyHeader)) {
-      file.close();
-      SD.remove(finalPath);
-      cacheStatus_ = CacheStatus::Invalid;
-      return false;
-    }
-  } else {
-    file.close();
-    SD.remove(finalPath);
-    cacheStatus_ = CacheStatus::Invalid;
-    return false;
-  }
-
-  uint8_t* framebuffer = allocateWireBuffer(kPhotoPainterFrameBytes);
-  if (framebuffer == nullptr) {
-    file.close();
-    cacheStatus_ = CacheStatus::Error;
-    lastError_ = "DEVICE-PSRAM-ALLOC";
-    return false;
-  }
-  size_t total = 0;
-  while (total < kPhotoPainterFrameBytes) {
-    const size_t requested = min(kIoChunkSize, kPhotoPainterFrameBytes - total);
-    const size_t received = file.read(impl_->ioBuffer, requested);
-    sdReadBytes_ += static_cast<uint32_t>(received);
-    if (received != requested) break;
-    memcpy(framebuffer + total, impl_->ioBuffer, received);
-    total += received;
-  }
-  file.close();
-  if (total == kPhotoPainterFrameBytes) {
-    headerValidation = useFullHeader
-      ? validateCacheV2(fullHeader, sourceSha256, rotation, framebuffer, total)
-      : validateCache(legacyHeader, sourceHash, rotation, framebuffer, total);
-  }
-  if (total != kPhotoPainterFrameBytes || headerValidation != CacheValidation::Valid) {
-    heap_caps_free(framebuffer);
-    SD.remove(finalPath);
-    cacheStatus_ = CacheStatus::Invalid;
-    return false;
-  }
-  *output = framebuffer;
-  cacheStatus_ = CacheStatus::Hit;
-  return true;
-}
-
 bool PhotoPainterSupport::loadFormalFrame(
   const char* sourceSha256,
   DisplayRotation rotation,
@@ -1047,8 +964,8 @@ bool PhotoPainterSupport::loadFormalFrame(
 ) {
   if (output == nullptr) return false;
   *output = nullptr;
-  if (!sdReady_ || impl_->ioBuffer == nullptr || !isSha256Hex(sourceSha256)) {
-    cacheStatus_ = sdReady_ ? CacheStatus::Miss : CacheStatus::Disabled;
+  if (!storageReady_ || impl_->ioBuffer == nullptr || !isSha256Hex(sourceSha256)) {
+    cacheStatus_ = storageReady_ ? CacheStatus::Miss : CacheStatus::Disabled;
     return false;
   }
   char finalPath[128] = {0};
@@ -1059,55 +976,62 @@ bool PhotoPainterSupport::loadFormalFrame(
     cacheStatus_ = CacheStatus::Error;
     return false;
   }
-  if (!SD.exists(finalPath) && SD.exists(backupPath)) SD.rename(backupPath, finalPath);
-  File file = SD.open(finalPath, FILE_READ);
-  if (!file || static_cast<size_t>(file.size())
-      != sizeof(FormalFrameHeader) + kPhotoPainterFrameBytes) {
-    if (file) file.close();
-    if (SD.exists(finalPath)) SD.remove(finalPath);
-    if (SD.exists(backupPath)) SD.rename(backupPath, finalPath);
-    cacheStatus_ = CacheStatus::Miss;
-    return false;
-  }
-  FormalFrameHeader header = {};
-  const size_t headerReceived = file.read(reinterpret_cast<uint8_t*>(&header), sizeof(header));
-  sdReadBytes_ += static_cast<uint32_t>(headerReceived);
-  if (headerReceived != sizeof(header)) {
+  if (!FFat.exists(finalPath) && FFat.exists(backupPath)) FFat.rename(backupPath, finalPath);
+  for (uint8_t attempt = 0; attempt < 2; ++attempt) {
+    File file = FFat.open(finalPath, FILE_READ);
+    if (!file || static_cast<size_t>(file.size())
+        != sizeof(FormalFrameHeader) + kPhotoPainterFrameBytes) {
+      if (file) file.close();
+      if (FFat.exists(finalPath)) FFat.remove(finalPath);
+      if (attempt == 0 && FFat.exists(backupPath)
+          && FFat.rename(backupPath, finalPath)) continue;
+      cacheStatus_ = CacheStatus::Miss;
+      return false;
+    }
+    FormalFrameHeader header = {};
+    const size_t headerReceived = file.read(reinterpret_cast<uint8_t*>(&header), sizeof(header));
+    storageReadBytes_ += static_cast<uint32_t>(headerReceived);
+    if (headerReceived != sizeof(header)) {
+      file.close();
+      FFat.remove(finalPath);
+      if (attempt == 0 && FFat.exists(backupPath)
+          && FFat.rename(backupPath, finalPath)) continue;
+      cacheStatus_ = CacheStatus::Invalid;
+      return false;
+    }
+    uint8_t* framebuffer = allocateWireBuffer(kPhotoPainterFrameBytes);
+    if (framebuffer == nullptr) {
+      file.close();
+      cacheStatus_ = CacheStatus::Error;
+      lastError_ = "DEVICE-PSRAM-ALLOC";
+      return false;
+    }
+    size_t total = 0;
+    while (total < kPhotoPainterFrameBytes) {
+      const size_t requested = min(kIoChunkSize, kPhotoPainterFrameBytes - total);
+      const size_t received = file.read(impl_->ioBuffer, requested);
+      storageReadBytes_ += static_cast<uint32_t>(received);
+      if (received != requested) break;
+      memcpy(framebuffer + total, impl_->ioBuffer, received);
+      total += received;
+    }
     file.close();
-    SD.remove(finalPath);
-    if (SD.exists(backupPath)) SD.rename(backupPath, finalPath);
-    cacheStatus_ = CacheStatus::Invalid;
-    return false;
+    if (total != kPhotoPainterFrameBytes
+        || validateFormalFrameHeader(
+             header, sourceSha256, rotation, framebuffer, total) != CacheValidation::Valid) {
+      heap_caps_free(framebuffer);
+      FFat.remove(finalPath);
+      if (attempt == 0 && FFat.exists(backupPath)
+          && FFat.rename(backupPath, finalPath)) continue;
+      cacheStatus_ = CacheStatus::Invalid;
+      return false;
+    }
+    FFat.remove(backupPath);
+    *output = framebuffer;
+    cacheStatus_ = CacheStatus::Hit;
+    return true;
   }
-  uint8_t* framebuffer = allocateWireBuffer(kPhotoPainterFrameBytes);
-  if (framebuffer == nullptr) {
-    file.close();
-    cacheStatus_ = CacheStatus::Error;
-    lastError_ = "DEVICE-PSRAM-ALLOC";
-    return false;
-  }
-  size_t total = 0;
-  while (total < kPhotoPainterFrameBytes) {
-    const size_t requested = min(kIoChunkSize, kPhotoPainterFrameBytes - total);
-    const size_t received = file.read(impl_->ioBuffer, requested);
-    sdReadBytes_ += static_cast<uint32_t>(received);
-    if (received != requested) break;
-    memcpy(framebuffer + total, impl_->ioBuffer, received);
-    total += received;
-  }
-  file.close();
-  if (total != kPhotoPainterFrameBytes
-      || validateFormalFrameHeader(
-           header, sourceSha256, rotation, framebuffer, total) != CacheValidation::Valid) {
-    heap_caps_free(framebuffer);
-    SD.remove(finalPath);
-    if (SD.exists(backupPath)) SD.rename(backupPath, finalPath);
-    cacheStatus_ = CacheStatus::Invalid;
-    return false;
-  }
-  *output = framebuffer;
-  cacheStatus_ = CacheStatus::Hit;
-  return true;
+  return false;
 }
 
 bool PhotoPainterSupport::convertFrame(
@@ -1138,90 +1062,15 @@ bool PhotoPainterSupport::convertFrame(
   return true;
 }
 
-bool PhotoPainterSupport::convertAndCache(
-  const uint8_t* wire,
-  size_t wireLength,
-  bool indexed4,
-  uint32_t sourceHash,
-  DisplayRotation rotation,
-  uint8_t** output,
-  const char* sourceSha256
-) {
-  if (!convertFrame(wire, wireLength, indexed4, rotation, output)) return false;
-  uint8_t* framebuffer = *output;
-
-  if (!sdReady_ || impl_->ioBuffer == nullptr || sourceHash == 0) {
-    cacheStatus_ = CacheStatus::Disabled;
-    return true;
-  }
-  char finalPath[64] = {0};
-  char temporaryPath[64] = {0};
-  char backupPath[64] = {0};
-  if (!makeCachePaths(
-        sourceHash, rotation, finalPath, temporaryPath, backupPath, sizeof(finalPath))) {
-    cacheStatus_ = CacheStatus::Error;
-    return true;
-  }
-  SD.remove(temporaryPath);
-  File file = SD.open(temporaryPath, FILE_WRITE);
-  if (!file) {
-    cacheStatus_ = CacheStatus::Error;
-    return true;
-  }
-  const uint32_t writeStarted = millis();
-  const bool useFullHeader = isSha256Hex(sourceSha256);
-  CacheHeader legacyHeader = makeCacheHeader(
-    sourceHash, rotation, framebuffer, kPhotoPainterFrameBytes);
-  CacheHeaderV2 fullHeader = makeCacheHeaderV2(
-    sourceSha256, rotation, framebuffer, kPhotoPainterFrameBytes);
-  const uint8_t* headerBytes = useFullHeader
-    ? reinterpret_cast<const uint8_t*>(&fullHeader)
-    : reinterpret_cast<const uint8_t*>(&legacyHeader);
-  const size_t headerSize = useFullHeader ? sizeof(fullHeader) : sizeof(legacyHeader);
-  const size_t headerWritten = file.write(headerBytes, headerSize);
-  sdWriteBytes_ += static_cast<uint32_t>(headerWritten);
-  bool writeOk = headerWritten == headerSize;
-  size_t total = 0;
-  while (writeOk && total < kPhotoPainterFrameBytes) {
-    const size_t requested = min(kIoChunkSize, kPhotoPainterFrameBytes - total);
-    memcpy(impl_->ioBuffer, framebuffer + total, requested);
-    const size_t written = file.write(impl_->ioBuffer, requested);
-    sdWriteBytes_ += static_cast<uint32_t>(written);
-    writeOk = written == requested;
-    total += written;
-  }
-  file.flush();
-  file.close();
-  sdWriteDurationMs_ += millis() - writeStarted;
-  if (!writeOk || total != kPhotoPainterFrameBytes) {
-    SD.remove(temporaryPath);
-    cacheStatus_ = CacheStatus::Error;
-    return true;
-  }
-
-  SD.remove(backupPath);
-  bool movedOld = !SD.exists(finalPath) || SD.rename(finalPath, backupPath);
-  bool installed = movedOld && SD.rename(temporaryPath, finalPath);
-  if (!installed) {
-    SD.remove(temporaryPath);
-    if (!SD.exists(finalPath) && SD.exists(backupPath)) SD.rename(backupPath, finalPath);
-    cacheStatus_ = CacheStatus::Error;
-    return true;
-  }
-  SD.remove(backupPath);
-  cacheStatus_ = CacheStatus::Written;
-  return true;
-}
-
 bool PhotoPainterSupport::writeFormalFrame(
   const char* sourceSha256,
   DisplayRotation rotation,
   const uint8_t* framebuffer,
   size_t length
 ) {
-  if (!sdReady_ || impl_->ioBuffer == nullptr || !isSha256Hex(sourceSha256)
+  if (!storageReady_ || impl_->ioBuffer == nullptr || !isSha256Hex(sourceSha256)
       || framebuffer == nullptr || length != kPhotoPainterFrameBytes) {
-    cacheStatus_ = sdReady_ ? CacheStatus::Error : CacheStatus::Disabled;
+    cacheStatus_ = storageReady_ ? CacheStatus::Error : CacheStatus::Disabled;
     return false;
   }
   struct FormalFrameInFlightGuard final {
@@ -1238,8 +1087,30 @@ bool PhotoPainterSupport::writeFormalFrame(
     cacheStatus_ = CacheStatus::Error;
     return false;
   }
-  SD.remove(temporaryPath);
-  File file = SD.open(temporaryPath, FILE_WRITE);
+  if (!restoreStorageBackup(finalPath, backupPath)) {
+    lastError_ = "STORAGE-RECOVERY";
+    cacheStatus_ = CacheStatus::Error;
+    return false;
+  }
+  if (!FFat.exists(finalPath) && countFormalFrameFiles() >= kFormalFrameMaximumFiles) {
+    lastError_ = "STORAGE-FRAME-LIMIT";
+    cacheStatus_ = CacheStatus::Error;
+    return false;
+  }
+  // An interrupted attempt's .tmp is never committed data. Reclaim it before
+  // checking space, otherwise retrying that same frame can stay STORAGE-FULL.
+  if (FFat.exists(temporaryPath) && !FFat.remove(temporaryPath)) {
+    lastError_ = "STORAGE-TEMP-CLEANUP";
+    cacheStatus_ = CacheStatus::Error;
+    return false;
+  }
+  const uint64_t requiredBytes = sizeof(FormalFrameHeader) + kPhotoPainterFrameBytes;
+  if (FFat.freeBytes() < kFormalFrameStorageReserveBytes + requiredBytes) {
+    lastError_ = "STORAGE-FULL";
+    cacheStatus_ = CacheStatus::Error;
+    return false;
+  }
+  File file = FFat.open(temporaryPath, FILE_WRITE);
   if (!file) {
     cacheStatus_ = CacheStatus::Error;
     return false;
@@ -1249,55 +1120,51 @@ bool PhotoPainterSupport::writeFormalFrame(
     sourceSha256, rotation, framebuffer, length);
   const size_t headerWritten = file.write(
     reinterpret_cast<const uint8_t*>(&header), sizeof(header));
-  sdWriteBytes_ += static_cast<uint32_t>(headerWritten);
+  storageWriteBytes_ += static_cast<uint32_t>(headerWritten);
   bool writeOk = headerWritten == sizeof(header);
   size_t total = 0;
   while (writeOk && total < length) {
     const size_t requested = min(kIoChunkSize, length - total);
     memcpy(impl_->ioBuffer, framebuffer + total, requested);
     const size_t written = file.write(impl_->ioBuffer, requested);
-    sdWriteBytes_ += static_cast<uint32_t>(written);
+    storageWriteBytes_ += static_cast<uint32_t>(written);
     writeOk = written == requested;
     total += written;
   }
   file.flush();
   file.close();
-  sdWriteDurationMs_ += millis() - writeStarted;
+  storageWriteDurationMs_ += millis() - writeStarted;
   if (!writeOk || total != length) {
-    SD.remove(temporaryPath);
+    FFat.remove(temporaryPath);
     cacheStatus_ = CacheStatus::Error;
     return false;
   }
-  SD.remove(backupPath);
-  const bool movedOld = !SD.exists(finalPath) || SD.rename(finalPath, backupPath);
-  const bool installed = movedOld && SD.rename(temporaryPath, finalPath);
+  FFat.remove(backupPath);
+  const bool movedOld = !FFat.exists(finalPath) || FFat.rename(finalPath, backupPath);
+  const bool installed = movedOld && FFat.rename(temporaryPath, finalPath);
   if (!installed) {
-    SD.remove(temporaryPath);
-    if (!SD.exists(finalPath) && SD.exists(backupPath)) SD.rename(backupPath, finalPath);
+    FFat.remove(temporaryPath);
+    if (!FFat.exists(finalPath) && FFat.exists(backupPath)) FFat.rename(backupPath, finalPath);
     cacheStatus_ = CacheStatus::Error;
     return false;
   }
-  SD.remove(backupPath);
+  FFat.remove(backupPath);
   cacheStatus_ = CacheStatus::Written;
   return true;
 }
 
 namespace {
 
-constexpr uint64_t kFormalFrameFreeSpaceFloorBytes = 8ULL * 1024ULL * 1024ULL;
-constexpr size_t kFormalFrameMaximumFiles = 24U;
-constexpr uint8_t kFormalFrameGcMaxDeletesPerWake = 4U;
-constexpr uint8_t kFormalFrameGcMaxScansPerWake = 32U;
-constexpr size_t kFormalFrameReferenceLimit = 64U;
-
 class ProtectedFormalFrames final {
  public:
-  void add(const char* sourceSha256) {
-    if (!isSha256Hex(sourceSha256)) return;
+  bool add(const char* sourceSha256) {
+    if (!isSha256Hex(sourceSha256)) return true;
     for (size_t index = 0; index < count_; ++index) {
-      if (values_[index].equalsIgnoreCase(sourceSha256)) return;
+      if (values_[index].equalsIgnoreCase(sourceSha256)) return true;
     }
-    if (count_ < kFormalFrameReferenceLimit) values_[count_++] = sourceSha256;
+    if (count_ >= kFormalFrameReferenceLimit) return false;
+    values_[count_++] = sourceSha256;
+    return true;
   }
 
   bool contains(const String& sourceSha256) const {
@@ -1327,7 +1194,7 @@ bool addScheduleFrameReferences(
     const JsonVariantConst rawSlot = slots[index];
     if (!rawSlot.is<JsonObjectConst>()) continue;
     const String sourceSha256 = rawSlot["sha256"] | "";
-    protectedFrames.add(sourceSha256.c_str());
+    if (!protectedFrames.add(sourceSha256.c_str())) return false;
   }
   return true;
 }
@@ -1337,7 +1204,7 @@ bool scheduleJsonSafeForGc(
   const char* finalPath,
   const char* backupPath
 ) {
-  if (!SD.exists(finalPath) && !SD.exists(backupPath)) return true;
+  if (!FFat.exists(finalPath) && !FFat.exists(backupPath)) return true;
   if (scheduleJson == nullptr || scheduleJson[0] == '\0') return false;
   JsonDocument document;
   if (deserializeJson(document, scheduleJson) || document.overflowed()) return false;
@@ -1355,11 +1222,13 @@ bool formalFrameShaFromPath(const String& path, String& sourceSha256) {
   return isSha256Hex(sourceSha256.c_str());
 }
 
+
 size_t countFormalFrameFiles() {
-  File directory = SD.open("/inktime/frames");
+  File directory = FFat.open("/inktime/frames");
   if (!directory || !directory.isDirectory()) {
     if (directory) directory.close();
-    return 0U;
+    // A failed inventory must not grant permission to create a new frame.
+    return kFormalFrameMaximumFiles;
   }
   size_t count = 0U;
   size_t scanned = 0U;
@@ -1372,11 +1241,50 @@ size_t countFormalFrameFiles() {
     file.close();
     file = directory.openNextFile();
   }
+  const bool incomplete = static_cast<bool>(file);
+  if (file) file.close();
   directory.close();
-  return count;
+  // Transaction artifacts can consume the scan budget before all .itf files
+  // are seen. Fail closed rather than undercounting the hard capacity limit.
+  return incomplete ? kFormalFrameMaximumFiles : count;
 }
 
 }  // namespace
+
+void PhotoPainterSupport::recoverFormalFrameArtifacts() {
+  // Inventory first: mutating an open directory iterator can skip entries.
+  String paths[kFormalFrameGcMaxScansPerWake];
+  size_t count = 0;
+  File directory = FFat.open("/inktime/frames");
+  if (!directory || !directory.isDirectory()) return;
+  File file = directory.openNextFile();
+  while (file && count < kFormalFrameGcMaxScansPerWake) {
+    String name = file.name();
+    paths[count++] = file.isDirectory() ? String("")
+      : (name.startsWith("/") ? name : String("/inktime/frames/") + name);
+    file.close();
+    file = directory.openNextFile();
+  }
+  if (file) file.close();
+  directory.close();
+  for (size_t index = 0; index < count; ++index) {
+    const String path = paths[index];
+    if (!path.endsWith(".tmp") && !path.endsWith(".bak")) continue;
+    const String finalPath = path.substring(0, path.length() - 4) + ".itf";
+    String sha;
+    if (!formalFrameShaFromPath(finalPath, sha)) continue;
+    if (path.endsWith(".tmp")) FFat.remove(path.c_str());
+    else if (!FFat.exists(finalPath.c_str())) FFat.rename(path.c_str(), finalPath.c_str());
+    else {
+      uint8_t* frame = nullptr;
+      const DisplayRotation rotation = finalPath.endsWith("-r180.itf")
+        ? DisplayRotation::Rotate180 : DisplayRotation::Rotate0;
+      // load validates the final, retries its backup, and removes only invalid
+      // copies or a backup made redundant by a fully validated final.
+      if (loadFormalFrame(sha.c_str(), rotation, &frame)) heap_caps_free(frame);
+    }
+  }
+}
 
 bool PhotoPainterSupport::runFormalFrameGc(
   const char* activeScheduleJson,
@@ -1384,9 +1292,11 @@ bool PhotoPainterSupport::runFormalFrameGc(
   const char* currentFrameSha256,
   const char* lastGoodFrameSha256,
   const char* inFlightFrameSha256,
-  const char* recoveryFrameSha256
+  const char* recoveryFrameSha256,
+  const char* incomingScheduleJson,
+  DisplayRotation incomingRotation
 ) {
-  if (!sdReady_) return false;
+  if (!storageReady_) return false;
   if (!scheduleJsonSafeForGc(
         activeScheduleJson, "/inktime/schedule/active.json", "/inktime/schedule/active.bak")
       || !scheduleJsonSafeForGc(
@@ -1401,60 +1311,97 @@ bool PhotoPainterSupport::runFormalFrameGc(
       || !addScheduleFrameReferences(stagedNextScheduleJson, protectedFrames)) {
     return false;
   }
-  protectedFrames.add(currentFrameSha256);
-  protectedFrames.add(lastGoodFrameSha256);
-  protectedFrames.add(inFlightFrameSha256);
-  protectedFrames.add(recoveryFrameSha256);
+  if (!protectedFrames.add(currentFrameSha256)
+      || !protectedFrames.add(lastGoodFrameSha256)
+      || !protectedFrames.add(inFlightFrameSha256)
+      || !protectedFrames.add(recoveryFrameSha256)) return false;
   // The internal guard covers a formal write that is in progress even if the
   // caller did not pass the optional in-flight reference explicitly.
-  protectedFrames.add(formalFrameInFlightSha256_.c_str());
+  if (!protectedFrames.add(formalFrameInFlightSha256_.c_str())) return false;
 
+  size_t missing = 0;
+  if (incomingScheduleJson != nullptr) {
+    JsonDocument incoming;
+    if (deserializeJson(incoming, incomingScheduleJson) || incoming.overflowed()
+        || !incoming["slots"].is<JsonArrayConst>()) return false;
+    const JsonArrayConst slots = incoming["slots"].as<JsonArrayConst>();
+    if (slots.size() > 16) return false;
+    for (size_t index = 0; index < slots.size(); ++index) {
+      const JsonVariantConst slot = slots[index];
+      const String sha = slot["sha256"] | "";
+      if (!isSha256Hex(sha.c_str())) return false;
+      bool duplicate = false;
+      for (size_t previous = 0; previous < index; ++previous) {
+        const String previousSha = slots[previous]["sha256"] | "";
+        if (sha.equalsIgnoreCase(previousSha)) duplicate = true;
+      }
+      if (duplicate) continue;
+      if (!protectedFrames.add(sha.c_str())) return false;
+      uint8_t* frame = nullptr;
+      if (loadFormalFrame(sha.c_str(), incomingRotation, &frame)) heap_caps_free(frame);
+      else ++missing;
+    }
+  }
   const size_t formalFrameFiles = countFormalFrameFiles();
-  const uint64_t totalBytes = SD.totalBytes();
-  const uint64_t usedBytes = SD.usedBytes();
-  const uint64_t freeBytes = totalBytes > usedBytes ? totalBytes - usedBytes : 0U;
-  const bool pressure = freeBytes < kFormalFrameFreeSpaceFloorBytes;
-  if (!pressure && formalFrameFiles <= kFormalFrameMaximumFiles) return true;
+  const uint64_t freeBytes = FFat.freeBytes();
+  const uint64_t requiredFree = kFormalFrameFreeSpaceFloorBytes
+    + missing * kFormalFrameRecordBytes;
+  const bool pressure = freeBytes < requiredFree;
+  const bool batch = incomingScheduleJson != nullptr;
+  if (!pressure && (batch ? formalFrameFiles + missing <= kFormalFrameMaximumFiles
+                          : formalFrameFiles < kFormalFrameMaximumFiles)) return true;
 
-  File directory = SD.open("/inktime/frames");
+  File directory = FFat.open("/inktime/frames");
   if (!directory || !directory.isDirectory()) {
     if (directory) directory.close();
     return false;
   }
-  uint8_t deletedThisWake = 0U;
-  uint8_t scannedThisWake = 0U;
+  String paths[kFormalFrameGcMaxScansPerWake];
+  uint32_t sizes[kFormalFrameGcMaxScansPerWake] = {};
+  size_t scannedThisWake = 0;
   File file = directory.openNextFile();
-  while (file && deletedThisWake < kFormalFrameGcMaxDeletesPerWake
-      && scannedThisWake < kFormalFrameGcMaxScansPerWake) {
-    ++scannedThisWake;
-    String sourceSha256;
+  while (file && scannedThisWake < kFormalFrameGcMaxScansPerWake) {
     const String entryName = file.name();
     const String path = entryName.startsWith("/")
-      ? entryName
-      : String("/inktime/frames/") + entryName;
-    const uint32_t fileBytes = static_cast<uint32_t>(file.size());
-    const bool candidate = !file.isDirectory()
-      && formalFrameShaFromPath(path, sourceSha256);
-    const bool protectedReference = candidate && protectedFrames.contains(sourceSha256);
+      ? entryName : String("/inktime/frames/") + entryName;
+    String sourceSha256;
+    if (!file.isDirectory() && formalFrameShaFromPath(path, sourceSha256)) {
+      paths[scannedThisWake] = path;
+      sizes[scannedThisWake] = static_cast<uint32_t>(file.size());
+    }
+    ++scannedThisWake;
     file.close();
-    if (protectedReference) {
+    file = directory.openNextFile();
+  }
+  if (file) file.close();
+  directory.close();
+  uint8_t deletedThisWake = 0U;
+  for (size_t index = 0; index < scannedThisWake
+      && deletedThisWake < (batch ? kFormalFrameMaximumFiles : kFormalFrameGcMaxDeletesPerWake);
+      ++index) {
+    const String path = paths[index];
+    String sourceSha256;
+    if (!formalFrameShaFromPath(path, sourceSha256)) continue;
+    const uint32_t fileBytes = sizes[index];
+    if (protectedFrames.contains(sourceSha256)) {
       if (gcSkippedProtected_ < UINT32_MAX) ++gcSkippedProtected_;
-    } else if (candidate && SD.remove(path.c_str())) {
+    } else if (FFat.remove(path.c_str())) {
       if (gcDeletedFiles_ < UINT32_MAX) ++gcDeletedFiles_;
       if (UINT32_MAX - gcDeletedBytes_ < fileBytes) gcDeletedBytes_ = UINT32_MAX;
       else gcDeletedBytes_ += fileBytes;
       ++deletedThisWake;
+      if (batch && formalFrameFiles - deletedThisWake + missing <= kFormalFrameMaximumFiles
+          && FFat.freeBytes() >= requiredFree) break;
     }
-    file = directory.openNextFile();
   }
-  directory.close();
-  return true;
+  return !batch || (countFormalFrameFiles() + missing <= kFormalFrameMaximumFiles
+    && FFat.freeBytes() >= requiredFree);
 }
 
 bool PhotoPainterSupport::writeActiveSchedule(const char* json, size_t length) {
   static constexpr size_t kMaxScheduleBytes = 32768U;
-  if (!sdReady_ || json == nullptr || length == 0 || length > kMaxScheduleBytes) {
-    cacheStatus_ = sdReady_ ? CacheStatus::Error : CacheStatus::Disabled;
+  if (!storageReady_ || json == nullptr || length == 0 || length > kMaxScheduleBytes) {
+    cacheStatus_ = storageReady_ ? CacheStatus::Error : CacheStatus::Disabled;
     return false;
   }
   char finalPath[64] = {0};
@@ -1465,8 +1412,13 @@ bool PhotoPainterSupport::writeActiveSchedule(const char* json, size_t length) {
     cacheStatus_ = CacheStatus::Error;
     return false;
   }
-  SD.remove(temporaryPath);
-  File file = SD.open(temporaryPath, FILE_WRITE);
+  if (!restoreStorageBackup(finalPath, backupPath)) {
+    lastError_ = "STORAGE-RECOVERY";
+    cacheStatus_ = CacheStatus::Error;
+    return false;
+  }
+  FFat.remove(temporaryPath);
+  File file = FFat.open(temporaryPath, FILE_WRITE);
   if (!file) {
     cacheStatus_ = CacheStatus::Error;
     return false;
@@ -1474,25 +1426,25 @@ bool PhotoPainterSupport::writeActiveSchedule(const char* json, size_t length) {
   const uint32_t writeStarted = millis();
   const size_t written = file.write(
     reinterpret_cast<const uint8_t*>(json), length);
-  sdWriteBytes_ += static_cast<uint32_t>(written);
+  storageWriteBytes_ += static_cast<uint32_t>(written);
   file.flush();
   file.close();
-  sdWriteDurationMs_ += millis() - writeStarted;
+  storageWriteDurationMs_ += millis() - writeStarted;
   if (written != length) {
-    SD.remove(temporaryPath);
+    FFat.remove(temporaryPath);
     cacheStatus_ = CacheStatus::Error;
     return false;
   }
-  SD.remove(backupPath);
-  const bool movedOld = !SD.exists(finalPath) || SD.rename(finalPath, backupPath);
-  const bool installed = movedOld && SD.rename(temporaryPath, finalPath);
+  FFat.remove(backupPath);
+  const bool movedOld = !FFat.exists(finalPath) || FFat.rename(finalPath, backupPath);
+  const bool installed = movedOld && FFat.rename(temporaryPath, finalPath);
   if (!installed) {
-    SD.remove(temporaryPath);
-    if (!SD.exists(finalPath) && SD.exists(backupPath)) SD.rename(backupPath, finalPath);
+    FFat.remove(temporaryPath);
+    if (!FFat.exists(finalPath) && FFat.exists(backupPath)) FFat.rename(backupPath, finalPath);
     cacheStatus_ = CacheStatus::Error;
     return false;
   }
-  SD.remove(backupPath);
+  FFat.remove(backupPath);
   cacheStatus_ = CacheStatus::Written;
   return true;
 }
@@ -1500,7 +1452,7 @@ bool PhotoPainterSupport::writeActiveSchedule(const char* json, size_t length) {
 bool PhotoPainterSupport::readActiveSchedule(String& json) {
   static constexpr size_t kMaxScheduleBytes = 32768U;
   json = "";
-  if (!sdReady_) {
+  if (!storageReady_) {
     cacheStatus_ = CacheStatus::Disabled;
     return false;
   }
@@ -1512,8 +1464,8 @@ bool PhotoPainterSupport::readActiveSchedule(String& json) {
     cacheStatus_ = CacheStatus::Error;
     return false;
   }
-  if (!SD.exists(finalPath) && SD.exists(backupPath)) SD.rename(backupPath, finalPath);
-  File file = SD.open(finalPath, FILE_READ);
+  if (!FFat.exists(finalPath) && FFat.exists(backupPath)) FFat.rename(backupPath, finalPath);
+  File file = FFat.open(finalPath, FILE_READ);
   if (!file || file.size() <= 0 || static_cast<size_t>(file.size()) > kMaxScheduleBytes) {
     if (file) file.close();
     cacheStatus_ = CacheStatus::Miss;
@@ -1524,7 +1476,7 @@ bool PhotoPainterSupport::readActiveSchedule(String& json) {
   while (file.available()) {
     const int value = file.read();
     if (value >= 0) {
-      ++sdReadBytes_;
+      ++storageReadBytes_;
       json += static_cast<char>(value);
     }
   }
@@ -1560,8 +1512,8 @@ String PhotoPainterSupport::activeScheduleId() {
 
 bool PhotoPainterSupport::writeStagedNextSchedule(const char* json, size_t length) {
   static constexpr size_t kMaxScheduleBytes = 32768U;
-  if (!sdReady_ || json == nullptr || length == 0 || length > kMaxScheduleBytes) {
-    cacheStatus_ = sdReady_ ? CacheStatus::Error : CacheStatus::Disabled;
+  if (!storageReady_ || json == nullptr || length == 0 || length > kMaxScheduleBytes) {
+    cacheStatus_ = storageReady_ ? CacheStatus::Error : CacheStatus::Disabled;
     return false;
   }
   char finalPath[64] = {0};
@@ -1572,33 +1524,38 @@ bool PhotoPainterSupport::writeStagedNextSchedule(const char* json, size_t lengt
     cacheStatus_ = CacheStatus::Error;
     return false;
   }
-  SD.remove(temporaryPath);
-  File file = SD.open(temporaryPath, FILE_WRITE);
+  if (!restoreStorageBackup(finalPath, backupPath)) {
+    lastError_ = "STORAGE-RECOVERY";
+    cacheStatus_ = CacheStatus::Error;
+    return false;
+  }
+  FFat.remove(temporaryPath);
+  File file = FFat.open(temporaryPath, FILE_WRITE);
   if (!file) {
     cacheStatus_ = CacheStatus::Error;
     return false;
   }
   const uint32_t writeStarted = millis();
   const size_t written = file.write(reinterpret_cast<const uint8_t*>(json), length);
-  sdWriteBytes_ += static_cast<uint32_t>(written);
+  storageWriteBytes_ += static_cast<uint32_t>(written);
   file.flush();
   file.close();
-  sdWriteDurationMs_ += millis() - writeStarted;
+  storageWriteDurationMs_ += millis() - writeStarted;
   if (written != length) {
-    SD.remove(temporaryPath);
+    FFat.remove(temporaryPath);
     cacheStatus_ = CacheStatus::Error;
     return false;
   }
-  SD.remove(backupPath);
-  const bool movedOld = !SD.exists(finalPath) || SD.rename(finalPath, backupPath);
-  const bool installed = movedOld && SD.rename(temporaryPath, finalPath);
+  FFat.remove(backupPath);
+  const bool movedOld = !FFat.exists(finalPath) || FFat.rename(finalPath, backupPath);
+  const bool installed = movedOld && FFat.rename(temporaryPath, finalPath);
   if (!installed) {
-    SD.remove(temporaryPath);
-    if (!SD.exists(finalPath) && SD.exists(backupPath)) SD.rename(backupPath, finalPath);
+    FFat.remove(temporaryPath);
+    if (!FFat.exists(finalPath) && FFat.exists(backupPath)) FFat.rename(backupPath, finalPath);
     cacheStatus_ = CacheStatus::Error;
     return false;
   }
-  SD.remove(backupPath);
+  FFat.remove(backupPath);
   cacheStatus_ = CacheStatus::Written;
   return true;
 }
@@ -1606,7 +1563,7 @@ bool PhotoPainterSupport::writeStagedNextSchedule(const char* json, size_t lengt
 bool PhotoPainterSupport::readStagedNextSchedule(String& json) {
   static constexpr size_t kMaxScheduleBytes = 32768U;
   json = "";
-  if (!sdReady_) {
+  if (!storageReady_) {
     cacheStatus_ = CacheStatus::Disabled;
     return false;
   }
@@ -1618,8 +1575,8 @@ bool PhotoPainterSupport::readStagedNextSchedule(String& json) {
     cacheStatus_ = CacheStatus::Error;
     return false;
   }
-  if (!SD.exists(finalPath) && SD.exists(backupPath)) SD.rename(backupPath, finalPath);
-  File file = SD.open(finalPath, FILE_READ);
+  if (!FFat.exists(finalPath) && FFat.exists(backupPath)) FFat.rename(backupPath, finalPath);
+  File file = FFat.open(finalPath, FILE_READ);
   if (!file || file.size() <= 0 || static_cast<size_t>(file.size()) > kMaxScheduleBytes) {
     if (file) file.close();
     cacheStatus_ = CacheStatus::Miss;
@@ -1630,7 +1587,7 @@ bool PhotoPainterSupport::readStagedNextSchedule(String& json) {
   while (file.available()) {
     const int value = file.read();
     if (value >= 0) {
-      ++sdReadBytes_;
+      ++storageReadBytes_;
       json += static_cast<char>(value);
     }
   }
@@ -1650,7 +1607,7 @@ String PhotoPainterSupport::stagedNextScheduleId() {
 }
 
 bool PhotoPainterSupport::clearStagedNextSchedule() {
-  if (!sdReady_) {
+  if (!storageReady_) {
     cacheStatus_ = CacheStatus::Disabled;
     return false;
   }
@@ -1662,15 +1619,15 @@ bool PhotoPainterSupport::clearStagedNextSchedule() {
     cacheStatus_ = CacheStatus::Error;
     return false;
   }
-  SD.remove(finalPath);
-  SD.remove(temporaryPath);
-  SD.remove(backupPath);
+  FFat.remove(finalPath);
+  FFat.remove(temporaryPath);
+  FFat.remove(backupPath);
   cacheStatus_ = CacheStatus::Written;
   return true;
 }
 
 bool PhotoPainterSupport::promoteStagedNextSchedule() {
-  if (!sdReady_) {
+  if (!storageReady_) {
     cacheStatus_ = CacheStatus::Disabled;
     return false;
   }
@@ -1687,23 +1644,28 @@ bool PhotoPainterSupport::promoteStagedNextSchedule() {
     cacheStatus_ = CacheStatus::Error;
     return false;
   }
-  if (!SD.exists(stagedFinal) && SD.exists(stagedBackup)) SD.rename(stagedBackup, stagedFinal);
-  if (!SD.exists(stagedFinal)) {
+  if (!FFat.exists(stagedFinal) && FFat.exists(stagedBackup)) FFat.rename(stagedBackup, stagedFinal);
+  if (!FFat.exists(stagedFinal)) {
     cacheStatus_ = CacheStatus::Miss;
     return false;
   }
-  SD.remove(activeBackup);
-  const bool movedActive = !SD.exists(activeFinal) || SD.rename(activeFinal, activeBackup);
-  const bool installed = movedActive && SD.rename(stagedFinal, activeFinal);
-  if (!installed) {
-    if (!SD.exists(activeFinal) && SD.exists(activeBackup)) SD.rename(activeBackup, activeFinal);
+  if (!restoreStorageBackup(activeFinal, activeBackup)) {
+    lastError_ = "STORAGE-RECOVERY";
     cacheStatus_ = CacheStatus::Error;
     return false;
   }
-  SD.remove(activeTemporary);
-  SD.remove(activeBackup);
-  SD.remove(stagedTemporary);
-  SD.remove(stagedBackup);
+  FFat.remove(activeBackup);
+  const bool movedActive = !FFat.exists(activeFinal) || FFat.rename(activeFinal, activeBackup);
+  const bool installed = movedActive && FFat.rename(stagedFinal, activeFinal);
+  if (!installed) {
+    if (!FFat.exists(activeFinal) && FFat.exists(activeBackup)) FFat.rename(activeBackup, activeFinal);
+    cacheStatus_ = CacheStatus::Error;
+    return false;
+  }
+  FFat.remove(activeTemporary);
+  FFat.remove(activeBackup);
+  FFat.remove(stagedTemporary);
+  FFat.remove(stagedBackup);
   cacheStatus_ = CacheStatus::Written;
   return true;
 }
@@ -1878,20 +1840,8 @@ int PhotoPainterSupport::batteryPercent() const {
 void PhotoPainterSupport::prepareForDeepSleep() {
   if (impl_ != nullptr) {
     impl_->display.safeShutdown();
-    if (sdReady_) {
-      SD.end();
-      impl_->sdSpi.end();
-      sdReady_ = false;
-    }
-    // Rev2.0 has external 10k pull-ups on all SD lines and no card power gate.
-    // Release host drivers/pulls after unmount; do not drive those lines LOW.
-    // Each deep-sleep wake runs beginSd() again before accessing files.
-    const int sdPins[] = {board_.sd.cs, board_.sd.sck, board_.sd.miso, board_.sd.mosi};
-    for (const int pin : sdPins) {
-      if (pin == kNoPin) continue;
-      pinMode(pin, INPUT);
-      gpio_pullup_dis(static_cast<gpio_num_t>(pin));
-      gpio_pulldown_dis(static_cast<gpio_num_t>(pin));
+    if (storageReady_) {
+      FFat.end();
     }
     if (board_.audio.paEnable != kNoPin) {
       pinMode(board_.audio.paEnable, OUTPUT);

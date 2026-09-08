@@ -7,9 +7,10 @@
 
 ## 支援狀態
 
-InkTime 韌體 2.8.6 可用單一 compile-time Profile 切換既有 PCB 與 Waveshare
+InkTime 韌體 2.8.7 可用單一 compile-time Profile 切換既有 PCB 與 Waveshare
 ESP32-S3-PhotoPainter。使用者實際板與 Waveshare Rev2.0 原理圖都確認 PMIC 為 TG28；
-這仍不代表 GPIO 喚醒、面板、SD、電池或睡眠電流已完成 InkTime 實機驗證。
+Enhanced runtime 不要求 microSD；這仍不代表 GPIO 喚醒、面板、電池或睡眠電流已完成
+InkTime 實機驗證。
 
 ```cpp
 #define DEVICE_PROFILE DEVICE_PROFILE_WAVESHARE_PHOTOPAINTER
@@ -78,20 +79,46 @@ Stock 原始碼使用相對秒數 timer，不足以證明支援 InkTime 的任�
   `POWER_OFF` 與 BUSY 完成順序。官方 PhotoPainter driver 未使用的額外面板 sleep command
   或 GPIO pulldown／hold 不會加入；沒有宣稱快速刷新。
 
-## SD、快取與斷電恢復
+## Internal Flash、FFat、快取與斷電恢復
 
-- SD 先以 20 MHz 初始化，失敗後只以 4 MHz重試一次；無 SD 時 Wi-Fi、下載、
-  診斷與 RAM→面板流程仍可執行。
-- 啟動建立 `/originals`、`/cache`、`/config`、`/logs`，以及 Enhanced 使用的
-  `/inktime/schedule`、`/inktime/frames`、`/inktime/journal`、`/inktime/state`。
-- PSRAM 與 SD 之間固定經 4,096-byte internal-RAM bounce buffer；逐 chunk 檢查
-  read／write byte count，寫完 flush／close。
-- `/cache` 是可重建的 derived cache；其 header 驗證 magic、版本、800×480、4bpp、
-  rotation、來源 hash、payload 長度與 CRC32。Enhanced 正式內容另使用完整 SHA-256
-  檔名與 `ITF2` header，不把 32-bit cache key 當成內容身份。損壞檔案會刪除並保留
-  舊的可用檔案，不會把半寫入內容當成畫面。
-- 寫入採同目錄 `.tmp`，舊檔先 rename 為 `.bak`，新檔再 rename 成正式檔；若中途
-  斷電，下次啟動可恢復 `.bak`，不會把半寫入檔案當成有效畫面。
+- Enhanced 不要求插入 microSD；Internal Flash 的既有 FAT partition 以 FFat 掛載，
+  partition label 固定為 `fat`，並使用其 wear leveling。
+- Enhanced 只建立並使用 `/inktime`、`/inktime/schedule`、`/inktime/frames`、
+  `/inktime/journal` 與 `/inktime/state`；正式圖片只寫入
+  `/inktime/frames/<sha256>-r0.itf` 或 `-r180.itf`，不長期保存 BMP、JPEG、原始照片
+  或完整 server source image。
+- 每張 native 4bpp formal Frame 的 payload 固定為 192,000 bytes，保留既有
+  `FormalFrameHeader`／`ITF2`、rotation、CRC32、SHA-256 與尺寸驗證。Internal Flash
+  最多保留 40 個 `.itf` 實體檔案；對 Server 宣告的 Enhanced offline schedule
+  capability 最多 16 slots/day。
+  Server 自 Migration 59 起將 16 保存為 `confirmed_16`，配對、每日預取與管理頁均接受
+  此能力。曾被舊 Server 降為 12 的裝置須重新配對／Repair；既有能力不自動推升。
+  新下載排程在韌體端最多接受 16 slots，舊本機 24-slot 資料仍可讀。
+  Authenticated status heartbeat 也回報 16；較新 heartbeat 若宣告低於 DB 的容量，
+  Server 會保留排程與版本，轉入既有 `legacy_ambiguous` quarantine（保守值 12），
+  停止預取，並記錄 `DEVICE-CAPABILITY-CONFLICT`，等待重新配對／Repair。
+- Formal Frame GC 每次最多掃描 64 個 entry、刪除 4 個，保護 active、staged-next、
+  current、last-good、recovery 與 in-flight references；free-space floor 為約
+  1.5 MiB 加一張 formal Frame transaction 的空間。
+  新批次下載前先以 SHA＋rotation 驗證、去重，計算缺少的 frame；保護新批次與原有
+  references，最多掃 64 entries、刪 40 個未引用 frame，直到整批張數與空間足夠。
+  受保護資料無法讓出足夠容量時，下載前回報 `STORAGE-BATCH-CAPACITY`。
+  一般開機 GC 仍最多刪 4 個；目錄掃描未完成時拒絕
+  新增 frame。一般線上照片也盡力保存正式 ITF 供 KEY1 恢復，儲存失敗仍可由 RAM 顯示。
+- Active／staged schedule 與 frame 寫入仍採同目錄 `.tmp`，flush／close 後將舊檔 rename
+  為 `.bak`、再把 temporary rename 成 final；final 缺失時恢復 `.bak`，不把尺寸錯誤或
+  CRC／SHA 驗證失敗的檔案當成有效畫面。
+  重試寫入或 promote 前先恢復僅剩的 `.bak`，避免下一次 transaction 提前刪掉唯一舊副本。
+
+- 正常掛載使用 `formatOnFail=false`。僅整個 FAT partition 都是 `0xff` 時允許首次
+  格式化；已有任何資料而 mount fail 時保留原分割區，回報 `STORAGE_CORRUPT`。
+  本流程不會自動修復／格式化損壞的 filesystem。
+- 開機 recovery sweep 最多掃 64 entries，先關閉目錄再處理合法 frame 檔名的殘檔：
+  刪除 `.tmp`，final 缺失時恢復 `.bak`；兩者存在時完整驗證 final 或恢復 backup。
+  正式讀取恢復 `.bak` 後會在同一次呼叫最多重試一次。
+- Status 增加 `storage_backend=ffat`、`internal_storage_ready`、`storage_read_bytes`、
+  `storage_write_bytes`、`storage_write_ms` 與 `storage_state`；Server 保存於 status event details。
+  `sd_card`／`sd_*` 暫時保留相容，表示相同的內部儲存狀態／I/O。
 
 ## I²C、PMIC、RTC 與感測器
 
@@ -145,7 +172,7 @@ Stock 原始碼使用相對秒數 timer，不足以證明支援 InkTime 的任�
   讀取 GPIO 4；單擊會重畫同一組 SSID／AP 密碼／設定網址，頁尾以 `KEY REFRESH n`
   顯示本次動作；450 ms 內雙擊則顯示 TG28 唯讀取得的電量百分比、電池電壓、USB
   供電、是否充電與充電階段。從 deep sleep 由第一次 KEY 喚醒後，在同一時間窗第二次
-  點擊也會直接顯示電源頁。電源頁完成刷新後保留 30 秒，再從 SD 讀取並驗證最後成功
+  點擊也會直接顯示電源頁。電源頁完成刷新後保留 30 秒，再從 Internal Flash 讀取並驗證最後成功
   Frame，無網路刷回原照片；若本地 Frame 不存在或完整性失敗，才回到正常網路刷新。
   未配對時則恢復同一組 Portal 配對頁。因 E6 每次 full refresh 約 30 秒，從雙擊到原圖
   完全恢復通常約 90 秒；這段是使用者明確要求的有界醒著時間，仍受 10 分鐘 max-awake
@@ -324,9 +351,8 @@ rm -f esp32/ink-display-7C-photo/partitions.csv
 ```
 
 `inktime_photopainter_3M_16MB` 提供 512 KiB NVS、3 MiB 雙 OTA app slot 與約 9.4 MiB
-FAT partition；本韌體的
-圖片快取使用外接 SD，不會自動使用 Flash FAT partition。OTA 尚未實作，但分割區先
-保留 rollback 空間。
+FAT partition；Enhanced 正式 Frame 與 offline schedule metadata 使用 Internal FFat，
+不要求外接 SD。OTA 尚未實作，但分割區先保留 rollback 空間。
 
 PhotoPainter 的 `CDCOnBoot=cdc` 使用 ESP32-S3 原生 USB CDC／JTAG 作為正式與除錯
 生命週期 Log；不要另建 `HardwareSerial(0)`，否則 Type-C 埠可燒錄但看不到應用程式
@@ -343,7 +369,7 @@ ArduinoJson 7.4.3 完成以下編譯；這些是軟體建置結果，不是實�
 | PhotoPainter | Release | 1,161,527／3,145,728 bytes（36%） | 49,168 bytes（15%） |
 | PhotoPainter | Debug | 1,254,227／3,145,728 bytes（39%） | 49,296 bytes（15%） |
 
-以上 Flash／RAM 數字只屬於 2026-07-19 歷史 binary，不代表 2.8.6 的剩餘容量。現行 4 MiB／16 MiB repository-owned partitions 與 artifact 大小需以同一 source 的 Hosted CI 核對；OTA 簽章與啟用流程仍未實作。
+以上 Flash／RAM 數字只屬於 2026-07-19 歷史 binary，不代表 2.8.7 的剩餘容量。現行 4 MiB／16 MiB repository-owned partitions 與 artifact 大小需以同一 source 的 Hosted CI 核對；OTA 簽章與啟用流程仍未實作。
 
 ## 不需量測儀器的使用確認
 
