@@ -79,6 +79,9 @@ jobs:
       - if: ${{ steps.event.outputs.full_validation == 'true' }}
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (Node 24)
         with: {fetch-depth: 0}
+      - name: Validate AI navigation contract
+        if: ${{ steps.event.outputs.full_validation == 'true' }}
+        run: python scripts/ci/validate_ai_navigation.py
       - id: route
         name: Emit canonical source-owned plan and tested checkout provenance
         if: ${{ steps.event.outputs.full_validation == 'true' }}

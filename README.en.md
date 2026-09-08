@@ -21,7 +21,7 @@ It does not show random photos, and it is not a simple chronological slideshow. 
 - Pushes it to an ESP32-powered e-ink display
 
 ---
-For coding tasks, read [AGENTS.md](AGENTS.md) and the [scoped navigation](docs/AI_NAVIGATION.md) before opening relevant modules.
+For coding tasks, read [AGENTS.md](AGENTS.md), the [scoped navigation](docs/AI_NAVIGATION.md), and the [machine-readable context index](docs/AI_CONTEXT_INDEX.json) before opening relevant modules.
 
 ## Project Structure
 

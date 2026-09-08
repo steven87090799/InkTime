@@ -17,7 +17,7 @@ Full mode is selected when any of these are true:
 
 Full mode includes Tier 0, the complete owner-suite plan, Python 3.12 coverage at 80%, Python 3.10 compatibility, dependency policy and audit, migrations, secret scan, actionlint, Docker LAN production persistence, TLS production smoke, bounded runtime soak, Playwright, firmware host contracts and the complete firmware profile matrix, container security, offline benchmark, and both aggregate gates. Equivalent impact-only heavy jobs are not run again in full mode. Actionlint is a full-mode invariant even when the diff itself is not a workflow/configuration change.
 
-The planner's full-mode execution registry maps every `FULL_PLAN_SUITES` entry to a real full-mode job. `docs_contract` is a documentation classification marker and is intentionally non-executable.
+The planner's full-mode execution registry maps every `FULL_PLAN_SUITES` entry to a real full-mode job. `docs_contract` remains a documentation classification marker for routing, while each full-validation `changes` job runs [`scripts/ci/validate_ai_navigation.py`](../scripts/ci/validate_ai_navigation.py) after checkout. That contract validates the machine-readable AI index, its paths and test globs, the large-file policy, and the required navigation links.
 
 Cross-layer integration regressions are mapped to their domain owner in [`scripts/ci/test_plan.py`](../scripts/ci/test_plan.py) and [`scripts/ci/run_selected_suites.py`](../scripts/ci/run_selected_suites.py); there is no catch-all integration-directory runner. The explicit full-only allowlist is reserved for the multi-domain scheduled-release pipeline and records its reason in source.
 
