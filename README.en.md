@@ -1,6 +1,6 @@
 # InkTime · E-Ink Memory Frame
 
-> Source baseline: 2026-09-03, `51309e2`. Migration 57, AI Schema v4 and ESP32 2.8.6 are separate version contracts. See the [current-state reference](docs/reference/CURRENT_STATE_ZH_TW.md).
+> Source baseline: 2026-09-08, current checkout. Migration 59, AI Schema v4 and ESP32 2.8.7 are separate version contracts. See the [current-state reference](docs/reference/CURRENT_STATE_ZH_TW.md).
 
 > For complete Web/Worker/Scheduler setup, device queues, resilience features, and the document map, also see the [Chinese README](README.md), the [documentation portal](USER_MANUAL.html), and [docs/README.md](docs/README.md).
 
@@ -21,6 +21,8 @@ It does not show random photos, and it is not a simple chronological slideshow. 
 - Pushes it to an ESP32-powered e-ink display
 
 ---
+For coding tasks, read [AGENTS.md](AGENTS.md) and the [scoped navigation](docs/AI_NAVIGATION.md) before opening relevant modules.
+
 ## Project Structure
 
 InkTime has three main parts:
@@ -161,7 +163,7 @@ Example PCB:
 
 ## Build and Flash
 
-The shared 7C/PhotoPainter source currently declares firmware **2.8.6**. Use the exact Hosted CI profile, pinned dependencies and repository-owned partition table described in the [ESP32 guide](docs/devices/ESP32_GUIDE_ZH_TW.md).
+The shared 7C/PhotoPainter source currently declares firmware **2.8.7**. Use the exact Hosted CI profile, pinned dependencies and repository-owned partition table described in the [ESP32 guide](docs/devices/ESP32_GUIDE_ZH_TW.md).
 
 PhotoPainter Rev2.0 requires 16 MiB flash, 8 MiB OPI PSRAM, TG28 ALDO4 power handling and its own GPIO map. Read the [hardware handoff](docs/devices/PHOTOPAINTER_REV2_TG28_HARDWARE_HANDOFF_ZH_TW.md) before flashing. Preserve a full local flash backup; an app-only binary belongs at `0x10000`, never `0x0`. GPIO0 remains BOOT and GPIO5 remains the factory PWR button.
 

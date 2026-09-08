@@ -1,6 +1,6 @@
 # InkTime 現行版本與功能基線
 
-核對日期：2026-09-03。功能基準：`origin/main` 的 `51309e2`，加上本次保留退休設定的快照修復；文件與本機重建不表示 GitHub PR 已合併。部署中的版本請另從「診斷」核對 Git revision。
+核對日期：2026-09-08。功能基準以目前 checkout 的原始碼為準，不固定綁定單一 Git commit SHA；文件與本機重建不表示 GitHub PR 已合併。部署中的版本請另從「診斷」核對 Git revision。
 
 ## 版本不是同一個數字
 
@@ -24,7 +24,7 @@ Config Store v5 是裝置本機儲存格式，不是所有 HTTP Manifest 的版�
 - 新策略為 `local`／`single`；舊的 `low_cost`、`smart`、`smart_two_stage`、`high_quality`、`single_high`、`custom` 正規化成 `single`，不恢復兩階段圖片分析。一次分析計畫最多一次圖片 Vision，必要時最多一次純文字 JSON 修復；另建重跑工作仍可能產生新費用。
 - Web 的 `analysis.image_max_side` 預設 1024、可選 1600；底層 plan／benchmark 額外支援 512。不要把低解析度誤寫成第一階段。
 - Migration 51 增加有界 AI Trace；Migration 52 增加 `providers.model`。Provider 專屬模型優先於全域模型，留白才沿用；OpenRouter 必須使用完整模型 ID。
-- Schema v4 的回憶／視覺／本機品質固定為 50／25／25，加上本機特殊程度與照片庫稀有度；語意與本機品質分開排名。E6 只參與顯示分數；內容分類有獨立門檻與人工恢復保護，見 [Vision v4](../VISION_SCHEMA_V4.md)。
+- Schema v4 採 `ranking-v5-ai-first`：回憶 67%、視覺 33%、本機品質 0%，再套用 special bonus 與最愛提升。本機品質現在是 candidate qualification／quality gate，不是 ranking weight；它只負責本機特徵完成、品質與來源資格判斷，不與 semantic 分數混比或補位。E6 只參與顯示分數；內容分類有獨立門檻與人工恢復保護，見 [Vision v4](../VISION_SCHEMA_V4.md)。
 - 照片庫優先顯示現行 v4 模型，再顯示已保存的歷史模型紀錄及本機分析；歷史描述／短句可搜尋、原始評分可查閱，仍不參與 v4 排名。儀表板分開標示含本機的完成狀態與依照片去重的模型結果。
 - `completed` 只表示工作結束；本機、預篩排除、繼承或 cache hit 不證明有新 API 請求。請合併工作策略、AI Trace attempts、`api_usage` 與時間戳判讀。
 
@@ -46,4 +46,6 @@ NAS 使用[Tag 更新器](../operations/NAS_TAG_DEPLOYMENT_ZH_TW.md)拉取已發
 
 一般 Web 備份預設排除 Secrets、原圖與 Release payload；NAS update recovery point 另保存含 Secrets 的 DB 與受保護的 session key。這些檔案不得公開。AI Trace 預設保留 30 天；API usage 原始預設為 400 天，管理員已改過的政策不應被覆蓋。Photo Analysis 歷史清理另有 dry-run digest 與明確確認，詳見[保留指南](../operations/PHOTO_ANALYSIS_RETENTION_ZH_TW.md)。
 
-本次另依部署者授權重建 OrbStack debug 三服務，驗證 Migration 53→57、ready／login 與帳號、Provider、模型價格、Secrets、Session Key 和個人設定保留；這是本機環境證據。pytest 與完整回歸仍由目前提交的 Hosted CI 決定；付費 API、NAS 更新及刷機未執行。歷史 CI 與量測保存原日期。PhotoPainter 2026-08-22／23 的局部實板結果仍見[硬體交接](../devices/PHOTOPAINTER_REV2_TG28_HARDWARE_HANDOFF_ZH_TW.md)，不推廣為目前全部功能已驗收。
+歷史紀錄（2026-09-06）：當時依部署者授權重建 OrbStack debug 三服務，驗證 Migration 53→58、ready／login 與帳號、Provider、模型價格、Secrets、Session Key 和個人設定保留；這是本機環境證據。pytest 與完整回歸仍由目前提交的 Hosted CI 決定；付費 API、NAS 更新及刷機未執行。歷史 CI 與量測保存原日期。PhotoPainter 2026-08-22／23 的局部實板結果仍見[硬體交接](../devices/PHOTOPAINTER_REV2_TG28_HARDWARE_HANDOFF_ZH_TW.md)，不推廣為目前全部功能已驗收。
+
+本次（2026-09-08）僅核對原始碼與更新文件，未重新部署、呼叫付費 API、執行 Hosted CI 或實板驗收。Migration 58 更新 AI-first 衍生排名；Migration 59 新增已確認的 16-slot PhotoPainter 能力。AI agent 修改入口見 [AI 修改導航](../AI_NAVIGATION.md)。

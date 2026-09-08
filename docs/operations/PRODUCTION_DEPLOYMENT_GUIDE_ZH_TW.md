@@ -2,7 +2,7 @@
 
 本指南把 NAS 初次部署、Web 建立第一個 Release，以及 ESP32 配網、配對與顯示驗收串成一條操作流程。日後更新、故障復原及板型專屬命令，請使用各步驟連結的專項文件。
 
-> 原始碼核對基準：2026-09-03，`51309e2`。資料庫 Migration 57、Vision Schema v4、韌體 2.8.6、Config Store payload v5、NAS deployment contract 3 是不同的版本契約。部署時以所選 Release 的程式碼與部署檔為準；版本不是使用者手動填入資料庫的設定。
+> 原始碼核對基準：2026-09-08，目前 checkout。資料庫 Migration 59、Vision Schema v4、韌體 2.8.7、Config Store payload v5、NAS deployment contract 3 是不同的版本契約。部署時以所選 Release 的程式碼與部署檔為準；版本不是使用者手動填入資料庫的設定。
 
 ## 1. 準備 NAS、儲存與網路
 
