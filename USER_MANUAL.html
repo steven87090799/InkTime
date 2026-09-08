@@ -1240,7 +1240,7 @@
     <main class="main-content">
         <article class="markdown-body" id="content">
             <h1 id="inktime-墨水屏電子相框系統-終極百科全書級操作手冊與開發者指南" class="doc-h1">InkTime 墨水屏電子相框系統 終極百科全書級操作手冊與開發者指南</h1>
-<p class="doc-p"><strong>2026-09-03 文件同步：</strong>功能基準為 main <code>51309e2</code>，Migration 57、嚴格 AI Schema v4、ESP32 2.8.6，新增安裝預設 <code>local_only</code>。章節與索引維持原位置，部署、評分與設定範例依目前程式校正。版本與驗證範圍見<a class="doc-link" href="docs/reference/CURRENT_STATE_ZH_TW.md">現行基線</a>；歷史 CI 與實板量測保留原日期。</p>
+<p class="doc-p"><a class="doc-link" href="docs/AI_NAVIGATION.md">AI 修改導航</a> · <a class="doc-link" href="AGENTS.md">AGENTS.md</a> · <a class="doc-link" href="CLAUDE.md">CLAUDE.md</a>。<strong>2026-09-08 文件核對：</strong>功能基準為目前 checkout 原始碼，Migration 59、嚴格 AI Schema v4、ESP32 2.8.7，新增安裝預設 <code>local_only</code>。章節與索引維持原位置，部署、評分與設定範例依目前程式校正。版本與驗證範圍見<a class="doc-link" href="docs/reference/CURRENT_STATE_ZH_TW.md">現行基線</a>；歷史 CI 與實板量測保留原日期。</p>
 
 
 <hr class="doc-divider">
@@ -1362,12 +1362,12 @@
 <hr class="doc-divider">
 <h3 id="sec-5-6" class="doc-h3">5.6 評分控制中心 (Scoring Lab)</h3>
 <p class="doc-p"><code>/scoring</code> 提供 v4 規則、固定排名公式、版本歷史與單張測試；已移除舊四權重及旅行加分滑桿。</p>
-<div class="code-wrapper"><pre><code class="language-text">base = memory * 0.50 + visual * 0.25 + local_quality * 0.25
-effective_special_level = clamp(ai_special_level + rarity_adjustment + favorite_adjustment, 0, 4)
+<div class="code-wrapper"><pre><code class="language-text">base = round(memory * 0.67 + visual * 0.33, 2)
+effective_special_level = clamp(ai_special_level + favorite_adjustment, 0, 4)
 special_bonus = [0, 2, 5, 9, 14][effective_special_level]
-raw = clamp(base + special_bonus, 0, 100)
+raw = round(clamp(base + special_bonus, 0, 100), 2)
 </code></pre></div>
-<p class="doc-p">語意 percentile 在同照片庫合格 v4 母體計算；E6 只參與最後顯示分數，本機 fallback 與歷史資料不混入語意排名。細節與人工恢復見 <a class="doc-link" href="docs/VISION_SCHEMA_V4.md">Vision v4</a>。</p>
+<p class="doc-p">ranking-v5-ai-first 以 raw 分數直接排名；最愛使 special level 提升一級（上限 4），rarity adjustment 為 0。本機品質只作資格門檻，E6 只參與顯示分數，本機 fallback 與歷史資料不混入語意排名。細節與人工恢復見 <a class="doc-link" href="docs/VISION_SCHEMA_V4.md">Vision v4</a>。</p>
 <hr class="doc-divider">
 <h3 id="sec-5-7" class="doc-h3">5.7 渲染設定與 A/B 模擬器 (Rendering & Simulator)</h3>
 <ul class="doc-list"><li><strong>URL 路由</strong>：<code>/rendering</code> (GET) 與 <code>/simulator</code> (GET)</li><li><strong>畫面指標與模擬器</strong>：</li><li><strong>A/B 畫面對照區</strong>：左側與右側可選擇不同 Preset、版型與 Dither 演算法，實時比對渲染效果。</li><li><strong>頁面控制按鈕與下拉選單</strong>：</li><li><strong>版型選擇 (Layout)</strong>：<code>full</code>, <code>postcard</code>, <code>photo_info</code>, <code>photo_pair</code>, <code>photo_pair_caption</code>, <code>adaptive_memory</code>, <code>calendar</code>, <code>weather_sensor</code>。</li><li><strong>抖動模式 (Dither)</strong>：<code>floyd_steinberg</code>, <code>gooddisplay</code>, <code>photo_smooth</code>, <code>atkinson</code>, <code>bayer4</code>, <code>bayer8</code>, <code>serpentine_floyd_steinberg</code> 等 10 種。</li><li><code>[儲存為預設發布設定]</code>：將當前參數寫入 <code>render.layout</code> 與 <code>render.dither</code>。</li></ul>
@@ -1590,7 +1590,7 @@ output schema: 嚴格 v4，繁體中文描述與短文案
 <ul class="doc-list"><li><strong>優勢</strong>：在墨水屏有限的 4 色 / 6 色面板上，相片人像膚色過渡更加自然，不會出現突兀的色彩塊斑。</li></ul>
 <hr class="doc-divider">
 <h2 id="sec-10" class="doc-h2"><span class="h2-anchor-icon">#</span> 十、 SQLite 資料庫主要表與 Migration 規格</h2>
-<p class="doc-p">目前 Migration 連續 1–57；資料表會隨 immutable migrations 擴充，不能以本章概覽手工建立完整資料庫。Schema、索引與約束由 <a class="doc-link" href="inktime/app/db/migrations.py">migrations.py</a> 唯一管理，升級順序與備份見 <a class="doc-link" href="docs/operations/MIGRATION_GUIDE_ZH_TW.md">遷移指南</a>。</p>
+<p class="doc-p">目前 Migration 連續 1–59；資料表會隨 immutable migrations 擴充，不能以本章概覽手工建立完整資料庫。Schema、索引與約束由 <a class="doc-link" href="inktime/app/db/migrations.py">migrations.py</a> 唯一管理，升級順序與備份見 <a class="doc-link" href="docs/operations/MIGRATION_GUIDE_ZH_TW.md">遷移指南</a>。</p>
 <div class="code-wrapper"><pre><code class="language-text">users：帳號、密碼雜湊、角色、正規化名稱與 session_version
 settings／settings_snapshots：設定值、版本、稽核與可還原快照
 providers／secrets／model_pricing：模型供應商、加密憑證與價格

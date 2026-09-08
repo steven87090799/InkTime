@@ -1,6 +1,6 @@
 # InkTime 文件地圖
 
-核對日期：2026-09-03；主線 `51309e2`。先讀[現行版本與功能基線](reference/CURRENT_STATE_ZH_TW.md)，了解 Migration 57、AI Schema v4、韌體 2.8.6、local-only 預設與本次驗證範圍。
+核對日期：2026-09-08；目前 checkout。先讀[現行版本與功能基線](reference/CURRENT_STATE_ZH_TW.md)，了解 Migration 59、AI Schema v4、韌體 2.8.7、local-only 預設與本次驗證範圍。
 
 這是 InkTime 文件的單一入口。根目錄的 [`USER_MANUAL.html`](../USER_MANUAL.html) 保留可瀏覽的說明與完整文件連結；現行操作契約以本次校對的 Markdown 為準；本頁則提供適合 GitHub、純文字閱讀器與程式碼審查的 Markdown 索引。
 
@@ -8,6 +8,7 @@
 
 | 你要做什麼 | 先讀 |
 |---|---|
+| AI agent 修改專案、減少重複讀取 | [AGENTS.md](../AGENTS.md) → [AI 修改導航](AI_NAVIGATION.md)；[CLAUDE.md](../CLAUDE.md) 共用此入口 |
 | 工作已完成但沒有文案／Worker 告警 | [Activity、工作與 AI Trace](guides/ACTIVITY_AI_TRACE_ZH_TW.md) |
 | 從 NAS 到 ESP32 完成上線 | [完整上線指南](operations/PRODUCTION_DEPLOYMENT_GUIDE_ZH_TW.md) |
 | 第一次啟動 Docker | [快速開始](getting-started/QUICK_START_ZH_TW.md) → [安裝指南](getting-started/INSTALLATION_ZH_TW.md) |

@@ -1,3 +1,10 @@
+# Start here: scoped reading
+
+Before editing, read [`docs/AI_NAVIGATION.md`](docs/AI_NAVIGATION.md).
+Select the matching task row and read only its entry points and relevant sections.
+Do not preload the full README, HTML manual, documentation tree, or repository.
+Expand to callers, contracts, and tests when evidence requires it.
+
 # Hosted CI and delivery policy
 
 GitHub Actions is the authoritative test, build, security-scan, benchmark,
