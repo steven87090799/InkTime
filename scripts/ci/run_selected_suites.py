@@ -243,6 +243,29 @@ def _ordered_unique(values: Iterable[str]) -> list[str]:
     return result
 
 
+def _remove_paths_covered_by_directories(paths: list[str]) -> list[str]:
+    """Avoid passing the same test file both explicitly and via a directory."""
+
+    directory_roots = [
+        (REPOSITORY_ROOT / path).resolve()
+        for path in paths
+        if (REPOSITORY_ROOT / path).is_dir()
+    ]
+    if not directory_roots:
+        return paths
+
+    result: list[str] = []
+    for path in paths:
+        target = (REPOSITORY_ROOT / path).resolve()
+        if target.is_file() and any(
+            target != directory and target.is_relative_to(directory)
+            for directory in directory_roots
+        ):
+            continue
+        result.append(path)
+    return result
+
+
 def selected_runner_suites(selected_suites: Iterable[str]) -> list[str]:
     selected = list(selected_suites)
     known_suites = set(SUITE_EXECUTION_OWNERS) | NON_EXECUTABLE_SUITES
@@ -264,10 +287,12 @@ def selected_runner_suites(selected_suites: Iterable[str]) -> list[str]:
 
 def selected_test_paths(selected_suites: Iterable[str]) -> tuple[list[str], list[str]]:
     runner_suites = selected_runner_suites(selected_suites)
-    paths = _ordered_unique(
-        path
-        for suite in runner_suites
-        for path in RUNNER_SUITE_TEST_PATHS[suite]
+    paths = _remove_paths_covered_by_directories(
+        _ordered_unique(
+            path
+            for suite in runner_suites
+            for path in RUNNER_SUITE_TEST_PATHS[suite]
+        )
     )
     return runner_suites, paths
 
@@ -319,7 +344,7 @@ def main() -> int:
     print(f"Selected pytest paths: {', '.join(test_paths)}")
     # Every pytest path comes from the source-owned mapping and was validated above.
     return subprocess.run(  # noqa: S603
-        [sys.executable, "-m", "pytest", *test_paths], check=False
+        [sys.executable, "-m", "pytest", "-m", "not performance", *test_paths], check=False
     ).returncode
 
 

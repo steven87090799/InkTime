@@ -47,13 +47,12 @@ def test_every_runner_mapping_path_exists_and_contains_tests():
 
 def test_selected_paths_are_deduplicated_and_ordered():
     suites, paths = selected_test_paths(
-        ["ci_planner_contracts", "ci_routing_contracts", "python_application_owner"]
+        ["ci_planner_contracts", "ci_routing_contracts"]
     )
 
     assert suites == [
         "ci_planner_contracts",
         "ci_routing_contracts",
-        "python_application_owner",
     ]
     assert paths[:3] == [
         "tests/unit/test_ci_changed_paths.py",
@@ -61,6 +60,15 @@ def test_selected_paths_are_deduplicated_and_ordered():
         "tests/unit/test_ci_selected_suites.py",
     ]
     assert len(paths) == len(set(paths))
+
+
+def test_directory_mapping_covers_explicit_files_without_repeating_them():
+    suites, paths = selected_test_paths(
+        ["ci_planner_contracts", "python_application_owner"]
+    )
+
+    assert suites == ["ci_planner_contracts", "python_application_owner"]
+    assert paths == ["tests/unit"]
 
 
 def test_unknown_suite_fails_closed():

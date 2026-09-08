@@ -104,12 +104,12 @@ def _pr_context(*, draft: bool = True, labels: list[str] | None = None) -> dict[
             {"repository_gate", "container_security_gate", "actionlint"},
         ),
         (
-            "ready PR full",
+            "ready PR impact",
             ["inktime/app/api/photos.py"],
             _pr_context(draft=False),
-            FULL_MODE,
-            {"python312_unit_security_integration_coverage"},
-            {"repository_gate", "container_security_gate", "actionlint"},
+            IMPACT_MODE,
+            {"python_application_owner", "ruff", "mypy"},
+            {"secret_scan"},
         ),
         (
             "full-ci full",

@@ -26,6 +26,11 @@ ignore = ["S101"]
 "inktime/app/services/budgets.py" = ["S608"]
 "scripts/*.py" = ["E402"]
 
+[tool.pytest.ini_options]
+markers = [
+  "performance: scale and timing-sensitive validation reserved for performance lanes",
+]
+
 [tool.coverage.run]
 # The benchmark harness has its own offline contract job; keep the production
 # application coverage gate scoped to runtime application code.

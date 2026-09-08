@@ -33,6 +33,7 @@ jobs:
   changes:
     name: Classify changed paths and validation provenance
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     outputs:
       full_validation: ${{ steps.event.outputs.full_validation }}
       ci_mode: ${{ steps.route.outputs.ci_mode }}
@@ -217,11 +218,17 @@ jobs:
     if: ${{ needs.changes.outputs.full_validation == 'true' && needs.changes.outputs.run_container_security == 'true' }}
     needs: changes
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (Node 24)
         with: {fetch-depth: 0}
+      - name: Set up Docker Buildx with GitHub Actions cache
+        uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
       - name: Build validation image from workflow checkout
-        run: docker build --pull --tag inktime:ci .
+        run: >-
+          docker buildx build --pull --load --tag inktime:ci
+          --cache-from type=gha,scope=inktime-container-security
+          --cache-to type=gha,mode=max,scope=inktime-container-security,ignore-error=true .
       - name: Generate CycloneDX SBOM
         run: |
           mkdir -p artifacts
@@ -250,18 +257,15 @@ jobs:
             --exit-code 1 \
             inktime:ci
           status=$?
+          set -e
+          # Convert the already-produced JSON locally; do not scan the image a
+          # second time just to create the human-readable artifact.
           docker run --rm \
-            -v /var/run/docker.sock:/var/run/docker.sock \
             -v "${PWD}/artifacts:/artifacts" \
-            -v "${PWD}/.trivyignore:/trivyignore:ro" \
-            aquasec/trivy:0.60.0 image \
-            --db-repository ghcr.io/aquasecurity/trivy-db:2,public.ecr.aws/aquasecurity/trivy-db:2 \
+            aquasec/trivy:0.60.0 convert \
             --format table \
             --output "/artifacts/inktime-trivy-${GITHUB_SHA}.txt" \
-            --ignorefile /trivyignore \
-            --severity HIGH,CRITICAL \
-            --exit-code 0 \
-            inktime:ci
+            "/artifacts/inktime-trivy-${GITHUB_SHA}.json"
           exit "$status"
       - name: Upload SBOM and Trivy evidence
         if: always()
@@ -276,6 +280,7 @@ jobs:
     if: ${{ needs.changes.outputs.full_validation == 'true' && needs.changes.outputs.run_benchmark == 'true' }}
     needs: changes
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (Node 24)
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0 (Node 24)

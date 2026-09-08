@@ -34,6 +34,7 @@ jobs:
   changes:
     name: Classify changed paths and validation provenance
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     outputs:
       full_validation: ${{ steps.event.outputs.full_validation }}
       ci_mode: ${{ steps.route.outputs.ci_mode }}
@@ -183,6 +184,9 @@ jobs:
             "${draft_args[@]}" "${full_suite_args[@]}" "${label_args[@]}")"
           has_suite() { jq -r --arg name "$1" '((.selected_test_suites | index($name)) != null)' <<<"${plan_json}"; }
           has_gate() { jq -r --arg name "$1" '((.selected_gates | index($name)) != null)' <<<"${plan_json}"; }
+          has_python_quality_suite() {
+            jq -r 'any(.selected_test_suites[]; . == "ruff" or . == "mypy" or . == "dependency_policy" or . == "python312_unit_security_integration_coverage")' <<<"${plan_json}"
+          }
           firmware_compile="$(jq -r 'any(.selected_gates[]; . == "firmware_quick" or . == "firmware_affected" or . == "firmware_full_matrix")' <<<"${plan_json}")"
           test "$(has_gate secret_scan)" = "true"
           test "$(jq -r .no_heavy_impact_duplicates <<<"${plan_json}")" = "true"
@@ -201,7 +205,7 @@ jobs:
             echo "tested_sha=${tested_sha}"
             echo "tested_ref=${tested_ref}"
             echo "tested_ref_kind=${tested_ref_kind}"
-            echo "run_python_quality=$(has_suite ruff)"
+            echo "run_python_quality=$(has_python_quality_suite)"
             echo "run_dependency_policy=$(has_suite dependency_policy)"
             echo "selected_owner_suites=$(jq -c .selected_owner_suites <<<"${plan_json}")"
             echo "run_python312_full=$(has_gate python312_full)"
@@ -260,6 +264,7 @@ jobs:
     if: ${{ needs.changes.outputs.full_validation == 'true' && needs.changes.outputs.run_source_head_contract == 'true' }}
     needs: changes
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (Node 24)
         with:
@@ -304,10 +309,11 @@ jobs:
           retention-days: 14
 
   python-quality:
-    name: Python 3.12 T0 and full coverage
+    name: Python static checks and full coverage
     if: ${{ needs.changes.outputs.full_validation == 'true' && needs.changes.outputs.run_python_quality == 'true' }}
     needs: changes
     runs-on: ubuntu-latest
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (Node 24)
         with: {fetch-depth: 0}
@@ -315,19 +321,8 @@ jobs:
         with: {python-version: "3.12", cache: pip}
       - run: pip install -r requirements-dev.txt
       - name: Dependency policy
+        if: ${{ needs.changes.outputs.run_dependency_policy == 'true' }}
         run: python scripts/check_dependency_policy.py
-      - name: Planner hardening contracts
-        run: >-
-          pytest
-          tests/unit/test_ci_changed_paths.py
-          tests/unit/test_ci_test_plan.py
-          tests/unit/test_ci_selected_suites.py
-          tests/unit/test_dependency_policy.py
-          tests/unit/test_ci_execution_attestation.py
-          tests/unit/test_ci_verify_execution.py
-          tests/unit/test_ci_provenance.py
-          tests/unit/test_ci_planner_hardening.py
-          tests/unit/test_ci_workflow_events.py
       - name: Ruff
         run: ruff check inktime tests scripts server.py analyze_photos.py
       - name: Mypy
@@ -336,32 +331,40 @@ jobs:
         run: git diff --check
       - name: Python 3.12 full coverage >= 80%
         if: ${{ needs.changes.outputs.run_python312_full == 'true' }}
-        run: pytest --cov=inktime --cov-config=pyproject.toml --cov-report=term-missing --cov-fail-under=80 tests/unit tests/security tests/integration
+        run: >-
+          pytest --cov=inktime --cov-config=pyproject.toml
+          --cov-report=term-missing --cov-fail-under=80
+          -m "not performance"
+          --ignore=tests/unit/test_migrations.py
+          tests/unit tests/security tests/integration
 
   python-compatibility:
     name: Python 3.10 compatibility
     if: ${{ needs.changes.outputs.full_validation == 'true' && needs.changes.outputs.run_python310 == 'true' }}
     needs: changes
     runs-on: ubuntu-latest
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (Node 24)
         with: {fetch-depth: 0}
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0 (Node 24)
         with: {python-version: "3.10", cache: pip}
       - run: pip install -r requirements-dev.txt
-      - run: pytest tests/unit tests/security tests/integration
+      - run: >-
+          pytest -m "not performance"
+          tests/unit tests/security tests/integration
 
   dependency-audit:
     name: Dependency policy and audit
     if: ${{ needs.changes.outputs.full_validation == 'true' && needs.changes.outputs.run_dependency_audit == 'true' }}
     needs: changes
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (Node 24)
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0 (Node 24)
         with: {python-version: "3.12", cache: pip}
       - run: pip install -r requirements-dev.txt
-      - run: python scripts/check_dependency_policy.py
       - run: pip-audit -r requirements.txt
 
   migration-contract:
@@ -369,6 +372,7 @@ jobs:
     if: ${{ needs.changes.outputs.full_validation == 'true' && needs.changes.outputs.run_migration == 'true' }}
     needs: changes
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (Node 24)
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0 (Node 24)
@@ -380,6 +384,7 @@ jobs:
     if: ${{ needs.changes.outputs.full_validation == 'true' && needs.changes.outputs.run_secret_scan == 'true' }}
     needs: changes
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (Node 24)
         with: {fetch-depth: 0}
@@ -392,6 +397,7 @@ jobs:
     if: ${{ needs.changes.outputs.full_validation == 'true' && needs.changes.outputs.run_actionlint == 'true' }}
     needs: changes
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (Node 24)
         with: {fetch-depth: 0}
@@ -408,6 +414,7 @@ jobs:
     if: ${{ needs.changes.outputs.full_validation == 'true' && needs.changes.outputs.ci_mode == 'impact' && needs.changes.outputs.selected_owner_suites != '[]' }}
     needs: changes
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (Node 24)
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0 (Node 24)
@@ -422,6 +429,7 @@ jobs:
     if: ${{ needs.changes.outputs.full_validation == 'true' && needs.changes.outputs.run_lan_persistence == 'true' }}
     needs: changes
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (Node 24)
       - name: Prepare isolated production smoke environment
@@ -546,6 +554,7 @@ jobs:
     if: ${{ needs.changes.outputs.full_validation == 'true' && needs.changes.outputs.run_tls_smoke == 'true' }}
     needs: changes
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     env:
       NO_PROXY: inktime-ci.acme.dev,127.0.0.1
     steps:
@@ -614,6 +623,7 @@ jobs:
     if: ${{ needs.changes.outputs.full_validation == 'true' && needs.changes.outputs.run_runtime_soak == 'true' }}
     needs: changes
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (Node 24)
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0 (Node 24)
@@ -631,6 +641,7 @@ jobs:
     if: ${{ needs.changes.outputs.full_validation == 'true' && needs.changes.outputs.run_playwright == 'true' }}
     needs: changes
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (Node 24)
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0 (Node 24)
@@ -645,6 +656,7 @@ jobs:
     if: ${{ needs.changes.outputs.full_validation == 'true' && needs.changes.outputs.run_firmware_host_contract == 'true' }}
     needs: changes
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (Node 24)
       - name: Test crash-consistent device Config core
@@ -690,6 +702,7 @@ jobs:
     if: ${{ needs.changes.outputs.full_validation == 'true' && needs.changes.outputs.run_firmware_compile == 'true' }}
     needs: changes
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (Node 24)
       - name: Install pinned Arduino CLI

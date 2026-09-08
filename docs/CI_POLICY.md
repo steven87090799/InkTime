@@ -6,11 +6,10 @@ InkTime CI uses the existing source-owned path/domain planner in [`scripts/ci/te
 
 ## Impact mode and full mode
 
-Draft pull requests without the `full-ci` label use impact mode. The planner classifies changed paths into production domains, owner suites, and expensive gates, then selects the smallest affected validation set. Unknown repository paths fail open to full mode, and a production domain without an owner suite also fails open.
+Pull request validation uses impact mode by default, including Ready pull requests. The planner classifies changed paths into production domains, owner suites, and expensive gates, then selects the smallest affected validation set. Unknown repository paths fail open to full mode, and a production domain without an owner suite also fails open.
 
 Full mode is selected when any of these are true:
 
-- a triggered pull request event reports that the pull request is ready for review (`draft == false`);
 - the pull request has the `full-ci` label;
 - `workflow_dispatch` uses `full_suite=true`;
 - a push targets `refs/heads/main`.
@@ -58,10 +57,15 @@ That job proves the checked-out commit equals `SOURCE_HEAD_SHA`. It does not dup
 
 ## Validation tiers
 
-- **Tier 0:** changed-path classification, planner contracts, secret scan, Ruff, mypy, dependency policy, and patch-format validation. Actionlint runs for CI/workflow configuration in impact mode and for every full run.
+- **Tier 0:** changed-path classification, planner contracts, secret scan, and patch-format validation. Ruff and mypy are added for Python/configuration changes and always run in full mode. Dependency policy is required for dependency changes and full mode. Actionlint runs for CI/workflow configuration in impact mode and for every full run.
 - **Tier 1/2:** source-owned Python, web, authentication, runtime, queue, persistence, migration, backup/restore, device, rendering, scanner, notification, settings, provider, Docker, TLS, firmware, and benchmark owner suites.
 - **Tier 3:** only affected expensive gates run in impact mode. Firmware uses the PhotoPainter release as the quick profile and expands to affected profiles for shared firmware surfaces.
 - **Tier 4:** full mode runs the complete pre-merge validation set and preserves the existing global coverage threshold.
+
+The 100,000-row cases marked `performance` are excluded from the ordinary
+unit/compatibility commands (the 10,000-row regression remains in those
+commands) and run by the scheduled performance workflow with an uploaded
+report.
 
 Production changes select their owning regression boundaries even when the corresponding test file did not change. Scheduler changes route runtime soak; migration changes route persistence and migration owners; device manifest/ACK changes route device and firmware host contracts; authentication/session changes route security, browser, and TLS boundaries.
 
@@ -88,6 +92,6 @@ python3 scripts/ci/canonical_plan.py --event-name pull_request --ref refs/pull/1
 
 Check `ci_mode`, `unknown_paths`, `owner_suite_gaps`, `full_only_test_paths`, `selected_test_suites`, `selected_owner_suites`, `selected_gates`, `skipped_gates`, `suite_execution_gaps`, `full_suite_execution_gaps`, `full_plan_complete`, `no_heavy_impact_duplicates`, `requires_source_head_contract`, and provenance. A selected job that is skipped, failed, cancelled, missing, or unknown fails its aggregate gate with the execution ID and job name; only unselected skipped jobs are accepted. A full PR run is merge-ref validation and must be judged from the current PR event and its reported provenance, not described as direct source-head execution.
 
-The full suite is not run on every Draft push because Draft validation is intended to give fast, affected feedback while retaining secret, quality, routing, and relevant production-boundary checks. Full mode is available through those existing triggers; routine agents must still follow `AGENTS.md` and must not dispatch, rerun or poll to manufacture a green result. Ready conversion, merges and pushes to protected branches require the applicable authorization.
+The full suite is not run on every pull-request event because impact validation is intended to give fast, affected feedback while retaining secret, routing, static checks for changed Python surfaces, and relevant production-boundary checks. Full mode remains available through the explicit label, manual dispatch, unknown/owner-gap fail-open rules, and main push. Routine agents must still follow `AGENTS.md` and must not dispatch, rerun or poll to manufacture a green result.
 
-Every source commit pushed to a pull request branch triggers validation through `synchronize`. Changing a Draft pull request to Ready for review triggers both workflows through `ready_for_review`; because the pull request is then ready (`draft == false`), the planner selects full mode for the unchanged source HEAD and refreshes both required aggregate gates. This avoids a ruleset deadlock where successful Draft checks remain visible but GitHub keeps the Ready pull request in `BLOCKED` with no bypass actor. Base retargets remain covered by `edited`, while title/body-only edits stay on the metadata lane. Required aggregate gates, strict branch protection, and fail-closed revalidation remain unchanged.
+Every source commit pushed to a pull request branch triggers validation through `synchronize`. Changing a Draft pull request to Ready for review triggers both workflows through `ready_for_review`; the planner keeps the unchanged source HEAD on impact mode and refreshes both required aggregate gates without starting the full suite. A full pre-merge run can be requested with the `full-ci` label or `workflow_dispatch` with `full_suite=true`. Base retargets remain covered by `edited`, while title/body-only edits stay on the metadata lane. Required aggregate gates, strict branch protection, and fail-closed revalidation remain unchanged.

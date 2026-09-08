@@ -11,11 +11,12 @@ from scripts.ci.verify_execution import (
 )
 
 
-def _context(*, draft: bool = True) -> dict[str, object]:
+def _context(*, draft: bool = True, labels: list[str] | None = None) -> dict[str, object]:
     return {
         "event_name": "pull_request",
         "ref": "refs/pull/64/merge",
         "draft": draft,
+        "labels": labels or [],
         "base_sha": "a" * 40,
         "head_sha": "b" * 40,
         "tested_ref": "refs/pull/64/merge",
@@ -24,8 +25,10 @@ def _context(*, draft: bool = True) -> dict[str, object]:
     }
 
 
-def _plan(path: str, *, draft: bool = True) -> dict[str, object]:
-    return build_canonical_plan([path], _context(draft=draft))
+def _plan(
+    path: str, *, draft: bool = True, labels: list[str] | None = None
+) -> dict[str, object]:
+    return build_canonical_plan([path], _context(draft=draft, labels=labels))
 
 
 def _needs_for(plan: dict[str, object], workflow: str) -> dict[str, dict[str, str]]:
@@ -70,7 +73,7 @@ def test_unselected_skipped_job_is_accepted_in_impact_mode():
 
 
 def test_full_mode_missing_required_job_fails_closed():
-    plan = _plan("README.md", draft=False)
+    plan = _plan("README.md", labels=["full-ci"])
     needs = _needs_for(plan, REPOSITORY_WORKFLOW)
     missing_job = "python-compatibility"
     assert missing_job in needs
@@ -99,7 +102,7 @@ def test_impact_container_workflow_accepts_unrelated_skipped_jobs():
 
 
 def test_full_mode_accepts_only_intentionally_non_applicable_impact_runner_skip():
-    plan = _plan("README.md", draft=False)
+    plan = _plan("README.md", labels=["full-ci"])
     needs = _needs_for(plan, REPOSITORY_WORKFLOW)
     needs["selected-owner-suites"] = {"result": "skipped"}
 
