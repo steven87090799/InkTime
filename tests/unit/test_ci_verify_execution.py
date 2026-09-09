@@ -9,7 +9,7 @@ from scripts.ci.verify_execution import (
 
 
 def _context(*, full: bool = False) -> dict[str, object]:
-    return {
+    context = {
         "event_name": "pull_request",
         "ref": "refs/pull/64/merge",
         "draft": not full,
@@ -20,6 +20,9 @@ def _context(*, full: bool = False) -> dict[str, object]:
         "tested_ref": "refs/pull/64/merge",
         "tested_ref_kind": "merge-ref",
     }
+    if full:
+        context["labels"] = ["full-ci"]
+    return context
 
 
 def _plan(*, full: bool = False):

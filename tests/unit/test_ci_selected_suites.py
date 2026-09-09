@@ -68,7 +68,7 @@ def test_directory_mapping_covers_explicit_files_without_repeating_them():
     )
 
     assert suites == ["ci_planner_contracts", "python_application_owner"]
-    assert paths == ["tests/unit"]
+    assert paths == ["tests/unit", "tests/integration/test_application_factory.py"]
 
 
 def test_unknown_suite_fails_closed():
