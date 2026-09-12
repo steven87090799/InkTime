@@ -87,7 +87,10 @@ def test_history_selection_filters_unavailable_excluded_and_same_day_reroll(app,
     assert [candidate["id"] for candidate in unseen["candidates"]] == ["good-b"]
 
 
-@pytest.mark.parametrize("row_count", [10_000, 100_000])
+@pytest.mark.parametrize(
+    "row_count",
+    [10_000, pytest.param(100_000, marks=pytest.mark.performance)],
+)
 def test_history_selection_synthetic_rows_is_bounded_sqlite_work(app, tmp_path, row_count):
     root = tmp_path / "synthetic"
     root.mkdir()

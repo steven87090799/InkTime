@@ -1,3 +1,29 @@
+# Start here: scoped reading
+
+Before editing, read [`docs/AI_NAVIGATION.md`](docs/AI_NAVIGATION.md).
+Select the matching task row and read only its entry points and relevant sections.
+Do not preload the full README, HTML manual, documentation tree, or repository.
+Expand to callers, contracts, and tests when evidence requires it.
+
+## AI read boundary and context budget
+
+Use [`docs/AI_CONTEXT_INDEX.json`](docs/AI_CONTEXT_INDEX.json) as the
+machine-readable route and read-policy index. In the first pass, read at most
+4 files and 800 source/documentation lines. Expand only when a caller,
+contract, test, or safety boundary is required by evidence; record the reason
+when the budget is exceeded. A full-repository audit requires an explicit user
+request. Use `python scripts/ci/ai_context.py <task-id>` to print a bounded
+route summary and symbol/heading locations before opening a large file.
+
+Do not open secrets, runtime data, generated output, or binary/media assets by
+default: `.env*`, `*.db`, `*.sqlite*`, `*.lock`, `data/`, `output/`, `photos/`,
+`simulation_photos/`, `logs/`, `.git/`, `docs/archive/`, fonts, images, PDFs,
+ZIPs, and firmware binaries are excluded unless the task names an exact path
+and requires it. `.gitignore` is not an AI read policy. Use targeted `rg` and
+bounded `sed` reads instead of whole-file dumps. The PhotoPainter hardware
+handoff documents named below remain a safety exception and must be read in
+full before hardware work.
+
 # Hosted CI and delivery policy
 
 GitHub Actions is the authoritative test, build, security-scan, benchmark,

@@ -7,6 +7,13 @@ from inktime.app.core.runtime_config import RuntimeConfig
 from inktime.app.factory import create_app
 
 
+def pytest_configure(config):
+    config.addinivalue_line(
+        "markers",
+        "performance: scale and timing-sensitive validation reserved for performance lanes",
+    )
+
+
 @pytest.fixture
 def app(tmp_path: Path):
     runtime_config = RuntimeConfig.from_sources(

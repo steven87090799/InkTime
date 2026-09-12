@@ -3,7 +3,7 @@
 This module is intentionally dependency-free and pure at its planning boundary.
 Path ownership lives here so that GitHub Actions only has to execute the
 selected suites and gates.  Unknown repository-relative paths fail open to the
-full plan; known CI/documentation/test-only changes remain bounded in Draft
+full plan; known CI/documentation/test-only changes remain bounded in impact
 mode.
 """
 
@@ -73,6 +73,12 @@ PRODUCTION_DOMAINS = frozenset(
 TIER_0_SUITES = (
     "changed_path_classification",
     "ci_planner_contracts",
+)
+
+# Static Python checks are still required for Python/configuration changes and
+# every full plan, but they are not useful work for documentation-only impact
+# validation.
+IMPACT_STATIC_SUITES = (
     "ruff",
     "mypy",
 )
@@ -111,7 +117,12 @@ FULL_TEST_SUITES = (
 )
 
 FULL_REQUIRED_STATIC_SUITES = ("dependency_policy",)
-FULL_PLAN_SUITES = TIER_0_SUITES + FULL_REQUIRED_STATIC_SUITES + FULL_TEST_SUITES
+FULL_PLAN_SUITES = (
+    TIER_0_SUITES
+    + IMPACT_STATIC_SUITES
+    + FULL_REQUIRED_STATIC_SUITES
+    + FULL_TEST_SUITES
+)
 
 # These production files are imported by the offline benchmark contract.  Keep
 # the seam explicit so unrelated provider transports do not start benchmark CI.
@@ -1130,7 +1141,9 @@ def classify_paths(paths: Iterable[str]) -> dict[str, Any]:
         "unknown_paths": sorted(unknown_paths),
         "full_only_test_paths": sorted(full_only_test_paths),
         "owner_suite_gaps": owner_suite_gaps,
-        "selected_test_suites": _ordered(suites, TIER_0_SUITES + FULL_TEST_SUITES),
+        "selected_test_suites": _ordered(
+            suites, TIER_0_SUITES + IMPACT_STATIC_SUITES + FULL_TEST_SUITES
+        ),
         "expensive_gates": _ordered(gates, FULL_EXPENSIVE_GATES),
         "affected_firmware_profiles": _ordered(firmware_profiles, FULL_FIRMWARE_PROFILES),
         "firmware_profile_reasons": sorted(firmware_profile_reasons),
@@ -1155,8 +1168,9 @@ def _mode_reasons(context: Mapping[str, object]) -> list[str]:
         reasons.append("explicit_full_request")
     if "full-ci" in labels:
         reasons.append("full_ci_label")
-    if draft is False:
-        reasons.append("ready_pr")
+    # Ready pull requests remain on impact mode. Full validation is an
+    # explicit release/CI request so a status transition cannot unexpectedly
+    # start the 80-minute suite.
     if event_name == "pull_request" and draft is None:
         reasons.append("missing_pull_request_draft_state")
     return reasons
@@ -1219,10 +1233,18 @@ def build_test_plan(
             set(classification["firmware_profile_reasons"]) | {"full_matrix"}
         )
     else:
+        changed_python_sources = any(
+            path.endswith(".py") for path in classification["changed_paths"]
+        )
         selected_suites = list(
             dict.fromkeys(
                 [
                     *TIER_0_SUITES,
+                    *(
+                        IMPACT_STATIC_SUITES
+                        if changed_python_sources
+                        else ()
+                    ),
                     *classification["selected_test_suites"],
                 ]
             )
@@ -1239,7 +1261,9 @@ def build_test_plan(
             selected_gates.append("actionlint")
 
         selected_gates = _ordered(selected_gates, FULL_EXPENSIVE_GATES + TIER_0_GATES)
-        selected_suites = _ordered(selected_suites, TIER_0_SUITES + FULL_TEST_SUITES)
+        selected_suites = _ordered(
+            selected_suites, TIER_0_SUITES + IMPACT_STATIC_SUITES + FULL_TEST_SUITES
+        )
         affected_firmware_profiles = list(classification["affected_firmware_profiles"])
         firmware_profile_mode = (
             "affected" if affected_firmware_profiles else "not_applicable"

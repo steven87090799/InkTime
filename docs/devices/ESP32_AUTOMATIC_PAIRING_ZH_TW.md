@@ -4,14 +4,14 @@
 
 ## 0. 目前韌體與 Config Store 版本
 
-- 目前自製 InkTime 韌體版本：`2.8.6`。
+- 目前自製 InkTime 韌體版本：`2.8.7`。
 - Config Store 目前寫入 schema：`5`。
 - Config Store 相容讀取舊 schema：`1`、`2`、`3`、`4`。
 - `2.8.2` 將連續 max-awake 故障退避改為 `1h → 6h → 24h → 每日一次`；每次退避後只允許一次 probation，正常完成睡眠或 GPIO4 明確 recovery 會清除故障狀態。此機制不寫 NVS，也不改 TG28／EPD 電源軌。
 - `2.8.3` 讓 PhotoPainter 可用嚴格 RFC1918 IP 的 LAN HTTP 直接配對，將 AP 密碼縮為
   每個 session 重新產生的 8 位隨機數字，並簡化手機 Portal；HTTPS CA 驗證、Automatic
   Pairing、Device Secret 與 A/B Config Store 不變。
-- Schema 5 將新能力容量提高至 24 slots；舊 schema 最多 12，Server 仍依配對確認的 capability 決定上限，不能只改版本字串。2.8.6 另加入 KEY1 電源頁停留後驗證 SD 原圖恢復，見[PhotoPainter 指南](WAVESHARE_PHOTOPAINTER_ZH_TW.md)。
+- Schema 5 可讀取 24-slot payload；PhotoPainter Enhanced 2.8.7 宣告 16 slots/day，舊 schema 最多 12，Server 仍依配對確認的 capability 決定上限，不能只改版本字串。2.8.7 的 KEY1 電源頁停留後驗證 Internal Flash 正式 frame 恢復，見[PhotoPainter 指南](WAVESHARE_PHOTOPAINTER_ZH_TW.md)。
 - Schema 4 新增同步策略欄位：`sync_strategy` 與 `sync_time`。`first_display_lead` 沿用既有 `prefetch_lead_minutes`，`sync_time` 必須為空；`fixed_daily` 則必須提供合法的 `HH:MM`。
 
 ## 1. 三種裝置認證模式
@@ -47,7 +47,7 @@
   "device_id": "esp32-ABC123",
   "pairing_nonce": "高熵隨機字串",
   "firmware_identity": "ESP32-S3-PhotoPainter",
-  "firmware_version": "2.8.6",
+  "firmware_version": "2.8.7",
   "panel_profile": "safe_4c",
   "capabilities": {
     "automatic_pairing": true,

@@ -1,6 +1,6 @@
 # InkTime｜照片分析與電子紙回憶管理平台
 
-> 原始碼核對：2026-09-03，主線 `51309e2`。SQLite Migration 59、AI Schema v4、ESP32 2.8.7；詳細版本、預設值與驗收邊界見[現行基線](docs/reference/CURRENT_STATE_ZH_TW.md)。
+> 原始碼基準以目前 checkout 為準，不固定綁定單一 Git commit SHA；部署中的版本請從 Web「診斷」頁確認 Git revision。SQLite Migration 59、AI Schema v4、ESP32 2.8.7；詳細版本、預設值與驗收邊界見[現行基線](docs/reference/CURRENT_STATE_ZH_TW.md)。
 
 [English README](README.en.md) · [HTML 手冊與文件入口](USER_MANUAL.html) · [完整 Markdown 文件地圖](docs/README.md) · [完整程式流程圖](#完整程式流程圖從啟動照片分析到電子紙顯示) · [快速開始](docs/getting-started/QUICK_START_ZH_TW.md) · [電子紙模擬器](docs/guides/EPAPER_SIMULATOR_ZH_TW.md) · [N100 Docker 部署規格](docs/operations/DOCKER_GUIDE_ZH_TW.md) · [完整上線指南](docs/operations/PRODUCTION_DEPLOYMENT_GUIDE_ZH_TW.md) · [NAS Tag 更新](docs/operations/NAS_TAG_DEPLOYMENT_ZH_TW.md) · [ESP32／電子紙指南](docs/devices/ESP32_GUIDE_ZH_TW.md) · [ESP32 自動配對與憑證](docs/devices/ESP32_AUTOMATIC_PAIRING_ZH_TW.md) · [Waveshare PhotoPainter](docs/devices/WAVESHARE_PHOTOPAINTER_ZH_TW.md) · [ESP32 TLS／配網信任根](docs/devices/ESP32_TLS_PROVISIONING_ZH_TW.md) · [OpenRouter Provider](docs/providers/OPENROUTER_ZH_TW.md) · [模型 Benchmark](docs/providers/MODEL_BENCHMARK_ZH_TW.md) · [資源與低功耗](docs/operations/N100_RESOURCE_GUIDE_ZH_TW.md) · [Log 指南](docs/operations/LOGGING_GUIDE_ZH_TW.md)
 
@@ -9,6 +9,10 @@ InkTime 會在本地掃描相簿、擷取 EXIF 與品質特徵，先辨識重複
 決策追蹤、回饋閉環、Shadow Mode、離線內容 Queue、資料保留與 Canary 發布皆為可選功能，預設不會改變既有配對裝置、正式 Release 或選片。啟用與故障處理請見 [實作計畫](docs/resilience/DECISION_FEEDBACK_RESILIENCE_PLAN_ZH_TW.md)、[決策追蹤](docs/resilience/DECISION_TRACE_ZH_TW.md)、[Shadow Mode](docs/resilience/SHADOW_MODE_ZH_TW.md)、[離線 Queue](docs/resilience/OFFLINE_QUEUE_ZH_TW.md)、[資料保留](docs/resilience/DATA_RETENTION_ZH_TW.md)、[Canary](docs/resilience/CANARY_ROLLOUT_ZH_TW.md)。
 
 ![InkTime 繁體中文儀表板](docs/images/dashboard.png)
+
+## AI 修改入口
+
+修改前先讀 [AGENTS.md](AGENTS.md) → [AI 修改導航](docs/AI_NAVIGATION.md) → [機器可讀任務索引](docs/AI_CONTEXT_INDEX.json)，依問題定位模組與必讀區段；Claude 入口為 [CLAUDE.md](CLAUDE.md)。不需要每次載入本 README 的完整流程圖。
 
 ## 主要能力
 
@@ -129,7 +133,7 @@ flowchart TD
 |---:|---|---|---|---|
 | 1 | 管理員指定 Library Root | 建立可恢復的掃描 Job | `jobs`／`job_items` | `api/operations.py`、`repositories/jobs.py` |
 | 2 | 唯讀照片檔案 | Pillow metadata、雜湊、本地品質與安全預篩 | `photos` 本地特徵與縮圖 Cache | `workers/scanner.py`、`domain/photos/preprocessing.py` |
-| 3 | Photo ID、策略、預算與 Provider | 繼承、local、兩階段 AI、single-flight 與 Schema 驗證 | `photo_analysis`、AI Cache、用量 | `services/analysis.py` |
+| 3 | Photo ID、策略、預算與 Provider | 繼承、local、單次圖片 Vision、single-flight 與 Schema 驗證 | `photo_analysis`、AI Cache、用量 | `services/analysis.py` |
 | 4 | 已分析照片 | 統一檢查 eligible、active、Library、最新分析、安全路徑與檔案存在 | 合格 Photo ID；明確指定失敗為 `RENDER-009` | `repositories/render_candidates.py` |
 | 5 | 手動選片、歷史模式或 `display_prepare` | 年份、數量、Profile、偏好、fallback 與同日重抽 | 有序候選清單 | `services/display_prepare.py`、`services/rendering.py` |
 | 6 | 照片、文案、版型與 Profile | Server 端 composition、字型覆蓋、調色盤、抖動與打包 | 480×800 BIN、Preview、Manifest | `domain/rendering/` |
@@ -705,7 +709,7 @@ docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build
 - `analysis.stage_two_threshold`：舊版兩階段設定的讀取相容欄位，不會恢復第二次圖片請求。
 - `render.memory_threshold`：電子紙歷史今日選片的最低回憶分門檻。
 
-真正完成 Vision v4 分析的資料列以 `score_kind=semantic` 標記，模型只輸出 `memory_score`、`visual_score` 與特殊程度；Server 再加入本機品質，以固定的回憶 50%、視覺 25%、本機品質 25% 計算基礎分，並套用特殊程度、同照片庫稀有度與最愛提升。本機影像分析以 `score_kind=local_quality` 標記，只保存 `local_score` 與本機特徵，正式語意排名欄位為 `NULL`，也不進入語意 percentile。`automatic_ai` 會先選 semantic 候選，數量不足才用 local quality 另層補足，不會直接比較兩種分數。無法可靠辨識的歷史列標為 `legacy`；舊 schema 不會轉成 v4 排名。測試台照片只在暫存目錄停留，但模型 Token 與費用仍會記入成本頁。完整資料流見 [專案架構與評分流程](docs/architecture/ARCHITECTURE_ZH_TW.md)。
+真正完成 Vision v4 分析的資料列以 `score_kind=semantic` 標記，模型只輸出 `memory_score`、`visual_score` 與特殊程度；Server 以 `ranking-v5-ai-first` 的固定回憶 67%、視覺 33%、本機品質 0% 計算基礎分，再套用特殊程度與最愛提升。本機品質是 candidate qualification／quality gate，不是 ranking weight；本機影像分析以 `score_kind=local_quality` 標記，只保存 `local_score` 與本機特徵，正式語意排名欄位為 `NULL`。`automatic_ai` 要求本機特徵與有效的 v4 semantic 分析都完成，不以 local quality 分數補位或與 semantic 分數混比。無法可靠辨識的歷史列標為 `legacy`；舊 schema 不會轉成 v4 排名。測試台照片只在暫存目錄停留，但模型 Token 與費用仍會記入成本頁。完整資料流見 [專案架構與評分流程](docs/architecture/ARCHITECTURE_ZH_TW.md)。
 
 ## Token 與成本控制
 

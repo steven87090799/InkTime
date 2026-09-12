@@ -40,6 +40,8 @@ def test_docs_only_is_bounded_and_has_a_non_empty_tier_zero_plan():
     assert plan["selected_test_suites"]
     assert "ci_planner_contracts" in plan["selected_owner_suites"]
     assert "docs_contract" in plan["selected_test_suites"]
+    assert "ruff" not in plan["selected_test_suites"]
+    assert "mypy" not in plan["selected_test_suites"]
     assert plan["suite_execution_gaps"] == []
     assert plan["expensive_gates"] == []
     assert plan["selected_gates"] == ["secret_scan"]
@@ -52,6 +54,7 @@ def test_ordinary_python_change_routes_its_owner_without_python_full_suite():
     assert "python" in plan["changed_domains"]
     assert "python_application_owner" in plan["selected_test_suites"]
     assert "python_application_owner" in plan["selected_owner_suites"]
+    assert {"ruff", "mypy"} <= set(plan["selected_test_suites"])
     assert plan["production_owner_invariant"] is True
     assert plan["ci_mode"] == IMPACT_MODE
     assert "secret_scan" in plan["selected_gates"]
@@ -385,7 +388,9 @@ def test_unknown_path_fails_open_to_a_complete_full_plan():
 
 
 def test_full_mode_replaces_impact_heavy_gates_without_duplicate_impact_jobs():
-    plan = build_test_plan(["inktime/app/workers/scheduler.py"], draft_context(draft=False))
+    plan = build_test_plan(
+        ["inktime/app/workers/scheduler.py"], draft_context(labels=["full-ci"])
+    )
 
     assert plan["ci_mode"] == FULL_MODE
     assert plan["selected_test_suites"] == list(FULL_PLAN_SUITES)
@@ -411,8 +416,8 @@ def test_impact_mode_allows_intended_heavy_owner_gate_without_duplicate_flag():
     assert plan["no_heavy_impact_duplicates"] is True
 
 
-def test_full_mode_semantics_cover_ready_label_main_and_manual_events():
-    assert resolve_ci_mode(draft_context(draft=False)) == FULL_MODE
+def test_ci_mode_semantics_cover_ready_label_main_and_manual_events():
+    assert resolve_ci_mode(draft_context(draft=False)) == IMPACT_MODE
     assert resolve_ci_mode(draft_context(labels=["full-ci"])) == FULL_MODE
     assert (
         resolve_ci_mode(
@@ -428,12 +433,9 @@ def test_full_mode_semantics_cover_ready_label_main_and_manual_events():
     )
 
 
-def test_ready_synchronize_is_full_and_draft_synchronize_is_impact():
+def test_ready_synchronize_stays_impact_and_draft_synchronize_is_impact():
     assert resolve_ci_mode(draft_context(action="synchronize")) == IMPACT_MODE
-    assert (
-        resolve_ci_mode(draft_context(draft=False, action="synchronize"))
-        == FULL_MODE
-    )
+    assert resolve_ci_mode(draft_context(draft=False, action="synchronize")) == IMPACT_MODE
 
 
 def test_missing_pull_request_draft_state_fails_open():
@@ -497,7 +499,7 @@ def test_firmware_impact_reports_profile_specific_selection_and_shared_surface()
 
 
 def test_full_mode_selects_all_supported_firmware_profiles_and_tier_zero():
-    plan = build_test_plan(["README.md"], draft_context(draft=False))
+    plan = build_test_plan(["README.md"], draft_context(labels=["full-ci"]))
 
     assert plan["firmware_profile_mode"] == "full"
     assert plan["affected_firmware_profiles"] == list(FULL_FIRMWARE_PROFILES)
@@ -511,14 +513,16 @@ def test_full_mode_selects_all_supported_firmware_profiles_and_tier_zero():
 
 
 def test_full_ci_config_mode_requires_actionlint_for_completeness():
-    plan = build_test_plan([".github/workflows/ci.yml"], draft_context(draft=False))
+    plan = build_test_plan(
+        [".github/workflows/ci.yml"], draft_context(labels=["full-ci"])
+    )
 
     assert "actionlint" in plan["selected_gates"]
     assert plan["full_plan_complete"] is True
 
 
 def test_full_plan_suite_registry_is_execution_complete():
-    plan = build_test_plan(["README.md"], draft_context(draft=False))
+    plan = build_test_plan(["README.md"], draft_context(labels=["full-ci"]))
 
     assert set(FULL_PLAN_SUITES) <= set(FULL_SUITE_EXECUTION_OWNERS)
     assert set(FULL_SUITE_EXECUTION_OWNERS.values()) <= FULL_EXECUTION_OWNERS
@@ -591,7 +595,9 @@ def test_web_and_mixed_tooling_paths_fail_open_only_outside_known_roots():
 
 def test_execution_contract_exposes_non_overlapping_impact_and_full_ids():
     impact = build_test_plan(["scripts/runtime_soak.py"], draft_context())
-    full = build_test_plan(["scripts/runtime_soak.py"], draft_context(draft=False))
+    full = build_test_plan(
+        ["scripts/runtime_soak.py"], draft_context(labels=["full-ci"])
+    )
 
     assert impact["impact_execution_ids"]
     assert impact["full_execution_ids"] == []

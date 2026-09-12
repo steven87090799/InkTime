@@ -7,7 +7,7 @@
 
 InkTime 以一套中央結構化 Log 契約串起 Web、資料庫、Migration、Worker、Scanner、Scheduler、Provider、分析、程序隔離邊界、Batch、渲染、Release、裝置 Queue／ACK 與 ESP32 韌體。Log 只能協助追蹤，任何格式化、遮蔽或輸出失敗都不得改變主要操作的成功、失敗、重試或持久化語意。
 
-stdout/stderr 仍由 Docker `json-file` 收集並輪替。應用 Log 與 HTTP access log 分開：應用 Log 可在 Web 動態改層級，access log 為部署層且預設關閉，避免健康檢查與裝置輪詢產生大量無用寫入。結構化 Log 與 AI Trace 是不同功能：主線目前依序套用至 Migration 57，其中 Migration 51 新增 AI Trace tables，Migration 52 新增 Provider 模型欄位。
+stdout/stderr 仍由 Docker `json-file` 收集並輪替。應用 Log 與 HTTP access log 分開：應用 Log 可在 Web 動態改層級，access log 為部署層且預設關閉，避免健康檢查與裝置輪詢產生大量無用寫入。結構化 Log 與 AI Trace 是不同功能：主線目前依序套用至 Migration 59，其中 Migration 51 新增 AI Trace tables，Migration 52 新增 Provider 模型欄位。
 
 ## 層級與雜訊控制
 

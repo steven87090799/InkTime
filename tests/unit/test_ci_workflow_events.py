@@ -178,6 +178,7 @@ def test_all_heavy_jobs_require_full_validation(workflow_name, heavy_jobs):
         job = workflow["jobs"][job_id]
         assert job["needs"] == "changes", job_id
         assert FULL_VALIDATION_GUARD in job["if"], job_id
+        assert job.get("timeout-minutes", 0) > 0, job_id
 
 
 @pytest.mark.parametrize(

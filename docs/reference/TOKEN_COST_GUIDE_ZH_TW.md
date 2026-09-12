@@ -1,5 +1,7 @@
 # Token 與成本指南
 
+本頁處理 InkTime 照片分析 API 的 Token 與帳務。若問題是 coding agent 每次修改都讀大量程式，請先用 [AI 修改導航](../AI_NAVIGATION.md) 按模組縮小閱讀範圍；兩者是不同的用量來源。
+
 新安裝 `local_only` 不產生模型費用；一般 AI 工作必須明確啟用 `automatic_ai`。`single` 不代表供應商永遠只計一次費：新建重跑工作、允許的重試與文字修復可能增加帳務，應以 usage／Provider 對帳。
 
 成本節省順序：掃描時排除影片／動畫 → SHA-256 相同內容繼承 → pHash 近似群組 → 本機截圖／明顯品質缺陷預篩選 → E6 六色適合度模擬 → 同一 plan／Vision fingerprint 的快取 → 一次圖片 Vision（Web 預設 1024px、可選 1600px）。主要分析一次輸出所有欄位，不再另傳圖片產生短文案。
