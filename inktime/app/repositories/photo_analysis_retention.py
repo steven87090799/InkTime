@@ -40,7 +40,8 @@ class PhotoAnalysisRetentionRepository:
             """,
             """
             SELECT id,rules,ranking_contract_version,memory_weight,visual_weight,local_weight,
-                   beauty_weight,technical_weight,emotion_weight,favorite_bonus,is_active,created_at
+                   beauty_weight,technical_weight,emotion_weight,legacy_favorite_score_bonus,
+                   is_active,created_at
             FROM scoring_rule_versions ORDER BY id
             """,
         )

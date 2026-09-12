@@ -97,7 +97,7 @@
       <dl>
         <dt>照片分類</dt><dd>{{ a.types|join('、') if a.types else '未分類' }}</dd>
         <dt>AI 選片分</dt><dd><strong>{{ a.ranking_score if a.ranking_score is not none else '—' }}{% if a.score_band is defined %}（{{ a.score_band }}）{% endif %}</strong> · 不隨照片庫大小換算</dd>
-        <dt>排序組成</dt><dd>AI 回憶 {{ a.memory_score }} × 67% ＋ AI 視覺 {{ a.visual_score }} × 33% ＋ 特殊加分 {{ a.special_bonus|default(0) }}（有效等級 {{ a.effective_special_level }}）</dd>
+        <dt>排序組成</dt><dd>AI 回憶價值 {{ a.memory_score }} × 67% ＋ AI 視覺 {{ a.visual_score }} × 33% ＋ 特殊加分 {{ a.special_bonus|default(0) }}（有效等級 {{ a.effective_special_level }}）</dd>
         <dt>本機品質門檻</dt><dd>{% if photo.local_features_status == 'complete' %}已完成 · {{ prefilter.decision_label }}{% else %}尚未完成，不進入自動顯示{% endif %}。本機品質參考分 {{ a.local_quality_score if a.local_quality_score is not none else '未記錄' }}，不加入 AI 排序；完整指標見下方。</dd>
         <dt>內容過濾檢查</dt><dd>{% for item in a.content_filter_items|default([]) %}{{ item.label }}：{{ '有標記' if item.detected else '未標記' }}{% if item.detected %}（判斷信心 {{ '%.0f'|format(item.confidence * 100) }}%）{% endif %}{{ '；' if not loop.last else '' }}{% else %}未記錄{% endfor %}。這是排除項目檢查，不是照片類型或加分。</dd>
         <dt>評分版本</dt><dd>{{ a.scoring_version_name or '舊版／未記錄' }}</dd>
@@ -106,7 +106,7 @@
       {% elif a.is_historical_model %}
       <dl>
         <dt>照片分類</dt><dd>{{ a.types|join('、') if a.types else '未分類' }}</dd>
-        <dt>歷史模型原始分數</dt><dd>回憶 {{ a.memory_score if a.memory_score is not none else '—' }}｜美觀 {{ a.beauty_score if a.beauty_score is not none else '—' }}｜技術 {{ a.technical_quality_score if a.technical_quality_score is not none else '—' }}｜情緒 {{ a.emotion_score if a.emotion_score is not none else '—' }}</dd>
+        <dt>歷史模型原始分數</dt><dd>一般回看價值 {{ a.memory_score if a.memory_score is not none else '—' }}｜美觀 {{ a.beauty_score if a.beauty_score is not none else '—' }}｜技術 {{ a.technical_quality_score if a.technical_quality_score is not none else '—' }}｜情緒 {{ a.emotion_score if a.emotion_score is not none else '—' }}</dd>
         <dt>歷史綜合分</dt><dd>{{ a.ranking_score if a.ranking_score is not none else '—' }}</dd>
         <dt>判斷理由</dt><dd>{{ a.reason or '未記錄' }}</dd>
         <dt>評分版本</dt><dd>{{ a.scoring_version_name or '舊版／未記錄' }}</dd>

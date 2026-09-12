@@ -2,9 +2,9 @@
 
 本文件描述 Schema v4 與 `ranking-v5-ai-first` 選片契約（2026-09-05 更新；部署狀態另見交付紀錄）。
 
-模型只輸出 Schema v4：兩個 0–100 分數（memory、visual）、special_level（0–4）、最多兩個 special_codes、types、people_count、caption、side_caption、content_filter、subject_position、text_safe_area、visual_orientation。每個物件禁止額外欄位；不接受 v1/v2/v3 或 Grade 正規化。
+模型只輸出 Schema v4：兩個 0–100 分數（memory、visual）、special_level（0–4）、最多兩個 special_codes、types、people_count、caption、side_caption、content_filter、subject_position、text_safe_area、visual_orientation。`memory_score` 表示一般回看價值／AI 回憶價值，不是 Personal Memory Importance；模型不得猜使用者私人關係或私人重要性。每個物件禁止額外欄位；不接受 v1/v2/v3 或 Grade 正規化。
 
-每次 Vision（包括同步、Batch、快取、重用分析）都必須保留方向與內容分類。方向是 EXIF transpose 後還需順時針旋轉的角度；null 必須 ambiguous=true，只有 insufficient_visual_cues 時信心不得大於 0.5。無效模型 JSON 走既有一次文字修復流程，不增加 Vision 呼叫。
+每次 Vision（包括同步、Batch、快取、重用分析）都必須保留方向與內容分類。方向是 EXIF transpose 後還需順時針旋轉的角度；null 必須 ambiguous=true，只有 insufficient_visual_cues 時信心不得大於 0.5。JSON Repair 只可修 syntax、Markdown fence、明確安全的型別及多餘欄位；九個照片語意欄位缺少任一項或修復前後值改變，都拒絕 Repair 並由有界工作重試重新執行 Vision Analysis。
 
 ## Server 內容排除
 
@@ -28,7 +28,7 @@ Favorite 只調整 Vision 排名，不繞過 AI 內容排除，包含重用分�
 
 `base = memory * 0.67 + visual * 0.33`
 
-`effective_special_level = clamp(ai_special_level + favorite_adjustment, 0, 4)`
+`effective_special_level = min(ai_special_level + FAVORITE_SPECIAL_LEVEL_BOOST, 4)`（僅最愛時套用，常數為 1）
 
 `AI 選片分 = clamp(base + special_bonus, 0, 100)`
 

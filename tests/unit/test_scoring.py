@@ -5,10 +5,12 @@ from PIL import Image
 
 from inktime.app.domain.analysis.scoring import (
     calculate_ranking_score,
+    FAVORITE_SPECIAL_LEVEL_BOOST,
     LOCAL_QUALITY_SCORE_KIND,
+    SPECIAL_BONUSES,
+    ranking_components,
     resolve_score_kind,
     score_band,
-    validate_ranking_weights,
 )
 from inktime.app.providers.base import ProviderResponse, Usage, VisionProvider
 from inktime.app.providers.openai_compatible import ProviderHTTPError
@@ -22,21 +24,20 @@ SCORES = {
     "local_quality_score": 60,
     "special_level": 0,
 }
-WEIGHTS = {
-    "memory": 67,
-    "visual": 33,
-    "local_quality": 0,
-}
-
-
-def test_ranking_score_preserves_components_and_applies_favorite_bonus():
-    assert calculate_ranking_score(SCORES, WEIGHTS) == 76.7
-    assert calculate_ranking_score(SCORES, WEIGHTS, favorite=True, favorite_bonus=5) == 78.7
-
-
-def test_ranking_weights_must_total_one_hundred():
-    with pytest.raises(ValueError, match="固定"):
-        validate_ranking_weights({**WEIGHTS, "memory": 49})
+def test_favorite_only_boosts_special_level_without_a_fixed_score_bonus():
+    ordinary = calculate_ranking_score(SCORES)
+    favorite = calculate_ranking_score(SCORES, favorite=True)
+    assert ordinary == 76.7
+    assert favorite == 78.7
+    assert FAVORITE_SPECIAL_LEVEL_BOOST == 1
+    assert favorite - ordinary == SPECIAL_BONUSES[1] - SPECIAL_BONUSES[0]
+    level_two = {**SCORES, "special_level": 2}
+    ordinary_parts = ranking_components(level_two)
+    favorite_parts = ranking_components(level_two, favorite=True)
+    assert favorite_parts["base_ranking_score"] == ordinary_parts["base_ranking_score"]
+    assert favorite_parts["favorite_special_level_boost"] == 1
+    assert favorite_parts["effective_special_level"] == 3
+    assert favorite_parts["ranking_score"] - ordinary_parts["ranking_score"] == 4
 
 
 def test_score_kind_does_not_misclassify_a_real_local_ai_provider():
@@ -65,8 +66,6 @@ def test_scoring_profile_create_and_restore_are_versioned(app):
     created = repository.create(
         name="家庭照片優先",
         rules=rules,
-        weights=WEIGHTS,
-        favorite_bonus=1,
         created_by=user_id,
         source_ip="127.0.0.1",
     )
@@ -74,6 +73,8 @@ def test_scoring_profile_create_and_restore_are_versioned(app):
     assert created["is_active"] == 1
     assert created["memory_weight"] == 67
     assert created["ranking_contract_version"] == 4
+    assert "favorite_bonus" not in created
+    assert created["legacy_favorite_score_bonus"] == 0
     assert (created["visual_weight"], created["local_weight"]) == (33, 0)
     assert repository.get(str(initial["id"]))["is_active"] == 0
     with app.extensions["inktime_database"].session() as connection:
@@ -132,7 +133,12 @@ class RepairLabProvider(LabProvider):
         self.repair_calls = 0
 
     def analyze(self, **_kwargs):
-        return ProviderResponse('{"memory_score": 1}', Usage(120, 30, 10))
+        import json
+
+        return ProviderResponse(
+            json.dumps(valid_result(types=["人物", "人物"]), ensure_ascii=False),
+            Usage(120, 30, 10),
+        )
 
     def repair_json(self, **_kwargs):
         self.repair_calls += 1
@@ -149,7 +155,12 @@ class FailingScoringProvider(LabProvider):
     def analyze(self, **_kwargs):
         if self.vision_error is not None:
             raise self.vision_error
-        return ProviderResponse('{"memory_score": 1}', Usage(120, 30, 10))
+        import json
+
+        return ProviderResponse(
+            json.dumps(valid_result(types=["人物", "人物"]), ensure_ascii=False),
+            Usage(120, 30, 10),
+        )
 
     def repair_json(self, **_kwargs):
         if self.repair_error is not None:

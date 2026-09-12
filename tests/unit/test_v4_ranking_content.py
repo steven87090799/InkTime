@@ -2,7 +2,6 @@ import pytest
 from inktime.app.domain.analysis.scoring import (
     calculate_ranking_score,
     ranking_components,
-    DEFAULT_RANKING_WEIGHTS,
 )
 from inktime.app.domain.analysis.content_filter import evaluate_content_filter, CONTENT_FILTER_SWITCHES
 from inktime.app.domain.analysis.schema import validate_analysis_result
@@ -16,7 +15,7 @@ from tests.unit.test_analysis_schema import content_filter_result, valid_result
 def test_special_and_ranking_formula(level, bonus):
     value = valid_result(memory_score=80, visual_score=60, special_level=level)
     value["local_quality_score"] = 40
-    assert calculate_ranking_score(value, DEFAULT_RANKING_WEIGHTS) == pytest.approx(73.4 + bonus)
+    assert calculate_ranking_score(value) == pytest.approx(73.4 + bonus)
 
 
 def test_favorite_is_one_level_and_clamped():

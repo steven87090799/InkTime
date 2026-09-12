@@ -192,7 +192,7 @@ def test_force_ai_calls_provider_when_ai_is_off_and_preserves_exclusion_audit(ap
     plan = app.extensions["inktime_analysis_service"].build_plan(
         strategy="high_quality",
         provider_route=[],
-        scoring_profile=dict(app.extensions["inktime_scoring_repository"].current()),
+        scoring_profile_id=str(app.extensions["inktime_scoring_repository"].current()["id"]),
     )
     job_id = app.extensions["inktime_job_service"].create_analysis_job(
         name="force excluded",
