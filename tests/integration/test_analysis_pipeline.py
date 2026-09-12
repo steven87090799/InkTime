@@ -343,6 +343,7 @@ def test_more_than_three_model_types_require_one_text_repair(app, tmp_path):
     assert result["analysis"]["types"] == ["人物", "風景", "日常"]
     assert provider.analyze_calls == 1
     assert provider.repair_calls == 1
+    assert provider.repair_kwargs[0]["immutable_semantic_values"]["memory_score"] == 72
 
 
 def test_trace_persistence_failure_cannot_retry_provider_or_change_analysis(app, tmp_path):
@@ -910,43 +911,53 @@ def test_favorite_change_recalculates_latest_ranking_with_original_version(app, 
     assert after["scoring_version_id"] == before["scoring_version_id"]
 
 
-def test_invalid_json_is_repaired_only_once_without_second_image_call(app, tmp_path):
+def test_missing_semantics_skip_repair_and_require_a_new_vision_analysis(app, tmp_path):
     _, ids, service = prepare(app, tmp_path)
     service.ai_traces = app.extensions["inktime_ai_trace_repository"]
-    provider = MockProvider(["not-json", valid_result()])
-    service.analyze_photo(
-        photo_id=ids[0], job_id=None, provider=provider, strategy="high_quality", high_model="mock"
-    )
+    provider = MockProvider(["not-json"])
+    with pytest.raises(AnalysisValidationError, match="重新執行 Vision Analysis") as exc:
+        service.analyze_photo(
+            photo_id=ids[0], job_id=None, provider=provider, strategy="high_quality", high_model="mock"
+        )
+    assert exc.value.code == "VLM-007"
     assert provider.analyze_calls == 1
-    assert provider.repair_calls == 1
-    assert provider.repair_kwargs[0]["max_tokens"] == 1200
-    assert "image_path" not in provider.repair_kwargs[0]
+    assert provider.repair_calls == 0
     with app.extensions["inktime_database"].session() as connection:
         attempts = connection.execute(
             "SELECT attempt_kind,status FROM ai_trace_attempts ORDER BY attempt_number"
         ).fetchall()
     assert [tuple(row) for row in attempts] == [
         ("vision", "VALIDATION_FAILED"),
-        ("json_repair", "SUCCESS"),
     ]
 
 
 def test_invalid_repair_container_fails_without_a_second_vision_request(app, tmp_path):
     _, ids, service = prepare(app, tmp_path)
-    provider = MockProvider(["[]", "{}"])
+    provider = MockProvider(["[]"])
     with pytest.raises(AnalysisValidationError):
         service.analyze_photo(
             photo_id=ids[0], job_id=None, provider=provider, strategy="high_quality", high_model="mock"
         )
     assert provider.analyze_calls == 1
-    assert provider.repair_calls == 1
-    assert provider.repair_kwargs[0]["max_tokens"] == 1200
-    assert "image_path" not in provider.repair_kwargs[0]
+    assert provider.repair_calls == 0
+
+
+def test_repair_that_changes_existing_semantics_is_rejected(app, tmp_path):
+    _, ids, service = prepare(app, tmp_path)
+    invalid = valid_result(types=["人物", "人物"])
+    changed = valid_result(types=["人物"], memory_score=99)
+    provider = MockProvider([invalid, changed])
+    with pytest.raises(AnalysisValidationError, match="修改了既有照片語意") as exc:
+        service.analyze_photo(
+            photo_id=ids[0], job_id=None, provider=provider, strategy="high_quality", high_model="mock"
+        )
+    assert exc.value.code == "VLM-007"
+    assert provider.analyze_calls == 1 and provider.repair_calls == 1
 
 
 def test_router_does_not_fail_over_after_initial_vision_and_repair_failure(app, tmp_path):
     _, ids, service = prepare(app, tmp_path)
-    first = MockProvider(["[]", "{}"])
+    first = MockProvider([valid_result(types=["人物", "人物"]), "{}"])
     first.provider_id = "first-vision"
     second = MockProvider([valid_result()])
     second.provider_id = "second-vision"
@@ -975,15 +986,7 @@ def test_full_analysis_hits_historical_v2_cache_without_an_image_call(app, tmp_p
         low_model="mock",
         high_model="mock",
         stage_two_threshold=65,
-        favorite_override=True,
-        scoring_profile={
-            "id": "",
-            "memory_weight": 25,
-            "beauty_weight": 25,
-            "technical_weight": 25,
-            "emotion_weight": 25,
-            "favorite_bonus": 0,
-        },
+        scoring_profile_id="",
         caption_controls=None,
         prompt_version="legacy-test-prompt",
         high_image_max_side=1024,
@@ -1100,7 +1103,7 @@ def test_failover_rebuilds_cache_identity_for_the_next_provider(app, tmp_path):
     plan = analysis.build_plan(
         strategy="high_quality",
         provider_route=[],
-        scoring_profile=dict(app.extensions["inktime_scoring_repository"].current()),
+        scoring_profile_id=str(app.extensions["inktime_scoring_repository"].current()["id"]),
     )
     result = analysis.analyze_photo(
         photo_id=ids[0], job_id=None, provider=router, strategy="high_quality", analysis_plan=plan
@@ -1132,7 +1135,7 @@ def test_new_analysis_plan_forces_single_literary_caption_and_no_reasoning(app):
     plan = service.build_plan(
         strategy="high_quality",
         provider_route=[],
-        scoring_profile=dict(app.extensions["inktime_scoring_repository"].current()),
+        scoring_profile_id=str(app.extensions["inktime_scoring_repository"].current()["id"]),
     )
     assert plan["caption_controls"]["caption_variants_enabled"] is False
     assert plan["caption_controls"]["copy_default_style"] == "literary"
@@ -1188,7 +1191,7 @@ def test_worker_context_inherits_only_the_same_frozen_plan_and_keeps_source_trac
     plan = service.build_plan(
         strategy="high_quality",
         provider_route=[],
-        scoring_profile=dict(app.extensions["inktime_scoring_repository"].current()),
+        scoring_profile_id=str(app.extensions["inktime_scoring_repository"].current()["id"]),
     )
     first = MockProvider([valid_result()])
     service.analyze_photo(
@@ -1198,10 +1201,11 @@ def test_worker_context_inherits_only_the_same_frozen_plan_and_keeps_source_trac
         scoring = app.extensions["inktime_scoring_repository"]
         renamed = scoring.create(
             name="同規則新版本名稱", rules=str(plan["scoring_rules"]),
-            weights={"memory": 67.0, "visual": 33.0, "local_quality": 0.0},
-            favorite_bonus=1, created_by=actor, source_ip="127.0.0.1",
+            created_by=actor, source_ip="127.0.0.1",
         )
-        plan = service.build_plan(strategy="high_quality", provider_route=[], scoring_profile=renamed)
+        plan = service.build_plan(
+            strategy="high_quality", provider_route=[], scoring_profile_id=str(renamed["id"])
+        )
     second = MockProvider([])
     inherited = service.analyze_photo(
         photo_id=ids[1], job_id=None, provider=second, strategy="high_quality", analysis_plan=plan
@@ -1246,13 +1250,17 @@ def test_worker_context_does_not_inherit_a_different_frozen_plan(app, tmp_path):
         )
     service = app.extensions["inktime_analysis_service"]
     profile = dict(app.extensions["inktime_scoring_repository"].current())
-    first_plan = service.build_plan(strategy="high_quality", provider_route=[], scoring_profile=profile)
+    first_plan = service.build_plan(
+        strategy="high_quality", provider_route=[], scoring_profile_id=str(profile["id"])
+    )
     first = MockProvider([valid_result()])
     service.analyze_photo(
         photo_id=ids[0], job_id=None, provider=first, strategy="high_quality", analysis_plan=first_plan
     )
     settings.update("model.analysis_model", "new-model", changed_by="test", source_ip="127.0.0.1")
-    second_plan = service.build_plan(strategy="high_quality", provider_route=[], scoring_profile=profile)
+    second_plan = service.build_plan(
+        strategy="high_quality", provider_route=[], scoring_profile_id=str(profile["id"])
+    )
     second = MockProvider([valid_result(memory_score=77)])
     result = service.analyze_photo(
         photo_id=ids[1], job_id=None, provider=second, strategy="high_quality", analysis_plan=second_plan

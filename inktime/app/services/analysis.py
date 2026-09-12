@@ -23,7 +23,12 @@ from inktime.app.domain.analysis import (
     validate_analysis_result,
 )
 from inktime.app.domain.analysis.content_filter import CONTENT_FILTER_SWITCHES
-from inktime.app.domain.analysis.json_repair import extract_json_value
+from inktime.app.domain.analysis.json_repair import (
+    assert_semantic_repair_integrity,
+    extract_json_value,
+    repair_source_object,
+    semantic_repair_snapshot,
+)
 from inktime.app.domain.analysis.execution_mode import (
     execution_mode,
     permits_automatic_ai,
@@ -31,8 +36,6 @@ from inktime.app.domain.analysis.execution_mode import (
 )
 from inktime.app.domain.analysis.scoring import (
     normalize_scoring_rules,
-    DEFAULT_FAVORITE_BONUS,
-    DEFAULT_RANKING_WEIGHTS,
     LOCAL_QUALITY_SCORE_KIND,
     SEMANTIC_SCORE_KIND,
     ranking_components,
@@ -214,7 +217,7 @@ class PhotoAnalysisService:
             return None
         return {"copy_default_style": str(controls.get("copy_default_style", "literary"))}
 
-    def build_plan(self, *, strategy: str, provider_route: list[dict], scoring_profile: dict) -> dict:
+    def build_plan(self, *, strategy: str, provider_route: list[dict], scoring_profile_id: str) -> dict:
         """Build the sole server-authoritative non-secret Analysis Plan."""
         if self.settings is None:
             raise RuntimeError("分析設定尚未初始化")
@@ -269,8 +272,7 @@ class PhotoAnalysisService:
             low_model=str(settings.get("model.low_model", "low-cost-vision")),
             high_model=analysis_model,
             stage_two_threshold=float(settings.get("analysis.stage_two_threshold", 65)),
-            favorite_override=bool(settings.get("analysis.favorite_override", True)),
-            scoring_profile=scoring_profile,
+            scoring_profile_id=scoring_profile_id,
             caption_controls=generation_controls,
             prompt_version=prompt_version,
             high_image_max_side=int(
@@ -500,9 +502,6 @@ class PhotoAnalysisService:
         self,
         result: dict,
         photo,
-        *,
-        ranking_weights: dict[str, float],
-        favorite_bonus: float,
     ) -> dict:
         result["local_quality_score"] = self._local_quality(photo)
         result.update(ranking_components(result, favorite=bool(photo["favorite"])))
@@ -521,8 +520,6 @@ class PhotoAnalysisService:
         result: dict,
         raw: str,
         photo,
-        ranking_weights: dict[str, float],
-        favorite_bonus: float,
         scoring_version_id: str | None,
         schema_kind: str,
         score_kind: str | None = None,
@@ -536,12 +533,7 @@ class PhotoAnalysisService:
         connection=None,
     ) -> dict:
         score_kind = resolve_score_kind(score_kind, provider=provider, stage=stage)
-        ranked = self._score_result(
-            result,
-            photo,
-            ranking_weights=ranking_weights,
-            favorite_bonus=favorite_bonus,
-        )
+        ranked = self._score_result(result, photo)
         semantic_available = score_kind == SEMANTIC_SCORE_KIND
         ranked["score_kind"] = score_kind
         ranked["semantic_scores_available"] = semantic_available
@@ -1371,7 +1363,7 @@ class PhotoAnalysisService:
         total_reasoning_tokens = response.usage.reasoning_tokens
         parse_started_at = datetime.now(timezone.utc).isoformat()
         try:
-            local_json = extract_json_value(response.content)
+            local_json = repair_source_object(response.content)
             candidate = local_json if isinstance(local_json, dict) else response.content
             result = self._apply_caption_variant(validate_model_response(candidate), caption_controls)
             raw = response.content
@@ -1413,6 +1405,8 @@ class PhotoAnalysisService:
                 error_message=str(first_error),
                 completed_at=datetime.now(timezone.utc).isoformat(),
             )
+            repair_source = repair_source_object(response.content)
+            semantic_snapshot = semantic_repair_snapshot(repair_source)
             vision_attempt.repair_attempted = True
             self._activity(
                 "DEBUG",
@@ -1442,8 +1436,9 @@ class PhotoAnalysisService:
             except (TypeError, ValueError):
                 repair_cap = REPAIR_TOKEN_CAP
             repair_call = {
-                "invalid_content": response.content,
+                "invalid_content": json.dumps(repair_source, ensure_ascii=False),
                 "validation_error": str(first_error),
+                "immutable_semantic_values": semantic_snapshot,
                 "model": repair_model,
                 "max_tokens": max(256, min(repair_cap, REPAIR_TOKEN_CAP)),
                 "stage": stage,
@@ -1573,12 +1568,14 @@ class PhotoAnalysisService:
             repair_parse_started_at = datetime.now(timezone.utc).isoformat()
             repaired_candidate = extract_json_value(repaired.content)
             try:
-                result = self._apply_caption_variant(
-                    validate_model_response(
+                validated_repair = validate_model_response(
                         repaired_candidate
                         if isinstance(repaired_candidate, dict)
                         else repaired.content
-                    ),
+                    )
+                assert_semantic_repair_integrity(semantic_snapshot, validated_repair)
+                result = self._apply_caption_variant(
+                    validated_repair,
                     caption_controls,
                 )
             except AnalysisValidationError as repair_validation_error:
@@ -1659,9 +1656,6 @@ class PhotoAnalysisService:
         low_model: str = "low-cost-vision",
         high_model: str = "high-quality-vision",
         stage_two_threshold: float = 65,
-        favorite_override: bool = True,
-        ranking_weights: dict[str, float] | None = None,
-        favorite_bonus: float = DEFAULT_FAVORITE_BONUS,
         scoring_version_id: str | None = None,
         force_ai: bool = False,
         force_actor: str = "system",
@@ -1683,14 +1677,7 @@ class PhotoAnalysisService:
                 low_model=low_model,
                 high_model=high_model,
                 stage_two_threshold=stage_two_threshold,
-                favorite_override=favorite_override,
-                scoring_profile={
-                    "id": scoring_version_id or "",
-                    "memory_weight": (ranking_weights or DEFAULT_RANKING_WEIGHTS)["memory"],
-                    "visual_weight": DEFAULT_RANKING_WEIGHTS["visual"],
-                    "local_weight": DEFAULT_RANKING_WEIGHTS["local_quality"],
-                    "favorite_bonus": favorite_bonus,
-                },
+                scoring_profile_id=scoring_version_id or "",
                 caption_controls=self._caption_generation_controls(self._caption_controls()),
                 prompt_version=self._prompt_version(
                     self._caption_generation_controls(self._caption_controls())
@@ -1729,7 +1716,6 @@ class PhotoAnalysisService:
         )
         strategy = str(analysis_spec["strategy"])
         model = str(analysis_spec.get("model") or analysis_spec.get("high_model") or "")
-        favorite_override = bool(analysis_spec["favorite_override"])
         caption_controls = dict(analysis_spec.get("caption_controls") or {}) or None
         display_controls = dict(analysis_spec.get("caption_display_controls") or {})
         repair_policy = dict(analysis_spec.get("repair_policy") or {})
@@ -1740,8 +1726,6 @@ class PhotoAnalysisService:
         prompt_version = str(analysis_spec["prompt_version"])
         vision_input = dict(analysis_spec["vision_input"])
         image_max_side = int(vision_input["max_side"])
-        ranking_weights = dict(analysis_spec["ranking_weights"])
-        favorite_bonus = float(analysis_spec["favorite_bonus"])
         scoring_version_id = str(analysis_spec["scoring_profile_id"]) or scoring_version_id
         analysis_spec_json = canonical_json(analysis_spec)
         identity_spec = dict(analysis_spec)
@@ -1800,7 +1784,6 @@ class PhotoAnalysisService:
             trace_id=prompt_version,
             advanced_caption=bool(caption_controls),
         )
-        weights = ranking_weights or DEFAULT_RANKING_WEIGHTS
         # Reuse identical bytes and semantic inputs across local ranking/version
         # changes, while retaining the current full plan for result provenance.
         inherited = self.photos.inherit_existing_analysis(
@@ -1828,8 +1811,6 @@ class PhotoAnalysisService:
                 result=result,
                 raw=raw,
                 photo=photo,
-                ranking_weights=weights,
-                favorite_bonus=favorite_bonus,
                 scoring_version_id=scoring_version_id,
                 schema_kind="basic",
                 score_kind=LOCAL_QUALITY_SCORE_KIND,
@@ -1856,8 +1837,6 @@ class PhotoAnalysisService:
                 result=result,
                 raw=raw,
                 photo=photo,
-                ranking_weights=weights,
-                favorite_bonus=favorite_bonus,
                 scoring_version_id=scoring_version_id,
                 schema_kind="basic",
                 score_kind=LOCAL_QUALITY_SCORE_KIND,
@@ -1884,8 +1863,6 @@ class PhotoAnalysisService:
                 result=result,
                 raw=raw,
                 photo=photo,
-                ranking_weights=weights,
-                favorite_bonus=favorite_bonus,
                 scoring_version_id=scoring_version_id,
                 schema_kind="basic",
                 score_kind=LOCAL_QUALITY_SCORE_KIND,
@@ -1908,8 +1885,6 @@ class PhotoAnalysisService:
                 result=result,
                 raw=raw,
                 photo=photo,
-                ranking_weights=weights,
-                favorite_bonus=favorite_bonus,
                 scoring_version_id=scoring_version_id,
                 schema_kind="basic",
                 score_kind=LOCAL_QUALITY_SCORE_KIND,
@@ -1977,8 +1952,6 @@ class PhotoAnalysisService:
                 result=result,
                 raw=raw,
                 photo=photo,
-                ranking_weights=weights,
-                favorite_bonus=favorite_bonus,
                 scoring_version_id=scoring_version_id,
                 schema_kind="full",
                 score_kind=SEMANTIC_SCORE_KIND,

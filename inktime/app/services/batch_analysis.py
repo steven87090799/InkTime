@@ -299,20 +299,14 @@ class BatchAnalysisService:
         route = route or self._provider_route()
         # The scoring repository is intentionally read through the app graph by
         # bootstrap; this fallback keeps direct service tests dependency-light.
-        scoring = getattr(self, "scoring", None) or {
-            "id": "",
-            "memory_weight": 25,
-            "visual_weight": 25,
-            "local_weight": 25,
-            "favorite_bonus": 0,
-        }
+        scoring = getattr(self, "scoring", None) or {"id": ""}
         scoring_repository = getattr(self, "scoring_repository", None)
         if scoring_repository is not None:
             scoring = dict(scoring_repository.current())
         plan = self.analysis.build_plan(
             strategy="single",
             provider_route=route,
-            scoring_profile=scoring,
+            scoring_profile_id=str(scoring.get("id", "")),
         )
         model = str(self.settings.get("batch.model", "gpt-5.6-luna")).strip()
         if not model:
@@ -2195,7 +2189,6 @@ class BatchAnalysisService:
         caption_controls = dict(plan.get("caption_controls") or {})
         caption_controls.update(dict(plan.get("caption_display_controls") or {}))
         result = self.analysis._apply_caption_variant(result, caption_controls or None)
-        weights = dict(plan.get("ranking_weights") or {})
         estimated_cost = provider.estimate_batch_cost(str(batch["model"]), usage)
         actual_cost = usage.provider_reported_cost
         cost_source = "provider_reported" if actual_cost is not None else "estimated" if estimated_cost is not None else "unknown"
@@ -2222,8 +2215,6 @@ class BatchAnalysisService:
                 result=result,
                 raw=raw_content,
                 photo=photo,
-                ranking_weights=weights,
-                favorite_bonus=float(plan.get("favorite_bonus", 0)),
                 scoring_version_id=str(plan.get("scoring_profile_id") or "") or None,
                 schema_kind="full",
                 prompt_version=str(plan["prompt_version"]),

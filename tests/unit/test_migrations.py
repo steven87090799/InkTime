@@ -32,7 +32,7 @@ def _run_capture_date_backfill(database_path: str, start, results) -> None:
 
 
 def test_fresh_database_is_migrated(tmp_path):
-    assert CURRENT_SCHEMA_VERSION == 59
+    assert CURRENT_SCHEMA_VERSION == 60
     database = Database(tmp_path / "inktime.db")
     assert migrate(database) == list(range(1, CURRENT_SCHEMA_VERSION + 1))
     assert database.integrity_check() == "ok"
@@ -1974,6 +1974,11 @@ def test_migration_58_recomposes_ai_scores_without_rewriting_evidence(monkeypatc
             "emotion_weight,visual_weight,local_weight,ranking_contract_version,favorite_bonus,is_active,created_at) "
             "VALUES ('old','我的自訂規則','保留自訂文字',50,25,25,0,25,25,4,1,1,?)", (now,),
         )
+        connection.execute(
+            "INSERT INTO scoring_rule_versions(id,name,rules,memory_weight,beauty_weight,technical_weight,"
+            "emotion_weight,ranking_contract_version,favorite_bonus,is_active,created_at) "
+            "VALUES ('legacy','舊版','舊規則',20,30,40,10,3,9,0,?)", (now,),
+        )
         photos_before = [dict(row) for row in connection.execute("SELECT * FROM photos ORDER BY id")]
         non_semantic_before = [dict(row) for row in connection.execute(
             "SELECT * FROM photo_analysis WHERE score_kind<>'semantic' ORDER BY id"
@@ -2001,3 +2006,11 @@ def test_migration_58_recomposes_ai_scores_without_rewriting_evidence(monkeypatc
         profile = connection.execute("SELECT * FROM scoring_rule_versions WHERE id='old'").fetchone()
         assert profile["is_active"] == 0 and profile["rules"] == "保留自訂文字"
         assert profile["memory_weight"] == 50
+        columns = {row["name"] for row in connection.execute("PRAGMA table_info(scoring_rule_versions)")}
+        assert "favorite_bonus" not in columns
+        assert "legacy_favorite_score_bonus" in columns
+        assert profile["legacy_favorite_score_bonus"] == 0
+        legacy = connection.execute(
+            "SELECT legacy_favorite_score_bonus FROM scoring_rule_versions WHERE id='legacy'"
+        ).fetchone()
+        assert legacy["legacy_favorite_score_bonus"] == 9

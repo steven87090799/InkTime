@@ -30,7 +30,7 @@ class FakeContractProvider:
         elif self.valid:
             value = valid_result()
         else:
-            value = "not-json"
+            value = valid_result(types=["人物", "人物"])
         return ProviderResponse(
             value if isinstance(value, str) else json.dumps(value, ensure_ascii=False),
             Usage(input_tokens=20, output_tokens=10, provider_reported_cost=0.08),

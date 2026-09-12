@@ -12,6 +12,11 @@ from PIL import Image, ImageDraw, ImageFont
 
 from inktime.app.core.ai_trace_payloads import bounded_text
 from inktime.app.domain.analysis import REPAIR_TOKEN_CAP
+from inktime.app.domain.analysis.json_repair import (
+    assert_semantic_repair_integrity,
+    repair_source_object,
+    semantic_repair_snapshot,
+)
 from inktime.app.domain.analysis.schema import AnalysisValidationError, validate_analysis_result
 from inktime.app.providers.base import ProviderResponse, VisionAttemptState
 
@@ -329,14 +334,44 @@ def run_provider_contract(provider: Any, *, level: int, model: str) -> dict[str,
             except AnalysisValidationError:
                 pass
         if not schema_valid and level == 3:
+            repair_source = repair_source_object(response.content)
+            try:
+                semantic_snapshot = semantic_repair_snapshot(repair_source)
+            except AnalysisValidationError:
+                semantic_snapshot = None
+            if semantic_snapshot is None:
+                result = {
+                    "level": level,
+                    "ok": False,
+                    "message": "Level 3 response lacked immutable semantics; a new Vision analysis is required",
+                    "vision_requests": vision_requests,
+                    "repair_requests": 0,
+                    "repair_attempts": 0,
+                    "repair_responses": 0,
+                    "network_request_attempts": network_request_attempts,
+                    "network_responses": network_responses,
+                    "network_requests": network_request_attempts,
+                    "request_counting_policy": "conservative_attempted_calls",
+                    "vision_started": vision_started,
+                    "vision_completed": vision_completed,
+                    "repair_attempted": False,
+                    "repair_completed": False,
+                    "schema_valid": False,
+                    "usage": usage,
+                }
+                result["checks"] = _checks(
+                    provider, level=level, ok=False, schema_valid=False, usage=usage
+                )
+                return result
             repair_attempts = 1
             repair_requests = 1
             repair_attempted = True
             network_request_attempts += 1
             try:
                 repaired = provider.repair_json(
-                    invalid_content=response.content,
+                    invalid_content=json.dumps(repair_source, ensure_ascii=False),
                     validation_error="synthetic contract schema validation failed",
+                    immutable_semantic_values=semantic_snapshot,
                     model=model,
                     max_tokens=REPAIR_TOKEN_CAP,
                     stage="single",
@@ -369,7 +404,8 @@ def run_provider_contract(provider: Any, *, level: int, model: str) -> dict[str,
                     if usage["estimated_cost"] is not None
                     else "unknown"
                 )
-                validate_analysis_result(repaired.content)
+                repaired_value = validate_analysis_result(repaired.content)
+                assert_semantic_repair_integrity(semantic_snapshot, repaired_value)
                 schema_valid = True
             except AnalysisValidationError:
                 schema_valid = False

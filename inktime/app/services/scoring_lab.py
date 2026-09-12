@@ -8,7 +8,12 @@ from uuid import uuid4
 from inktime.app.domain.photos.formats import load_rgb
 
 from inktime.app.domain.analysis import AnalysisValidationError, validate_analysis_result
-from inktime.app.domain.analysis.scoring import calculate_ranking_score, DEFAULT_RANKING_WEIGHTS
+from inktime.app.domain.analysis.json_repair import (
+    assert_semantic_repair_integrity,
+    repair_source_object,
+    semantic_repair_snapshot,
+)
+from inktime.app.domain.analysis.scoring import calculate_ranking_score
 from inktime.app.services.analysis import FULL_ANALYSIS_TOKEN_CAP
 from inktime.app.domain.photos.preprocessing import PhotoPreprocessor
 from inktime.app.domain.photos.quality_policy import evaluate_local_quality, local_candidate_score
@@ -259,12 +264,15 @@ class ScoringLabService:
         try:
             result = validate_analysis_result(response.content)
         except AnalysisValidationError as error:
+            repair_source = repair_source_object(response.content)
+            semantic_snapshot = semantic_repair_snapshot(repair_source)
             repair_started_at = datetime.now(timezone.utc).isoformat()
             repair_started_perf = time.perf_counter()
             try:
                 repaired = provider.repair_json(
-                    invalid_content=response.content,
+                    invalid_content=json.dumps(repair_source, ensure_ascii=False),
                     validation_error=str(error),
+                    immutable_semantic_values=semantic_snapshot,
                     model=model,
                     max_tokens=max_tokens,
                     stage="scoring_test",
@@ -296,6 +304,7 @@ class ScoringLabService:
                 image_bytes=False,
             )
             result = validate_analysis_result(repaired.content)
+            assert_semantic_repair_integrity(semantic_snapshot, result)
         total_cost = sum(float(item["effective_cost"]) for item in attempt_summary)
         unknown_count = sum(item["cost_source"] == "unknown" for item in attempt_summary)
         cost_source = (
@@ -308,16 +317,13 @@ class ScoringLabService:
         total_input = sum(int(item["input_tokens"]) for item in attempt_summary)
         total_output = sum(int(item["output_tokens"]) for item in attempt_summary)
         total_cached = sum(int(item["cached_tokens"]) for item in attempt_summary)
-        weights = dict(DEFAULT_RANKING_WEIGHTS)
         features = PhotoPreprocessor().analyze(image_path).as_dict()
         result["local_quality_score"] = local_candidate_score(features, evaluation=evaluate_local_quality(features))
         return {
             "analysis": result,
             "ranking_score": calculate_ranking_score(
                 result,
-                weights,
                 favorite=False,
-                favorite_bonus=float(profile["favorite_bonus"]),
             ),
             "profile": {"id": profile["id"], "name": profile["name"]},
             "usage": {

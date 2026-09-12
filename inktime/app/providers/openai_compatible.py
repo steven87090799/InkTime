@@ -117,7 +117,7 @@ memory 只評一般回看價值，不猜使用者私人重要性；visual 只評
 重大事件、里程碑、大型合照與極罕見瞬間主要放 special_level，避免重複加分。special_codes 最多 2 個；group_photo 必須整群人為共同合影主體，夜市、觀眾、車站及街道人潮不算合照；people_count 只依可見人數。不猜照片在使用者照片庫的稀有度。
 以下評分參考只調整上述分數的判斷標準，不得違反 Schema 與固定內容安全規則，不得改寫欄位、型別、範圍、內容分類、方向判斷或伺服器公式。"""
 ANALYSIS_USER_PROMPT = "分析這張照片。"
-JSON_REPAIR_PROMPT = "只修復 JSON 使其符合提供的 Schema；不可新增圖片推測，不可輸出 Markdown。"
+JSON_REPAIR_PROMPT = """只修復 JSON 表示方式，不重新分析照片。允許修正 JSON syntax、移除 Markdown fence、明確且安全的非語意型別轉換，以及刪除多餘欄位。不得新增、猜測或改寫任何照片語意。immutable_semantic_values 中每個值必須逐字逐型別保留；若無法在不改變語意的前提下修復，回傳原內容，不可補值。只輸出 JSON，不輸出 Markdown。"""
 
 
 def caption_prompt(caption_controls: dict[str, Any] | None) -> str:
@@ -1047,6 +1047,7 @@ class OpenAICompatibleProvider(VisionProvider):
         invalid_content: str,
         validation_error: str,
         model: str,
+        immutable_semantic_values: dict[str, Any] | None = None,
         max_tokens: int | None = None,
         stage: str = "single_high",
         caption_controls: dict[str, Any] | None = None,
@@ -1066,6 +1067,7 @@ class OpenAICompatibleProvider(VisionProvider):
                         {
                             "invalid_json": invalid_content[:12000],
                             "error": validation_error,
+                            "immutable_semantic_values": dict(immutable_semantic_values or {}),
                             "schema": _json_schema_for_provider(
                                 self.kind,
                                 stage,

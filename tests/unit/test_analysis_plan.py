@@ -17,15 +17,7 @@ def _plan(**changes):
         "low_model": "small",
         "high_model": "large",
         "stage_two_threshold": 65,
-        "favorite_override": True,
-        "scoring_profile": {
-            "id": "rules-1",
-            "memory_weight": 1,
-            "beauty_weight": 2,
-            "technical_weight": 3,
-            "emotion_weight": 4,
-            "favorite_bonus": 5,
-        },
+        "scoring_profile_id": "rules-1",
         "caption_controls": {"caption_variants_enabled": True},
         "prompt_version": "prompt-1",
         "high_image_max_side": 1600,
@@ -53,10 +45,14 @@ def test_analysis_plan_is_canonical_non_secret_and_input_specific():
 def test_reuse_ignores_local_scoring_metadata_but_keeps_model_contract():
     plan = _plan()
     local_changes = plan | {
-        "scoring_profile_id": "renamed", "ranking_weights": {"memory": 60}, "favorite_bonus": 9,
+        "scoring_profile_id": "renamed", "ranking_weights": {"memory": 60},
+        "favorite_bonus": 9, "favorite_override": False,
     }
     assert fingerprint(local_changes) != fingerprint(plan)
     assert reusable_analysis_fingerprint(local_changes) == reusable_analysis_fingerprint(plan)
+    assert "ranking_weights" not in normalize_analysis_plan(local_changes)
+    assert "favorite_bonus" not in normalize_analysis_plan(local_changes)
+    assert "favorite_override" not in normalize_analysis_plan(local_changes)
     for changed in (
         _plan(prompt_version="changed"), _plan(scoring_rules="changed rubric"),
         _plan(caption_controls={"copy_banned_words": ["changed"]}),
