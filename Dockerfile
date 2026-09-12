@@ -44,6 +44,7 @@ RUN set -eux; \
         libblkid1 \
         liblastlog2-2 \
         libmount1 \
+        libpcre2-8-0 \
         libsqlite3-0 \
         libsmartcols1 \
         libuuid1 \
