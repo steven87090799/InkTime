@@ -1435,7 +1435,7 @@ class PhotoAnalysisService:
                 repair_cap = int(frozen_repair_policy.get("max_tokens", REPAIR_TOKEN_CAP))
             except (TypeError, ValueError):
                 repair_cap = REPAIR_TOKEN_CAP
-            repair_call = {
+            repair_call: dict[str, Any] = {
                 "invalid_content": json.dumps(repair_source, ensure_ascii=False),
                 "validation_error": str(first_error),
                 "immutable_semantic_values": semantic_snapshot,
