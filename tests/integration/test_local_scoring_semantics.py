@@ -470,7 +470,7 @@ def test_semantic_detail_explains_model_rank_and_local_gate(client, app, tmp_pat
     assert "AI 選片分" in body
     assert "暫用原始分" not in body
     assert "排序組成" in body
-    assert "回憶 78" in body
+    assert "AI 回憶價值 78" in body
     assert "視覺 78" in body
     assert "本機品質參考分 78" in body
     assert "內容過濾檢查" in body

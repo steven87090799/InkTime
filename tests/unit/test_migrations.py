@@ -551,7 +551,13 @@ def test_deployed_main_schema54_upgrades_without_rewriting_history(monkeypatch, 
             assert {key: after[key] for key in before if key != "score_kind"} == {key: value for key, value in before.items() if key != "score_kind"}
             assert after["visual_score"] is None and after["local_quality_score"] is None
         profile = dict(connection.execute("SELECT * FROM scoring_rule_versions WHERE id='legacy'").fetchone())
-        assert {key: profile[key] for key in profile_before if key != "is_active"} == {key: value for key, value in profile_before.items() if key != "is_active"}
+        expected_profile = {
+            key: value
+            for key, value in profile_before.items()
+            if key not in {"is_active", "favorite_bonus"}
+        }
+        expected_profile["legacy_favorite_score_bonus"] = profile_before["favorite_bonus"]
+        assert {key: profile[key] for key in expected_profile} == expected_profile
         assert profile["is_active"] == 0 and profile["ranking_contract_version"] == 3
         assert profile["visual_weight"] is None and profile["local_weight"] is None
         assert [dict(row) for row in connection.execute("SELECT * FROM photos WHERE id<>'e6' ORDER BY id")] == protected_before
@@ -1917,7 +1923,8 @@ def test_migration_59_preserves_devices_and_enforces_16_slot_state(monkeypatch, 
         )
         before = [dict(row) for row in connection.execute("SELECT * FROM devices ORDER BY id")]
         events_before = [dict(row) for row in connection.execute("SELECT * FROM device_events ORDER BY id")]
-    monkeypatch.setattr(migrations_module, "MIGRATIONS", MIGRATIONS)
+    # Isolate migration 59; later schema changes are covered separately.
+    monkeypatch.setattr(migrations_module, "MIGRATIONS", MIGRATIONS[:59])
     assert migrate(database) == [59]
     assert migrate(database) == []
     with database.transaction() as connection:

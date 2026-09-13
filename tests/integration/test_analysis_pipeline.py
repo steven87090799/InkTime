@@ -146,7 +146,11 @@ class _BoundaryHTTPHandler(BaseHTTPRequestHandler):
             status_code = 503
 
         if state.mode.startswith("invalid_then_repair") and image_request:
-            response_content = "not-json"
+            # Keep original semantics available so these boundary cases reach
+            # the repair request while still failing schema validation.
+            response_content = json.dumps(
+                valid_result(types=["人物", "人物"]), ensure_ascii=False
+            )
         else:
             response_content = json.dumps(valid_result(), ensure_ascii=False)
         if status_code >= 400:
@@ -713,7 +717,7 @@ def test_repair_capacity_timeout_after_vision_is_terminal_without_repair_unknown
 
 def test_router_repair_capacity_is_terminal_to_worker_without_second_vision(app, tmp_path):
     boundary = KillableProcessBoundary(max_processes=1, terminate_grace_seconds=0.05)
-    provider = MockProvider(["not-json"])
+    provider = MockProvider([valid_result(types=["人物", "人物"])])
     router = _PostVisionRepairCapacityRouter([ProviderChannel(provider, max_concurrency=1)])
     photo_id, service = _isolated_service(app, tmp_path, boundary)
     jobs = app.extensions["inktime_job_service"]
