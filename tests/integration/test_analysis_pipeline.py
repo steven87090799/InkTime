@@ -16,6 +16,7 @@ from inktime.app.providers.base import ProviderCallTrace, ProviderResponse, Usag
 from inktime.app.providers.openai_compatible import OpenAICompatibleProvider, ProviderHTTPError
 from inktime.app.providers.router import FailoverVisionProvider, ProviderChannel
 from inktime.app.repositories.photos import PhotoRepository
+from inktime.app.repositories.render_candidates import RenderCandidateRepository
 from inktime.app.repositories.usage import UsageRepository
 from inktime.app.services.analysis import PhotoAnalysisService
 from inktime.app.services.budgets import BudgetService
@@ -26,7 +27,7 @@ from inktime.app.workers.job_worker import BoundedJobWorker
 from inktime.app.workers.scanner import PhotoScanner
 from inktime.app.workers.process_boundary import KillableProcessBoundary, ProcessCallError
 from tests.conftest import create_admin
-from tests.unit.test_analysis_schema import valid_result
+from tests.unit.test_analysis_schema import legacy_v4_result, valid_result
 
 
 class MockProvider(VisionProvider):
@@ -316,6 +317,9 @@ def test_single_model_call_returns_all_fields_and_usage(app, tmp_path):
     assert result["analysis"]["side_caption"]
     with app.extensions["inktime_database"].session() as connection:
         usage = connection.execute("SELECT input_tokens,output_tokens FROM api_usage").fetchone()
+        stored = connection.execute(
+            "SELECT schema_version,side_caption FROM photo_analysis WHERE photo_id=?", (ids[0],)
+        ).fetchone()
         trace = connection.execute(
             "SELECT trace_id,status,final_result_json FROM ai_trace_runs WHERE photo_id=?", (ids[0],)
         ).fetchone()
@@ -324,25 +328,42 @@ def test_single_model_call_returns_all_fields_and_usage(app, tmp_path):
             (trace["trace_id"],),
         ).fetchone()
     assert tuple(usage) == (1000, 100)
+    assert tuple(stored) == (5, valid_result()["side_caption"])
     assert trace["status"] == "SUCCESS" and json.loads(trace["final_result_json"])["side_caption"]
     assert tuple(attempt[:2]) == ("vision", "SUCCESS") and attempt["api_usage_id"] is not None
 
 
-def test_more_than_three_model_types_require_one_text_repair(app, tmp_path):
+def test_legacy_v4_analysis_remains_readable_without_model_call(app, tmp_path):
+    _, ids, service = prepare(app, tmp_path)
+    legacy = legacy_v4_result()
+    service.photos.save_analysis(
+        ids[0], None, "single", "legacy-provider", "legacy-model", legacy,
+        json.dumps(legacy, ensure_ascii=False), score_kind="semantic",
+    )
+    with app.extensions["inktime_database"].session() as connection:
+        row = connection.execute(
+            "SELECT schema_version,side_caption,raw_json FROM photo_analysis WHERE photo_id=?",
+            (ids[0],),
+        ).fetchone()
+    assert row["schema_version"] == 4
+    assert row["side_caption"] == legacy["side_caption"]
+    assert json.loads(row["raw_json"])["caption"] == legacy["caption"]
+    assert RenderCandidateRepository(app.extensions["inktime_database"]).get(ids[0]) is not None
+
+
+def test_invalid_model_types_fail_without_text_repair(app, tmp_path):
     _, ids, service = prepare(app, tmp_path)
     service.ai_traces = app.extensions["inktime_ai_trace_repository"]
     duplicate_types = valid_result(types=["人物", "風景", "人物", "日常"])
-    provider = MockProvider(
-        [duplicate_types, valid_result(types=["人物", "風景", "日常"])]
-    )
+    provider = MockProvider([duplicate_types])
 
-    result = service.analyze_photo(
-        photo_id=ids[0], job_id=None, provider=provider, strategy="high_quality", high_model="mock"
-    )
-
-    assert result["analysis"]["types"] == ["人物", "風景", "日常"]
+    with pytest.raises(AnalysisValidationError) as raised:
+        service.analyze_photo(
+            photo_id=ids[0], job_id=None, provider=provider, strategy="high_quality", high_model="mock"
+        )
+    assert raised.value.code == "VLM-004"
     assert provider.analyze_calls == 1
-    assert provider.repair_calls == 1
+    assert provider.repair_calls == 0
 
 
 def test_trace_persistence_failure_cannot_retry_provider_or_change_analysis(app, tmp_path):
@@ -410,7 +431,7 @@ def test_spawned_consumed_vision_timeout_is_terminal_and_billed_once(app, tmp_pa
     job_id = _test_job(app, "consumed vision timeout")
     budgets = service.budgets
     try:
-        with pytest.raises(TimeoutError) as raised:
+        with pytest.raises(AnalysisValidationError) as raised:
             service.analyze_photo(
                 photo_id=photo_id,
                 job_id=job_id,
@@ -419,8 +440,7 @@ def test_spawned_consumed_vision_timeout_is_terminal_and_billed_once(app, tmp_pa
                 high_model="test-model",
                 force_ai=True,
             )
-        assert raised.value.code == "VLM-AMBIGUOUS"
-        assert raised.value.ambiguous is True
+        assert raised.value.code == "VLM-004"
         assert classify_failure(raised.value) == FailureClass.TERMINAL_NO_RETRY
         assert state.vision_requests == 1
         assert state.repair_requests == 0
@@ -629,7 +649,7 @@ def test_spawned_consumed_repair_timeout_records_repair_unknown_without_second_v
         assert raised.value.ambiguous is True
         assert classify_failure(raised.value) == FailureClass.TERMINAL_NO_RETRY
         assert state.vision_requests == 1
-        assert state.repair_requests == 1
+        assert state.repair_requests == 0
         with app.extensions["inktime_database"].session() as connection:
             usage_rows = connection.execute(
                 "SELECT request_type,status,cost_source,error_code,image_bytes,request_body_bytes "
@@ -645,23 +665,13 @@ def test_spawned_consumed_repair_timeout_records_repair_unknown_without_second_v
                 "SELECT attempt_kind,status,request_started_at,api_usage_id FROM ai_trace_attempts WHERE trace_id=(SELECT trace_id FROM ai_trace_runs WHERE photo_id=? ORDER BY id DESC LIMIT 1) ORDER BY attempt_number",
                 (photo_id,),
             ).fetchall()
-        assert len(usage_rows) == 1
-        assert tuple(usage_rows[0][:4]) == (
-            "json_repair",
-            "failed",
-            "unknown",
-            "VLM-AMBIGUOUS",
-        )
-        assert usage_rows[0][4] == 0
-        assert usage_rows[0][5] > 0
-        assert tuple(outcome) == ("ambiguous_failed", 1, "VLM-AMBIGUOUS")
-        assert [row["attempt_kind"] for row in trace_attempts] == ["vision", "json_repair"]
-        assert trace_attempts[1]["status"] == "AMBIGUOUS"
-        assert trace_attempts[1]["request_started_at"] is not None
-        assert trace_attempts[1]["api_usage_id"] is not None
+        assert len(usage_rows) == 0
+        assert tuple(outcome) == ("failed", 0, "VLM-004")
+        assert [row["attempt_kind"] for row in trace_attempts] == ["vision"]
+        assert trace_attempts[0]["status"] == "VALIDATION_FAILED"
         snapshot = service.budgets.snapshot(job_id=job_id, photo_id=photo_id)
-        assert snapshot["photo_unknown_count"] == 1
-        assert snapshot["job_unknown_count"] == 1
+        assert snapshot["photo_unknown_count"] == 0
+        assert snapshot["job_unknown_count"] == 0
     finally:
         boundary.shutdown()
         provider.close()
@@ -679,7 +689,7 @@ def test_repair_capacity_timeout_after_vision_is_terminal_without_repair_unknown
     photo_id, service = _isolated_service(app, tmp_path, boundary)
     job_id = _test_job(app, "repair capacity timeout")
     try:
-        with pytest.raises(TimeoutError) as raised:
+        with pytest.raises(AnalysisValidationError) as raised:
             service.analyze_photo(
                 photo_id=photo_id,
                 job_id=job_id,
@@ -698,11 +708,11 @@ def test_repair_capacity_timeout_after_vision_is_terminal_without_repair_unknown
                 (photo_id,),
             ).fetchone()[0]
             repair_attempt = connection.execute(
-                "SELECT status,request_started_at,api_usage_id FROM ai_trace_attempts WHERE trace_id=(SELECT trace_id FROM ai_trace_runs WHERE photo_id=? ORDER BY id DESC LIMIT 1) AND attempt_kind='json_repair'",
+                "SELECT COUNT(*) FROM ai_trace_attempts WHERE trace_id=(SELECT trace_id FROM ai_trace_runs WHERE photo_id=? ORDER BY id DESC LIMIT 1) AND attempt_kind='json_repair'",
                 (photo_id,),
-            ).fetchone()
+            ).fetchone()[0]
         assert failed_count == 0
-        assert tuple(repair_attempt) == ("TIMEOUT", None, None)
+        assert repair_attempt == 0
     finally:
         boundary.shutdown()
         provider.close()
@@ -753,7 +763,7 @@ def test_router_repair_capacity_is_terminal_to_worker_without_second_vision(app,
     assert processor_calls == 1
     assert provider.analyze_calls == 1
     assert provider.repair_calls == 0
-    assert router.repair_capacity_failures == 1
+    assert router.repair_capacity_failures == 0
     assert len(errors) == 1
     assert errors[0].code == "VLM-004"
     assert classify_failure(errors[0]) == FailureClass.TERMINAL_NO_RETRY
@@ -823,7 +833,7 @@ def test_router_worker_repair_http_errors_are_terminal_without_second_vision(
     assert errors[0].code == "VLM-004"
     assert classify_failure(errors[0]) == FailureClass.TERMINAL_NO_RETRY
     assert state.vision_requests == 1
-    assert state.repair_requests == 1
+    assert state.repair_requests == 0
     with app.extensions["inktime_database"].session() as connection:
         usage = connection.execute(
             "SELECT request_type,status,cost_source,error_code FROM api_usage "
@@ -910,43 +920,40 @@ def test_favorite_change_recalculates_latest_ranking_with_original_version(app, 
     assert after["scoring_version_id"] == before["scoring_version_id"]
 
 
-def test_invalid_json_is_repaired_only_once_without_second_image_call(app, tmp_path):
+def test_invalid_json_fails_without_llm_repair(app, tmp_path):
     _, ids, service = prepare(app, tmp_path)
     service.ai_traces = app.extensions["inktime_ai_trace_repository"]
-    provider = MockProvider(["not-json", valid_result()])
-    service.analyze_photo(
-        photo_id=ids[0], job_id=None, provider=provider, strategy="high_quality", high_model="mock"
-    )
+    provider = MockProvider(["not-json"])
+    with pytest.raises(AnalysisValidationError) as raised:
+        service.analyze_photo(
+            photo_id=ids[0], job_id=None, provider=provider, strategy="high_quality", high_model="mock"
+        )
+    assert raised.value.code == "VLM-004"
     assert provider.analyze_calls == 1
-    assert provider.repair_calls == 1
-    assert provider.repair_kwargs[0]["max_tokens"] == 1200
-    assert "image_path" not in provider.repair_kwargs[0]
+    assert provider.repair_calls == 0
     with app.extensions["inktime_database"].session() as connection:
         attempts = connection.execute(
             "SELECT attempt_kind,status FROM ai_trace_attempts ORDER BY attempt_number"
         ).fetchall()
     assert [tuple(row) for row in attempts] == [
         ("vision", "VALIDATION_FAILED"),
-        ("json_repair", "SUCCESS"),
     ]
 
 
 def test_invalid_repair_container_fails_without_a_second_vision_request(app, tmp_path):
     _, ids, service = prepare(app, tmp_path)
-    provider = MockProvider(["[]", "{}"])
+    provider = MockProvider(["[]"])
     with pytest.raises(AnalysisValidationError):
         service.analyze_photo(
             photo_id=ids[0], job_id=None, provider=provider, strategy="high_quality", high_model="mock"
         )
     assert provider.analyze_calls == 1
-    assert provider.repair_calls == 1
-    assert provider.repair_kwargs[0]["max_tokens"] == 1200
-    assert "image_path" not in provider.repair_kwargs[0]
+    assert provider.repair_calls == 0
 
 
 def test_router_does_not_fail_over_after_initial_vision_and_repair_failure(app, tmp_path):
     _, ids, service = prepare(app, tmp_path)
-    first = MockProvider(["[]", "{}"])
+    first = MockProvider(["[]"])
     first.provider_id = "first-vision"
     second = MockProvider([valid_result()])
     second.provider_id = "second-vision"
@@ -961,7 +968,7 @@ def test_router_does_not_fail_over_after_initial_vision_and_repair_failure(app, 
         )
 
     assert first.analyze_calls == 1
-    assert first.repair_calls == 1
+    assert first.repair_calls == 0
     assert second.analyze_calls == 0
 
 
@@ -1114,14 +1121,8 @@ def test_failover_rebuilds_cache_identity_for_the_next_provider(app, tmp_path):
     assert cache["provider"] == "second-provider"
 
 
-def test_new_analysis_plan_forces_single_literary_caption_and_no_reasoning(app):
+def test_new_analysis_plan_uses_minimal_side_caption_controls_and_no_reasoning(app):
     settings = app.extensions["inktime_settings_repository"]
-    settings.update(
-        "analysis.caption_variants_enabled",
-        True,
-        changed_by="legacy-operator",
-        source_ip="127.0.0.1",
-    )
     settings.update(
         "batch.reasoning_effort",
         "high",
@@ -1134,8 +1135,11 @@ def test_new_analysis_plan_forces_single_literary_caption_and_no_reasoning(app):
         provider_route=[],
         scoring_profile=dict(app.extensions["inktime_scoring_repository"].current()),
     )
-    assert plan["caption_controls"]["caption_variants_enabled"] is False
-    assert plan["caption_controls"]["copy_default_style"] == "literary"
+    assert plan["caption_controls"] == {
+        "side_caption_min_chars": 8,
+        "side_caption_max_chars": 16,
+        "side_caption_custom_rules": "",
+    }
     assert plan["reasoning_effort"] == "none"
 
 

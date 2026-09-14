@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from hashlib import sha256
 from io import BytesIO
+import json
 from pathlib import Path
 
 from PIL import Image
@@ -62,6 +63,20 @@ def test_primary_management_pages_render(client, app):
     settings = client.get("/settings").get_data(as_text=True)
     assert "Good Display 原廠相容" in settings
     assert "照片平滑（減少色塊／雜點）" in settings
+    for active_caption_setting in (
+        "analysis.side_caption_min_chars",
+        "analysis.side_caption_max_chars",
+        "analysis.side_caption_custom_rules",
+    ):
+        assert active_caption_setting in settings
+    for retired_caption_setting in (
+        "analysis.advanced_caption_enabled",
+        "analysis.caption_variants_enabled",
+        "analysis.copy_humor_level",
+        "analysis.copy_poetic_level",
+        "analysis.copy_banned_words",
+    ):
+        assert retired_caption_setting not in settings
 
     rendering = client.get("/rendering").get_data(as_text=True)
     assert 'id="release-action-status"' in rendering
@@ -1012,7 +1027,7 @@ def test_photo_manual_edit_is_audited(client, app):
     assert event["event"] == "manual_update"
 
 
-def test_photo_console_shows_prefilter_metrics_model_text_and_generated_caption(client, app):
+def test_photo_console_shows_prefilter_metrics_scores_orientation_and_side_caption(client, app):
     create_admin(app)
     login(client)
     photo_id = add_photos(app, 1)[0]
@@ -1024,7 +1039,7 @@ def test_photo_console_shows_prefilter_metrics_model_text_and_generated_caption(
         "測試 Provider",
         "vision-model",
         result,
-        '{"caption":"家人在公園散步。"}',
+        json.dumps(result, ensure_ascii=False),
     )
 
     detail = client.get(f"/photos/{photo_id}")
@@ -1044,8 +1059,8 @@ def test_photo_console_shows_prefilter_metrics_model_text_and_generated_caption(
     assert "目前門檻" in body
     assert "模糊分數" in body
     assert "過曝占比" in body
-    assert "模型判斷文字結果" in body
-    assert result["caption"] in body
+    assert "一般回看價值" in body
+    assert "視覺方向" in body
     assert "產生的一句話（電子紙短文案）" in body
     assert result["side_caption"] in body
     assert "測試 Provider / vision-model" in body
@@ -1054,8 +1069,9 @@ def test_photo_console_shows_prefilter_metrics_model_text_and_generated_caption(
     assert body.index('class="panel photo-prefilter-panel"') < body.index('class="photo-runtime-grid"')
 
     listing = client.get("/photos").get_data(as_text=True)
-    assert result["caption"] in listing
     assert result["side_caption"] in listing
+    assert "搜尋路徑" in listing and "最低 AI 回看分" in listing
+    assert "搜尋路徑或描述" not in listing
 
 
 def test_photo_cards_show_total_score_and_e6_estimate(client, app):
@@ -1096,7 +1112,7 @@ def test_photo_detail_shows_only_two_latest_analyses_and_compact_type_picker(cli
     login(client)
     photo_id = add_photos(app, 1)[0]
     for index in range(3):
-        result = valid_result(caption=f"第 {index + 1} 次分析這張照片完整內容")
+        result = valid_result(side_caption=f"第{index + 1}次分析短句保留")
         app.extensions["inktime_photo_repository"].save_analysis(
             photo_id,
             None,
@@ -1112,14 +1128,14 @@ def test_photo_detail_shows_only_two_latest_analyses_and_compact_type_picker(cli
 
     assert body.count('class="analysis-card"') == 2
     assert "顯示優先結果與最近記錄，共 2 / 3 筆" in body
-    assert "自動顯示須同時完成本機品質檢查與 v4 模型分析" in body
+    assert "有效 AI 模型分析（Schema v4 / v5）" in body
     assert "歷史模型結果保留供查閱" in body
     assert 'class="photo-orientation-actions"' in body
     assert 'class="secondary orientation-set orientation-clear"' in body
     assert 'class="photo-type-picker"' in body
-    assert "第 3 次分析" in body
-    assert "第 2 次分析" in body
-    assert "第 1 次分析" not in body
+    assert "第3次分析短句保留" in body
+    assert "第2次分析短句保留" in body
+    assert "第1次分析短句保留" not in body
 
 
 def test_model_analysis_stays_preferred_after_newer_local_fallback(client, app):
@@ -1127,8 +1143,8 @@ def test_model_analysis_stays_preferred_after_newer_local_fallback(client, app):
     login(client)
     photo_id = add_photos(app, 1)[0]
     repository = app.extensions["inktime_photo_repository"]
-    model_result = valid_result(caption="完整模型判斷這張照片內容", side_caption="模型短句保留完整內容")
-    local_result = valid_result(caption="只有本機特徵尚未模型分析")
+    model_result = valid_result(side_caption="模型短句保留完整內容")
+    local_result = valid_result(side_caption="本機特徵尚未模型分析")
     repository.save_analysis(
         photo_id,
         None,
@@ -1503,8 +1519,13 @@ def test_prompt_preview_has_no_side_effects_and_uses_live_settings(client, app, 
     assert repo.current() == before
     assert settings.get("analysis.scoring_rules") == "目前設定的短版規則"
     lab = client.get("/api/v1/scoring/prompt?scope=scoring_test").json
-    assert "【進階照片描述與相框文案】" in saved.json["system_prompt"]
-    assert "【進階照片描述與相框文案】" not in lab["system_prompt"]
+    assert lab["system_prompt"] == saved.json["system_prompt"]
+    assert {field["name"] for field in saved.json["fields"]} == {
+        "schema_version", "types", "memory_score", "visual_score", "special_level",
+        "side_caption", "content_filter", "visual_orientation",
+    }
+    assert "repair_prompt" not in saved.json
+    assert saved.json["prompt_chars"] == len(saved.json["system_prompt"])
     assert client.get("/api/v1/scoring/prompt?scope=unknown").status_code == 400
 
 

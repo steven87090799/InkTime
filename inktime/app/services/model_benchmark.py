@@ -28,15 +28,12 @@ from inktime.app.domain.analysis.content_filter import evaluate_content_filter
 from inktime.app.domain.analysis.plan import normalize_reasoning_effort
 from inktime.app.domain.analysis.schema import AnalysisValidationError, validate_analysis_result
 from inktime.app.domain.analysis.scoring import (
-    DEFAULT_FAVORITE_BONUS,
+    FAVORITE_SPECIAL_LEVEL_BOOST,
     DEFAULT_RANKING_WEIGHTS,
     RANKING_RULE_VERSION,
     calculate_ranking_score,
 )
-from inktime.app.services.analysis import (
-    CAPTION_VARIANTS_TOKEN_CAP,
-    FULL_ANALYSIS_TOKEN_CAP,
-)
+from inktime.app.services.analysis import FULL_ANALYSIS_TOKEN_CAP
 from inktime.app.services.benchmark_metrics import calculate_benchmark_metrics
 from inktime.app.providers.base import ProviderResponse, VisionAttemptState
 from inktime.app.providers.config import normalize_options
@@ -76,7 +73,7 @@ def _benchmark_ranking_policy() -> dict[str, Any]:
         "favorite_bonus_policy": {
             "favorite": False,
             "applied": False,
-            "value": DEFAULT_FAVORITE_BONUS,
+            "value": FAVORITE_SPECIAL_LEVEL_BOOST,
             "mode": "disabled_for_golden_manifest",
         },
     }
@@ -89,7 +86,6 @@ def _production_ranking_score(result: Mapping[str, Any]) -> float:
         result,
         _BENCHMARK_RANKING_WEIGHTS,
         favorite=False,
-        favorite_bonus=DEFAULT_FAVORITE_BONUS,
     )
 
 
@@ -668,11 +664,7 @@ class ModelBenchmarkService:
                             model=axis.model,
                             detail="high",
                             stage="single",
-                            max_tokens=(
-                                CAPTION_VARIANTS_TOKEN_CAP
-                                if axis.variants_enabled
-                                else FULL_ANALYSIS_TOKEN_CAP
-                            ),
+                            max_tokens=FULL_ANALYSIS_TOKEN_CAP,
                             caption_controls=(
                                 _caption_controls(axis.variants_enabled)
                                 if axis.prompt_profile == "advanced"

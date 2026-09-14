@@ -2,83 +2,93 @@ from __future__ import annotations
 
 import json
 
-from inktime.app.domain.analysis.schema import (
-    FULL_ANALYSIS_JSON_SCHEMA,
-    json_schema_for_stage,
+from inktime.app.domain.analysis.schema import FULL_ANALYSIS_JSON_SCHEMA, json_schema_for_stage
+from inktime.app.providers.openai_compatible import (
+    ANALYSIS_USER_PROMPT,
+    OpenAICompatibleProvider,
+    analysis_system_prompt,
 )
-from inktime.app.providers.openai_compatible import OpenAICompatibleProvider
 from inktime.app.repositories.settings import SETTING_DEFINITIONS
-from inktime.app.services.analysis import PROMPT_VERSION, PhotoAnalysisService
+from inktime.app.services.analysis import FULL_ANALYSIS_TOKEN_CAP, PROMPT_VERSION, PhotoAnalysisService
 
 
 def _controls(**updates):
     value = {
-        "caption_min_chars": 120,
-        "caption_target_chars": 160,
-        "caption_max_chars": 200,
         "side_caption_min_chars": 8,
-        "side_caption_target_chars": 12,
         "side_caption_max_chars": 16,
-        "copy_default_style": "literary",
-        "copy_humor_level": 1,
-        "copy_poetic_level": 2,
-        "copy_avoid_cliche": True,
-        "copy_avoid_direct_description": True,
-        "copy_forbid_exclamation": True,
-        "copy_forbid_like_phrase": True,
-        "copy_max_commas": 2,
-        "copy_avoid_abstract_ending": True,
-        "copy_banned_words": ["世界"],
-        "copy_banned_patterns": ["模板句"],
-        "copy_custom_rules": "",
-        "caption_variants_enabled": False,
+        "side_caption_custom_rules": "",
     }
     value.update(updates)
     return value
 
 
-def test_caption_feature_defaults_enable_one_literary_caption():
-    assert SETTING_DEFINITIONS["analysis.advanced_caption_enabled"]["default"] is True
-    assert SETTING_DEFINITIONS["analysis.caption_variants_enabled"]["default"] is False
-    assert SETTING_DEFINITIONS["analysis.copy_default_style"]["default"] == "literary"
-    assert SETTING_DEFINITIONS["analysis.copy_poetic_level"]["default"] == 3
-    assert SETTING_DEFINITIONS["render.caption_wrap_enabled"]["default"] is False
-    assert json_schema_for_stage("single_high") == FULL_ANALYSIS_JSON_SCHEMA
-    assert PhotoAnalysisService._prompt_version(None) == PROMPT_VERSION
+def test_only_minimal_side_caption_settings_are_registered():
+    assert SETTING_DEFINITIONS["analysis.side_caption_min_chars"]["default"] == 8
+    assert SETTING_DEFINITIONS["analysis.side_caption_max_chars"]["default"] == 16
+    custom = SETTING_DEFINITIONS["analysis.side_caption_custom_rules"]
+    assert custom["default"] == "" and custom["max_length"] == 1000 and custom["multiline"]
+    removed = {
+        "analysis.advanced_caption_enabled",
+        "analysis.caption_variants_enabled",
+        "analysis.caption_min_chars",
+        "analysis.caption_target_chars",
+        "analysis.caption_max_chars",
+        "analysis.side_caption_target_chars",
+        "analysis.copy_default_style",
+        "analysis.copy_humor_level",
+        "analysis.copy_poetic_level",
+        "analysis.copy_banned_words",
+        "analysis.copy_banned_patterns",
+        "analysis.copy_custom_rules",
+    }
+    assert removed.isdisjoint(SETTING_DEFINITIONS)
 
 
-def test_advanced_schema_and_prompt_keep_legacy_variant_compatibility():
-    controls = _controls(caption_variants_enabled=True)
-    schema = json_schema_for_stage("single_high", caption_controls=controls)
-    assert schema["schema"]["properties"]["caption"]["minLength"] == 100
-    assert "details" not in schema["schema"]["properties"]
-    prompt = OpenAICompatibleProvider(
-        name="test", base_url="https://example.invalid", api_key="", caption_controls=controls
-    ).system_prompt
-    assert "繁體中文" in prompt and "嚴禁簡體字" in prompt
-    assert "世界" in prompt
+def test_empty_custom_rule_adds_no_prompt_section_and_nonempty_adds_one_line():
+    base = analysis_system_prompt("評分參考", _controls())
+    custom = analysis_system_prompt(
+        "評分參考", _controls(side_caption_custom_rules="避開雙關語\n保持口語")
+    )
+    assert "side_caption 自訂規則" not in base
+    assert custom == base + "\n\nside_caption 自訂規則：避開雙關語 保持口語"
 
 
-def test_single_caption_prompt_is_literary_compact_and_omits_empty_fields(tmp_path):
-    controls = _controls(copy_banned_words=[], copy_banned_patterns=[], copy_custom_rules="")
+def test_compact_prompt_and_schema_have_no_advanced_caption_contract(tmp_path):
+    controls = _controls()
     provider = OpenAICompatibleProvider(
         name="test", base_url="https://example.invalid", api_key="", caption_controls=controls
     )
     prompt = provider.system_prompt
-    assert "不需要為了湊字數" in prompt
-    assert "不可確認內容" in prompt
-    assert "不虛構" in prompt
-    assert "句意必須完整" in prompt
-    assert "不留下半截比喻" in prompt
-    assert "欄杆負責認真，我們負責等" in prompt
-    assert "不照抄內容" in prompt
-    assert "禁止詞：無" not in prompt
-    assert "禁止句型：無" not in prompt
-    assert "自訂規則：無" not in prompt
-    assert "不要求多風格候選" not in prompt
-    assert "caption_variants" not in json.dumps(
-        json_schema_for_stage("single", caption_controls=controls), ensure_ascii=False
-    )
+    assert "輕微冷幽默" in prompt
+    assert "不要描述畫面" in prompt
+    assert "完整一句" in prompt
+    for removed in (
+        "caption target",
+        "copy_humor_level",
+        "copy_poetic_level",
+        "special_codes",
+        "people_count",
+        "subject_position",
+        "text_safe_area",
+        "文案語感示例",
+    ):
+        assert removed not in prompt
+    assert len(prompt) < 1600
+    assert FULL_ANALYSIS_TOKEN_CAP == 512
+    assert PhotoAnalysisService._prompt_version(None) == PROMPT_VERSION
+
+    schema = json_schema_for_stage("single", caption_controls=controls)
+    assert schema == FULL_ANALYSIS_JSON_SCHEMA
+    assert set(schema["schema"]["properties"]) == {
+        "schema_version",
+        "types",
+        "memory_score",
+        "visual_score",
+        "special_level",
+        "side_caption",
+        "content_filter",
+        "visual_orientation",
+    }
 
     image = tmp_path / "thumbnail.jpg"
     image.write_bytes(b"thumbnail")
@@ -89,41 +99,22 @@ def test_single_caption_prompt_is_literary_compact_and_omits_empty_fields(tmp_pa
         stage="single",
         reasoning_effort="none",
     )
-    assert body["messages"][1]["content"][0]["text"] == "分析這張照片。"
+    user_content = body["messages"][1]["content"]
+    assert user_content[0] == {"type": "text", "text": ANALYSIS_USER_PROMPT}
+    assert len([item for item in user_content if item["type"] == "image_url"]) == 1
     assert provider.last_request_metrics["prompt_chars"] == len(prompt)
-    # The two short literary examples add bounded input; output limits are unchanged.
-    assert provider.last_request_metrics["prompt_chars"] < 2400
-    assert provider.last_request_metrics["schema_chars"] <= 6634
+    assert provider.last_request_metrics["prompt_chars"] < 1600
+    assert "caption" not in json.dumps(schema, ensure_ascii=False).replace("side_caption", "")
+    provider.close()
 
 
-def test_legacy_caption_limits_are_normalized_before_schema_generation():
-    controls = _controls(
-        caption_max_chars=220,
-        side_caption_min_chars=7,
-        side_caption_target_chars=20,
-        side_caption_max_chars=42,
+def test_side_caption_bounds_are_clamped_to_eight_through_sixteen():
+    schema = json_schema_for_stage(
+        "single",
+        caption_controls=_controls(side_caption_min_chars=0, side_caption_max_chars=200),
     )
-    schema = json_schema_for_stage("single", caption_controls=controls)
-    properties = schema["schema"]["properties"]
-    assert properties["caption"]["maxLength"] == 100
-    assert properties["side_caption"] == {
+    assert schema["schema"]["properties"]["side_caption"] == {
         "type": "string",
         "minLength": 8,
         "maxLength": 16,
     }
-
-
-def test_caption_settings_change_cache_fingerprint_and_legacy_variant_fallback():
-    controls = _controls()
-    assert PhotoAnalysisService._prompt_version(controls) != PhotoAnalysisService._prompt_version(
-        _controls(copy_poetic_level=1)
-    )
-    assert PhotoAnalysisService._prompt_version(controls) != PhotoAnalysisService._prompt_version(
-        _controls(copy_default_style="natural")
-    )
-    result = {"side_caption": "既有短句", "details": {"caption_variants": {"natural": "自然短句"}}}
-    selected = PhotoAnalysisService._apply_caption_variant(
-        result,
-        _controls(copy_default_style="literary", caption_variants_enabled=True),
-    )
-    assert selected["side_caption"] == "既有短句"

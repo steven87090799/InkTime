@@ -20,7 +20,7 @@ def historical_model_sql(alias: str = "a") -> str:
 def display_analysis_order_sql(alias: str = "a") -> str:
     """Show current model results, then model history, then local evidence."""
     return (
-        f"CASE WHEN {alias}.schema_version=4 AND {alias}.score_kind='semantic' THEN 0 "
+        f"CASE WHEN {alias}.schema_version IN (4,5) AND {alias}.score_kind='semantic' THEN 0 "
         f"WHEN {historical_model_sql(alias)} THEN 1 "
         f"WHEN {alias}.score_kind='local_quality' THEN 2 ELSE 3 END,"
         f"{alias}.created_at DESC,{alias}.id DESC"

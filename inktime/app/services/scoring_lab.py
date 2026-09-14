@@ -317,7 +317,6 @@ class ScoringLabService:
                 result,
                 weights,
                 favorite=False,
-                favorite_bonus=float(profile["favorite_bonus"]),
             ),
             "profile": {"id": profile["id"], "name": profile["name"]},
             "usage": {

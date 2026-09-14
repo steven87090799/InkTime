@@ -23,7 +23,12 @@ from inktime.app.domain.analysis.scoring import (
     resolve_score_kind,
 )
 from inktime.app.domain.analysis.content_filter import CONTENT_FILTER_DEFAULTS, evaluate_content_filter
-from inktime.app.domain.analysis.schema import REQUIRED_FIELDS, validate_analysis_result
+from inktime.app.domain.analysis.schema import (
+    ANALYSIS_JSON_SCHEMA,
+    LEGACY_V4_JSON_SCHEMA,
+    SUPPORTED_ANALYSIS_SCHEMA_VERSIONS,
+    validate_analysis_result,
+)
 from inktime.app.domain.photos.preprocessing import LocalPhotoFeatures
 from inktime.app.domain.photos.quality_policy import (
     FEATURE_VERSION,
@@ -1116,7 +1121,7 @@ class PhotoRepository:
                 JOIN photos source ON source.sha256=target.sha256 AND source.id<>target.id
                 JOIN photo_analysis a ON a.photo_id=source.id
                 WHERE target.id=?
-                  AND a.schema_version=4
+                  AND a.schema_version IN (4,5)
                   AND (?='' OR a.analysis_fingerprint=? OR ?)
                 ORDER BY {preferred_analysis_order_sql('a')}
                 """,
@@ -1136,7 +1141,7 @@ class PhotoRepository:
                     continue
         if row is None:
             return None
-        if row["schema_version"] != 4:
+        if row["schema_version"] not in SUPPORTED_ANALYSIS_SCHEMA_VERSIONS:
             return None
         source_kind = resolve_score_kind(
             row["score_kind"] if "score_kind" in row.keys() else None,
@@ -1338,7 +1343,7 @@ class PhotoRepository:
                     if reapply_rules and exclusion is None:
                         analysis = connection.execute(
                             "SELECT content_filter_json FROM photo_analysis "
-                            "WHERE photo_id=? AND schema_version=4 AND score_kind=? "
+                            "WHERE photo_id=? AND schema_version IN (4,5) AND score_kind=? "
                             "ORDER BY created_at DESC,id DESC LIMIT 1",
                             (photo_id, SEMANTIC_SCORE_KIND),
                         ).fetchone()
@@ -1586,7 +1591,7 @@ class PhotoRepository:
         query = f"""SELECT p.id FROM photos p WHERE {where}
             ORDER BY EXISTS(
                 SELECT 1 FROM photo_analysis a WHERE a.photo_id=p.id
-                AND a.schema_version=4 AND a.score_kind='semantic'
+                AND a.schema_version IN (4,5) AND a.score_kind='semantic'
                 AND a.ranking_score IS NOT NULL
             ),p.captured_at DESC,p.id"""  # noqa: S608 -- fixed internal predicate
         params: tuple = () if limit is None else (max(1, min(int(limit), 100_000)),)
@@ -2073,9 +2078,9 @@ class PhotoRepository:
         clauses = ["1=1"]
         parameters: list = []
         if query:
-            clauses.append("(p.relative_path LIKE ? ESCAPE '\\' OR a.caption LIKE ? ESCAPE '\\')")
+            clauses.append("p.relative_path LIKE ? ESCAPE '\\'")
             escaped = "%" + query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
-            parameters.extend([escaped, escaped])
+            parameters.append(escaped)
         if status:
             clauses.append("p.status=?")
             parameters.append(status)
@@ -2083,7 +2088,7 @@ class PhotoRepository:
             clauses.append("a.types_json LIKE ?")
             parameters.append(f'%"{photo_type}"%')
         if minimum_score is not None:
-            clauses.append("a.schema_version=4 AND a.score_kind=? AND a.memory_score>=?")
+            clauses.append("a.schema_version IN (4,5) AND a.score_kind=? AND a.memory_score>=?")
             parameters.append(SEMANTIC_SCORE_KIND)
             parameters.append(minimum_score)
         if duplicate_only:
@@ -2116,7 +2121,7 @@ class PhotoRepository:
         return rows, total
 
     def score_population(self, library_id: str | None = None) -> list[float]:
-        """Pure read of active, eligible Vision v4 semantic scores for one library."""
+        """Pure read of active, eligible Vision v4/v5 semantic scores for one library."""
         global _SCORE_POPULATION_CACHE
         cache_key = f"{self.database.path}:{library_id or 'all'}"
         now = time.monotonic()
@@ -2134,7 +2139,7 @@ class PhotoRepository:
                     FROM photo_analysis a
                     JOIN photos p ON p.id=a.photo_id
                     JOIN libraries l ON l.id=p.library_id
-                    WHERE a.ranking_score IS NOT NULL AND a.schema_version=4
+                    WHERE a.ranking_score IS NOT NULL AND a.schema_version IN (4,5)
                       AND a.score_kind=?
                       AND p.eligible=1 AND p.exclusion_status NOT IN ('auto_excluded','manually_excluded')
                       AND p.lifecycle_status='active' AND l.enabled=1
@@ -2228,7 +2233,7 @@ class PhotoRepository:
     def _refresh_library_ranking(connection, library_id: str) -> None:
         """Recompute current semantic rows with the AI-first ranking contract."""
         peers = """SELECT a.*,p.favorite FROM photos p
-            JOIN photo_analysis a ON a.id=(SELECT id FROM photo_analysis WHERE photo_id=p.id AND schema_version=4 AND score_kind=? ORDER BY created_at DESC,id DESC LIMIT 1)
+            JOIN photo_analysis a ON a.id=(SELECT id FROM photo_analysis WHERE photo_id=p.id AND schema_version IN (4,5) AND score_kind=? ORDER BY created_at DESC,id DESC LIMIT 1)
             WHERE p.library_id=? AND p.eligible=1 AND p.lifecycle_status='active'
               AND p.exclusion_status NOT IN ('auto_excluded','manually_excluded')"""
         cursor = connection.execute(peers, (SEMANTIC_SCORE_KIND, library_id))
@@ -2260,7 +2265,7 @@ class PhotoRepository:
     def _refresh_favorite_ranking(connection, photo_id: str) -> None:
         row = connection.execute(
             "SELECT a.*,p.favorite FROM photo_analysis a JOIN photos p ON p.id=a.photo_id "
-            "WHERE a.photo_id=? AND a.schema_version=4 AND a.score_kind=? "
+            "WHERE a.photo_id=? AND a.schema_version IN (4,5) AND a.score_kind=? "
             "ORDER BY a.created_at DESC,a.id DESC LIMIT 1",
             (photo_id, SEMANTIC_SCORE_KIND),
         ).fetchone()
@@ -2354,7 +2359,14 @@ class PhotoRepository:
                         # rather than inventing a non-existent system account.
                         (photo_id, event, json.dumps(changes, ensure_ascii=False), None, now),
                     )
-                canonical = validate_analysis_result({key: result[key] for key in REQUIRED_FIELDS})
+                result_version = result.get("schema_version")
+                result_schema = (
+                    LEGACY_V4_JSON_SCHEMA
+                    if result_version == 4
+                    else ANALYSIS_JSON_SCHEMA
+                )
+                result_fields = set(result_schema["schema"]["required"])
+                canonical = validate_analysis_result({key: result[key] for key in result_fields})
                 current = dict(connection.execute("SELECT * FROM photos WHERE id=?", (photo_id,)).fetchone())
                 content_evaluation = evaluate_content_filter(canonical["content_filter"], self._content_settings(connection))
                 protected = bool(current["manual_override"]) or current["exclusion_status"] in {"manually_restored", "manually_excluded"}
@@ -2408,13 +2420,15 @@ class PhotoRepository:
                         {
                             key: canonical[key]
                             for key in (
+                                "special_level",
+                                "content_filter",
+                                "visual_orientation",
                                 "people_count",
                                 "subject_position",
                                 "text_safe_area",
-                                "special_level",
                                 "special_codes",
-                                "content_filter",
                             )
+                            if key in canonical
                         }
                         if semantic_available
                         else {}
@@ -2422,13 +2436,15 @@ class PhotoRepository:
                     **({"inherited_from": inherited_from} if inherited_from else {}),
                 }
                 record = {
-                    "photo_id": photo_id, "job_id": job_id, "schema_version": 4,
+                    "photo_id": photo_id, "job_id": job_id,
+                    "schema_version": canonical["schema_version"],
                     "stage": stage, "provider": provider, "model": model,
-                    "caption": canonical["caption"], "types_json": json.dumps(canonical["types"], ensure_ascii=False),
+                    "caption": canonical.get("caption"), "types_json": json.dumps(canonical["types"], ensure_ascii=False),
                     "memory_score": canonical["memory_score"] if semantic_available else None,
                     "visual_score": canonical["visual_score"] if semantic_available else None,
                     "local_quality_score": quality, "special_level": canonical["special_level"],
-                    "special_codes_json": json.dumps(canonical["special_codes"]), "people_count": canonical["people_count"],
+                    "special_codes_json": json.dumps(canonical.get("special_codes", [])),
+                    "people_count": canonical.get("people_count", 0),
                     "content_filter_json": json.dumps(canonical["content_filter"]),
                     "effective_special_level": result["effective_special_level"],
                     "library_rarity_adjustment": rarity,

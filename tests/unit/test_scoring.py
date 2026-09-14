@@ -31,7 +31,7 @@ WEIGHTS = {
 
 def test_ranking_score_preserves_components_and_applies_favorite_bonus():
     assert calculate_ranking_score(SCORES, WEIGHTS) == 76.7
-    assert calculate_ranking_score(SCORES, WEIGHTS, favorite=True, favorite_bonus=5) == 78.7
+    assert calculate_ranking_score(SCORES, WEIGHTS, favorite=True) == 78.7
 
 
 def test_ranking_weights_must_total_one_hundred():

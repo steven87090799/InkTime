@@ -4,7 +4,7 @@ from typing import Mapping
 
 
 DEFAULT_RANKING_WEIGHTS = {"memory": 67.0, "visual": 33.0, "local_quality": 0.0}
-DEFAULT_FAVORITE_BONUS = 1
+FAVORITE_SPECIAL_LEVEL_BOOST = 1
 RANKING_RULE_VERSION = "ranking-v5-ai-first"
 SPECIAL_BONUSES = (0, 2, 5, 9, 14)
 
@@ -98,7 +98,11 @@ def ranking_components(analysis: Mapping, *, favorite: bool = False) -> dict:
         + float(analysis["visual_score"]) * 0.33
     )
     base = round(base, 2)
-    effective = max(0, min(4, int(analysis["special_level"]) + int(favorite)))
+    special_level = max(0, int(analysis["special_level"]))
+    effective = min(
+        4,
+        special_level + (FAVORITE_SPECIAL_LEVEL_BOOST if favorite else 0),
+    )
     raw = round(max(0.0, min(100.0, base + SPECIAL_BONUSES[effective])), 2)
     return {
         "base_ranking_score": round(base, 2),
@@ -117,7 +121,6 @@ def calculate_ranking_score(
     weights: Mapping[str, float] | None = None,
     *,
     favorite: bool = False,
-    favorite_bonus: float = DEFAULT_FAVORITE_BONUS,
 ) -> float:
     if weights is not None:
         validate_ranking_weights(weights)
@@ -129,7 +132,7 @@ memory 評一般情況下值得回看的程度：人物、互動、活動、日�
 visual 只評構圖、光線、主體突出、色彩明暗、平衡及整體吸引力；女性、男性、孩子、寵物或旅行題材本身不加分。模糊、曝光、解析度與技術品質由本機計算。
 special_level：0 普通；1 稍有特色；2 明確活動、合照、旅行紀錄或難得互動；3 重要典禮、舞台、大型合照或難重現事件；4 極罕見人生里程碑或無法重現的重要紀錄。非常保守使用 3、4，只填 level，不輸出 bonus。
 special_codes 最多 2 個。group_photo 必須整群人為主體、共同面向鏡頭或明顯共同合影；夜市、觀眾、車站及街道人潮不算合照。people_count 只依可見人數。不宣稱照片在使用者照片庫少見，library rarity 由本機判定。"""
-DEFAULT_SCORING_RULES = """memory_score：普通照片約 40～60，使用完整範圍。依人物、互動、活動、日常紀錄與故事資訊量判斷一般回看價值。
+DEFAULT_SCORING_RULES = """memory_score：普通照片約 40～60，使用完整範圍。評一般回看價值，不是私人回憶重要程度；依人物、互動、活動、日常紀錄與故事資訊量判斷。
 visual_score：普通照片約 40～60。依構圖、光線、主體突出、色彩明暗、平衡及整體吸引力評分；女性、男性、孩子、寵物或旅行題材本身不加分。
 special_level 參考：0 普通；1 稍有特色；2 明確活動、合照、旅行紀錄或難得互動；3 重要典禮、舞台、大型合照或難重現事件；4 極罕見人生里程碑或無法重現的重要紀錄。非常保守使用 3、4。"""
 DISTINCTIVE_SCORING_RULES = DEFAULT_SCORING_RULES

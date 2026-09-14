@@ -36,7 +36,7 @@ from inktime.app.domain.analysis import (
 from inktime.app.domain.analysis.plan import SCHEMA_VERSION, provider_prompt_contract_sha256
 from inktime.app.domain.analysis.schema import validate_model_response
 from inktime.app.domain.photos.quality_policy import is_confirmed_screenshot
-from inktime.app.services.analysis import CAPTION_VARIANTS_TOKEN_CAP, FULL_ANALYSIS_TOKEN_CAP
+from inktime.app.services.analysis import FULL_ANALYSIS_TOKEN_CAP
 from inktime.app.providers.base import Usage
 from inktime.app.providers.openai_compatible import calculate_usage_cost
 from inktime.app.repositories.analysis_reservations import (
@@ -788,19 +788,9 @@ class BatchAnalysisService:
     def _line_factory(self, provider, plan: dict[str, Any]) -> Callable[[dict[str, Any]], bytes]:
         global_cap = int(self.settings.get("budget.max_tokens", 8000))
         requested_cap = int(
-            self.settings.get(
-                "budget.caption_variants_max_tokens"
-                if (plan.get("caption_controls") or {}).get("caption_variants_enabled")
-                else "budget.full_analysis_max_tokens",
-                3072 if (plan.get("caption_controls") or {}).get("caption_variants_enabled") else 2048,
-            )
+            self.settings.get("budget.full_analysis_max_tokens", FULL_ANALYSIS_TOKEN_CAP)
         )
-        hard_cap = (
-            CAPTION_VARIANTS_TOKEN_CAP
-            if (plan.get("caption_controls") or {}).get("caption_variants_enabled")
-            else FULL_ANALYSIS_TOKEN_CAP
-        )
-        max_tokens = max(256, min(global_cap, requested_cap, hard_cap))
+        max_tokens = max(256, min(global_cap, requested_cap, FULL_ANALYSIS_TOKEN_CAP))
 
         def make_line(item: dict[str, Any]) -> bytes:
             body = provider.build_analysis_request_body(
@@ -2192,10 +2182,6 @@ class BatchAnalysisService:
                 item, "schema_invalid", str(exc), "schema_invalid", job_id=str(batch["job_id"])
             )
             return "schema_invalid"
-        caption_controls = dict(plan.get("caption_controls") or {})
-        caption_controls.update(dict(plan.get("caption_display_controls") or {}))
-        result = self.analysis._apply_caption_variant(result, caption_controls or None)
-        weights = dict(plan.get("ranking_weights") or {})
         estimated_cost = provider.estimate_batch_cost(str(batch["model"]), usage)
         actual_cost = usage.provider_reported_cost
         cost_source = "provider_reported" if actual_cost is not None else "estimated" if estimated_cost is not None else "unknown"
@@ -2222,8 +2208,6 @@ class BatchAnalysisService:
                 result=result,
                 raw=raw_content,
                 photo=photo,
-                ranking_weights=weights,
-                favorite_bonus=float(plan.get("favorite_bonus", 0)),
                 scoring_version_id=str(plan.get("scoring_profile_id") or "") or None,
                 schema_kind="full",
                 prompt_version=str(plan["prompt_version"]),
