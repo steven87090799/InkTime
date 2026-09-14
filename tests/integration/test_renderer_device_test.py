@@ -459,7 +459,6 @@ def test_preview_fingerprint_tracks_all_render_versions(app, tmp_path, monkeypat
     primary = _library_photo(app, tmp_path / "fingerprint", "fingerprint-primary")
     secondary = _library_photo(app, tmp_path / "fingerprint", "fingerprint-secondary")
     service = app.extensions["inktime_render_service"]
-    settings = app.extensions["inktime_settings_repository"]
 
     def key(**kwargs):
         return app.extensions["inktime_render_cache"].fingerprint(
@@ -475,10 +474,10 @@ def test_preview_fingerprint_tracks_all_render_versions(app, tmp_path, monkeypat
     caption_changed = key()
     assert caption_changed != baseline
 
-    settings.update("analysis.advanced_caption_enabled", True, changed_by="test", source_ip="local")
-    settings.update("analysis.copy_default_style", "warm", changed_by="test", source_ip="local")
+    # Side-caption generation settings change analysis prompts, not an
+    # already-rendered caption; render cache identity follows actual output.
     style_changed = key()
-    assert style_changed != caption_changed
+    assert style_changed == caption_changed
 
     with app.extensions["inktime_database"].session() as connection:
         connection.execute(

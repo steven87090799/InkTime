@@ -193,8 +193,7 @@ def test_caption_and_observability_settings_coexist_and_caption_events_are_redac
     response = client.post(
         "/api/v1/settings",
         json={
-            "analysis.caption_min_chars": 11,
-            "analysis.advanced_caption_enabled": True,
+            "analysis.side_caption_min_chars": 11,
             "observability.debug_enabled": True,
         },
         headers={
@@ -203,7 +202,7 @@ def test_caption_and_observability_settings_coexist_and_caption_events_are_redac
         },
     )
     assert response.status_code == 200
-    assert settings.get("analysis.caption_min_chars") == 11
+    assert settings.get("analysis.side_caption_min_chars") == 11
     assert analysis._prompt_version(analysis._caption_controls()) != before
     fingerprint = analysis._prompt_version(analysis._caption_controls())
     settings.update("observability.stuck_job_minutes", 6, changed_by="test", source_ip="test")

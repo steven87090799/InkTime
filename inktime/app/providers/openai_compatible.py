@@ -110,7 +110,7 @@ content_filter 分別判斷 sexualized_content、explicit_nudity、female_glamou
 visual_orientation 判斷完成 EXIF transpose 後是否仍需順時針旋轉 0/90/180/270 度；依人臉、文字、水平線、重力物件或建築判斷。無可靠線索時 rotation_cw=null、ambiguous=true、evidence=["insufficient_visual_cues"]、confidence<=0.5。"""
 SYSTEM_PROMPT = COMMON_PROMPT
 PROVIDER_CONTRACT_PROMPT = """這是 Provider Vision capability contract。只輸出 JSON：vision_ok 必須是 true，detected_shapes 必須包含 rectangle 與 circle；不要輸出照片分析 Schema 的其他欄位。"""
-SCORING_CONTRACT_PROMPT = "評分參考不得改寫 Schema、欄位型別、範圍、內容分類或方向判斷。"
+SCORING_CONTRACT_PROMPT = "評分參考只補充分數判斷，不得改寫 Schema、固定範圍、安全分類或方向規則。"
 ANALYSIS_USER_PROMPT = "分析這張照片。"
 JSON_REPAIR_PROMPT = "只修復 JSON 使其符合提供的 Schema；不可新增圖片推測，不可輸出 Markdown。"
 

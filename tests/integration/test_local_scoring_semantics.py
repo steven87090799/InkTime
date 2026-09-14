@@ -73,7 +73,6 @@ def _save_semantic(app, photo_id: str, score: float) -> None:
         memory_score=score,
         visual_score=score,
         special_level=0,
-        special_codes=[],
     )
     app.extensions["inktime_photo_repository"].save_analysis(
         photo_id,
@@ -93,7 +92,7 @@ def _save_semantic(app, photo_id: str, score: float) -> None:
 
 def _save_local(app, photo_id: str, score: float) -> None:
     photos = app.extensions["inktime_photo_repository"]
-    result = valid_result(caption="這是一段本機候選品質測試說明文字。")
+    result = valid_result()
     photos.save_analysis(
         photo_id,
         None,
@@ -299,7 +298,7 @@ def test_semantic_selection_survives_newer_local_history(app, tmp_path):
         "local_fallback",
         "local",
         "local-quality-v3",
-        valid_result(caption="這是一段本機備援結果測試說明文字。"),
+        valid_result(),
         "{}",
         score_kind=LOCAL_QUALITY_SCORE_KIND,
         ranking_score=55,
@@ -470,7 +469,7 @@ def test_semantic_detail_explains_model_rank_and_local_gate(client, app, tmp_pat
     assert "AI 選片分" in body
     assert "暫用原始分" not in body
     assert "排序組成" in body
-    assert "回憶 78" in body
+    assert "一般回看價值 78" in body
     assert "視覺 78" in body
     assert "本機品質參考分 78" in body
     assert "內容過濾檢查" in body
@@ -511,7 +510,7 @@ def test_preserved_model_history_survives_newer_local_rows_in_browse_and_search(
     repo = app.extensions["inktime_photo_repository"]
     with repo.database.session() as connection:
         before = [dict(row) for row in connection.execute("SELECT * FROM photo_analysis ORDER BY id")]
-    rows, count = repo.search(query="舊模型保存", photo_type="家庭", limit=1)
+    rows, count = repo.search(query="history-", photo_type="家庭", limit=1)
     assert count == 2 and len(rows) == 1
     assert rows[0]["is_historical_model"] == 1
     assert rows[0]["score_kind"] == "legacy"
@@ -520,7 +519,7 @@ def test_preserved_model_history_survives_newer_local_rows_in_browse_and_search(
     assert repo.score_population() == []
     create_admin(app)
     login(client)
-    listing = client.get("/photos?q=舊模型保存").get_data(as_text=True)
+    listing = client.get("/photos?q=history-").get_data(as_text=True)
     assert listing.count("歷史模型判斷 · Schema 3") == 2
     assert "海風吹來一家人的笑聲" in listing
     for stage in ("single", "inherited"):
@@ -529,10 +528,10 @@ def test_preserved_model_history_survives_newer_local_rows_in_browse_and_search(
         assert "舊模型保存的海邊家庭回憶。" in detail
         assert "歷史模型原始分數" in detail
         assert "美觀 81" in detail
-        assert "現行 v4 排名需重新分析" in detail
+        assert "現行 v5 排名需重新分析" in detail
     dashboard = client.get("/dashboard").get_data(as_text=True)
     assert "已完成分析（含本機）" in dashboard
-    assert "現行 v4 0／歷史 2" in dashboard
+    assert "有效 v4/v5 0／歷史 2" in dashboard
     with repo.database.session() as connection:
         after = [dict(row) for row in connection.execute("SELECT * FROM photo_analysis ORDER BY id")]
     assert before == after
@@ -563,7 +562,7 @@ def test_current_model_precedes_history_and_model_counts_do_not_include_local(
     create_admin(app)
     login(client)
     dashboard = client.get("/dashboard").get_data(as_text=True)
-    assert "現行 v4 1／歷史 0" in dashboard
+    assert "有效 v4/v5 1／歷史 0" in dashboard
 
 
 @pytest.mark.parametrize("status", ["pending", "failed", "complete"])

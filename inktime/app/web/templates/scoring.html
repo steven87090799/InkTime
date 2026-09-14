@@ -47,7 +47,7 @@
 <section class="panel" id="ranking-formula">
   <div class="panel-head"><div><p class="eyebrow">伺服器計算 · 已鎖定</p><h2>分數怎麼算</h2><p>模型提供語意分數，程式負責合成、加分與排除。修改評分參考不會修改這些公式。</p></div></div>
   <div class="prompt-formula-grid">
-    <article><strong>回憶 {{ prompt_preview.weights.memory|int }}%</strong><p>AI 回傳 memory_score，依上方評分參考判斷一般回看價值。</p></article>
+    <article><strong>一般回看價值 {{ prompt_preview.weights.memory|int }}%</strong><p>AI 回傳 memory_score，依上方評分參考判斷一般照片的回看價值，不代表私人回憶重要性。</p></article>
     <article><strong>視覺 {{ prompt_preview.weights.visual|int }}%</strong><p>AI 回傳 visual_score，判斷構圖、光線與畫面吸引力。</p></article>
     <article><strong>本機品質：通過或排除</strong><p>先完成清晰度、曝光、解析度等技術品質檢查；通過後不加入排序。</p></article>
   </div>
@@ -147,7 +147,7 @@
         return node;
       };
       const cards = element('div', '', 'score-cards');
-      [['AI 選片分', data.ranking_score], ['AI 回憶（67%）', analysis.memory_score], ['AI 視覺（33%）', analysis.visual_score], ['本機品質（僅門檻）', analysis.local_quality_score]].forEach(([label, value]) => {
+      [['AI 選片分', data.ranking_score], ['一般回看價值（67%）', analysis.memory_score], ['AI 視覺（33%）', analysis.visual_score], ['本機品質（僅門檻）', analysis.local_quality_score]].forEach(([label, value]) => {
         const card = document.createElement('article');
         card.append(element('span', label), element('strong', String(value)));
         cards.append(card);

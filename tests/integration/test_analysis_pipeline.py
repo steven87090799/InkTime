@@ -340,6 +340,12 @@ def test_legacy_v4_analysis_remains_readable_without_model_call(app, tmp_path):
         ids[0], None, "single", "legacy-provider", "legacy-model", legacy,
         json.dumps(legacy, ensure_ascii=False), score_kind="semantic",
     )
+    # This analysis-persistence compatibility test is independent of the
+    # scanner's local-quality gate; make the fixture publish-eligible.
+    with app.extensions["inktime_database"].session() as connection:
+        connection.execute(
+            "UPDATE photos SET eligible=1,exclusion_status='eligible' WHERE id=?", (ids[0],)
+        )
     with app.extensions["inktime_database"].session() as connection:
         row = connection.execute(
             "SELECT schema_version,side_caption,raw_json FROM photo_analysis WHERE photo_id=?",
@@ -431,7 +437,7 @@ def test_spawned_consumed_vision_timeout_is_terminal_and_billed_once(app, tmp_pa
     job_id = _test_job(app, "consumed vision timeout")
     budgets = service.budgets
     try:
-        with pytest.raises(AnalysisValidationError) as raised:
+        with pytest.raises(TimeoutError) as raised:
             service.analyze_photo(
                 photo_id=photo_id,
                 job_id=job_id,
@@ -440,7 +446,7 @@ def test_spawned_consumed_vision_timeout_is_terminal_and_billed_once(app, tmp_pa
                 high_model="test-model",
                 force_ai=True,
             )
-        assert raised.value.code == "VLM-004"
+        assert raised.value.code == "VLM-AMBIGUOUS"
         assert classify_failure(raised.value) == FailureClass.TERMINAL_NO_RETRY
         assert state.vision_requests == 1
         assert state.repair_requests == 0
@@ -627,7 +633,7 @@ def test_spawned_vision_capacity_timeout_is_pre_execution_and_retryable(app, tmp
         server.server_close()
 
 
-def test_spawned_consumed_repair_timeout_records_repair_unknown_without_second_vision(
+def test_invalid_json_fails_without_llm_repair_or_second_vision(
     app, tmp_path
 ):
     server, state = _start_boundary_server("invalid_then_repair_timeout")
@@ -636,7 +642,7 @@ def test_spawned_consumed_repair_timeout_records_repair_unknown_without_second_v
     photo_id, service = _isolated_service(app, tmp_path, boundary)
     job_id = _test_job(app, "consumed repair timeout")
     try:
-        with pytest.raises(TimeoutError) as raised:
+        with pytest.raises(AnalysisValidationError) as raised:
             service.analyze_photo(
                 photo_id=photo_id,
                 job_id=job_id,
@@ -645,8 +651,7 @@ def test_spawned_consumed_repair_timeout_records_repair_unknown_without_second_v
                 high_model="test-model",
                 force_ai=True,
             )
-        assert raised.value.code == "VLM-AMBIGUOUS"
-        assert raised.value.ambiguous is True
+        assert raised.value.code == "VLM-004"
         assert classify_failure(raised.value) == FailureClass.TERMINAL_NO_RETRY
         assert state.vision_requests == 1
         assert state.repair_requests == 0

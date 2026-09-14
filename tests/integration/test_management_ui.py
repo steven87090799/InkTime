@@ -789,7 +789,7 @@ def test_scoring_rules_create_a_new_locked_weight_version(client, app):
     login(client)
     page = client.get("/scoring").get_data(as_text=True)
     assert 'textarea name="rules"' in page
-    assert "memory_score、visual_score 各為 0～100 數字" in page
+    assert "memory_score：普通照片約 40～60" in page
 
     current = app.extensions["inktime_scoring_repository"].current()
     custom_rules = str(current["rules"]) + "\n- 家庭合照再額外提高回憶價值。"
@@ -1169,11 +1169,10 @@ def test_model_analysis_stays_preferred_after_newer_local_fallback(client, app):
     listing = client.get("/photos").get_data(as_text=True)
     detail = client.get(f"/photos/{photo_id}").get_data(as_text=True)
 
-    assert "完整模型判斷" in listing
-    assert "模型短句" in listing
-    assert "只有本機特徵" not in listing
+    assert "模型短句保留完整內容" in listing
+    assert "本機特徵尚未模型分析" not in listing
     assert "優先顯示 · AI 模型判斷 · Vision 模型分析" in detail
-    assert detail.index("完整模型判斷") < detail.index("只有本機特徵")
+    assert detail.index("模型短句保留完整內容") < detail.index("本機特徵尚未模型分析")
 
 
 def test_ai_trace_page_explains_that_only_real_provider_calls_are_listed(client, app):
