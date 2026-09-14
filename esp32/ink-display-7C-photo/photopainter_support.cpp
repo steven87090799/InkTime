@@ -888,9 +888,12 @@ bool PhotoPainterSupport::begin() {
       && Wire.begin(board_.i2c.sda, board_.i2c.scl, board_.i2c.clockHz)) {
     Wire.setTimeOut(kI2cTimeoutMs);
     const bool pmicReady = impl_->power.begin();
-    // Audio is unused in InkTime. Shut down its dedicated ALDO3 once at boot,
-    // never in the sleep transition. Preserve ALDO4 and the main 3V3 rail.
-    const bool audioReady = !pmicReady || impl_->power.powerDownUnusedAudio();
+    // Keep ALDO3 / Audio_VCC powered. On Rev2.0 hardware, disabling this rail
+    // can leave an unpowered audio device clamping the shared SDA/SCL bus; the
+    // next TG28 REG95 read then fails before EPD power can be prepared. The PA
+    // remains disabled on GPIO7, so this restores the previously safe rail
+    // state without enabling audio output or changing ALDO4.
+    const bool audioReady = true;
     if (audioReady) {
       shtc3Ready_ = impl_->sensor.begin();
       rtcReady_ = impl_->rtc.begin();

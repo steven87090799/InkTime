@@ -57,14 +57,17 @@ write allowlist, the recoverable full-flash backup boundary, and the distinction
 between Hosted CI and physical panel acceptance. Do not repeat destructive or
 broad PMIC experiments when the handoff already contains an A/B result.
 
-## Authorized unused-audio power change (2026-09-06)
+## PhotoPainter ALDO3 hard prohibition (2026-09-14)
 
-The user explicitly requested disabling unused microphone/audio power. The
-current Rev2.0 schematic confirms **ALDO3 (UP1 pin 16) -> Audio_VCC**, while
-ALDO2 (pin 19) is unconnected; older handoff text naming ALDO2 was incorrect.
-The additional narrow allowlist is clearing **REG90[2] only**, at startup after
-PA LOW, with full-byte readback. Preserve all other bits and retain the existing
-ALDO4 EPD contract. Do not expand this authorization to other PMIC rails, sleep,
-IRQ, charging, or shutdown registers. The SD card is directly on VCC3V3 and has
-no independent power gate. See the current PhotoPainter guide for source links,
-software evidence, and the outstanding physical acceptance checks.
+**Never disable TG28 ALDO3 / Audio_VCC (`REG90[2]`) on PhotoPainter Rev2.0.**
+Physical cold-boot testing proved that powering down the codecs can clamp the
+shared SDA/SCL bus; the next TG28 REG95 read then fails and the EPD cannot
+refresh. Keep ALDO3 powered, keep the audio PA disabled with GPIO7 LOW, and keep
+I2S pins uninitialized/input. Any future proposal to change this rule requires
+separate hardware isolation, schematic review, and explicit cold-boot I2C/panel
+acceptance; a compile, simulator, or warm reset is insufficient. The source
+contract test intentionally fails if boot calls `powerDownUnusedAudio()`.
+
+ALDO2 (pin 19) is unconnected, ALDO4 is the EPD rail, and the SD card is directly
+on VCC3V3 with no independent power gate. Do not expand PMIC writes to other
+rails, sleep, IRQ, charging, or shutdown registers.
