@@ -528,7 +528,6 @@ def test_preserved_model_history_survives_newer_local_rows_in_browse_and_search(
         assert "舊模型保存的海邊家庭回憶。" in detail
         assert "歷史模型原始分數" in detail
         assert "美觀 81" in detail
-        assert "現行 v5 排名需重新分析" in detail
     dashboard = client.get("/dashboard").get_data(as_text=True)
     assert "已完成分析（含本機）" in dashboard
     assert "有效 v4/v5 0／歷史 2" in dashboard

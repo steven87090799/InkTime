@@ -459,6 +459,7 @@ def test_preview_fingerprint_tracks_all_render_versions(app, tmp_path, monkeypat
     primary = _library_photo(app, tmp_path / "fingerprint", "fingerprint-primary")
     secondary = _library_photo(app, tmp_path / "fingerprint", "fingerprint-secondary")
     service = app.extensions["inktime_render_service"]
+    settings = app.extensions["inktime_settings_repository"]
 
     def key(**kwargs):
         return app.extensions["inktime_render_cache"].fingerprint(
