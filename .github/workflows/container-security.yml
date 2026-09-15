@@ -4,7 +4,7 @@ name: InkTime Container Security and Benchmark Contracts
   pull_request:
     branches:
       - main
-    # Ready transitions and base retargets need validation; title/body-only edits use the metadata lane below.
+    # Every PR event must publish the required gates, including title/body edits.
     types: [opened, synchronize, reopened, ready_for_review, labeled, unlabeled, edited]
   push:
     branches:
@@ -23,7 +23,7 @@ name: InkTime Container Security and Benchmark Contracts
         type: string
 
 concurrency:
-  group: inktime-container-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'pull_request' && github.event.action == 'edited' && github.event.changes.base == null && 'metadata-only' || 'validation' }}
+  group: inktime-container-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}-validation
   cancel-in-progress: true
 
 permissions:
@@ -54,7 +54,7 @@ jobs:
       - id: event
         name: Classify workflow event
         env:
-          FULL_VALIDATION: ${{ github.event_name != 'pull_request' || github.event.action != 'edited' || github.event.changes.base != null }}
+          FULL_VALIDATION: "true"
         run: echo "full_validation=${FULL_VALIDATION}" >> "${GITHUB_OUTPUT}"
       # pull_request intentionally retains GitHub's merge-ref checkout for
       # pre-merge compatibility validation; provenance is emitted separately.
@@ -303,7 +303,7 @@ jobs:
           retention-days: 14
 
   container-security-gate:
-    name: ${{ needs.changes.outputs.full_validation == 'true' && 'Container security gate' || 'Container metadata event gate' }}
+    name: Container security gate
     if: ${{ always() }}
     needs:
       - changes
@@ -329,6 +329,3 @@ jobs:
             --plan-json "${PLAN_JSON}" \
             --needs-json "${NEEDS_JSON}" \
             --workflow container
-      - name: Accept metadata-only pull request edit
-        if: ${{ needs.changes.outputs.full_validation != 'true' && needs.changes.result == 'success' }}
-        run: echo "Metadata-only edit classified without creating Container security gate validation evidence."
