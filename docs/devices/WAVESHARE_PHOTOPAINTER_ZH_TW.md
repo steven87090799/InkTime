@@ -155,11 +155,12 @@ Stock 原始碼使用相對秒數 timer，不足以證明支援 InkTime 的任�
   實板曾在清除該 rail 後的 ESP-only reset 觀察到共享 I²C 線持續為 low，完整斷電前
   無法再由 ESP 存取 PMIC，因此不在一般 refresh／deep-sleep 路徑關閉它。任一步失敗
   都不送出電子紙更新命令。
-- 韌體不寫 TG28 的 DCDC、充電、全機 shutdown 或 fast-power-on；除了原有 ALDO4
-  顯示控制，只增加下述 ALDO3 未使用音訊關閉。
+- 韌體不寫 TG28 的 DCDC、充電、全機 shutdown 或 fast-power-on；只保留原有 ALDO4
+  顯示控制，且不再關閉共用音訊裝置使用的 ALDO3。
   status、VBAT 與 fuel-gauge register 僅供遙測，也不作低電壓刷新門檻。
 - 本專案不需要音訊，因此不初始化 ES7210／ES8311；PA GPIO 7 維持 LOW，I²S
-  GPIO14～18 設為 input；確認 TG28 可讀後只清除 `REG90[2]`，關閉 ALDO3／Audio_VCC。
+  GPIO14～18 設為 input。ALDO3／Audio_VCC 維持上電，避免未供電的音訊裝置把共用
+  SDA／SCL 鉗制為 low；這不會啟用功放或音訊輸出。
 
 ## 按鍵、喚醒與網路邊界
 
@@ -272,14 +273,10 @@ Stock 原始碼使用相對秒數 timer，不足以證明支援 InkTime 的任�
 | 43／44 | UART0 | 不作額外板級控制 |
 | 47／48 | 共用 I²C SDA／SCL | 只用 open-drain，不強拉高 |
 
-本次依使用者明確要求關閉未使用音訊，增加 `photopainter_audio_power.h`。官方
-[ALDO3 driver](https://github.com/waveshareteam/ESP32-S3-PhotoPainter/blob/a5e8f757ba0cafbb5586f07d3e83bda3184c0845/01_Example/xiaozhi-esp32/components/pmicpower/src/XPowersAXP2101.tpp#L1845)
-以 REG90 bit 2 控制此 rail；沿用官方命名不代表把 Rev2.0 PMIC 改判為 AXP2101。
-啟動時 PA LOW、I²S input 後，讀 REG90，只清 bit 2 並完整讀回比對；已關閉不寫。
-只允許一次不重播的寫入，失敗／讀回不符標記 PMIC unknown 並跳過本輪後續的
-sensor/RTC 初始化，同時拒絕 EPD 供電命令，不猜測性寫回整組電源狀態。這也會關閉
-共用 Audio_VCC 的播放 codec，未來若要恢復音訊必須重新設計上電／codec 初始化。
-ALDO4、DCDC1、充電和全機 sleep registers 不變。
+Rev2.0 的音訊 codecs 與 TG28、RTC、SHTC3 共用 I²C。實板確認啟動時清除 REG90 bit 2
+關閉 ALDO3／Audio_VCC 後，下一次 TG28 REG95 讀取失敗，面板無法刷新；完整斷電後改為
+保留 ALDO3，配對畫面恢復刷新。因此韌體只以 PA GPIO 7 LOW 與 I²S input 停用音訊，
+不再寫 ALDO3。ALDO4、DCDC1、充電和全機 sleep registers 不變。
 
 SD 的 TF1 pin 4 直接接 DCDC1 的 VCC3V3，與 ESP32／SHTC3 共用，**無獨立開關**。
 因此不能靠韌體做到「只關 SD 電源、ESP timer 繼續睡眠計時」。現有檔案存取完成後
@@ -287,10 +284,10 @@ SD 的 TF1 pin 4 直接接 DCDC1 的 VCC3V3，與 ESP32／SHTC3 共用，**無�
 不能用把所有 SD 腳拉 LOW 的方法省電。下一次 deep-sleep wake 重新初始化 SD 後讀檔。
 這是停止通訊／卡片閒置，不是 SD 斷電；也不承諾特定卡的 standby current。
 
-驗證範圍：新增 host 測試覆蓋 REG90 全部 256 組狀態、重複喚醒不重寫、初讀失敗、
-寫入失敗、讀回失敗與其他 rail bit 意外變動；另有 boot／sleep 接線契約測試。
-Hosted CI／編譯與實板 cold boot、KEY／timer wake、共享 I²C、SD 讀寫、電流比較
-尚未執行。本分支尚未刷機，不能宣稱每天掉電 20% 已修復。
+Host 測試保留 ALDO3 helper 的 register 邊界覆蓋，boot／sleep 接線契約則明確禁止啟動
+流程呼叫它。2026-09-14 已完成 debug 編譯、app-only 燒錄、digest 驗證與完整斷電冷啟動；
+共享 I²C 恢復後配對畫面完成刷新。KEY／timer wake、SD 讀寫、電流比較仍未執行，不能
+據此宣稱待機耗電或電池續航已修復。
 
 ## 自動能源遙測
 
@@ -399,6 +396,13 @@ boot log；本次通過依據是實體面板變化，不延伸宣稱正式照片
 log 回報 `pairing_display_ready`，耗時 `30101 ms`，實體面板與 ACT 燈均有變化；接著
 拔除 USB 讓裝置進入 deep sleep，短按 KEY1 後配對畫面再次刷新。這項結果通過 GPIO4
 EXT1 按鍵喚醒及睡眠後再次刷新，不等同尚未執行的 timer 排程喚醒或睡眠電流量測。
+
+2026-09-14 在同一 Waveshare Rev2.0 實板確認 ALDO3／Audio_VCC 關閉會使後續 TG28
+REG95 讀取回報 `PMIC-EPD-VOLTAGE-READ`，紅色 PWR 燈亮但 ACT 燈與面板均無變化。
+韌體改為保留 ALDO3、PA GPIO 7 仍維持 LOW 後，以 app-only 方式燒錄並驗證 digest；
+拔除 USB、完整關機等待後冷啟動，log 回報 `pairing_display_ready`，配對畫面實際完成
+刷新，耗時 `30081 ms`。這項結果驗證共享 I²C 與配對畫面恢復，不延伸宣稱正式照片、
+排程喚醒、睡眠電流或電池續航已通過。
 
 本輪的安全結論來自官方 commit `a5e8f757…` 原始碼比對、compile-time 腳位鎖定與
 Hosted CI 編譯，不是對實體面板壽命或電池續航的保證；這項限制不會轉成使用者必須

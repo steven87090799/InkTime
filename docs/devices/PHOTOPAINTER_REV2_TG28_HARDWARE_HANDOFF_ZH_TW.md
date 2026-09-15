@@ -1,9 +1,16 @@
 # PhotoPainter Rev2.0 TG28 實板除錯交接紀錄
 
+> [!CAUTION]
+> **永久禁令：不得關閉 TG28 ALDO3／Audio_VCC（REG90[2]）。** 2026-09-14 實板冷啟動
+> 已確認：音訊 codecs 失去供電後會影響共用 SDA／SCL，下一次 TG28 REG95 讀取失敗，
+> 導致紅色 PWR 燈仍亮但 ACT 燈與面板均無變化。必須保留 ALDO3，只以 GPIO7 LOW 關閉
+> 功放並讓 I²S 腳位保持 input。Hosted compile、模擬器或暖重置都不能推翻此實板禁令；
+> 原始碼契約測試會禁止 boot 呼叫 `powerDownUnusedAudio()`。
+
 > 2026-09-06 原理圖更正：重新放大官方 Rev2.0 原理圖確認，UP1 pin 16 **ALDO3**
 > 才是 `Audio_VCC`，pin 19 ALDO2 未接；下方歷史稽核中的 ALDO2 音訊敘述已更正。
-> ALDO4／EPD 的歷史實板證據不變。本次使用者明確授權關閉未使用音訊；新增
-> `REG90[2]` 單一位元關閉與讀回的候選程式，尚未進行實板電流／I²C 驗收。
+> ALDO4／EPD 的歷史實板證據不變。當時新增的 `REG90[2]` 關閉候選尚未完成實板
+> I²C 驗收；後續 2026-09-14 驗收已證明不可使用，以上永久禁令取代該候選。
 > 現行實作與來源見 [PhotoPainter 指南](WAVESHARE_PHOTOPAINTER_ZH_TW.md)。
 
 > 2026-08-31 文件校對註：以下實板數字／commit／未驗收項目保留原始日期，不改寫為本次測量。當時 2.8.6 的 KEY1 電源頁與 SD 原圖恢復、v5 Config Store 及 `1h → 6h → 24h` 故障退避，以[現行 PhotoPainter 指南](WAVESHARE_PHOTOPAINTER_ZH_TW.md)為準；本頁舊 60 分鐘退避是當時版本紀錄。

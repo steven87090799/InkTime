@@ -625,19 +625,15 @@ def test_sleep_diagnostics_only_read_pmic_and_do_not_start_network():
     assert sleep.index('"sleep_diagnostics"') < sleep.index("esp_deep_sleep_start();")
 
 
-def test_unused_audio_shutdown_is_at_boot_after_pa_low_not_at_sleep():
+def test_unused_audio_keeps_pa_low_without_disabling_shared_audio_rail():
     support = SUPPORT.read_text(encoding="utf-8")
     begin = _between(
         support, "bool PhotoPainterSupport::begin()", "bool PhotoPainterSupport::loadFormalFrame"
     )
-    assert begin.index("digitalWrite(board_.audio.paEnable, LOW)") < begin.index(
-        "impl_->power.powerDownUnusedAudio()"
-    ) < begin.index("impl_->rtc.begin()")
+    assert begin.index("digitalWrite(board_.audio.paEnable, LOW)") < begin.index("Wire.begin(")
+    assert "impl_->power.powerDownUnusedAudio()" not in begin
+    assert "const bool audioReady = true;" in begin
     assert "if (audioReady)" in begin
-    pmic = _between(support, "bool powerDownUnusedAudio()", "bool prepareDisplayPower()")
-    assert "type_ != PmicType::TG28" in pmic
-    assert 'lastError_ = "PMIC-AUDIO-OFF"' in pmic
-    assert "type_ = PmicType::Unknown" in pmic
     sleep = _between(
         support,
         "void PhotoPainterSupport::prepareForDeepSleep()",
