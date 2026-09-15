@@ -1,3 +1,5 @@
+> Archived historical evidence; not a current contract or mandatory context. Dates and acceptance claims below are historical.
+
 # Legacy 已退休
 
 Legacy Web、Analyzer、Renderer 與其相容 runtime 已於 2026-08-27 從正式程式碼移除；InkTime 不再提供 Legacy runtime、Legacy routes、Legacy UI 或舊版離線腳本。

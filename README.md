@@ -12,7 +12,7 @@ InkTime 會在本地掃描相簿、擷取 EXIF 與品質特徵，先辨識重複
 
 ## AI 修改入口
 
-修改前先讀 [AGENTS.md](AGENTS.md) → [AI 修改導航](docs/AI_NAVIGATION.md) → [機器可讀任務索引](docs/AI_CONTEXT_INDEX.json)，依問題定位模組與必讀區段；Claude 入口為 [CLAUDE.md](CLAUDE.md)。不需要每次載入本 README 的完整流程圖。
+修改遵守 [AGENTS.md](AGENTS.md)；已知檔案／符號直接 TARGETED，只有探索任務才用 [AI 修改導航](docs/AI_NAVIGATION.md) 與 [機器可讀任務索引](docs/AI_CONTEXT_INDEX.json)；Claude 入口為 [CLAUDE.md](CLAUDE.md)。不需要每次載入本 README 的完整流程圖。
 
 ## 主要能力
 
@@ -30,7 +30,7 @@ InkTime 會在本地掃描相簿、擷取 EXIF 與品質特徵，先辨識重複
 - 繁體中文管理介面、動態 Log 層級、節流進度、錯誤中心、程序／cgroup／SQLite／Worker 診斷與已遮蔽診斷包。
 - Intel N100 低資源預設：單 Web worker、圖片特徵最大 512px 樣本、有界 Future、15 秒閒置輪詢與容器 CPU／RAM／PID 上限。
 
-正式部署採 loopback bind、Secure cookie、HTTPS public URL 與禁止 insecure HTTP；本機開發請明確使用 [`docker-compose.dev.yml`](docker-compose.dev.yml)。PhotoPainter 可用嚴格 RFC1918 IP 直連家用 InkTime，HTTPS 仍要求 trust anchor；8 位隨機數字配網密碼只顯示在 portal／裝置畫面。本次未重跑實體板、正式 NAS 或真實 OpenRouter／OpenAI API 驗證；既有局部實板結果保留於[Rev2.0 交接](docs/devices/PHOTOPAINTER_REV2_TG28_HARDWARE_HANDOFF_ZH_TW.md)，交接詳見 [Production readiness handoff](docs/PRODUCTION_READINESS_SECURITY_HANDOFF_ZH_TW.md)。
+正式部署採 loopback bind、Secure cookie、HTTPS public URL 與禁止 insecure HTTP；本機開發請明確使用 [`docker-compose.dev.yml`](docker-compose.dev.yml)。PhotoPainter 可用嚴格 RFC1918 IP 直連家用 InkTime，HTTPS 仍要求 trust anchor；8 位隨機數字配網密碼只顯示在 portal／裝置畫面。本次未重跑實體板、正式 NAS 或真實 OpenRouter／OpenAI API 驗證；既有局部實板結果保留於[Rev2.0 交接](docs/devices/PHOTOPAINTER_REV2_TG28_HARDWARE_HANDOFF_ZH_TW.md)，交接詳見 [歷史 Production readiness handoff](docs/archive/reports/PRODUCTION_READINESS_SECURITY_HANDOFF_ZH_TW.md)。
 
 ## 架構
 

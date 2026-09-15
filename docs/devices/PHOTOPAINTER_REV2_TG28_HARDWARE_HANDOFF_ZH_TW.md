@@ -247,7 +247,7 @@ Hosted CI 重新編譯。
 
 ## 後續 AI 的起手順序
 
-1. 先讀本文件、`WAVESHARE_PHOTOPAINTER_ZH_TW.md`、worktree 的 `AGENTS.md`。
+1. 遵守 worktree 的 `AGENTS.md`；硬體任務先讀 [精簡安全契約](PHOTOPAINTER_SAFETY_CONTRACT.md)，本頁與指南僅按需查歷史證據／操作細節。
 2. 只讀檢查目前 worktree、branch、dirty files、PR head、`origin/main` 與 Hosted CI；
    不假設本文件記載的 PR 狀態仍然有效。
 3. 確認板型確實是 Rev2.0/TG28，再核對 ALDO4 constants、SPI3 persistent transport 與

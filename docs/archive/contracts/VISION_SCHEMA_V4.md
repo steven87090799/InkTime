@@ -1,3 +1,5 @@
+> Archived historical evidence; not a current contract or mandatory context. Dates and acceptance claims below are historical.
+
 # Vision Schema v4：內容排除與排序
 
 本文件描述 Schema v4 與 `ranking-v5-ai-first` 選片契約（2026-09-05 更新；部署狀態另見交付紀錄）。

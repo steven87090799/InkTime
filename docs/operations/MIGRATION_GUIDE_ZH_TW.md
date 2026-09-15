@@ -91,4 +91,4 @@ Migration 33 不會把 `cost_source='unknown'` 的 historical row 推論成 `est
 
 Migration 51 保存 AI Trace run／attempt 與預設 30 天保留政策；52 為 Provider 加入可空白的 `model`。空白保持全域模型 fallback，已設定值納入路由與凍結計畫。版本數字與 API／Config Store schema 不同，完整對照見[現行基線](../reference/CURRENT_STATE_ZH_TW.md)。升級、fresh、rollback 與 restore 證據由目前 source 對應的 Hosted CI 決定。本次另在獲授權的 OrbStack debug 環境驗證 53→57，不能替代 NAS 實測或完整 Hosted CI。
 
-Migration 55 會退休舊排名權重、將文案長度改為 10／60／100 並把完整／變體分析上限收斂至 1200；57 將舊 v1–v3 語意結果標為歷史並精準解除舊 E6 自動排除。升級前應備份，再核對個人設定與 [Vision v4 契約](../VISION_SCHEMA_V4.md)。設定快照會略過目前版本不認識的舊 key，原始資料列仍保留，避免退休設定阻止一般設定儲存。
+Migration 55 會退休舊排名權重、將文案長度改為 10／60／100 並把完整／變體分析上限收斂至 1200；57 將舊 v1–v3 語意結果標為歷史並精準解除舊 E6 自動排除。升級前應備份，再核對個人設定與 [Vision v4 契約](../archive/contracts/VISION_SCHEMA_V4.md)。設定快照會略過目前版本不認識的舊 key，原始資料列仍保留，避免退休設定阻止一般設定儲存。

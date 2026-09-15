@@ -8,7 +8,7 @@
 
 | 你要做什麼 | 先讀 |
 |---|---|
-| AI agent 修改專案、減少重複讀取 | [AGENTS.md](../AGENTS.md) → [AI 修改導航](AI_NAVIGATION.md) → [機器可讀任務索引](AI_CONTEXT_INDEX.json)；[CLAUDE.md](../CLAUDE.md) 共用此入口 |
+| AI agent 修改專案、減少重複讀取 | [AGENTS.md](../AGENTS.md)；已知位置直接 TARGETED，探索才用 [AI 修改導航](AI_NAVIGATION.md)／[機器可讀任務索引](AI_CONTEXT_INDEX.json)；[CLAUDE.md](../CLAUDE.md) 共用此入口 |
 | 工作已完成但沒有文案／Worker 告警 | [Activity、工作與 AI Trace](guides/ACTIVITY_AI_TRACE_ZH_TW.md) |
 | 從 NAS 到 ESP32 完成上線 | [完整上線指南](operations/PRODUCTION_DEPLOYMENT_GUIDE_ZH_TW.md) |
 | 第一次啟動 Docker | [快速開始](getting-started/QUICK_START_ZH_TW.md) → [安裝指南](getting-started/INSTALLATION_ZH_TW.md) |
@@ -18,12 +18,12 @@
 | 開發或修改系統 | [開發指南](getting-started/DEVELOPMENT_GUIDE_ZH_TW.md) → [架構文件](architecture/ARCHITECTURE_ZH_TW.md) |
 | 接入 ESP32 或 PhotoPainter | [ESP32 指南](devices/ESP32_GUIDE_ZH_TW.md) → [自動配對](devices/ESP32_AUTOMATIC_PAIRING_ZH_TW.md) → [PhotoPainter](devices/WAVESHARE_PHOTOPAINTER_ZH_TW.md) → [Rev2.0 TG28 實板交接](devices/PHOTOPAINTER_REV2_TG28_HARDWARE_HANDOFF_ZH_TW.md) → [交付模式](devices/PHOTOPAINTER_DELIVERY_MODES_ZH_TW.md) |
 | 使用本機無 AI 模式 | [Local-only 選片與雙照片](guides/LOCAL_ONLY_SELECTION_ZH_TW.md) |
-| 執行 OpenAI Batch 分析 | [OpenAI Batch 照片分析](OPENAI_BATCH_ANALYSIS_ZH_TW.md) → [正式交付與安全交接](PRODUCTION_READINESS_SECURITY_HANDOFF_ZH_TW.md) |
+| 執行 OpenAI Batch 分析 | [OpenAI Batch 照片分析](OPENAI_BATCH_ANALYSIS_ZH_TW.md) |
 | 設定 OpenRouter 或查看成本來源 | [OpenRouter Provider](providers/OPENROUTER_ZH_TW.md) → [Token 與成本指南](reference/TOKEN_COST_GUIDE_ZH_TW.md) |
 | 離線比較模型與解析度 | [Model Benchmark](providers/MODEL_BENCHMARK_ZH_TW.md) |
 | 為 ESP32 配置 HTTPS 信任根 | [ESP32 TLS／配網](devices/ESP32_TLS_PROVISIONING_ZH_TW.md) |
 | 使用 Decision Trace、Queue 或 Canary | [決策與韌性總覽](resilience/DECISION_FEEDBACK_RESILIENCE_PLAN_ZH_TW.md) |
-| 交接 PR #53 的修復與證據 | [Final One-Shot Hardening Audit](archive/reports/FINAL_ONE_SHOT_HARDENING_AUDIT.md) → [Production Readiness Handoff](PRODUCTION_READINESS_SECURITY_HANDOFF_ZH_TW.md) |
+| 交接 PR #53 的修復與證據 | [Final One-Shot Hardening Audit](archive/reports/FINAL_ONE_SHOT_HARDENING_AUDIT.md) → [Production Readiness Handoff](archive/reports/PRODUCTION_READINESS_SECURITY_HANDOFF_ZH_TW.md) |
 
 ## 文件規則
 
@@ -50,12 +50,11 @@
 - [`../README.en.md`](../README.en.md)：英文專案概覽與 Modern 啟動方式。
 - [`../USER_MANUAL.html`](../USER_MANUAL.html)：HTML 手冊與所有 Markdown 文件索引；舊章節請配合現行基線閱讀。
 
-- [`VISION_SCHEMA_V4.md`](VISION_SCHEMA_V4.md)：嚴格 v4 輸出、內容排除、排序與人工恢復契約。
+- [`VISION_SCHEMA.md`](VISION_SCHEMA.md)：現行 v5 欄位與 v4 讀取相容性。
 
 ### Batch 與交付專項
 
 - [`OPENAI_BATCH_ANALYSIS_ZH_TW.md`](OPENAI_BATCH_ANALYSIS_ZH_TW.md)：Batch 輸入快照、隱私、生命週期、成本與實際人工 smoke 邊界。
-- [`PRODUCTION_READINESS_SECURITY_HANDOFF_ZH_TW.md`](PRODUCTION_READINESS_SECURITY_HANDOFF_ZH_TW.md)：正式環境安全、LAN、持久化與交接檢查。
 - [`archive/reports/branch-consolidation-report.md`](archive/reports/branch-consolidation-report.md)：分支整併、Migration 26、CI 與遠端分支清理證據。
 - [`post-merge-hardware-validation.md`](post-merge-hardware-validation.md)：軟體／hosted PASS 與真實 OpenAI、NAS、ESP32 驗收的 NOT RUN 邊界。
 
@@ -85,9 +84,7 @@
 - [`architecture/ARCHITECTURE_TARGET.md`](architecture/ARCHITECTURE_TARGET.md)：架構責任與不變條件。
 - [`architecture/APPLICATION_FACTORY.md`](architecture/APPLICATION_FACTORY.md)：Web／Worker／Scheduler 的 Factory 與初始化順序。
 - [`architecture/RUNTIME_CONFIGURATION.md`](architecture/RUNTIME_CONFIGURATION.md)：RuntimeConfig 與部署設定邊界。
-- [`architecture/LEGACY_RETIREMENT_PLAN.md`](architecture/LEGACY_RETIREMENT_PLAN.md)：Legacy runtime 已退休的資料保留紀錄。
 - [`architecture/VISUAL_ORIENTATION_CORRECTION.md`](architecture/VISUAL_ORIENTATION_CORRECTION.md)：EXIF、AI 與人工視覺方向規則。
-- [`architecture/TECH_DEBT_LOCAL_ONLY_ZH_TW.md`](architecture/TECH_DEBT_LOCAL_ONLY_ZH_TW.md)：Local-only 交付刻意未處理的技術債。
 
 ### 維運、安全與部署
 
@@ -136,7 +133,6 @@
 ### 參考資料與歷史紀錄
 
 - [`reference/CURRENT_STATE_ZH_TW.md`](reference/CURRENT_STATE_ZH_TW.md)：現行原始碼版本、預設與驗收界線。
-- [`reports/DOCUMENTATION_SYNC_20260831.md`](reports/DOCUMENTATION_SYNC_20260831.md)：本次全部 Markdown 盤點、校對依據與靜態驗證結果。
 
 - [`reference/TOKEN_COST_GUIDE_ZH_TW.md`](reference/TOKEN_COST_GUIDE_ZH_TW.md)：Token、預篩選、預算與成本邊界。
 - [`reference/CHANGELOG.md`](reference/CHANGELOG.md)：版本變更記錄。
@@ -164,3 +160,14 @@
 ## 維護這份索引
 
 新增、移動或刪除任何 `.md` 時，必須同步更新本頁與根目錄 `USER_MANUAL.html` 的「完整文件索引」，並重新檢查 Markdown／HTML 相對連結。新增或搬移程式入口時同步更新 `AI_CONTEXT_INDEX.json`，再執行 `python scripts/ci/validate_ai_navigation.py`。
+
+## 硬體安全入口
+
+- [PhotoPainter 精簡安全契約](devices/PHOTOPAINTER_SAFETY_CONTRACT.md)：硬體安全任務先讀。
+
+## 歷史文件（按需查證，非現行契約）
+
+- [`PRODUCTION_READINESS_SECURITY_HANDOFF_ZH_TW.md`](archive/reports/PRODUCTION_READINESS_SECURITY_HANDOFF_ZH_TW.md)：歷史安全交接，非現行部署契約。
+- [`architecture/LEGACY_RETIREMENT_PLAN.md`](archive/architecture/LEGACY_RETIREMENT_PLAN.md)：Legacy runtime 已退休的資料保留紀錄。
+- [`architecture/TECH_DEBT_LOCAL_ONLY_ZH_TW.md`](archive/architecture/TECH_DEBT_LOCAL_ONLY_ZH_TW.md)：Local-only 交付刻意未處理的技術債。
+- [`reports/DOCUMENTATION_SYNC_20260831.md`](archive/reports/DOCUMENTATION_SYNC_20260831.md)：2026-08-31 歷史 Markdown 校對紀錄。
