@@ -1,6 +1,8 @@
+> Archived historical evidence; not a current contract or mandatory context. Dates and acceptance claims below are historical.
+
 # 本輪延後的技術債
 
-> 本頁保存當時 local-only 交付的延期事項，不是最新待辦清單。是否仍存在須重新比對原始碼；現況見[版本基線](../reference/CURRENT_STATE_ZH_TW.md)。
+> 本頁保存當時 local-only 交付的延期事項，不是最新待辦清單。是否仍存在須重新比對原始碼；現況見[版本基線](../../reference/CURRENT_STATE_ZH_TW.md)。
 
 本機無 AI 選片與雙照片文字版型刻意沒有修改下列高風險項目：RenderService 拆分、NumPy
 Dithering 研究、Database Connection Pool、Font Cache、Renderer 效能分析、`_REGISTERED_SECRETS`

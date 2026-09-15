@@ -125,7 +125,7 @@ curl -fsS http://127.0.0.1:8765/health/ready
 6. 查看工作、Activity 與 AI Trace 的狀態、使用量和時間；本機結果、快取或繼承分析不代表此次發出新 Provider 請求。
 7. 在渲染頁選擇與裝置一致的面板 Profile、版型、字型及色盤，預覽後發布 Release。
 
-目前 Vision 使用 Schema v4，必須提供 `visual_orientation`；semantic 與 local quality 分開排名，歷史 v1–v3 分析保留為 legacy，需重新分析才進 v4 semantic 排名。`smart_two_stage` 等舊策略名稱會正規化為 `single`，不應再當成可選的兩階段流程。內容過濾、人工恢復與排名規則見 [Vision v4](../VISION_SCHEMA_V4.md)。
+目前新 Vision 輸出使用 Schema v5，已儲存 v4 仍可讀取，必須提供 `visual_orientation`；semantic 與 local quality 分開排名，歷史 v1–v3 分析保留為 legacy，需重新分析才進現行 semantic 排名。`smart_two_stage` 等舊策略名稱會正規化為 `single`，不應再當成可選的兩階段流程。內容過濾、人工恢復與排名規則見 [現行 Vision Schema](../VISION_SCHEMA.md)。
 
 完整 Web 操作見[管理員指南](../guides/ADMIN_GUIDE_ZH_TW.md)、[使用者指南](../guides/USER_GUIDE_ZH_TW.md)與[本機選片](../guides/LOCAL_ONLY_SELECTION_ZH_TW.md)。Provider Key 透過 Web 的加密設定保存，不寫入部署檔。
 

@@ -1,6 +1,6 @@
 # Token 與成本指南
 
-本頁處理 InkTime 照片分析 API 的 Token 與帳務。若問題是 coding agent 每次修改都讀大量程式，請先用 [AI 修改導航](../AI_NAVIGATION.md) 按模組縮小閱讀範圍；兩者是不同的用量來源。
+本頁處理 InkTime 照片分析 API 的 Token 與帳務。若問題是 coding agent 每次修改都讀大量程式，已知位置直接使用 TARGETED；只有探索才用 [AI 修改導航](../AI_NAVIGATION.md)；兩者是不同的用量來源。
 
 新安裝 `local_only` 不產生模型費用；一般 AI 工作必須明確啟用 `automatic_ai`。`single` 不代表供應商永遠只計一次費：新建重跑工作、允許的重試與文字修復可能增加帳務，應以 usage／Provider 對帳。
 

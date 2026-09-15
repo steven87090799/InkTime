@@ -1,73 +1,126 @@
-# Start here: scoped reading
+# InkTime AI Agent Rules
 
-Before editing, read [`docs/AI_NAVIGATION.md`](docs/AI_NAVIGATION.md).
-Select the matching task row and read only its entry points and relevant sections.
-Do not preload the full README, HTML manual, documentation tree, or repository.
-Expand to callers, contracts, and tests when evidence requires it.
+## Context: smallest useful evidence
+Complete the requested task with the minimum evidence necessary for correctness.
+Before each read ask: what decision does this answer? Expand only for the user
+request, a direct import/caller/reference, an error or failed validation, or a
+required security/protocol/migration/hardware contract. General curiosity is
+not a reason to rediscover architecture. Reuse unchanged evidence and ranges.
 
-## AI read boundary and context budget
+## Classify before exploring
+- **TARGETED** (default): known file, symbol/function, line, error, failing test,
+  PR, commit, subsystem or implementation plan. Skip `docs/AI_NAVIGATION.md`,
+  direct index reading and `ai_context.py`. Use exact rg → bounded read → patch
+  → residual rg → lightweight validation.
+- **DISCOVERY**: location/root cause unknown. Use optional
+  [AI_NAVIGATION](docs/AI_NAVIGATION.md) and one route from the machine-readable
+  [AI_CONTEXT_INDEX](docs/AI_CONTEXT_INDEX.json):
+  `python3 scripts/ci/ai_context.py <task-id> --max-items 12`.
+  A second route needs evidence that the first cannot locate the subsystem.
+- **FULL_AUDIT**: only an explicit full review, production/security/architecture
+  audit or broad regression investigation. Work subsystem by subsystem with
+  compact conclusions; never load the whole repository at once.
+- **HARDWARE_SAFETY**: PMIC, power rails, GPIO, boot, flash, storage bus,
+  destructive firmware operations or physical EPD diagnosis. Read the compact
+  [PhotoPainter safety contract](docs/devices/PHOTOPAINTER_SAFETY_CONTRACT.md)
+  first; historical A/B evidence is on demand. Server/API, schedule, playlist,
+  manifest, analysis and rendering work alone does not require full handoffs.
 
-Use [`docs/AI_CONTEXT_INDEX.json`](docs/AI_CONTEXT_INDEX.json) as the
-machine-readable route and read-policy index. In the first pass, read at most
-4 files and 800 source/documentation lines. Expand only when a caller,
-contract, test, or safety boundary is required by evidence; record the reason
-when the budget is exceeded. A full-repository audit requires an explicit user
-request. Use `python scripts/ci/ai_context.py <task-id>` to print a bounded
-route summary and symbol/heading locations before opening a large file.
+## Startup and reading
+For implementation run `git status --short` and `git log -1 --oneline`; verify
+any supplied base/HEAD. Preserve unrelated changes. No automatic broad scan.
+Prefer `git ls-files` when a tracked inventory is needed, scoped `rg` for exact
+references; unrestricted filesystem inventory requires a real inventory task.
+For discovery start with at most 4 files / 800 lines, expanding with evidence.
 
-Do not open secrets, runtime data, generated output, or binary/media assets by
-default: `.env*`, `*.db`, `*.sqlite*`, `*.lock`, `data/`, `output/`, `photos/`,
-`simulation_photos/`, `logs/`, `.git/`, `docs/archive/`, fonts, images, PDFs,
-ZIPs, and firmware binaries are excluded unless the task names an exact path
-and requires it. `.gitignore` is not an AI read policy. Use targeted `rg` and
-bounded `sed` reads instead of whole-file dumps. The PhotoPainter hardware
-handoff documents named below remain a safety exception and must be read in
-full before hardware work.
+Any text file over roughly **50 KB** is **symbol-first**, including source,
+tests, documents and generated text: `rg -n '<symbol|term|heading>' path`, then
+normally 40–120 useful lines with `sed`. Never dump the whole large file.
+Reread only edited ranges, ranges implicated by an error, or adjacent context
+needed for a decision. No stale hardcoded list of large files is required.
 
-# Hosted CI and delivery policy
+All files may be read when needed; availability is not a reason to read them.
+Defer README.md, README.en.md, USER_MANUAL.html, docs/README.md, docs/archive/**,
+.env*, data/session.key*, *.db, *.sqlite*, *.lock, .git/**, .ruff_cache/**,
+**/__pycache__/**, data/cache/**, data/releases/**, data/backups/**, output/**,
+simulation_photos/**, logs, fonts, images and firmware binaries. Start runtime
+investigations from source/schema/config definitions; read DB/logs/artifacts
+when those are insufficient. Local AI memory (~/.codex/memories/**) is on demand
+for required prior decisions, not automatic project discovery. No path is
+permanently forbidden for Token saving. Never echo secrets, commit credentials,
+or put them in tests, logs, prompts or PR descriptions.
 
-GitHub Actions is the authoritative test, build, security-scan, benchmark,
-firmware-compile, and hosted-runtime environment for this repository.
+## Direct entry points (read only the relevant one)
+- Prompt/Schema/Token: `inktime/app/domain/analysis/schema.py`, then
+  `inktime/app/providers/openai_compatible.py` as needed.
+- Ranking: `inktime/app/domain/analysis/scoring.py`.
+- Vision lifecycle/cache/retry/persistence: exact symbol in
+  `inktime/app/services/analysis.py` or `inktime/app/domain/analysis/plan.py`.
+- Provider: `inktime/app/providers/router.py`, then active provider and directly
+  relevant usage/budget service. Batch: `inktime/app/services/batch_analysis.py`
+  then `inktime/app/providers/openai_batch.py`.
+- Scanner/EXIF/quality: `inktime/app/workers/scanner.py`, then relevant
+  `inktime/app/domain/photos/` file.
+- Selection/release eligibility: `inktime/app/repositories/render_candidates.py`,
+  then `inktime/app/services/display_prepare.py` if needed.
+- Rendering: exact function in `inktime/app/services/rendering.py`, then relevant
+  `inktime/app/domain/rendering/` file.
+- Web/UI: exact template → matching API route → directly called service/repository.
+- Setting: `rg -n 'exact.setting.key' inktime/app/repositories/settings.py`.
+- Database: exact repository method → relevant schema/migration only; never
+  rewrite a released migration or preload the complete migration history.
+- CI failure: exact job/error → matching testcase → referenced source.
 
-For ordinary coding work, do not run local `pytest`, `npm test`, Docker build or
-compose smoke, Playwright, Arduino/PlatformIO/firmware compilation, benchmark,
-paid-provider call, or runtime-soak commands. Use static source inspection and
-`git diff --check` locally, then rely on the routed hosted checks.
+## Tests and PR review
+Do not preload tests. **Tests are symbol-first**: use
+`rg -n '<symbol|endpoint|error|behavior>' tests`, then only matching functions,
+required fixtures and nearby helpers. After editing, expand only to directly
+affected tests or validation/Hosted CI failures. Do not reload whole integration
+suites or restart repository discovery after a failure.
 
-After pushing a branch, inspect the resulting GitHub Actions runs once. Do not
-use `gh run watch`, polling loops, `sleep`-based waits, reruns, or manual
-dispatches to manufacture a green result. If a run is queued or in progress,
-report `CI_PENDING` and hand the task back to the user.
+**PR review is diff-first**: begin with `git diff <base>...HEAD` and
+`git diff --stat <base>...HEAD`; review changed code before affected callers,
+contracts and tests. A PR is not authorization to audit all of main.
 
-Keep pull requests Draft until a human explicitly decides otherwise. Never
-merge, mark ready, enable auto-merge, force-push, reset, or clean a worktree as
-part of routine delivery.
+## Contracts and validation
+Current source defines implementation; current contracts define required
+API/protocol/DB/security/deployment/hardware/recovery compatibility. Historical
+reports are evidence only and never override current contracts or source.
 
-# PhotoPainter Rev2.0 hardware handoff
+GitHub Actions is authoritative for tests, builds, security scans, benchmarks,
+firmware and hosted runtime. For ordinary coding do not run local pytest,
+npm test, Docker/Compose, Playwright, Arduino/PlatformIO, benchmarks,
+paid-provider calls or soak tests. Use `python3 -m py_compile <changed files>`,
+`git diff --check`, and lightweight validators only when their owned files
+change. Navigation changes: `python3 scripts/ci/validate_ai_navigation.py`.
 
-Before changing, compiling, flashing, or diagnosing Waveshare
-ESP32-S3-PhotoPainter Rev2.0 firmware, read
-[`docs/devices/PHOTOPAINTER_REV2_TG28_HARDWARE_HANDOFF_ZH_TW.md`](docs/devices/PHOTOPAINTER_REV2_TG28_HARDWARE_HANDOFF_ZH_TW.md)
-and the current
-[`docs/devices/WAVESHARE_PHOTOPAINTER_ZH_TW.md`](docs/devices/WAVESHARE_PHOTOPAINTER_ZH_TW.md).
+After push/PR inspect new Hosted CI once. No `gh run watch`, repeated polling,
+sleep loops, unsupported reruns or manual dispatches. Report
+`CI_STATUS=CI_PENDING` when queued/running; a later request can check completion.
 
-The verified Rev2.0 EPD rail is TG28 **ALDO4**, not ALDO3 or an AXP2101
-assumption. Preserve GPIO0 BOOT, GPIO5 PWR, GPIO21 TG28 IRQ, the narrow PMIC
-write allowlist, the recoverable full-flash backup boundary, and the distinction
-between Hosted CI and physical panel acceptance. Do not repeat destructive or
-broad PMIC experiments when the handoff already contains an A/B result.
+## Scope, delivery and handoff
+Use an isolated branch/worktree. Keep PR Draft. No automatic merge, ready,
+auto-merge, force-push, reset/clean of another worktree, or runtime/data deletion.
+Fix necessary direct dependencies; report unrelated issues without expanding.
 
-## PhotoPainter ALDO3 hard prohibition (2026-09-14)
+Before a substantially different task/subsystem, finish with a compact handoff:
+```text
+BASE_HEAD=
+FINAL_HEAD=
+PR=
+CHANGED_FILES=
+CONFIRMED_BEHAVIOR=
+UNRESOLVED=
+CI_STATUS=
+```
+Recommend a new chat for unrelated work using that handoff, rather than carrying
+all tool output. Do not create a new chat automatically. Within one task reuse
+known evidence. Repository policy reduces unnecessary reads; it cannot remove
+client-injected history, memory, tool definitions or system instructions.
 
-**Never disable TG28 ALDO3 / Audio_VCC (`REG90[2]`) on PhotoPainter Rev2.0.**
-Physical cold-boot testing proved that powering down the codecs can clamp the
-shared SDA/SCL bus; the next TG28 REG95 read then fails and the EPD cannot
-refresh. Keep ALDO3 powered, keep the audio PA disabled with GPIO7 LOW, and keep
-I2S pins uninitialized/input. Any future proposal to change this rule requires
-separate hardware isolation, schematic review, and explicit cold-boot I2C/panel
-acceptance; a compile, simulator, or warm reset is insufficient. The source
-contract test intentionally fails if boot calls `powerDownUnusedAudio()`.
-
-ALDO2 (pin 19) is unconnected, ALDO4 is the EPD rail, and the SD card is directly
-on VCC3V3 with no independent power gate. Do not expand PMIC writes to other
-rails, sleep, IRQ, charging, or shutdown registers.
+## PhotoPainter invariant
+Never disable TG28 ALDO3 / Audio_VCC (`REG90[2]`): unpowered codecs can clamp
+shared I2C and prevent EPD refresh. Keep ALDO3 powered, GPIO7 LOW and I2S input/
+uninitialized. EPD is ALDO4. Preserve GPIO0 BOOT, GPIO5 PWR, GPIO21 IRQ and the
+compact contract's narrow PMIC allowlist and recoverable flash boundary.
+A build/Hosted CI pass does not establish physical panel acceptance.

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import json
 from pathlib import Path
 from typing import Any
@@ -83,14 +84,14 @@ def validate() -> list[str]:
             errors.append("default_policy.expand_requires_evidence must be true")
         if policy.get("full_audit_requires_explicit_request") is not True:
             errors.append("default_policy.full_audit_requires_explicit_request must be true")
-        forbidden = policy.get("forbidden_globs")
-        if not isinstance(forbidden, list):
-            errors.append("default_policy.forbidden_globs must be a list")
+        deferred = policy.get("deferred_globs")
+        if not isinstance(deferred, list):
+            errors.append("default_policy.deferred_globs must be a list")
         else:
             required = {".env*", "*.db", "data/**", "docs/archive/**"}
-            missing = sorted(required - set(forbidden))
+            missing = sorted(required - set(deferred))
             if missing:
-                errors.append(f"default_policy.forbidden_globs missing: {', '.join(missing)}")
+                errors.append(f"default_policy.deferred_globs missing: {', '.join(missing)}")
 
     routes = index.get("task_routes")
     route_ids: set[str] = set()
@@ -113,26 +114,59 @@ def validate() -> list[str]:
             _check_existing_paths(route.get("contracts"), f"{label}.contracts", errors)
             _check_test_globs(route.get("tests", []), f"{label}.tests", errors)
 
-    large_files = index.get("large_files")
-    if not isinstance(large_files, list) or not large_files:
-        errors.append("large_files must be a non-empty list")
-    else:
-        for file_index, entry in enumerate(large_files):
-            label = f"large_files[{file_index}]"
-            if not isinstance(entry, dict):
-                errors.append(f"{label} must be an object")
+    large_policy = index.get("large_file_policy", {})
+    if large_policy.get("threshold_bytes") != 50000 or "symbol-first" not in large_policy.get("policy", ""):
+        errors.append("large_file_policy must apply symbol-first above 50000 bytes")
+    if isinstance(policy, dict) and policy.get("targeted_skip_context_tool") is not True:
+        errors.append("TARGETED must skip ai_context")
+    if isinstance(routes, list):
+        for route in routes:
+            if not isinstance(route, dict):
                 continue
-            candidate = _relative_path(entry.get("path"), f"{label}.path", errors)
-            minimum = entry.get("min_bytes")
-            if not isinstance(minimum, int) or minimum <= 0:
-                errors.append(f"{label}.min_bytes must be a positive integer")
-            elif candidate is not None:
-                if not candidate.is_file():
-                    errors.append(f"{label}.path is not a file: {entry.get('path')}")
-                elif candidate.stat().st_size < minimum:
-                    errors.append(f"{label}.path is smaller than its threshold: {entry.get('path')}")
-            if not isinstance(entry.get("policy"), str) or not entry["policy"].strip():
-                errors.append(f"{label}.policy must be non-empty")
+            entries = route.get("entrypoints", [])
+            if len(entries) > 4:
+                errors.append(f"route {route.get('id')} has more than 4 entrypoints")
+            for value in entries:
+                if isinstance(value, str) and ((ROOT / value).is_dir() or value.startswith("docs/archive/")):
+                    errors.append(f"route entrypoints must be current file-level candidates: {value}")
+            if any(str(value).startswith("docs/archive/") for value in route.get("contracts", [])):
+                errors.append("historical contracts must not be initial route context")
+    aliases = index.get("route_aliases", {})
+    if not isinstance(aliases, dict):
+        errors.append("route_aliases must be an object")
+    else:
+        for alias, target in aliases.items():
+            if alias in route_ids or target not in route_ids:
+                errors.append(f"invalid route alias: {alias} -> {target}")
+
+    # Static regression checks run in the existing Hosted navigation gate; no pytest needed.
+    tool_ast = ast.parse(CONTEXT_TOOL_PATH.read_text(encoding="utf-8"))
+    defaults = [
+        kw.value.value
+        for node in ast.walk(tool_ast)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "add_argument"
+        and any(isinstance(arg, ast.Constant) and arg.value == "--max-items" for arg in node.args)
+        for kw in node.keywords if kw.arg == "default" and isinstance(kw.value, ast.Constant)
+    ]
+    if defaults != [12]:
+        errors.append("ai_context --max-items default must be 12")
+    agents = AGENTS_PATH.read_text(encoding="utf-8")
+    for marker in ("TARGETED", "Skip `docs/AI_NAVIGATION.md`", "50 KB", "symbol-first",
+                   "Tests are symbol-first", "PR review is diff-first", "git diff <base>...HEAD",
+                   "docs/archive/**", "BASE_HEAD=", "FINAL_HEAD=", "CI_STATUS="):
+        if marker not in agents:
+            errors.append(f"AGENTS context rule missing: {marker}")
+    navigation = NAVIGATION_PATH.read_text(encoding="utf-8")
+    for marker in ("僅 DISCOVERY / FULL_AUDIT", "不要跑 ai_context.py", "TARGETED → exact rg"):
+        if marker not in navigation:
+            errors.append(f"optional navigation rule missing: {marker}")
+    for path in (AGENTS_PATH, NAVIGATION_PATH):
+        content = path.read_text(encoding="utf-8")
+        for obsolete in ("Before editing, read [`docs/AI_NAVIGATION.md`]", "每次任務的閱讀順序",
+                         "Read both hardware contracts in full", "2. Read [docs/AI_NAVIGATION.md]"):
+            if obsolete in content:
+                errors.append(f"mandatory discovery/historical reading returned: {path.name}")
 
     required_links = index.get("required_navigation_links")
     _check_existing_paths(required_links, "required_navigation_links", errors)
@@ -142,7 +176,6 @@ def validate() -> list[str]:
         ROOT / "README.md": ("docs/AI_NAVIGATION.md", "docs/AI_CONTEXT_INDEX.json"),
         ROOT / "README.en.md": ("docs/AI_NAVIGATION.md", "docs/AI_CONTEXT_INDEX.json"),
         ROOT / "USER_MANUAL.html": ("docs/AI_NAVIGATION.md", "docs/AI_CONTEXT_INDEX.json"),
-        ROOT / "CLAUDE.md": ("docs/AI_NAVIGATION.md", "docs/AI_CONTEXT_INDEX.json"),
         ROOT / "docs" / "README.md": ("AI_NAVIGATION.md", "AI_CONTEXT_INDEX.json"),
     }
     for path, required_links in required_links_by_file.items():
@@ -167,7 +200,7 @@ def main() -> int:
     print(
         "AI navigation contract OK: "
         f"{len(index['task_routes'])} routes, "
-        f"{len(index['large_files'])} large-file policies"
+        "general symbol-first policy (>50000 bytes)"
     )
     return 0
 

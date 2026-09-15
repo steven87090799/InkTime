@@ -1,10 +1,13 @@
-"""Print a bounded route summary and symbol locations for an AI task."""
+"""This command is intended for DISCOVERY tasks.
+Targeted tasks with known files or symbols should use direct rg/bounded reads instead.
+"""
 
 from __future__ import annotations
 
 import argparse
 import json
 import re
+import shlex
 from pathlib import Path
 from typing import Any
 
@@ -59,26 +62,18 @@ def _symbols(path: Path, limit: int) -> list[tuple[int, str]]:
 
 def _print_entrypoint(path_value: str, limit: int) -> None:
     path = _relative(path_value)
+    print(f"  candidate: {path_value}")
     if path.is_dir():
-        children = sorted(
-            child.relative_to(ROOT).as_posix()
-            for child in path.rglob("*")
-            if child.is_file() and not {".git", "__pycache__"}.intersection(child.parts)
-        )
-        shown = children[:limit]
-        print(f"  {path_value}/ directory ({len(children)} files; names only)")
-        for child in shown:
-            print(f"    - {child}")
-        if len(children) > limit:
-            print(f"    ... {len(children) - limit} more; use a targeted rg --files")
+        print("    directory hint only; locate the requested symbol before reading")
+        print(f"    next: rg -n --max-count 1 -- '<exact symbol or error>' {shlex.quote(path_value)}")
         return
-
-    print(f"  {path_value}")
     for line_number, label in _symbols(path, limit):
-        print(f"    {line_number}: {label}")
+        print(f"    {line_number}: {label[:160]}")
+    print(f"    next: rg -n -- '<exact symbol or term>' {shlex.quote(path_value)}")
 
 
 def _route(index: dict[str, Any], task_id: str) -> dict[str, Any] | None:
+    task_id = index.get("route_aliases", {}).get(task_id, task_id)
     routes = index.get("task_routes", [])
     for route in routes:
         if isinstance(route, dict) and route.get("id") == task_id:
@@ -86,15 +81,20 @@ def _route(index: dict[str, Any], task_id: str) -> dict[str, Any] | None:
     return None
 
 
-def main() -> int:
+def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("task_id", help="task id from docs/AI_CONTEXT_INDEX.json")
     parser.add_argument(
         "--max-items",
         type=int,
-        default=40,
-        help="maximum symbols or names per entrypoint",
+        default=12,
+        help="maximum hints per section and symbols per entrypoint (default: 12)",
     )
+    return parser
+
+
+def main() -> int:
+    parser = _parser()
     args = parser.parse_args()
     if args.max_items < 1:
         parser.error("--max-items must be positive")
@@ -107,14 +107,16 @@ def main() -> int:
         return 2
 
     print(f"task: {route['id']}")
-    print("entrypoints:")
-    for entrypoint in route["entrypoints"]:
+    if route.get("purpose"):
+        print(f"purpose: {route['purpose']}")
+    print("entrypoints (candidates, not required reads):")
+    for entrypoint in route["entrypoints"][:args.max_items]:
         _print_entrypoint(entrypoint, args.max_items)
-    print("contracts:")
-    for contract in route["contracts"]:
+    print("contracts (on demand):")
+    for contract in route["contracts"][:args.max_items]:
         print(f"  - {contract}")
-    print("tests:")
-    for test_glob in route.get("tests", []):
+    print("tests (on demand; locate matching functions only):")
+    for test_glob in route.get("tests", [])[:args.max_items]:
         print(f"  - {test_glob}")
     if route.get("read_policy"):
         print(f"read_policy: {route['read_policy']}")

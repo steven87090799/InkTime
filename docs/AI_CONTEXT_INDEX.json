@@ -7,7 +7,8 @@
     "first_pass_max_lines": 800,
     "expand_requires_evidence": true,
     "full_audit_requires_explicit_request": true,
-    "forbidden_globs": [
+    "hardware_exception": "Read docs/devices/PHOTOPAINTER_SAFETY_CONTRACT.md first for hardware safety tasks; historical evidence on demand.",
+    "deferred_globs": [
       ".env*",
       "*.db",
       "*.sqlite*",
@@ -30,60 +31,55 @@
       "**/*.hex",
       "**/*.uf2",
       "**/*.o",
-      "**/*.a"
+      "**/*.a",
+      "README.md",
+      "README.en.md",
+      "USER_MANUAL.html",
+      "docs/README.md",
+      "~/.codex/memories/**"
     ],
-    "hardware_exception": "Read both PhotoPainter handoff documents in full before hardware work."
+    "targeted_skip_context_tool": true
   },
   "task_routes": [
     {
       "id": "startup",
-      "entrypoints": ["inktime/app/factory.py", "inktime/app/bootstrap.py"],
-      "contracts": ["docs/architecture/APPLICATION_FACTORY.md"],
-      "tests": ["tests/**/test_application_factory.py"]
+      "entrypoints": [
+        "inktime/app/factory.py",
+        "inktime/app/bootstrap.py"
+      ],
+      "contracts": [
+        "docs/architecture/APPLICATION_FACTORY.md"
+      ],
+      "tests": [
+        "tests/**/test_application_factory.py"
+      ]
     },
     {
       "id": "scanner_photos",
-      "entrypoints": ["inktime/app/workers/scanner.py", "inktime/app/domain/photos/preprocessing.py"],
-      "contracts": ["docs/guides/LOCAL_ONLY_SELECTION_ZH_TW.md"],
-      "tests": ["tests/**/test_scanner*.py", "tests/**/test_local_only_mode.py"]
-    },
-    {
-      "id": "analysis_scoring",
       "entrypoints": [
-        "inktime/app/domain/analysis/scoring.py",
-        "inktime/app/domain/analysis/plan.py",
-        "inktime/app/domain/analysis/schema.py"
+        "inktime/app/workers/scanner.py",
+        "inktime/app/domain/photos/preprocessing.py"
       ],
       "contracts": [
-        "docs/VISION_SCHEMA_V4.md",
-        "docs/analysis/PHOTO_SELECTION_AI_FIRST_ZH_TW.md"
+        "docs/guides/LOCAL_ONLY_SELECTION_ZH_TW.md"
       ],
-      "tests": ["tests/**/test_scoring*.py", "tests/**/test_vision_v4.py"]
-    },
-    {
-      "id": "analysis_pipeline",
-      "entrypoints": ["inktime/app/services/analysis.py", "inktime/app/domain/analysis/plan.py"],
-      "contracts": ["docs/reference/TOKEN_COST_GUIDE_ZH_TW.md"],
-      "tests": ["tests/**/test_analysis*.py", "tests/**/test_ai_cache_singleflight.py"]
-    },
-    {
-      "id": "providers_usage",
-      "entrypoints": [
-        "inktime/app/providers/router.py",
-        "inktime/app/services/usage_tracking.py",
-        "inktime/app/services/budgets.py"
-      ],
-      "contracts": [
-        "docs/providers/OPENROUTER_ZH_TW.md",
-        "docs/guides/ACTIVITY_AI_TRACE_ZH_TW.md"
-      ],
-      "tests": ["tests/**/test_provider*.py", "tests/**/test_usage*.py"]
+      "tests": [
+        "tests/**/test_scanner*.py",
+        "tests/**/test_local_only_mode.py"
+      ]
     },
     {
       "id": "openai_batch",
-      "entrypoints": ["inktime/app/services/batch_analysis.py", "inktime/app/providers/openai_batch.py"],
-      "contracts": ["docs/OPENAI_BATCH_ANALYSIS_ZH_TW.md"],
-      "tests": ["tests/**/test_batch_analysis*.py"]
+      "entrypoints": [
+        "inktime/app/services/batch_analysis.py",
+        "inktime/app/providers/openai_batch.py"
+      ],
+      "contracts": [
+        "docs/OPENAI_BATCH_ANALYSIS_ZH_TW.md"
+      ],
+      "tests": [
+        "tests/**/test_batch_analysis*.py"
+      ]
     },
     {
       "id": "jobs_workers",
@@ -92,97 +88,268 @@
         "inktime/app/workers/scheduler.py",
         "inktime/app/services/jobs.py"
       ],
-      "contracts": ["docs/guides/ACTIVITY_AI_TRACE_ZH_TW.md"],
-      "tests": ["tests/**/test_jobs*.py", "tests/**/test_scheduler*.py"]
+      "contracts": [
+        "docs/guides/ACTIVITY_AI_TRACE_ZH_TW.md"
+      ],
+      "tests": [
+        "tests/**/test_jobs*.py",
+        "tests/**/test_scheduler*.py"
+      ]
     },
     {
-      "id": "selection_release",
+      "id": "analysis_prompt_schema",
+      "entrypoints": [
+        "inktime/app/domain/analysis/schema.py",
+        "inktime/app/providers/openai_compatible.py"
+      ],
+      "contracts": [
+        "docs/VISION_SCHEMA.md"
+      ],
+      "tests": [
+        "tests/**/test_scoring*.py",
+        "tests/**/test_vision_v4.py"
+      ],
+      "purpose": "Prompt assembly and current output schema"
+    },
+    {
+      "id": "analysis_ranking",
+      "entrypoints": [
+        "inktime/app/domain/analysis/scoring.py"
+      ],
+      "contracts": [
+        "docs/analysis/PHOTO_SELECTION_AI_FIRST_ZH_TW.md"
+      ],
+      "tests": [
+        "tests/**/test_scoring*.py",
+        "tests/**/test_vision_v4.py"
+      ],
+      "purpose": "67/33 weights, special bonus and favorite"
+    },
+    {
+      "id": "analysis_runtime",
+      "entrypoints": [
+        "inktime/app/services/analysis.py",
+        "inktime/app/domain/analysis/plan.py"
+      ],
+      "contracts": [
+        "docs/reference/TOKEN_COST_GUIDE_ZH_TW.md"
+      ],
+      "tests": [
+        "tests/**/test_analysis*.py",
+        "tests/**/test_ai_cache_singleflight.py"
+      ],
+      "purpose": "Vision lifecycle, cache, retry and persistence"
+    },
+    {
+      "id": "providers_usage",
+      "entrypoints": [
+        "inktime/app/providers/router.py"
+      ],
+      "contracts": [
+        "docs/providers/OPENROUTER_ZH_TW.md",
+        "docs/guides/ACTIVITY_AI_TRACE_ZH_TW.md"
+      ],
+      "tests": [
+        "tests/**/test_provider*.py",
+        "tests/**/test_usage*.py"
+      ],
+      "purpose": "Locate active provider before reading usage/budget dependencies"
+    },
+    {
+      "id": "release_selection",
       "entrypoints": [
         "inktime/app/repositories/render_candidates.py",
         "inktime/app/services/display_prepare.py"
       ],
-      "contracts": ["docs/analysis/PHOTO_SELECTION_AI_FIRST_ZH_TW.md"],
-      "tests": ["tests/**/test_render_candidate_contract.py"]
-    },
-    {
-      "id": "rendering_release",
-      "entrypoints": [
-        "inktime/app/services/rendering.py",
-        "inktime/app/services/release_coordinator.py",
-        "inktime/app/domain/rendering"
+      "contracts": [
+        "docs/analysis/PHOTO_SELECTION_AI_FIRST_ZH_TW.md"
       ],
-      "contracts": ["docs/architecture/ARCHITECTURE_ZH_TW.md"],
-      "tests": ["tests/**/test_*render*.py", "tests/**/test_adaptive_frame_renderer.py"]
+      "tests": [
+        "tests/**/test_render_candidate_contract.py"
+      ],
+      "purpose": "Candidate qualification and automatic release"
     },
     {
-      "id": "web_settings",
+      "id": "rendering",
       "entrypoints": [
-        "inktime/app/api",
-        "inktime/app/services",
-        "inktime/app/web/templates",
+        "inktime/app/services/rendering.py"
+      ],
+      "contracts": [
+        "docs/architecture/ARCHITECTURE_ZH_TW.md"
+      ],
+      "tests": [
+        "tests/**/test_*render*.py",
+        "tests/**/test_adaptive_frame_renderer.py"
+      ],
+      "purpose": "Locate named renderer before domain helpers"
+    },
+    {
+      "id": "release_lifecycle",
+      "entrypoints": [
+        "inktime/app/services/release_coordinator.py"
+      ],
+      "contracts": [
+        "docs/architecture/ARCHITECTURE_ZH_TW.md"
+      ],
+      "tests": [
+        "tests/**/test_*render*.py",
+        "tests/**/test_adaptive_frame_renderer.py"
+      ],
+      "purpose": "Publication, rollback and release lifecycle"
+    },
+    {
+      "id": "web_ui",
+      "entrypoints": [
+        "inktime/app/web/templates/settings.html",
+        "inktime/app/api/settings.py"
+      ],
+      "contracts": [
+        "docs/guides/ADMIN_GUIDE_ZH_TW.md"
+      ],
+      "tests": [
+        "tests/**/test_*api*.py",
+        "tests/**/test_settings*.py"
+      ],
+      "purpose": "Settings UI example; known screens should start directly at their own template"
+    },
+    {
+      "id": "settings_registry",
+      "entrypoints": [
         "inktime/app/repositories/settings.py"
       ],
-      "contracts": ["docs/guides/ADMIN_GUIDE_ZH_TW.md"],
-      "tests": ["tests/**/test_*api*.py", "tests/**/test_settings*.py"]
-    },
-    {
-      "id": "database_retention",
-      "entrypoints": ["inktime/app/db/migrations.py", "inktime/app/repositories"],
-      "contracts": ["docs/operations/MIGRATION_GUIDE_ZH_TW.md"],
-      "tests": ["tests/**/test_migrations.py", "tests/**/test_*retention*.py"]
-    },
-    {
-      "id": "devices_pairing_queue",
-      "entrypoints": [
-        "inktime/app/api/devices.py",
-        "inktime/app/api/device_pairing.py",
-        "inktime/app/services/device_queue_manifests.py"
+      "contracts": [
+        "docs/guides/ADMIN_GUIDE_ZH_TW.md"
       ],
-      "contracts": ["docs/devices/ESP32_AUTOMATIC_PAIRING_ZH_TW.md"],
-      "tests": ["tests/**/test_device*.py"]
+      "tests": [
+        "tests/**/test_*api*.py",
+        "tests/**/test_settings*.py"
+      ],
+      "purpose": "Search the exact setting key"
     },
     {
-      "id": "photopainter_hardware",
+      "id": "database_repository",
       "entrypoints": [
-        "esp32/ink-display-7C-photo/ink-display-7C-photo.ino",
-        "esp32/ink-display-7C-photo/photopainter_support.cpp"
+        "inktime/app/repositories/photos.py"
       ],
       "contracts": [
-        "docs/devices/PHOTOPAINTER_REV2_TG28_HARDWARE_HANDOFF_ZH_TW.md",
-        "docs/devices/WAVESHARE_PHOTOPAINTER_ZH_TW.md"
+        "docs/operations/MIGRATION_GUIDE_ZH_TW.md"
       ],
-      "tests": ["tests/**/test_esp32*.py"],
-      "read_policy": "Read both hardware contracts in full before source."
+      "tests": [
+        "tests/**/test_migrations.py",
+        "tests/**/test_*retention*.py"
+      ],
+      "purpose": "Photo repository example; use exact method in the affected repository"
     },
     {
-      "id": "operations_ci",
-      "entrypoints": [".github/workflows/ci.yml", "scripts"],
+      "id": "database_migrations",
+      "entrypoints": [
+        "inktime/app/db/migrations.py"
+      ],
       "contracts": [
-        "docs/CI_POLICY.md",
+        "docs/operations/MIGRATION_GUIDE_ZH_TW.md"
+      ],
+      "tests": [
+        "tests/**/test_migrations.py",
+        "tests/**/test_*retention*.py"
+      ],
+      "purpose": "Locate exact migration version; preserve released migrations"
+    },
+    {
+      "id": "device_pairing",
+      "entrypoints": [
+        "inktime/app/api/device_pairing.py"
+      ],
+      "contracts": [
+        "docs/devices/ESP32_AUTOMATIC_PAIRING_ZH_TW.md"
+      ],
+      "tests": [
+        "tests/**/test_device*.py"
+      ],
+      "purpose": "Pairing endpoints and state"
+    },
+    {
+      "id": "device_offline_queue",
+      "entrypoints": [
+        "inktime/app/services/device_queue_manifests.py",
+        "inktime/app/api/devices.py"
+      ],
+      "contracts": [
+        "docs/devices/ESP32_AUTOMATIC_PAIRING_ZH_TW.md"
+      ],
+      "tests": [
+        "tests/**/test_device*.py"
+      ],
+      "purpose": "Offline manifests, queue and ACK"
+    },
+    {
+      "id": "hardware_safety",
+      "entrypoints": [
+        "docs/devices/PHOTOPAINTER_SAFETY_CONTRACT.md"
+      ],
+      "contracts": [
+        "docs/devices/PHOTOPAINTER_SAFETY_CONTRACT.md"
+      ],
+      "tests": [
+        "tests/**/test_esp32*.py"
+      ],
+      "purpose": "Read safety contract before named firmware symbols"
+    },
+    {
+      "id": "ci_failure",
+      "entrypoints": [
+        ".github/workflows/ci.yml"
+      ],
+      "contracts": [
+        "docs/CI_POLICY.md"
+      ],
+      "tests": [
+        "tests/unit/test_ci_*.py"
+      ],
+      "purpose": "Start with exact failing job/error and testcase"
+    },
+    {
+      "id": "operations_runtime",
+      "entrypoints": [
+        "scripts/update_nas.sh"
+      ],
+      "contracts": [
         "docs/operations/NAS_TAG_DEPLOYMENT_ZH_TW.md"
       ],
-      "tests": ["tests/unit/test_ci_*.py"]
+      "tests": [
+        "tests/unit/test_ci_*.py"
+      ],
+      "purpose": "NAS runtime/update entry point; expand from actual error"
     },
     {
       "id": "documentation_baseline",
-      "entrypoints": ["docs/reference/CURRENT_STATE_ZH_TW.md"],
-      "contracts": ["docs/README.md", "README.md"],
+      "entrypoints": [
+        "docs/reference/CURRENT_STATE_ZH_TW.md"
+      ],
+      "contracts": [
+        "docs/README.md",
+        "README.md"
+      ],
       "tests": []
     }
-  ],
-  "large_files": [
-    {"path": "USER_MANUAL.html", "min_bytes": 100000, "policy": "Read only named sections."},
-    {"path": "README.md", "min_bytes": 40000, "policy": "Use AI navigation and named headings."},
-    {"path": "inktime/app/db/migrations.py", "min_bytes": 100000, "policy": "Read only the migration and callers involved."},
-    {"path": "inktime/app/services/batch_analysis.py", "min_bytes": 100000, "policy": "Locate the named lifecycle function first."},
-    {"path": "inktime/app/services/rendering.py", "min_bytes": 100000, "policy": "Locate the named renderer or contract first."},
-    {"path": "inktime/app/repositories/photos.py", "min_bytes": 100000, "policy": "Locate the named query or repository method first."},
-    {"path": "inktime/app/repositories/settings.py", "min_bytes": 90000, "policy": "Locate the setting key and default first."},
-    {"path": "esp32/ink-display-7C-photo/ink-display-7C-photo.ino", "min_bytes": 200000, "policy": "Read only after the hardware contracts and named symbols."}
   ],
   "required_navigation_links": [
     "AGENTS.md",
     "docs/AI_NAVIGATION.md",
     "docs/AI_CONTEXT_INDEX.json"
-  ]
+  ],
+  "large_file_policy": {
+    "threshold_bytes": 50000,
+    "policy": "symbol-first; bounded read of normally 40–120 lines; applies to every text file, including tests"
+  },
+  "route_aliases": {
+    "analysis_scoring": "analysis_ranking",
+    "analysis_pipeline": "analysis_runtime",
+    "selection_release": "release_selection",
+    "rendering_release": "rendering",
+    "web_settings": "settings_registry",
+    "database_retention": "database_migrations",
+    "devices_pairing_queue": "device_offline_queue",
+    "photopainter_hardware": "hardware_safety",
+    "operations_ci": "ci_failure"
+  }
 }

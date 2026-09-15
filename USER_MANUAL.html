@@ -1240,7 +1240,7 @@
     <main class="main-content">
         <article class="markdown-body" id="content">
             <h1 id="inktime-墨水屏電子相框系統-終極百科全書級操作手冊與開發者指南" class="doc-h1">InkTime 墨水屏電子相框系統 終極百科全書級操作手冊與開發者指南</h1>
-<p class="doc-p"><a class="doc-link" href="docs/AI_NAVIGATION.md">AI 修改導航</a> · <a class="doc-link" href="docs/AI_CONTEXT_INDEX.json">機器可讀任務索引</a> · <a class="doc-link" href="AGENTS.md">AGENTS.md</a> · <a class="doc-link" href="CLAUDE.md">CLAUDE.md</a>。<strong>2026-09-13 文件核對：</strong>功能基準為目前 checkout 原始碼，Migration 60、嚴格 AI Schema v4、ESP32 2.8.7，新增安裝預設 <code>local_only</code>。章節與索引維持原位置，部署、評分與設定範例依目前程式校正。版本與驗證範圍見<a class="doc-link" href="docs/reference/CURRENT_STATE_ZH_TW.md">現行基線</a>；歷史 CI 與實板量測保留原日期。</p>
+<p class="doc-p"><a class="doc-link" href="docs/AI_NAVIGATION.md">AI 修改導航</a> · <a class="doc-link" href="docs/AI_CONTEXT_INDEX.json">機器可讀任務索引</a> · <a class="doc-link" href="AGENTS.md">AGENTS.md</a>。<strong>2026-09-13 文件核對：</strong>功能基準為目前 checkout 原始碼，Migration 60、嚴格 AI Schema v4、ESP32 2.8.7，新增安裝預設 <code>local_only</code>。章節與索引維持原位置，部署、評分與設定範例依目前程式校正。版本與驗證範圍見<a class="doc-link" href="docs/reference/CURRENT_STATE_ZH_TW.md">現行基線</a>；歷史 CI 與實板量測保留原日期。</p>
 
 
 <hr class="doc-divider">
@@ -1351,7 +1351,7 @@
 <hr class="doc-divider">
 <h3 id="sec-5-3" class="doc-h3">5.3 預篩選排除清單 (Excluded Photos)</h3>
 <p class="doc-p">排除清單位於 <code>/photos/excluded</code>，可查本機截圖／品質證據以及 AI 內容分類。E6 不再作自動排除門檻。AI 的 sexualized_content、explicit_nudity、female_glamour_portrait 各自套用開關與信心門檻；普通女性旅遊、自拍與生活照不能只因人物性別被當成寫真。</p>
-<p class="doc-p">人工恢復可覆寫內容排除；一般重掃與重新分析保留人工決定，只有明確重新套用自動規則才重新評估。完整契約見 <a class="doc-link" href="docs/VISION_SCHEMA_V4.md">Vision Schema v4</a>。</p>
+<p class="doc-p">人工恢復可覆寫內容排除；一般重掃與重新分析保留人工決定，只有明確重新套用自動規則才重新評估。完整契約見 <a class="doc-link" href="docs/VISION_SCHEMA.md">現行 Vision Schema</a>。</p>
 <hr class="doc-divider">
 <h3 id="sec-5-4" class="doc-h3">5.4 照片分析與 AI 工作佇列 (Photo Analysis & Jobs)</h3>
 <p class="doc-p"><code>/jobs</code> 與工作詳細頁可建立、暫停、續跑、取消和重跑失敗項目。新策略為 <code>local</code>／<code>single</code>；舊名稱只正規化為 single，不恢復第二次 Vision。執行仍受 execution_mode、Provider、預算與照片資格限制。</p>
@@ -1367,7 +1367,7 @@ effective_special_level = clamp(ai_special_level + favorite_adjustment, 0, 4)
 special_bonus = [0, 2, 5, 9, 14][effective_special_level]
 raw = round(clamp(base + special_bonus, 0, 100), 2)
 </code></pre></div>
-<p class="doc-p">ranking-v5-ai-first 以 raw 分數直接排名；最愛使 special level 提升一級（上限 4），rarity adjustment 為 0。本機品質只作資格門檻，E6 只參與顯示分數，本機 fallback 與歷史資料不混入語意排名。細節與人工恢復見 <a class="doc-link" href="docs/VISION_SCHEMA_V4.md">Vision v4</a>。</p>
+<p class="doc-p">ranking-v5-ai-first 以 raw 分數直接排名；最愛使 special level 提升一級（上限 4），rarity adjustment 為 0。本機品質只作資格門檻，E6 只參與顯示分數，本機 fallback 與歷史資料不混入語意排名。細節與人工恢復見 <a class="doc-link" href="docs/VISION_SCHEMA.md">現行 Vision Schema</a>。</p>
 <hr class="doc-divider">
 <h3 id="sec-5-7" class="doc-h3">5.7 渲染設定與 A/B 模擬器 (Rendering & Simulator)</h3>
 <ul class="doc-list"><li><strong>URL 路由</strong>：<code>/rendering</code> (GET) 與 <code>/simulator</code> (GET)</li><li><strong>畫面指標與模擬器</strong>：</li><li><strong>A/B 畫面對照區</strong>：左側與右側可選擇不同 Preset、版型與 Dither 演算法，實時比對渲染效果。</li><li><strong>頁面控制按鈕與下拉選單</strong>：</li><li><strong>版型選擇 (Layout)</strong>：<code>full</code>, <code>postcard</code>, <code>photo_info</code>, <code>photo_pair</code>, <code>photo_pair_caption</code>, <code>adaptive_memory</code>, <code>calendar</code>, <code>weather_sensor</code>。</li><li><strong>抖動模式 (Dither)</strong>：<code>floyd_steinberg</code>, <code>gooddisplay</code>, <code>photo_smooth</code>, <code>atkinson</code>, <code>bayer4</code>, <code>bayer8</code>, <code>serpentine_floyd_steinberg</code> 等 10 種。</li><li><code>[儲存為預設發布設定]</code>：將當前參數寫入 <code>render.layout</code> 與 <code>render.dither</code>。</li></ul>
@@ -1602,7 +1602,7 @@ devices／device_content_queues：裝置、內容交付與顯示 ACK
 analysis_batches／analysis_batch_items：OpenAI Batch 生命週期
 library_ranking_state：照片庫排名待重算狀態
 </code></pre></div>
-<p class="doc-p">v1–v3 分析保留原始 JSON，Migration 57 將其語意排序身分改為 legacy；v4 欄位、舊權重保留與精準 E6 恢復見 <a class="doc-link" href="docs/VISION_SCHEMA_V4.md">Vision v4 儲存契約</a>。</p>
+<p class="doc-p">v1–v3 分析保留原始 JSON，Migration 57 將其語意排序身分改為 legacy；v4 欄位、舊權重保留與精準 E6 恢復見 <a class="doc-link" href="docs/archive/contracts/VISION_SCHEMA_V4.md">歷史 Vision v4 儲存契約</a>。</p>
 <hr class="doc-divider">
 <h2 id="sec-11" class="doc-h2"><span class="h2-anchor-icon">#</span> 十一、 RESTful API 端點與 Error Code 錯誤碼完全對照表</h2>
 <p class="doc-p">下表依目前主要 API 模組列出路由；欄位、權限、CSRF、確認與錯誤回應以連結中的原始碼為準，錯誤碼另見 <a class="doc-link" href="docs/operations/ERROR_CODES_ZH_TW.md">錯誤碼指南</a>。</p>
@@ -2109,7 +2109,7 @@ INKTIME_GUNICORN_LOG_LEVEL=warning
 <h4 class="doc-h4">Batch 與正式交付</h4>
 <ul class="doc-list">
 <li><a href="docs/OPENAI_BATCH_ANALYSIS_ZH_TW.md" class="doc-link"><code>docs/OPENAI_BATCH_ANALYSIS_ZH_TW.md</code></a>：Batch 輸入快照、隱私、生命週期、成本與實際人工 smoke 邊界。</li>
-<li><a href="docs/PRODUCTION_READINESS_SECURITY_HANDOFF_ZH_TW.md" class="doc-link"><code>docs/PRODUCTION_READINESS_SECURITY_HANDOFF_ZH_TW.md</code></a>：正式環境安全、LAN、持久化與交接檢查。</li>
+<li><a href="docs/archive/reports/PRODUCTION_READINESS_SECURITY_HANDOFF_ZH_TW.md" class="doc-link"><code>docs/PRODUCTION_READINESS_SECURITY_HANDOFF_ZH_TW.md</code></a>：歷史安全交接證據，非現行部署契約。</li>
 <li><a href="docs/archive/reports/FINAL_ONE_SHOT_HARDENING_AUDIT.md" class="doc-link"><code>docs/archive/reports/FINAL_ONE_SHOT_HARDENING_AUDIT.md</code></a>：本輪 P1、Provider、AI、Release、Container、文件與 hosted CI 交接證據。</li>
 <li><a href="docs/archive/reports/branch-consolidation-report.md" class="doc-link"><code>docs/archive/reports/branch-consolidation-report.md</code></a>：分支整併、Migration 26、CI 與遠端分支清理證據。</li>
 <li><a href="docs/post-merge-hardware-validation.md" class="doc-link"><code>docs/post-merge-hardware-validation.md</code></a>：軟體／hosted PASS 與真實 OpenAI、NAS、ESP32 驗收的 NOT RUN 邊界。</li>
@@ -2121,9 +2121,9 @@ INKTIME_GUNICORN_LOG_LEVEL=warning
 <li><a href="docs/architecture/ARCHITECTURE_TARGET.md" class="doc-link"><code>docs/architecture/ARCHITECTURE_TARGET.md</code></a>：架構責任與不變條件。</li>
 <li><a href="docs/architecture/APPLICATION_FACTORY.md" class="doc-link"><code>docs/architecture/APPLICATION_FACTORY.md</code></a>：Web／Worker／Scheduler 的 Factory 與初始化順序。</li>
 <li><a href="docs/architecture/RUNTIME_CONFIGURATION.md" class="doc-link"><code>docs/architecture/RUNTIME_CONFIGURATION.md</code></a>：RuntimeConfig 與部署設定邊界。</li>
-<li><a href="docs/architecture/LEGACY_RETIREMENT_PLAN.md" class="doc-link"><code>docs/architecture/LEGACY_RETIREMENT_PLAN.md</code></a>：Legacy 相容與退休門檻。</li>
+<li><a href="docs/archive/architecture/LEGACY_RETIREMENT_PLAN.md" class="doc-link"><code>docs/architecture/LEGACY_RETIREMENT_PLAN.md</code></a>：Legacy 已退休的歷史紀錄。</li>
 <li><a href="docs/architecture/VISUAL_ORIENTATION_CORRECTION.md" class="doc-link"><code>docs/architecture/VISUAL_ORIENTATION_CORRECTION.md</code></a>：EXIF、AI 與人工視覺方向規則。</li>
-<li><a href="docs/architecture/TECH_DEBT_LOCAL_ONLY_ZH_TW.md" class="doc-link"><code>docs/architecture/TECH_DEBT_LOCAL_ONLY_ZH_TW.md</code></a>：Local-only 交付刻意未處理的技術債。</li>
+<li><a href="docs/archive/architecture/TECH_DEBT_LOCAL_ONLY_ZH_TW.md" class="doc-link"><code>docs/architecture/TECH_DEBT_LOCAL_ONLY_ZH_TW.md</code></a>：Local-only 交付刻意未處理的技術債。</li>
 </ul>
 
 <h4 class="doc-h4">維運、安全與部署（<code>docs/operations/</code>）</h4>
@@ -2210,7 +2210,7 @@ INKTIME_GUNICORN_LOG_LEVEL=warning
 <li><a href="docs/devices/PHOTOPAINTER_REV2_TG28_HARDWARE_HANDOFF_ZH_TW.md" class="doc-link"><code>docs/devices/PHOTOPAINTER_REV2_TG28_HARDWARE_HANDOFF_ZH_TW.md</code></a>：PhotoPainter Rev2.0 TG28 實板除錯交接紀錄。</li>
 <li><a href="docs/guides/ACTIVITY_AI_TRACE_ZH_TW.md" class="doc-link"><code>docs/guides/ACTIVITY_AI_TRACE_ZH_TW.md</code></a>：Activity、工作與 AI Trace 判讀。</li>
 <li><a href="docs/operations/PHOTO_ANALYSIS_RETENTION_ZH_TW.md" class="doc-link"><code>docs/operations/PHOTO_ANALYSIS_RETENTION_ZH_TW.md</code></a>：Photo Analysis 歷史資料保留與安全清理。</li>
-<li><a href="docs/reports/DOCUMENTATION_SYNC_20260831.md" class="doc-link"><code>docs/reports/DOCUMENTATION_SYNC_20260831.md</code></a>：2026-08-31 全專案 Markdown 校對紀錄。</li>
+<li><a href="docs/archive/reports/DOCUMENTATION_SYNC_20260831.md" class="doc-link"><code>docs/reports/DOCUMENTATION_SYNC_20260831.md</code></a>：2026-08-31 全專案 Markdown 校對紀錄。</li>
 <li><a href="esp32/ink-display-7C-photo/README.md" class="doc-link"><code>esp32/ink-display-7C-photo/README.md</code></a>：7.3 吋／PhotoPainter 韌體入口。</li>
 </ul>
         </article>

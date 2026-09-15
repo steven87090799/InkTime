@@ -21,14 +21,6 @@ EXPECTED_PULL_REQUEST_TYPES = (
     "unlabeled",
     "edited",
 )
-FULL_VALIDATION_EXPRESSION = (
-    "${{ github.event_name != 'pull_request' || github.event.action != 'edited' || "
-    "github.event.changes.base != null }}"
-)
-METADATA_LANE_EXPRESSION = (
-    "github.event_name == 'pull_request' && github.event.action == 'edited' && "
-    "github.event.changes.base == null && 'metadata-only' || 'validation'"
-)
 FULL_VALIDATION_GUARD = "needs.changes.outputs.full_validation == 'true'"
 CI_HEAVY_JOBS = (
     "source-head-contract",
@@ -59,36 +51,6 @@ def _load_workflow(path: Path) -> dict[str, Any]:
     return document
 
 
-def _requires_full_validation(
-    event_name: str,
-    action: str = "",
-    changes: dict[str, object] | None = None,
-) -> bool:
-    return not (
-        event_name == "pull_request"
-        and action == "edited"
-        and "base" not in (changes or {})
-    )
-
-
-def _concurrency_lane(
-    event_name: str,
-    action: str = "",
-    changes: dict[str, object] | None = None,
-) -> str:
-    if _requires_full_validation(event_name, action, changes):
-        return "validation"
-    return "metadata-only"
-
-
-def _gate_name(
-    full_validation: bool,
-    validation_name: str,
-    metadata_name: str,
-) -> str:
-    return validation_name if full_validation else metadata_name
-
-
 def _step_by_id(job: dict[str, Any], step_id: str) -> dict[str, Any]:
     return next(step for step in job["steps"] if step.get("id") == step_id)
 
@@ -97,41 +59,8 @@ def _step_by_name(job: dict[str, Any], name: str) -> dict[str, Any]:
     return next(step for step in job["steps"] if step.get("name") == name)
 
 
-@pytest.mark.parametrize("changed_field", ["body", "title"])
-def test_metadata_only_edits_do_not_require_full_validation(changed_field):
-    changes = {changed_field: {"from": "old value"}}
-
-    assert _requires_full_validation("pull_request", "edited", changes) is False
-    assert _concurrency_lane("pull_request", "edited", changes) == "metadata-only"
-
-
-def test_base_retarget_requires_full_validation():
-    changes = {"base": {"ref": {"from": "release"}}}
-
-    assert _requires_full_validation("pull_request", "edited", changes) is True
-    assert _concurrency_lane("pull_request", "edited", changes) == "validation"
-
-
-@pytest.mark.parametrize(
-    "event_name,action",
-    [
-        ("pull_request", "opened"),
-        ("pull_request", "synchronize"),
-        ("pull_request", "reopened"),
-        ("pull_request", "ready_for_review"),
-        ("pull_request", "labeled"),
-        ("pull_request", "unlabeled"),
-        ("push", ""),
-        ("workflow_dispatch", ""),
-    ],
-)
-def test_code_and_routing_events_require_full_validation(event_name, action):
-    assert _requires_full_validation(event_name, action) is True
-    assert _concurrency_lane(event_name, action) == "validation"
-
-
 @pytest.mark.parametrize("workflow_path", WORKFLOW_PATHS)
-def test_workflows_parse_and_isolate_metadata_concurrency(workflow_path):
+def test_all_pr_events_share_validation_concurrency(workflow_path):
     workflow = _load_workflow(workflow_path)
     pull_request = workflow["on"]["pull_request"]
     concurrency = workflow["concurrency"]
@@ -141,13 +70,15 @@ def test_workflows_parse_and_isolate_metadata_concurrency(workflow_path):
     assert "ready_for_review" in pull_request["types"]
     assert workflow["on"]["push"]["branches"] == ["main"]
     assert "workflow_dispatch" in workflow["on"]
-    assert METADATA_LANE_EXPRESSION in concurrency["group"]
+    assert concurrency["group"].endswith("-validation")
+    assert "github.event.action" not in concurrency["group"]
+    assert "metadata-only" not in concurrency["group"]
     assert concurrency["cancel-in-progress"] is True
     assert "pull_request_target" not in workflow["on"]
 
 
 @pytest.mark.parametrize("workflow_path", WORKFLOW_PATHS)
-def test_metadata_edits_skip_checkout_routing_and_provenance(workflow_path):
+def test_every_event_runs_checkout_routing_and_provenance(workflow_path):
     workflow = _load_workflow(workflow_path)
     changes = workflow["jobs"]["changes"]
     event = _step_by_id(changes, "event")
@@ -158,7 +89,7 @@ def test_metadata_edits_skip_checkout_routing_and_provenance(workflow_path):
     assert changes["outputs"]["full_validation"] == (
         "${{ steps.event.outputs.full_validation }}"
     )
-    assert event["env"]["FULL_VALIDATION"] == FULL_VALIDATION_EXPRESSION
+    assert event["env"]["FULL_VALIDATION"] == "true"
     assert checkout["if"] == "${{ steps.event.outputs.full_validation == 'true' }}"
     assert route["if"] == "${{ steps.event.outputs.full_validation == 'true' }}"
     assert upload["if"] == "${{ steps.event.outputs.full_validation == 'true' }}"
@@ -182,29 +113,26 @@ def test_all_heavy_jobs_require_full_validation(workflow_name, heavy_jobs):
 
 
 @pytest.mark.parametrize(
-    "workflow_path,gate_id,validation_name,metadata_name,attestation_workflow",
+    "workflow_path,gate_id,validation_name,attestation_workflow",
     [
         (
             WORKFLOW_PATHS[0],
             "repository-gate",
             "Repository gate",
-            "Metadata event gate",
             "repository",
         ),
         (
             WORKFLOW_PATHS[1],
             "container-security-gate",
             "Container security gate",
-            "Container metadata event gate",
             "container",
         ),
     ],
 )
-def test_metadata_uses_distinct_gate_identity(
+def test_required_gate_identity_is_stable_and_attested(
     workflow_path,
     gate_id,
     validation_name,
-    metadata_name,
     attestation_workflow,
 ):
     workflow = _load_workflow(workflow_path)
@@ -212,25 +140,13 @@ def test_metadata_uses_distinct_gate_identity(
     failure = _step_by_name(gate, "Fail when event classification failed")
     checkout = next(step for step in gate["steps"] if "uses" in step)
     attestation = _step_by_name(gate, "Verify planner-selected execution attestation")
-    metadata = _step_by_name(gate, "Accept metadata-only pull request edit")
-
-    expected_name = (
-        "${{ needs.changes.outputs.full_validation == 'true' && "
-        + f"'{validation_name}' || '{metadata_name}'"
-        + " }}"
-    )
-    assert gate["name"] == expected_name
-    assert _gate_name(True, validation_name, metadata_name) == validation_name
-    assert _gate_name(False, validation_name, metadata_name) == metadata_name
+    assert gate["name"] == validation_name
+    assert all(step.get("name") != "Accept metadata-only pull request edit" for step in gate["steps"])
     assert gate["if"] == "${{ always() }}"
     assert failure["if"] == "${{ needs.changes.result != 'success' }}"
     assert checkout["if"] == "${{ needs.changes.outputs.full_validation == 'true' }}"
     assert attestation["if"] == "${{ needs.changes.outputs.full_validation == 'true' }}"
     assert f"--workflow {attestation_workflow}" in attestation["run"]
-    assert metadata["if"] == (
-        "${{ needs.changes.outputs.full_validation != 'true' && "
-        "needs.changes.result == 'success' }}"
-    )
 
 
 def test_main_canonical_planner_and_provenance_contracts_are_preserved():
