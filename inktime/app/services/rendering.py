@@ -625,13 +625,6 @@ class RenderService:
                 "created_at": analysis["created_at"] if analysis else None,
                 "side_caption_hash": hashlib.sha256(side_caption.encode("utf-8")).hexdigest(),
                 "semantic_hash": hashlib.sha256(semantic.encode("utf-8")).hexdigest(),
-                "caption_style": str(self.settings.get("analysis.copy_default_style", "natural")),
-                "caption_variants_enabled": bool(
-                    self.settings.get("analysis.caption_variants_enabled", False)
-                ),
-                "advanced_caption_enabled": bool(
-                    self.settings.get("analysis.advanced_caption_enabled", False)
-                ),
                 "caption_wrap_enabled": bool(self.settings.get("render.caption_wrap_enabled", False)),
                 "caption_max_lines": int(self.settings.get("render.caption_max_lines", 2)),
                 "caption_min_font_size": int(self.settings.get("render.caption_min_font_size", 17)),
@@ -783,42 +776,16 @@ class RenderService:
                 result[photo_id] = analysis
         return {photo_id: result.get(photo_id, analysis) for photo_id, analysis in latest.items()}
 
-    @staticmethod
-    def _caption_variants(analysis: dict[str, Any] | None) -> dict[str, Any]:
-        try:
-            variants = (
-                json.loads(str((analysis or {}).get("semantic_json") or "{}")).get("values") or {}
-            ).get("caption_variants") or {}
-        except (TypeError, ValueError, json.JSONDecodeError):
-            return {}
-        return variants if isinstance(variants, dict) else {}
-
     @classmethod
     def _has_caption_content(cls, analysis: dict[str, Any]) -> bool:
-        if str(analysis.get("side_caption") or "").strip():
-            return True
-        return any(str(value or "").strip() for value in cls._caption_variants(analysis).values())
+        return bool(str(analysis.get("side_caption") or "").strip())
 
     def _caption_text(self, photo_id: str, analysis: dict[str, Any] | None) -> str:
-        """Choose a configured variant without changing its provenance."""
+        """Return the canonical model side-caption for rendering."""
         row = analysis
         if row is None:
             return ""
-        side_caption = str(row.get("side_caption") or "").strip()
-        if not (
-            bool(self.settings.get("analysis.advanced_caption_enabled", False))
-            and bool(self.settings.get("analysis.caption_variants_enabled", False))
-        ):
-            return side_caption
-        variants = self._caption_variants(row)
-        style = str(self.settings.get("analysis.copy_default_style", "natural"))
-        selected = str(
-            variants.get(style) or variants.get("natural") or side_caption or "畫面把此刻收好了。"
-        ).strip()
-        self._activity(
-            "caption_style_selected", "Renderer 已選擇 Caption 候選風格", photo_id=photo_id, style=style
-        )
-        return selected
+        return str(row.get("side_caption") or "").strip()
 
     def _caption(self, photo_id: str) -> str:
         override = self._photo_level_caption_override(photo_id)
@@ -927,26 +894,7 @@ class RenderService:
             ).fetchone()
         if row is None:
             return ""
-        side_caption = str(row["side_caption"] or "").strip()
-        if not (
-            bool(self.settings.get("analysis.advanced_caption_enabled", False))
-            and bool(self.settings.get("analysis.caption_variants_enabled", False))
-        ):
-            return side_caption
-        try:
-            variants = (json.loads(str(row["semantic_json"] or "{}")).get("values") or {}).get(
-                "caption_variants"
-            ) or {}
-        except (TypeError, ValueError, json.JSONDecodeError):
-            variants = {}
-        style = str(self.settings.get("analysis.copy_default_style", "natural"))
-        selected = str(
-            variants.get(style) or variants.get("natural") or side_caption or "畫面把此刻收好了。"
-        ).strip()
-        self._activity(
-            "caption_style_selected", "Renderer 已選擇 Caption 候選風格", photo_id=photo_id, style=style
-        )
-        return selected
+        return str(row["side_caption"] or "").strip()
 
     def _draw_footer_caption(
         self, draw, text: str, *, x: int, top: int, bottom: int, width: int, fill: str = "black"

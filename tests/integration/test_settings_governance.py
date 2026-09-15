@@ -930,25 +930,24 @@ def test_unknown_key_rejects_entire_partial_update(client, app):
     assert repository.snapshots() == []
 
 
-def test_cross_field_validation_uses_current_plus_partial_update(client, app):
+def test_side_caption_length_validation_uses_current_plus_partial_update(client, app):
     create_admin(app)
     login(client)
     invalid = _post(
         client,
         "/api/v1/settings/preview",
-        {"analysis.caption_min_chars": 99},
+        {"analysis.side_caption_min_chars": 99},
     )
     assert invalid.status_code == 200
     assert invalid.json["valid"] is False
-    assert "min ≤ target ≤ max" in invalid.json["validation_errors"][0]
-    assert app.extensions["inktime_settings_repository"].get("analysis.caption_min_chars") == 10
+    assert "side_caption_min_chars" in invalid.json["validation_errors"][0]
+    assert app.extensions["inktime_settings_repository"].get("analysis.side_caption_min_chars") == 8
 
     valid = client.post(
         "/api/v1/settings",
         json={
-            "analysis.caption_min_chars": 50,
-            "analysis.caption_target_chars": 70,
-            "analysis.caption_max_chars": 100,
+            "analysis.side_caption_min_chars": 10,
+            "analysis.side_caption_max_chars": 14,
         },
         headers={
             "X-CSRF-Token": csrf(client),
@@ -959,17 +958,18 @@ def test_cross_field_validation_uses_current_plus_partial_update(client, app):
     assert valid.json["updated"] == 2
 
 
-def test_legacy_ai_limits_normalize_and_explicit_advanced_disable_is_preserved(app):
+def test_legacy_caption_rows_are_retained_but_not_registered_or_used(app):
     settings = app.extensions["inktime_settings_repository"]
-    settings.update(
-        "analysis.advanced_caption_enabled",
-        False,
-        changed_by="operator",
-        source_ip="127.0.0.1",
-    )
     with app.extensions["inktime_database"].transaction() as connection:
         connection.execute(
-            "UPDATE settings SET value_json='220' WHERE key='analysis.caption_max_chars'"
+            "INSERT INTO settings(key,category,value_json,value_type,requires_restart,updated_at) "
+            "VALUES ('analysis.advanced_caption_enabled','legacy','false','boolean',0,'test') "
+            "ON CONFLICT(key) DO UPDATE SET value_json='false'"
+        )
+        connection.execute(
+            "INSERT INTO settings(key,category,value_json,value_type,requires_restart,updated_at) "
+            "VALUES ('analysis.caption_max_chars','legacy','220','integer',0,'test') "
+            "ON CONFLICT(key) DO UPDATE SET value_json='220'"
         )
         connection.execute(
             "UPDATE settings SET value_json='512' WHERE key='analysis.image_max_side'"
@@ -977,9 +977,15 @@ def test_legacy_ai_limits_normalize_and_explicit_advanced_disable_is_preserved(a
 
     settings.ensure_defaults()
 
-    assert settings.get("analysis.caption_max_chars") == 100
     assert settings.get("analysis.image_max_side") == 1024
-    assert settings.get("analysis.advanced_caption_enabled") is False
+    with app.extensions["inktime_database"].session() as connection:
+        legacy_rows = connection.execute(
+            "SELECT key FROM settings WHERE key IN ('analysis.advanced_caption_enabled','analysis.caption_max_chars')"
+        ).fetchall()
+    assert {row["key"] for row in legacy_rows} == {
+        "analysis.advanced_caption_enabled", "analysis.caption_max_chars"
+    }
+    assert "analysis.advanced_caption_enabled" not in SETTING_DEFINITIONS
 
 
 def test_high_risk_change_requires_preview_confirmation(client, app):
@@ -1507,8 +1513,10 @@ def test_ui_contains_dirty_search_filter_snapshot_and_accessibility_contracts(cl
     assert "完整裝置群組覆寫" not in body
     assert "改變 Cache Fingerprint" in body
     assert SETTING_DEFINITIONS["analysis.ai_daily_photo_limit"]["advanced"] is True
-    assert SETTING_DEFINITIONS["analysis.caption_variants_enabled"]["advanced"] is True
+    assert SETTING_DEFINITIONS["analysis.side_caption_min_chars"]["default"] == 8
+    assert SETTING_DEFINITIONS["analysis.side_caption_max_chars"]["default"] == 16
+    assert SETTING_DEFINITIONS["analysis.side_caption_custom_rules"]["default"] == ""
+    assert "analysis.caption_variants_enabled" not in SETTING_DEFINITIONS
     assert SETTING_DEFINITIONS["analysis.ai_daily_photo_limit"]["risk"] == "high"
-    assert SETTING_DEFINITIONS["analysis.caption_variants_enabled"]["dependencies"] == [
-        {"key": "analysis.advanced_caption_enabled", "equals": True}
-    ]
+    assert "analysis.advanced_caption_enabled" not in body
+    assert "analysis.copy_humor_level" not in body

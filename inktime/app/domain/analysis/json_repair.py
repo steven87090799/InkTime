@@ -16,7 +16,7 @@ from typing import Any
 from inktime.app.domain.analysis.schema import AnalysisValidationError
 
 
-SEMANTIC_INTEGRITY_FIELDS = frozenset(
+LEGACY_V4_SEMANTIC_INTEGRITY_FIELDS = frozenset(
     {
         "memory_score",
         "visual_score",
@@ -29,6 +29,25 @@ SEMANTIC_INTEGRITY_FIELDS = frozenset(
         "text_safe_area",
     }
 )
+
+# Schema v5 intentionally removed the legacy storage/display fields.  The
+# compatibility-only repair surfaces still need an immutable snapshot, but it
+# must be derived from fields that actually exist in the response shape.
+# `types` and `side_caption` remain repairable text/category output, matching
+# the legacy contract's treatment of `caption` and `types`.
+V5_SEMANTIC_INTEGRITY_FIELDS = frozenset(
+    {
+        "memory_score",
+        "visual_score",
+        "special_level",
+        "content_filter",
+        "visual_orientation",
+    }
+)
+
+# Keep the public name for callers that only need to describe the legacy
+# contract; semantic_repair_snapshot() dispatches by schema version below.
+SEMANTIC_INTEGRITY_FIELDS = LEGACY_V4_SEMANTIC_INTEGRITY_FIELDS
 
 
 def _fenced_object(text: str) -> dict[str, Any] | None:
@@ -128,7 +147,12 @@ def repair_source_object(raw: str) -> dict[str, Any] | None:
 def semantic_repair_snapshot(source: dict[str, Any] | None) -> dict[str, Any]:
     """Require all photo semantics before allowing text-only repair."""
 
-    missing = sorted(SEMANTIC_INTEGRITY_FIELDS - set(source or {}))
+    fields = (
+        V5_SEMANTIC_INTEGRITY_FIELDS
+        if (source or {}).get("schema_version") == 5
+        else LEGACY_V4_SEMANTIC_INTEGRITY_FIELDS
+    )
+    missing = sorted(fields - set(source or {}))
     if source is None or missing:
         error = AnalysisValidationError(
             "JSON 回應缺少可驗證的照片語意欄位，必須重新執行 Vision Analysis"
@@ -136,7 +160,7 @@ def semantic_repair_snapshot(source: dict[str, Any] | None) -> dict[str, Any]:
         )
         error.code = "VLM-007"
         raise error
-    return {field: deepcopy(source[field]) for field in SEMANTIC_INTEGRITY_FIELDS}
+    return {field: deepcopy(source[field]) for field in fields}
 
 
 def assert_semantic_repair_integrity(

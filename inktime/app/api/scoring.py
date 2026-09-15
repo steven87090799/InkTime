@@ -26,7 +26,6 @@ from inktime.app.providers.config import effective_provider_kind
 from inktime.app.providers.openai_compatible import (
     ProviderHTTPError,
     ANALYSIS_USER_PROMPT,
-    JSON_REPAIR_PROMPT,
     analysis_prompt_sections,
     analysis_response_format,
     analysis_system_prompt,
@@ -52,8 +51,7 @@ def _prompt_preview(rules: str | None = None) -> dict:
     plan = current_app.extensions["inktime_analysis_service"].build_plan(
         strategy="single", provider_route=[], scoring_profile_id=str(profile["id"]),
     )
-    # The existing scoring lab builds its router without advanced caption controls.
-    controls = plan["caption_controls"] if scope == "analysis" else None
+    controls = plan["caption_controls"]
     saved_rules = str(plan["scoring_rules"])
     selected_rules = saved_rules if rules is None else rules
     prompt = analysis_system_prompt(selected_rules, controls)
@@ -88,7 +86,6 @@ def _prompt_preview(rules: str | None = None) -> dict:
         "sections": analysis_prompt_sections(selected_rules, controls),
         "system_prompt": prompt,
         "user_prompt": ANALYSIS_USER_PROMPT,
-        "repair_prompt": JSON_REPAIR_PROMPT,
         "schema": schema,
         "fields": [{"name": name, "constraints": json.dumps(spec, ensure_ascii=False)}
                    for name, spec in schema["schema"]["properties"].items()],

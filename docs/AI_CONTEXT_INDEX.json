@@ -178,7 +178,6 @@
     {"path": "inktime/app/services/rendering.py", "min_bytes": 100000, "policy": "Locate the named renderer or contract first."},
     {"path": "inktime/app/repositories/photos.py", "min_bytes": 100000, "policy": "Locate the named query or repository method first."},
     {"path": "inktime/app/repositories/settings.py", "min_bytes": 90000, "policy": "Locate the setting key and default first."},
-    {"path": "inktime/app/services/analysis.py", "min_bytes": 80000, "policy": "Locate the plan, cache, or repair function first."},
     {"path": "esp32/ink-display-7C-photo/ink-display-7C-photo.ino", "min_bytes": 200000, "policy": "Read only after the hardware contracts and named symbols."}
   ],
   "required_navigation_links": [

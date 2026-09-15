@@ -38,10 +38,7 @@ from inktime.app.domain.analysis.scoring import (
     RANKING_RULE_VERSION,
     calculate_ranking_score,
 )
-from inktime.app.services.analysis import (
-    CAPTION_VARIANTS_TOKEN_CAP,
-    FULL_ANALYSIS_TOKEN_CAP,
-)
+from inktime.app.services.analysis import FULL_ANALYSIS_TOKEN_CAP
 from inktime.app.services.benchmark_metrics import calculate_benchmark_metrics
 from inktime.app.providers.base import ProviderResponse, VisionAttemptState
 from inktime.app.providers.config import normalize_options
@@ -671,11 +668,7 @@ class ModelBenchmarkService:
                             model=axis.model,
                             detail="high",
                             stage="single",
-                            max_tokens=(
-                                CAPTION_VARIANTS_TOKEN_CAP
-                                if axis.variants_enabled
-                                else FULL_ANALYSIS_TOKEN_CAP
-                            ),
+                            max_tokens=FULL_ANALYSIS_TOKEN_CAP,
                             caption_controls=(
                                 _caption_controls(axis.variants_enabled)
                                 if axis.prompt_profile == "advanced"

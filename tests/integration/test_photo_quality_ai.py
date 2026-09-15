@@ -675,7 +675,7 @@ def test_concurrent_force_requests_share_one_fresh_generation(app, tmp_path):
     assert {result["analysis"]["memory_score"] for result in results} == {77}
 
 
-def test_cache_wait_deadline_covers_provider_and_one_json_repair(app, tmp_path, monkeypatch):
+def test_cache_wait_deadline_covers_one_vision_request(app, tmp_path, monkeypatch):
     photo_id = _scan(app, tmp_path)[0]
     photos = app.extensions["inktime_photo_repository"]
     photo = photos.get_with_path(photo_id)
@@ -720,13 +720,6 @@ def test_cache_wait_deadline_covers_provider_and_one_json_repair(app, tmp_path, 
         content_sha256=str(photo["sha256"]),
         schema_kind="full",
         caption_controls=None,
-        repair_policy={
-            "enabled": True,
-            "model": "wait-deadline-repair",
-            "max_tokens": 1200,
-            "max_attempts": 1,
-            "text_only": True,
-        },
         prompt_version="test",
         vision_input={"mode": "test"},
     )
@@ -735,12 +728,12 @@ def test_cache_wait_deadline_covers_provider_and_one_json_repair(app, tmp_path, 
     assert leases and set(leases) == {252}
 
 
-def test_full_v4_json_uses_semantic_ranking_independent_of_gps(app, tmp_path):
+def test_full_v5_json_uses_semantic_ranking_independent_of_gps(app, tmp_path):
     photo_id = _scan(app, tmp_path)[0]
     _setting(app, "analysis.ai_mode", "eligible")
     with app.extensions["inktime_database"].session() as connection:
         connection.execute("UPDATE photos SET gps_lat=22.6273,gps_lon=120.3014 WHERE id=?", (photo_id,))
-    result = valid_result(special_level=0, special_codes=[])
+    result = valid_result(special_level=0)
     provider = CountingProvider(result)
     analyzed = app.extensions["inktime_analysis_service"].analyze_photo(
         photo_id=photo_id, job_id=None, provider=provider, strategy="high_quality", high_model="travel"

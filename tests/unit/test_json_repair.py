@@ -1,14 +1,11 @@
 from __future__ import annotations
 
+import json
+
 import pytest
 
-from inktime.app.domain.analysis.json_repair import (
-    assert_semantic_repair_integrity,
-    extract_json_value,
-    repair_source_object,
-    semantic_repair_snapshot,
-)
-from inktime.app.domain.analysis.schema import AnalysisValidationError
+from inktime.app.domain.analysis.json_repair import extract_json_value
+from inktime.app.domain.analysis.schema import AnalysisValidationError, validate_model_response
 from tests.unit.test_analysis_schema import valid_result
 
 
@@ -26,38 +23,23 @@ def test_json_repair_accepts_one_object_and_rejects_ambiguous_containers():
     assert extract_json_value("前綴 {not-json} 後綴") is None
 
 
-def test_repair_source_accepts_only_unambiguous_safe_syntax_conversion():
-    expected = valid_result()
-    assert repair_source_object(repr(expected)) == expected
-    assert repair_source_object("not-json") is None
-    assert repair_source_object("[{'memory_score': 72}]") is None
-
-
-def test_semantic_snapshot_requires_every_protected_field_and_is_immutable():
-    source = valid_result()
-    snapshot = semantic_repair_snapshot(source)
-    source["memory_score"] = 1
-    assert snapshot["memory_score"] == 72
-
-    missing = valid_result()
-    del missing["people_count"]
-    with pytest.raises(AnalysisValidationError, match="重新執行 Vision Analysis") as exc:
-        semantic_repair_snapshot(missing)
-    assert exc.value.code == "VLM-007"
-
-
 @pytest.mark.parametrize(
-    "field",
+    "wrapped",
     [
-        "memory_score", "visual_score", "special_level", "special_codes",
-        "people_count", "content_filter", "visual_orientation",
-        "subject_position", "text_safe_area",
+        lambda raw: f"```json\n{raw}\n```",
+        lambda raw: f"模型前綴：{raw} 分析完成",
     ],
 )
-def test_repair_cannot_change_or_invent_semantic_values(field):
-    source = valid_result()
-    snapshot = semantic_repair_snapshot(source)
-    repaired = valid_result()
-    repaired[field] = "changed"
-    with pytest.raises(AnalysisValidationError, match="重新執行 Vision Analysis"):
-        assert_semantic_repair_integrity(snapshot, repaired)
+def test_local_extraction_recovers_wrapped_v5_json(wrapped):
+    expected = valid_result()
+    extracted = extract_json_value(wrapped(json.dumps(expected, ensure_ascii=False)))
+    assert validate_model_response(extracted) == expected
+
+
+def test_missing_or_invalid_semantic_value_is_vlm_004():
+    missing = valid_result()
+    del missing["side_caption"]
+    for value in (missing, valid_result(memory_score="72"), "not-json"):
+        with pytest.raises(AnalysisValidationError) as raised:
+            validate_model_response(value)
+        assert raised.value.code == "VLM-004"

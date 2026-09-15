@@ -7,7 +7,9 @@ from typing import Any
 
 from inktime.app.domain.analysis.traditional_chinese import to_taiwan_traditional
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
+LEGACY_SCHEMA_VERSION = 4
+SUPPORTED_ANALYSIS_SCHEMA_VERSIONS = frozenset({LEGACY_SCHEMA_VERSION, SCHEMA_VERSION})
 CAPTION_MAX_CHARS = 100
 SIDE_CAPTION_MIN_CHARS = 8
 SIDE_CAPTION_MAX_CHARS = 16
@@ -90,12 +92,12 @@ def _enum_array(values, minimum=0, maximum=5) -> dict:
     }
 
 
-ANALYSIS_JSON_SCHEMA: dict[str, Any] = {
+LEGACY_V4_JSON_SCHEMA: dict[str, Any] = {
     "name": "inktime_photo_analysis",
     "strict": True,
     "schema": _object(
         {
-            "schema_version": {"type": "integer", "const": SCHEMA_VERSION},
+            "schema_version": {"type": "integer", "const": LEGACY_SCHEMA_VERSION},
             "types": _enum_array(ALLOWED_TYPES, 1, 3),
             "memory_score": {"type": "number", "minimum": 0, "maximum": 100},
             "visual_score": {"type": "number", "minimum": 0, "maximum": 100},
@@ -119,6 +121,45 @@ ANALYSIS_JSON_SCHEMA: dict[str, Any] = {
             ),
             "subject_position": {"type": "string", "enum": POSITIONS},
             "text_safe_area": {"type": "string", "enum": [*POSITIONS, "none"]},
+            "visual_orientation": _object(
+                {
+                    "rotation_cw": {
+                        "anyOf": [{"type": "integer", "enum": [0, 90, 180, 270]}, {"type": "null"}]
+                    },
+                    "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+                    "ambiguous": {"type": "boolean"},
+                    "evidence": _enum_array(ORIENTATION_EVIDENCE, 1, 6),
+                }
+            ),
+        }
+    ),
+}
+
+
+ANALYSIS_JSON_SCHEMA: dict[str, Any] = {
+    "name": "inktime_photo_analysis",
+    "strict": True,
+    "schema": _object(
+        {
+            "schema_version": {"type": "integer", "const": SCHEMA_VERSION},
+            "types": _enum_array(ALLOWED_TYPES, 1, 3),
+            "memory_score": {"type": "number", "minimum": 0, "maximum": 100},
+            "visual_score": {"type": "number", "minimum": 0, "maximum": 100},
+            "special_level": {"type": "integer", "minimum": 0, "maximum": 4},
+            "side_caption": {
+                "type": "string",
+                "minLength": SIDE_CAPTION_MIN_CHARS,
+                "maxLength": SIDE_CAPTION_MAX_CHARS,
+            },
+            "content_filter": _object(
+                {
+                    code: _object({
+                        "detected": {"type": "boolean"},
+                        "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+                    })
+                    for code in sorted(CONTENT_FILTER_CODES)
+                }
+            ),
             "visual_orientation": _object(
                 {
                     "rotation_cw": {
@@ -158,29 +199,21 @@ PROVIDER_CONTRACT_JSON_SCHEMA: dict[str, Any] = {
 
 
 def normalize_caption_controls(controls: dict[str, Any]) -> dict[str, Any]:
-    """Bound persisted caption settings to the v4 schema/validator contract."""
+    """Bound side-caption settings to the fixed v5 safety contract."""
     normalized = dict(controls)
-    caption_upper = max(10, min(CAPTION_MAX_CHARS, int(controls.get("caption_max_chars", CAPTION_MAX_CHARS))))
-    caption_target = max(10, min(caption_upper, int(controls.get("caption_target_chars", 60))))
-    caption_minimum = max(10, min(caption_target, int(controls.get("caption_min_chars", 10))))
+    custom_rules = " ".join(str(controls.get("side_caption_custom_rules", "")).split())[:1000].strip()
     side_upper = max(
         SIDE_CAPTION_MIN_CHARS,
         min(SIDE_CAPTION_MAX_CHARS, int(controls.get("side_caption_max_chars", SIDE_CAPTION_MAX_CHARS))),
     )
-    side_target = max(
-        SIDE_CAPTION_MIN_CHARS, min(side_upper, int(controls.get("side_caption_target_chars", 12)))
-    )
     side_minimum = max(
         SIDE_CAPTION_MIN_CHARS,
-        min(side_target, int(controls.get("side_caption_min_chars", SIDE_CAPTION_MIN_CHARS))),
+        min(side_upper, int(controls.get("side_caption_min_chars", SIDE_CAPTION_MIN_CHARS))),
     )
     normalized.update(
-        caption_min_chars=caption_minimum,
-        caption_target_chars=caption_target,
-        caption_max_chars=caption_upper,
         side_caption_min_chars=side_minimum,
-        side_caption_target_chars=side_target,
         side_caption_max_chars=side_upper,
+        side_caption_custom_rules=custom_rules,
     )
     return normalized
 
@@ -197,10 +230,10 @@ def json_schema_for_stage(
     schema = deepcopy(ANALYSIS_JSON_SCHEMA)
     if caption_controls:
         controls = normalize_caption_controls(caption_controls)
-        for field in ("caption", "side_caption"):
-            schema["schema"]["properties"][field].update(
-                minLength=controls[f"{field}_min_chars"], maxLength=controls[f"{field}_max_chars"]
-            )
+        schema["schema"]["properties"]["side_caption"].update(
+            minLength=controls["side_caption_min_chars"],
+            maxLength=controls["side_caption_max_chars"],
+        )
     return schema
 
 
@@ -262,8 +295,8 @@ def validate_model_response(raw: str | dict) -> dict:
     if isinstance(raw, str):
         try:
             raw = json.loads(raw)
-        except json.JSONDecodeError:
-            return validate_analysis_result(raw)
+        except json.JSONDecodeError as exc:
+            raise AnalysisValidationError("模型回傳無效 JSON") from exc
     value = to_taiwan_traditional(deepcopy(raw))
     _validate(value, ANALYSIS_JSON_SCHEMA["schema"], "analysis")
     if not isinstance(value, dict):
@@ -278,10 +311,14 @@ def validate_model_response(raw: str | dict) -> dict:
             confidence=min(orientation["confidence"], 0.5),
             evidence=["insufficient_visual_cues"],
         )
-    return validate_analysis_result(value)
+    return validate_analysis_result(value, accepted_versions=frozenset({SCHEMA_VERSION}))
 
 
-def validate_analysis_result(raw: str | dict) -> dict:
+def validate_analysis_result(
+    raw: str | dict,
+    *,
+    accepted_versions: frozenset[int] = SUPPORTED_ANALYSIS_SCHEMA_VERSIONS,
+) -> dict:
     if isinstance(raw, str):
         try:
             raw = json.loads(raw)
@@ -290,9 +327,15 @@ def validate_analysis_result(raw: str | dict) -> dict:
             error.code = "VLM-003"
             raise error from exc
     value = to_taiwan_traditional(deepcopy(raw))
-    _validate(value, ANALYSIS_JSON_SCHEMA["schema"], "analysis")
     if not isinstance(value, dict):  # Narrow the type after the schema validator accepts it.
         raise AnalysisValidationError("analysis 必須是 object")
+    version = value.get("schema_version")
+    if type(version) is not int or version not in accepted_versions:
+        raise AnalysisValidationError("analysis.schema_version 不支援的版本")
+    schema = (
+        LEGACY_V4_JSON_SCHEMA if version == LEGACY_SCHEMA_VERSION else ANALYSIS_JSON_SCHEMA
+    )
+    _validate(value, schema["schema"], "analysis")
     orientation = value["visual_orientation"]
     if orientation["rotation_cw"] is None and not orientation["ambiguous"]:
         raise AnalysisValidationError("rotation_cw=null 必須 ambiguous=true")
@@ -307,6 +350,6 @@ def validate_analysis_result(raw: str | dict) -> dict:
             raise AnalysisValidationError(
                 "insufficient_visual_cues 必須獨立、rotation_cw=null、ambiguous=true 且 confidence <= 0.5"
             )
-    for key in ("caption", "side_caption"):
+    for key in (("caption", "side_caption") if version == LEGACY_SCHEMA_VERSION else ("side_caption",)):
         value[key] = value[key].strip()
     return value

@@ -35,7 +35,7 @@ class RenderCandidateRepository:
         AND p.exclusion_status NOT IN ('auto_excluded','manually_excluded')
         AND p.lifecycle_status='active'
         AND l.enabled=1
-        AND a.id IS NOT NULL AND a.schema_version=4
+        AND a.id IS NOT NULL AND a.schema_version IN (4,5)
     """
     SQL_PREDICATE = f"""
         {_BASE_SQL_PREDICATE}
@@ -203,7 +203,7 @@ class RenderCandidateRepository:
                 and bool(row.get("eligible"))
                 and row.get("latest_analysis_id") is not None
                 and str(row.get("score_kind") or "") == SEMANTIC_SCORE_KIND
-                and row.get("schema_version") == 4
+                and row.get("schema_version") in {4, 5}
                 and row.get("ranking_score") is not None
             )
             local_eligible = (

@@ -13,5 +13,4 @@
     {% for provider in prompt_preview.providers %}<article><h3>{{ provider.name }} / {{ provider.model }}</h3>{% if provider.response_format %}<p>Schema 封裝 {{ provider.schema_chars }} 字元</p><pre class="prompt-text">{{ provider.response_format|tojson(indent=2) }}</pre>{% else %}<p>此服務未啟用 JSON Schema；請求不附 response_format，回應仍受伺服器的 Schema v4 驗證。</p>{% endif %}</article>
     {% else %}<p>目前沒有啟用模型服務。固定欄位仍可在上方查看，新增服務後會顯示對應封裝。</p>{% endfor %}
   </div><p>OpenRouter 傳輸格式會移除不支援的 uniqueItems；伺服器仍檢查重複值。</p></details>
-  <details><summary>JSON 修復 · 僅在回應驗證失敗時使用</summary><pre class="prompt-text">{{ prompt_preview.repair_prompt }}</pre><p>另附當次 Schema、錯誤原因與待修復文字；不重送照片。這不是每次分析都會送出的提示詞。</p></details>
 </section>

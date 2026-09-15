@@ -31,7 +31,9 @@ def test_defaults_and_settings_ui(app, client):
         assert settings.get(key) is True
     assert settings.get("analysis.content_filter_min_confidence") == 0.85
     assert settings.get("analysis.female_glamour_min_confidence") == 0.9
-    assert [settings.get(f"analysis.caption_{x}_chars") for x in ("min", "target", "max")] == [10, 60, 100]
+    assert settings.get("analysis.side_caption_min_chars") == 8
+    assert settings.get("analysis.side_caption_max_chars") == 16
+    assert settings.get("analysis.side_caption_custom_rules") == ""
     assert settings.get("render.e6_weight") == 20
     response = client.get("/settings?mode=all")
     assert response.status_code == 200
@@ -71,7 +73,7 @@ def test_authoritative_exclusion_retains_analysis_orientation(app, code, confide
     with repo.database.session() as connection:
         row = connection.execute("SELECT * FROM photo_analysis WHERE photo_id=?", (photo_id,)).fetchone()
         assert (
-            row["schema_version"] == 4
+            row["schema_version"] == 5
             and json.loads(row["raw_json"])["content_filter"][code] == {"detected": True, "confidence": confidence}
         )
         assert (
@@ -139,11 +141,11 @@ def test_local_quality_favorite_population_and_caption_search(app):
         )
     save(repo, ids[-1], content_filter=content_filter_result("sexualized_content", 0.99))
     assert len(repo.score_population()) == 5
-    rows, count = repo.search(query="釣具")
+    rows, count = repo.search(query=".jpg")
     assert count == 6 and len(rows) == 6  # excluded analysis remains searchable
 
 
-def test_real_service_uses_v4_and_content_policy(app, tmp_path):
+def test_real_service_uses_v5_and_content_policy(app, tmp_path):
     photo_id = _scan(app, tmp_path)[0]
     provider = CountingProvider(
         valid_result(content_filter=content_filter_result("explicit_nudity", 0.95))
@@ -157,7 +159,7 @@ def test_real_service_uses_v4_and_content_policy(app, tmp_path):
         photo_id=photo_id, job_id=None, provider=provider, strategy="single", force_ai=True
     )
     assert provider.analyze_calls == 1
-    assert result["analysis"]["schema_version"] == 4
+    assert result["analysis"]["schema_version"] == 5
     assert (
         app.extensions["inktime_photo_repository"].get_with_path(photo_id)["reject_reason"]
         == "explicit_nudity"

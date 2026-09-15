@@ -260,7 +260,7 @@ def dashboard():
                    COALESCE(SUM(historical_model AND NOT current_model),0) AS historical_model
             FROM (
                 SELECT a.photo_id,
-                       MAX(a.schema_version=4 AND a.score_kind='semantic') AS current_model,
+                       MAX(a.schema_version IN (4,5) AND a.score_kind='semantic') AS current_model,
                        MAX({historical_model_sql()}) AS historical_model
                 FROM photo_analysis a GROUP BY a.photo_id
             )

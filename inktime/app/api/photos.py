@@ -193,7 +193,7 @@ def photos_page():
         score_kind = str(photo.get("score_kind") or "")
         ranking_score = (
             photo.get("ranking_score")
-            if score_kind == SEMANTIC_SCORE_KIND and photo.get("schema_version") == 4
+            if score_kind == SEMANTIC_SCORE_KIND and photo.get("schema_version") in {4, 5}
             else None
         )
         e6_score = photo.get("e6_score")
