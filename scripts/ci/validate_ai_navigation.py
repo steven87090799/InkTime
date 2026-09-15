@@ -161,7 +161,7 @@ def validate() -> list[str]:
     for marker in ("僅 DISCOVERY / FULL_AUDIT", "不要跑 ai_context.py", "TARGETED → exact rg"):
         if marker not in navigation:
             errors.append(f"optional navigation rule missing: {marker}")
-    for path in (AGENTS_PATH, NAVIGATION_PATH, ROOT / "CLAUDE.md"):
+    for path in (AGENTS_PATH, NAVIGATION_PATH):
         content = path.read_text(encoding="utf-8")
         for obsolete in ("Before editing, read [`docs/AI_NAVIGATION.md`]", "每次任務的閱讀順序",
                          "Read both hardware contracts in full", "2. Read [docs/AI_NAVIGATION.md]"):
@@ -176,7 +176,6 @@ def validate() -> list[str]:
         ROOT / "README.md": ("docs/AI_NAVIGATION.md", "docs/AI_CONTEXT_INDEX.json"),
         ROOT / "README.en.md": ("docs/AI_NAVIGATION.md", "docs/AI_CONTEXT_INDEX.json"),
         ROOT / "USER_MANUAL.html": ("docs/AI_NAVIGATION.md", "docs/AI_CONTEXT_INDEX.json"),
-        ROOT / "CLAUDE.md": ("docs/AI_NAVIGATION.md", "docs/AI_CONTEXT_INDEX.json"),
         ROOT / "docs" / "README.md": ("AI_NAVIGATION.md", "AI_CONTEXT_INDEX.json"),
     }
     for path, required_links in required_links_by_file.items():

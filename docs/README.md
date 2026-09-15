@@ -8,7 +8,7 @@
 
 | 你要做什麼 | 先讀 |
 |---|---|
-| AI agent 修改專案、減少重複讀取 | [AGENTS.md](../AGENTS.md)；已知位置直接 TARGETED，探索才用 [AI 修改導航](AI_NAVIGATION.md)／[機器可讀任務索引](AI_CONTEXT_INDEX.json)；[CLAUDE.md](../CLAUDE.md) 共用此入口 |
+| AI agent 修改專案、減少重複讀取 | [AGENTS.md](../AGENTS.md)；已知位置直接 TARGETED，探索才用 [AI 修改導航](AI_NAVIGATION.md)／[機器可讀任務索引](AI_CONTEXT_INDEX.json)；AGENTS.md 為唯一 Agent 規則入口 |
 | 工作已完成但沒有文案／Worker 告警 | [Activity、工作與 AI Trace](guides/ACTIVITY_AI_TRACE_ZH_TW.md) |
 | 從 NAS 到 ESP32 完成上線 | [完整上線指南](operations/PRODUCTION_DEPLOYMENT_GUIDE_ZH_TW.md) |
 | 第一次啟動 Docker | [快速開始](getting-started/QUICK_START_ZH_TW.md) → [安裝指南](getting-started/INSTALLATION_ZH_TW.md) |

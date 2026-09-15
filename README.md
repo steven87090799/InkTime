@@ -12,7 +12,7 @@ InkTime 會在本地掃描相簿、擷取 EXIF 與品質特徵，先辨識重複
 
 ## AI 修改入口
 
-修改遵守 [AGENTS.md](AGENTS.md)；已知檔案／符號直接 TARGETED，只有探索任務才用 [AI 修改導航](docs/AI_NAVIGATION.md) 與 [機器可讀任務索引](docs/AI_CONTEXT_INDEX.json)；Claude 入口為 [CLAUDE.md](CLAUDE.md)。不需要每次載入本 README 的完整流程圖。
+修改遵守 [AGENTS.md](AGENTS.md)；已知檔案／符號直接 TARGETED，只有探索任務才用 [AI 修改導航](docs/AI_NAVIGATION.md) 與 [機器可讀任務索引](docs/AI_CONTEXT_INDEX.json)；Agent 規則統一維護於 AGENTS.md。不需要每次載入本 README 的完整流程圖。
 
 ## 主要能力
 
