@@ -5,7 +5,7 @@ import json
 from uuid import uuid4
 
 from inktime.app.db import Database
-from inktime.app.domain.analysis.scoring import DEFAULT_RANKING_WEIGHTS, validate_ranking_weights, normalize_scoring_rules
+from inktime.app.domain.analysis.scoring import DEFAULT_RANKING_WEIGHTS, normalize_scoring_rules
 from inktime.app.repositories.settings import SettingsRepository
 
 
@@ -22,7 +22,6 @@ class ScoringProfileRepository:
         return {
             "rules": normalize_scoring_rules(self.settings.get(SETTING_KEYS["rules"], "")),
             "memory_weight": 67.0, "visual_weight": 33.0, "local_weight": 0.0,
-            "favorite_bonus": 1,
         }
 
     def ensure_initial(self) -> str:
@@ -43,8 +42,8 @@ class ScoringProfileRepository:
                     INSERT INTO scoring_rule_versions(
                         id,name,rules,memory_weight,visual_weight,local_weight,
                         beauty_weight,technical_weight,emotion_weight,ranking_contract_version,
-                        favorite_bonus,is_active,created_by,created_at
-                    ) VALUES (?,?,?,?,?,?,33,0,0,4,?,1,NULL,?)
+                        legacy_favorite_score_bonus,is_active,created_by,created_at
+                    ) VALUES (?,?,?,?,?,?,33,0,0,4,0,1,NULL,?)
                     """,
                     (
                         version_id,
@@ -53,7 +52,6 @@ class ScoringProfileRepository:
                         snapshot["memory_weight"],
                         snapshot["visual_weight"],
                         snapshot["local_weight"],
-                        snapshot["favorite_bonus"],
                         now,
                     ),
                 )
@@ -84,8 +82,6 @@ class ScoringProfileRepository:
         *,
         name: str,
         rules: str,
-        weights: dict[str, float],
-        favorite_bonus: float,
         created_by: str,
         source_ip: str,
     ) -> dict:
@@ -93,8 +89,7 @@ class ScoringProfileRepository:
         clean_rules = normalize_scoring_rules(rules)
         if not clean_name or len(clean_name) > 80:
             raise ValueError("版本名稱必須為 1 到 80 個字元")
-        values = validate_ranking_weights(weights)
-        bonus = 1
+        values = dict(DEFAULT_RANKING_WEIGHTS)
 
         version_id = str(uuid4())
         now = datetime.now(timezone.utc).isoformat()
@@ -152,8 +147,8 @@ class ScoringProfileRepository:
                     INSERT INTO scoring_rule_versions(
                         id,name,rules,memory_weight,visual_weight,local_weight,
                         beauty_weight,technical_weight,emotion_weight,ranking_contract_version,
-                        favorite_bonus,is_active,created_by,created_at
-                    ) VALUES (?,?,?,?,?,?,33,0,0,4,?,1,?,?)
+                        legacy_favorite_score_bonus,is_active,created_by,created_at
+                    ) VALUES (?,?,?,?,?,?,33,0,0,4,0,1,?,?)
                     """,
                     (
                         version_id,
@@ -162,7 +157,6 @@ class ScoringProfileRepository:
                         values["memory"],
                         values["visual"],
                         values["local_quality"],
-                        bonus,
                         created_by,
                         now,
                     ),
@@ -190,8 +184,6 @@ class ScoringProfileRepository:
         return self.create(
             name=f"還原：{version['name']}",
             rules=str(version["rules"]),
-            weights=dict(DEFAULT_RANKING_WEIGHTS),
-            favorite_bonus=float(version["favorite_bonus"]),
             created_by=created_by,
             source_ip=source_ip,
         )

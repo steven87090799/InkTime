@@ -334,7 +334,7 @@ def _analysis_plan(strategy: str) -> tuple[dict, str]:
     plan = analysis.build_plan(
         strategy=strategy,
         provider_route=provider_route,
-        scoring_profile=scoring,
+        scoring_profile_id=str(scoring["id"]),
     )
     return plan, canonical_json(plan)
 

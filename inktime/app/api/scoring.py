@@ -15,6 +15,7 @@ from inktime.app.domain.analysis import AnalysisValidationError
 from inktime.app.domain.analysis.scoring import (
     DISTINCTIVE_SCORING_RULES,
     DEFAULT_RANKING_WEIGHTS,
+    FAVORITE_SPECIAL_LEVEL_BOOST,
     score_band,
     SPECIAL_BONUSES,
     ranking_components,
@@ -49,7 +50,7 @@ def _prompt_preview(rules: str | None = None) -> dict:
     settings = current_app.extensions["inktime_settings_repository"]
     profile = current_app.extensions["inktime_scoring_repository"].current()
     plan = current_app.extensions["inktime_analysis_service"].build_plan(
-        strategy="single", provider_route=[], scoring_profile=profile,
+        strategy="single", provider_route=[], scoring_profile_id=str(profile["id"]),
     )
     # The existing scoring lab builds its router without advanced caption controls.
     controls = plan["caption_controls"] if scope == "analysis" else None
@@ -99,6 +100,7 @@ def _prompt_preview(rules: str | None = None) -> dict:
         "is_draft": rules is not None,
         "weights": DEFAULT_RANKING_WEIGHTS,
         "special_bonuses": SPECIAL_BONUSES,
+        "favorite_special_level_boost": FAVORITE_SPECIAL_LEVEL_BOOST,
         "example": ranking_components({
             "memory_score": 80, "visual_score": 60, "local_quality_score": 80, "special_level": 2,
         }),
@@ -170,8 +172,6 @@ def create_profile():
         profile = current_app.extensions["inktime_scoring_repository"].create(
             name=str(payload.get("name", "")),
             rules=str(payload.get("rules", "")),
-            weights=dict(DEFAULT_RANKING_WEIGHTS),
-            favorite_bonus=1,
             created_by=str(g.user["id"]),
             source_ip=request.remote_addr or "unknown",
         )

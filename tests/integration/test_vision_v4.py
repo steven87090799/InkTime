@@ -442,7 +442,7 @@ def test_scoring_history_displays_legacy_weights_without_offering_v4_restore(app
     with app.extensions["inktime_database"].session() as connection:
         connection.execute(
             "INSERT INTO scoring_rule_versions(id,name,rules,memory_weight,beauty_weight,technical_weight,"
-            "emotion_weight,favorite_bonus,created_at) VALUES ('legacy-profile','舊版歷史','original',20,30,40,10,9,datetime('now'))"
+            "emotion_weight,legacy_favorite_score_bonus,created_at) VALUES ('legacy-profile','舊版歷史','original',20,30,40,10,9,datetime('now'))"
         )
     page = client.get("/scoring")
     assert page.status_code == 200

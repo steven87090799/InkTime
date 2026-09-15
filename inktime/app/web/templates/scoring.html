@@ -27,7 +27,7 @@
 <section class="panel" id="prompt-editor">
   <div class="panel-head"><div><p class="eyebrow">可編輯</p><h2>評分參考內容</h2><p>調整各欄位的高低分條件、參考分數，或精簡用語。這段內容會取代預設評分參考，只送出一次。</p></div>{% if g.user.role == 'administrator' %}<button class="secondary" type="button" id="distinctive-preset">載入預設參考</button>{% endif %}</div>
   <div class="prompt-guidance">
-    <p><strong>memory_score</strong>：例如「互動清楚的日常紀錄約 70 分，資訊薄弱約 30 分」。</p>
+    <p><strong>memory_score（AI 回憶價值）</strong>：判斷一般回看價值，例如「互動清楚的日常紀錄約 70 分，資訊薄弱約 30 分」。它不是 Personal Memory Importance，不猜使用者私人關係或私人重要性。</p>
     <p><strong>visual_score</strong>：例如「構圖占判斷 60%、光線 40%」。這是模型評分參考，不會改變伺服器的合成權重。</p>
     <p><strong>special_level</strong>：可調整 0～4 級的情境門檻；每級對應加分由伺服器固定計算。</p>
   </div>
@@ -47,12 +47,12 @@
 <section class="panel" id="ranking-formula">
   <div class="panel-head"><div><p class="eyebrow">伺服器計算 · 已鎖定</p><h2>分數怎麼算</h2><p>模型提供語意分數，程式負責合成、加分與排除。修改評分參考不會修改這些公式。</p></div></div>
   <div class="prompt-formula-grid">
-    <article><strong>回憶 {{ prompt_preview.weights.memory|int }}%</strong><p>AI 回傳 memory_score，依上方評分參考判斷一般回看價值。</p></article>
+    <article><strong>AI 回憶價值 {{ prompt_preview.weights.memory|int }}%</strong><p>AI 回傳 memory_score，依上方評分參考判斷一般回看價值；不推測私人關係或私人重要性。</p></article>
     <article><strong>視覺 {{ prompt_preview.weights.visual|int }}%</strong><p>AI 回傳 visual_score，判斷構圖、光線與畫面吸引力。</p></article>
     <article><strong>本機品質：通過或排除</strong><p>先完成清晰度、曝光、解析度等技術品質檢查；通過後不加入排序。</p></article>
   </div>
-  <p class="prompt-equation">AI 選片分 = 回憶 × 0.67 ＋ 視覺 × 0.33 ＋ 特殊加分，限制在 0～100。</p>
-  <p>有效特殊等級 = AI special_level ＋ 最愛（0 或 1），最高 4 級。等級 0／1／2／3／4 分別加 {{ prompt_preview.special_bonuses|join('／') }} 分。不再依照片庫稀有度加級，也不再轉換百分位；同一份模型結果不會因照片庫大小改變分數。</p>
+  <p class="prompt-equation">AI 選片分 = AI 回憶價值 × 0.67 ＋ 視覺 × 0.33 ＋ 特殊加分，限制在 0～100。</p>
+  <p>有效特殊等級 = AI special_level ＋ 最愛提升 {{ prompt_preview.favorite_special_level_boost }} 級，最高 4 級。等級 0／1／2／3／4 分別加 {{ prompt_preview.special_bonuses|join('／') }} 分。不再依照片庫稀有度加級，也不再轉換百分位；同一份模型結果不會因照片庫大小改變分數。</p>
   <p><strong>例：</strong>回憶 80、視覺 60 → 基礎 {{ prompt_preview.example.base_ranking_score }} 分；特殊等級 2 加 {{ prompt_preview.example.special_bonus }} → AI 選片分 {{ prompt_preview.example.raw_ranking_score }} 分（未加最愛）。</p>
   <p>自動顯示只接受本機與 AI 都已完成的照片；不足時只使用已完成候選，沒有候選則保留既有畫面，不用尚未完成 AI 的照片補位。內容排除依分類與信心門檻處理，高分與最愛不能繞過 AI 內容排除，人工恢復可覆寫。</p>
   <p>E6 顯示適合度保留供參考，不混入 AI 排序，也不單憑 E6 分數排除。歷年同日模式先限定日期範圍，範圍內按 AI 分數排序；多樣性只在 AI 同分時作選擇，不加入日期或播放次數加減分。</p>
@@ -74,7 +74,7 @@
   <h2>規則版本歷史</h2>
   <div class="table-wrap"><table><thead><tr><th>版本</th><th>契約與權重</th><th>最愛</th><th>建立時間</th><th>操作</th></tr></thead><tbody>
   {% for version in versions %}
-    <tr><td><strong>{{ version.name }}</strong>{% if version.is_active %}<small>目前使用中</small>{% endif %}</td><td>{% if version.ranking_contract_version == 4 %}Vision v4：回憶 {{ version.memory_weight }}／視覺 {{ version.visual_weight }}／本機品質 {{ version.local_weight }}{% else %}舊版：回憶 {{ version.memory_weight }}／美感 {{ version.beauty_weight }}／技術 {{ version.technical_weight }}／情緒 {{ version.emotion_weight }}{% endif %}</td><td>+{{ version.favorite_bonus }} {{ '級' if version.ranking_contract_version == 4 else '分' }}</td><td>{{ version.created_at }}</td><td>{% if g.user.role == 'administrator' and not version.is_active and version.ranking_contract_version == 4 %}<button class="secondary restore-profile" data-id="{{ version.id }}">還原此版本</button>{% else %}—{% endif %}</td></tr>
+    <tr><td><strong>{{ version.name }}</strong>{% if version.is_active %}<small>目前使用中</small>{% endif %}</td><td>{% if version.ranking_contract_version == 4 %}Vision v4：回憶 {{ version.memory_weight }}／視覺 {{ version.visual_weight }}／本機品質 {{ version.local_weight }}{% else %}舊版：回憶 {{ version.memory_weight }}／美感 {{ version.beauty_weight }}／技術 {{ version.technical_weight }}／情緒 {{ version.emotion_weight }}{% endif %}</td><td>{% if version.ranking_contract_version == 4 %}+{{ prompt_preview.favorite_special_level_boost }} 級{% else %}+{{ version.legacy_favorite_score_bonus }} 分{% endif %}</td><td>{{ version.created_at }}</td><td>{% if g.user.role == 'administrator' and not version.is_active and version.ranking_contract_version == 4 %}<button class="secondary restore-profile" data-id="{{ version.id }}">還原此版本</button>{% else %}—{% endif %}</td></tr>
   {% endfor %}
   </tbody></table></div>
 </section>
@@ -147,7 +147,7 @@
         return node;
       };
       const cards = element('div', '', 'score-cards');
-      [['AI 選片分', data.ranking_score], ['AI 回憶（67%）', analysis.memory_score], ['AI 視覺（33%）', analysis.visual_score], ['本機品質（僅門檻）', analysis.local_quality_score]].forEach(([label, value]) => {
+      [['AI 選片分', data.ranking_score], ['AI 回憶價值（67%）', analysis.memory_score], ['AI 視覺（33%）', analysis.visual_score], ['本機品質（僅門檻）', analysis.local_quality_score]].forEach(([label, value]) => {
         const card = document.createElement('article');
         card.append(element('span', label), element('strong', String(value)));
         cards.append(card);

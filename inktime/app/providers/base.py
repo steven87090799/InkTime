@@ -136,6 +136,7 @@ class VisionProvider(ABC):
         invalid_content: str,
         validation_error: str,
         model: str,
+        immutable_semantic_values: dict[str, Any] | None = None,
         max_tokens: int | None = None,
         stage: str = "single_high",
         caption_controls: dict | None = None,

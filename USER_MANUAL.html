@@ -1240,7 +1240,7 @@
     <main class="main-content">
         <article class="markdown-body" id="content">
             <h1 id="inktime-墨水屏電子相框系統-終極百科全書級操作手冊與開發者指南" class="doc-h1">InkTime 墨水屏電子相框系統 終極百科全書級操作手冊與開發者指南</h1>
-<p class="doc-p"><a class="doc-link" href="docs/AI_NAVIGATION.md">AI 修改導航</a> · <a class="doc-link" href="docs/AI_CONTEXT_INDEX.json">機器可讀任務索引</a> · <a class="doc-link" href="AGENTS.md">AGENTS.md</a> · <a class="doc-link" href="CLAUDE.md">CLAUDE.md</a>。<strong>2026-09-08 文件核對：</strong>功能基準為目前 checkout 原始碼，Migration 59、嚴格 AI Schema v4、ESP32 2.8.7，新增安裝預設 <code>local_only</code>。章節與索引維持原位置，部署、評分與設定範例依目前程式校正。版本與驗證範圍見<a class="doc-link" href="docs/reference/CURRENT_STATE_ZH_TW.md">現行基線</a>；歷史 CI 與實板量測保留原日期。</p>
+<p class="doc-p"><a class="doc-link" href="docs/AI_NAVIGATION.md">AI 修改導航</a> · <a class="doc-link" href="docs/AI_CONTEXT_INDEX.json">機器可讀任務索引</a> · <a class="doc-link" href="AGENTS.md">AGENTS.md</a> · <a class="doc-link" href="CLAUDE.md">CLAUDE.md</a>。<strong>2026-09-13 文件核對：</strong>功能基準為目前 checkout 原始碼，Migration 60、嚴格 AI Schema v4、ESP32 2.8.7，新增安裝預設 <code>local_only</code>。章節與索引維持原位置，部署、評分與設定範例依目前程式校正。版本與驗證範圍見<a class="doc-link" href="docs/reference/CURRENT_STATE_ZH_TW.md">現行基線</a>；歷史 CI 與實板量測保留原日期。</p>
 
 
 <hr class="doc-divider">
@@ -1462,7 +1462,7 @@ raw = round(clamp(base + special_bonus, 0, 100), 2)
                 </div>
 <hr class="doc-divider">
 <h3 id="sec-7-2" class="doc-h3">7.2 送往 Vision LLM 之 Request Input Payload JSON</h3>
-<p class="doc-p">Provider adapter 依供應商能力建立請求，以下是欄位概念，實際 prompt／strict Schema 由 <a class="doc-link" href="inktime/app/domain/analysis/plan.py">Analysis Plan</a> 與 <a class="doc-link" href="inktime/app/providers/openai_compatible.py">Provider adapter</a> 產生。每 plan 最多一次圖片 Vision，失敗時最多一次純文字修復；Web 縮圖預設 1024，支援 1600，底層另支援 512。</p>
+<p class="doc-p">Provider adapter 依供應商能力建立請求，以下是欄位概念，實際 prompt／strict Schema 由 <a class="doc-link" href="inktime/app/domain/analysis/plan.py">Analysis Plan</a> 與 <a class="doc-link" href="inktime/app/providers/openai_compatible.py">Provider adapter</a> 產生。每 plan 最多一次圖片 Vision；純文字 JSON Repair 只修語法、Markdown fence、明確安全的型別與多餘欄位，不得補寫或改寫照片語意。語意欄位缺少或改變時改由有界工作重新執行 Vision。Web 縮圖預設 1024，支援 1600，底層另支援 512。</p>
 <div class="code-wrapper"><pre><code class="language-text">model: Provider 專屬完整模型 ID，留白才使用全域模型
 image: 經方向處理且有界的 JPEG 縮圖
 response_format: 依 Provider 能力選用的結構化 JSON 契約
@@ -1471,7 +1471,7 @@ output schema: 嚴格 v4，繁體中文描述與短文案
 </code></pre></div>
 <hr class="doc-divider">
 <h3 id="sec-7-3" class="doc-h3">7.3 Vision LLM 回傳之 Response JSON (<code>ANALYSIS_JSON_SCHEMA</code>)</h3>
-<p class="doc-p">以下為嚴格 v4 回應範例，欄位與額外屬性限制以 <a class="doc-link" href="inktime/app/domain/analysis/schema.py">ANALYSIS_JSON_SCHEMA</a> 為準。模型回傳分類證據，Server 決定排除與本機排名，不接收模型自行決定的 should_keep。</p>
+<p class="doc-p">以下為嚴格 v4 回應範例，欄位與額外屬性限制以 <a class="doc-link" href="inktime/app/domain/analysis/schema.py">ANALYSIS_JSON_SCHEMA</a> 為準。<code>memory_score</code> 是一般回看價值／AI 回憶價值，不是 Personal Memory Importance；模型不得猜使用者私人關係或私人重要性。模型回傳分類證據，Server 決定排除與本機排名，不接收模型自行決定的 should_keep。</p>
 <div class="code-wrapper"><pre><code class="language-json">{
   &quot;schema_version&quot;: 4,
   &quot;types&quot;: [
@@ -1590,7 +1590,7 @@ output schema: 嚴格 v4，繁體中文描述與短文案
 <ul class="doc-list"><li><strong>優勢</strong>：在墨水屏有限的 4 色 / 6 色面板上，相片人像膚色過渡更加自然，不會出現突兀的色彩塊斑。</li></ul>
 <hr class="doc-divider">
 <h2 id="sec-10" class="doc-h2"><span class="h2-anchor-icon">#</span> 十、 SQLite 資料庫主要表與 Migration 規格</h2>
-<p class="doc-p">目前 Migration 連續 1–59；資料表會隨 immutable migrations 擴充，不能以本章概覽手工建立完整資料庫。Schema、索引與約束由 <a class="doc-link" href="inktime/app/db/migrations.py">migrations.py</a> 唯一管理，升級順序與備份見 <a class="doc-link" href="docs/operations/MIGRATION_GUIDE_ZH_TW.md">遷移指南</a>。</p>
+<p class="doc-p">目前 Migration 連續 1–60；資料表會隨 immutable migrations 擴充，不能以本章概覽手工建立完整資料庫。Schema、索引與約束由 <a class="doc-link" href="inktime/app/db/migrations.py">migrations.py</a> 唯一管理，升級順序與備份見 <a class="doc-link" href="docs/operations/MIGRATION_GUIDE_ZH_TW.md">遷移指南</a>。</p>
 <div class="code-wrapper"><pre><code class="language-text">users：帳號、密碼雜湊、角色、正規化名稱與 session_version
 settings／settings_snapshots：設定值、版本、稽核與可還原快照
 providers／secrets／model_pricing：模型供應商、加密憑證與價格

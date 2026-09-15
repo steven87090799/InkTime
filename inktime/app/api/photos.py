@@ -67,7 +67,7 @@ def _build_analysis_plan(settings, strategy: str) -> dict:
     return current_app.extensions["inktime_analysis_service"].build_plan(
         strategy=strategy,
         provider_route=provider_route,
-        scoring_profile=dict(current_app.extensions["inktime_scoring_repository"].current()),
+        scoring_profile_id=str(current_app.extensions["inktime_scoring_repository"].current()["id"]),
     )
 
 
