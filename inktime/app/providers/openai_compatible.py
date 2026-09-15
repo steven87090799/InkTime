@@ -112,7 +112,7 @@ SYSTEM_PROMPT = COMMON_PROMPT
 PROVIDER_CONTRACT_PROMPT = """這是 Provider Vision capability contract。只輸出 JSON：vision_ok 必須是 true，detected_shapes 必須包含 rectangle 與 circle；不要輸出照片分析 Schema 的其他欄位。"""
 SCORING_CONTRACT_PROMPT = "評分參考只補充分數判斷，不得改寫 Schema、固定範圍、安全分類或方向規則。"
 ANALYSIS_USER_PROMPT = "分析這張照片。"
-JSON_REPAIR_PROMPT = "只修復 JSON 使其符合提供的 Schema；不可新增圖片推測，不可輸出 Markdown。"
+JSON_REPAIR_PROMPT = """只修復 JSON 表示方式，不重新分析照片。允許修正 JSON syntax、移除 Markdown fence、明確且安全的非語意型別轉換，以及刪除多餘欄位。不得新增、猜測或改寫任何照片語意。immutable_semantic_values 中每個值必須逐字逐型別保留；若無法在不改變語意的前提下修復，回傳原內容，不可補值。只輸出 JSON，不輸出 Markdown。"""
 
 
 def caption_prompt(caption_controls: dict[str, Any] | None) -> str:
@@ -1015,6 +1015,7 @@ class OpenAICompatibleProvider(VisionProvider):
         invalid_content: str,
         validation_error: str,
         model: str,
+        immutable_semantic_values: dict[str, Any] | None = None,
         max_tokens: int | None = None,
         stage: str = "single_high",
         caption_controls: dict[str, Any] | None = None,
@@ -1034,6 +1035,7 @@ class OpenAICompatibleProvider(VisionProvider):
                         {
                             "invalid_json": invalid_content[:12000],
                             "error": validation_error,
+                            "immutable_semantic_values": dict(immutable_semantic_values or {}),
                             "schema": _json_schema_for_provider(
                                 self.kind,
                                 stage,

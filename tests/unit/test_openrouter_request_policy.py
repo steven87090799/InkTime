@@ -49,6 +49,7 @@ def test_openrouter_analysis_and_repair_share_privacy_routing_usage_and_sticky_p
     provider.repair_json(
         invalid_content="not-json",
         validation_error="schema",
+        immutable_semantic_values={"memory_score": 72},
         model="provider/repair-model",
         stage="single",
         provider_request_context_id="job|photo|vision-fingerprint|owner-hash",
@@ -65,6 +66,9 @@ def test_openrouter_analysis_and_repair_share_privacy_routing_usage_and_sticky_p
     assert analysis["reasoning"] == {"effort": "low"}
     assert repair["reasoning"] == {"effort": "none"}
     assert repair["messages"][1]["content"]
+    assert json.loads(repair["messages"][1]["content"])["immutable_semantic_values"] == {
+        "memory_score": 72
+    }
     assert "image_url" not in json.dumps(repair, ensure_ascii=False)
     assert "image_path" not in json.dumps(repair, ensure_ascii=False)
     assert "uniqueItems" not in repair["messages"][1]["content"]

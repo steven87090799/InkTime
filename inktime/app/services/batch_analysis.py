@@ -299,20 +299,14 @@ class BatchAnalysisService:
         route = route or self._provider_route()
         # The scoring repository is intentionally read through the app graph by
         # bootstrap; this fallback keeps direct service tests dependency-light.
-        scoring = getattr(self, "scoring", None) or {
-            "id": "",
-            "memory_weight": 25,
-            "visual_weight": 25,
-            "local_weight": 25,
-            "favorite_bonus": 0,
-        }
+        scoring = getattr(self, "scoring", None) or {"id": ""}
         scoring_repository = getattr(self, "scoring_repository", None)
         if scoring_repository is not None:
             scoring = dict(scoring_repository.current())
         plan = self.analysis.build_plan(
             strategy="single",
             provider_route=route,
-            scoring_profile=scoring,
+            scoring_profile_id=str(scoring.get("id", "")),
         )
         model = str(self.settings.get("batch.model", "gpt-5.6-luna")).strip()
         if not model:

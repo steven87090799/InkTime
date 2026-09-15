@@ -22,6 +22,11 @@ from PIL import Image, ImageDraw
 from inktime.app.domain.photos.formats import load_rgb
 
 from inktime.app.domain.analysis import REPAIR_TOKEN_CAP
+from inktime.app.domain.analysis.json_repair import (
+    assert_semantic_repair_integrity,
+    repair_source_object,
+    semantic_repair_snapshot,
+)
 from inktime.app.domain.photos.preprocessing import PhotoPreprocessor
 from inktime.app.domain.photos.quality_policy import local_candidate_score, evaluate_local_quality
 from inktime.app.domain.analysis.content_filter import evaluate_content_filter
@@ -70,10 +75,10 @@ def _benchmark_ranking_policy() -> dict[str, Any]:
     return {
         "ranking_rule_version": RANKING_RULE_VERSION,
         "ranking_weights": dict(_BENCHMARK_RANKING_WEIGHTS),
-        "favorite_bonus_policy": {
+        "favorite_special_level_policy": {
             "favorite": False,
             "applied": False,
-            "value": FAVORITE_SPECIAL_LEVEL_BOOST,
+            "level_boost": FAVORITE_SPECIAL_LEVEL_BOOST,
             "mode": "disabled_for_golden_manifest",
         },
     }
@@ -84,7 +89,6 @@ def _production_ranking_score(result: Mapping[str, Any]) -> float:
 
     return calculate_ranking_score(
         result,
-        _BENCHMARK_RANKING_WEIGHTS,
         favorite=False,
     )
 
@@ -822,11 +826,17 @@ class ModelBenchmarkService:
                                 if requests_used >= max_requests or spent >= max_cost or report["stopped_by_budget"]:
                                     report["stopped_by_budget"] = True
                                 else:
+                                    repair_source = repair_source_object(response.content)
+                                    try:
+                                        semantic_snapshot = semantic_repair_snapshot(repair_source)
+                                    except AnalysisValidationError:
+                                        continue
                                     repairs += 1
                                     metrics["repair_requests"] += 1
                                     repair_response = provider.repair_json(
-                                        invalid_content=response.content,
+                                        invalid_content=json.dumps(repair_source, ensure_ascii=False),
                                         validation_error="benchmark schema validation",
+                                        immutable_semantic_values=semantic_snapshot,
                                         model=axis.model,
                                         max_tokens=REPAIR_TOKEN_CAP,
                                         stage="single",
@@ -851,6 +861,9 @@ class ModelBenchmarkService:
                                         report["stopped_by_budget"] = True
                                     try:
                                         validated_result = validate_analysis_result(repair_response.content)
+                                        assert_semantic_repair_integrity(
+                                            semantic_snapshot, validated_result
+                                        )
                                         metrics["success_count"] += 1
                                     except AnalysisValidationError:
                                         pass
@@ -977,7 +990,7 @@ def markdown_report(report: dict[str, Any]) -> str:
         f"- Stopped by budget: `{report['stopped_by_budget']}`",
         f"- Ranking rule: `{report['ranking_policy']['ranking_rule_version']}`",
         f"- Ranking weights: `{json.dumps(report['ranking_policy']['ranking_weights'], sort_keys=True)}`",
-        f"- Favorite bonus policy: `{report['ranking_policy']['favorite_bonus_policy']['mode']}`",
+        f"- Favorite special-level policy: `{report['ranking_policy']['favorite_special_level_policy']['mode']}`",
         "",
         (
             "Offline reports are request-contract measurements only; they are not model quality or accuracy claims."

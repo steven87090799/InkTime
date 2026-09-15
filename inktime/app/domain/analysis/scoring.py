@@ -79,12 +79,6 @@ def score_band(score: float) -> str:
     return "較弱"
 
 
-def validate_ranking_weights(weights: Mapping[str, float]) -> dict[str, float]:
-    if dict(weights) != DEFAULT_RANKING_WEIGHTS:
-        raise ValueError("排序權重固定為 AI 回憶 67%、AI 視覺 33%；本機品質只作門檻")
-    return dict(DEFAULT_RANKING_WEIGHTS)
-
-
 def ranking_components(analysis: Mapping, *, favorite: bool = False) -> dict:
     """Compose the AI ranking after the local quality gate has passed.
 
@@ -98,17 +92,18 @@ def ranking_components(analysis: Mapping, *, favorite: bool = False) -> dict:
         + float(analysis["visual_score"]) * 0.33
     )
     base = round(base, 2)
+    favorite_special_level_boost = FAVORITE_SPECIAL_LEVEL_BOOST if favorite else 0
     special_level = max(0, int(analysis["special_level"]))
-    effective = min(
-        4,
-        special_level + (FAVORITE_SPECIAL_LEVEL_BOOST if favorite else 0),
+    effective = max(
+        0,
+        min(4, special_level + favorite_special_level_boost),
     )
     raw = round(max(0.0, min(100.0, base + SPECIAL_BONUSES[effective])), 2)
     return {
         "base_ranking_score": round(base, 2),
         "effective_special_level": effective,
         "library_rarity_adjustment": 0,
-        "favorite_adjustment": int(favorite),
+        "favorite_special_level_boost": favorite_special_level_boost,
         "special_bonus": SPECIAL_BONUSES[effective],
         "raw_ranking_score": raw,
         "final_ranking_score": raw,
@@ -118,12 +113,9 @@ def ranking_components(analysis: Mapping, *, favorite: bool = False) -> dict:
 
 def calculate_ranking_score(
     analysis: Mapping,
-    weights: Mapping[str, float] | None = None,
     *,
     favorite: bool = False,
 ) -> float:
-    if weights is not None:
-        validate_ranking_weights(weights)
     return ranking_components(analysis, favorite=favorite)["raw_ranking_score"]
 
 

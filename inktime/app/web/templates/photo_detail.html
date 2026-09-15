@@ -107,7 +107,7 @@
       {% elif a.is_historical_model %}
       <dl>
         <dt>照片分類</dt><dd>{{ a.types|join('、') if a.types else '未分類' }}</dd>
-        <dt>歷史模型原始分數</dt><dd>回憶 {{ a.memory_score if a.memory_score is not none else '—' }}｜美觀 {{ a.beauty_score if a.beauty_score is not none else '—' }}｜技術 {{ a.technical_quality_score if a.technical_quality_score is not none else '—' }}｜情緒 {{ a.emotion_score if a.emotion_score is not none else '—' }}</dd>
+        <dt>歷史模型原始分數</dt><dd>一般回看價值 {{ a.memory_score if a.memory_score is not none else '—' }}｜美觀 {{ a.beauty_score if a.beauty_score is not none else '—' }}｜技術 {{ a.technical_quality_score if a.technical_quality_score is not none else '—' }}｜情緒 {{ a.emotion_score if a.emotion_score is not none else '—' }}</dd>
         <dt>歷史綜合分</dt><dd>{{ a.ranking_score if a.ranking_score is not none else '—' }}</dd>
         <dt>判斷理由</dt><dd>{{ a.reason or '未記錄' }}</dd>
         <dt>評分版本</dt><dd>{{ a.scoring_version_name or '舊版／未記錄' }}</dd>

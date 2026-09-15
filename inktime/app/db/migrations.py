@@ -2315,6 +2315,17 @@ MIGRATIONS = (
             END""",
         ),
     ),
+    Migration(
+        60,
+        "清除評分設定中的最愛直接加分誤名",
+        (
+            # Contract 3 rows retain their historical fixed-score value for
+            # read-only display. Contract 4 ranking uses the server constant
+            # FAVORITE_SPECIAL_LEVEL_BOOST and never reads this column.
+            "ALTER TABLE scoring_rule_versions RENAME COLUMN favorite_bonus TO legacy_favorite_score_bonus",
+            "UPDATE scoring_rule_versions SET legacy_favorite_score_bonus=0 WHERE ranking_contract_version=4",
+        ),
+    ),
 )
 
 

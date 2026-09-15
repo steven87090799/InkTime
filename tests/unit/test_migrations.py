@@ -32,7 +32,7 @@ def _run_capture_date_backfill(database_path: str, start, results) -> None:
 
 
 def test_fresh_database_is_migrated(tmp_path):
-    assert CURRENT_SCHEMA_VERSION == 59
+    assert CURRENT_SCHEMA_VERSION == 60
     database = Database(tmp_path / "inktime.db")
     assert migrate(database) == list(range(1, CURRENT_SCHEMA_VERSION + 1))
     assert database.integrity_check() == "ok"
@@ -551,7 +551,13 @@ def test_deployed_main_schema54_upgrades_without_rewriting_history(monkeypatch, 
             assert {key: after[key] for key in before if key != "score_kind"} == {key: value for key, value in before.items() if key != "score_kind"}
             assert after["visual_score"] is None and after["local_quality_score"] is None
         profile = dict(connection.execute("SELECT * FROM scoring_rule_versions WHERE id='legacy'").fetchone())
-        assert {key: profile[key] for key in profile_before if key != "is_active"} == {key: value for key, value in profile_before.items() if key != "is_active"}
+        expected_profile = {
+            key: value
+            for key, value in profile_before.items()
+            if key not in {"is_active", "favorite_bonus"}
+        }
+        expected_profile["legacy_favorite_score_bonus"] = profile_before["favorite_bonus"]
+        assert {key: profile[key] for key in expected_profile} == expected_profile
         assert profile["is_active"] == 0 and profile["ranking_contract_version"] == 3
         assert profile["visual_weight"] is None and profile["local_weight"] is None
         assert [dict(row) for row in connection.execute("SELECT * FROM photos WHERE id<>'e6' ORDER BY id")] == protected_before
@@ -1917,7 +1923,8 @@ def test_migration_59_preserves_devices_and_enforces_16_slot_state(monkeypatch, 
         )
         before = [dict(row) for row in connection.execute("SELECT * FROM devices ORDER BY id")]
         events_before = [dict(row) for row in connection.execute("SELECT * FROM device_events ORDER BY id")]
-    monkeypatch.setattr(migrations_module, "MIGRATIONS", MIGRATIONS)
+    # Isolate migration 59; later schema changes are covered separately.
+    monkeypatch.setattr(migrations_module, "MIGRATIONS", MIGRATIONS[:59])
     assert migrate(database) == [59]
     assert migrate(database) == []
     with database.transaction() as connection:
@@ -1974,6 +1981,11 @@ def test_migration_58_recomposes_ai_scores_without_rewriting_evidence(monkeypatc
             "emotion_weight,visual_weight,local_weight,ranking_contract_version,favorite_bonus,is_active,created_at) "
             "VALUES ('old','我的自訂規則','保留自訂文字',50,25,25,0,25,25,4,1,1,?)", (now,),
         )
+        connection.execute(
+            "INSERT INTO scoring_rule_versions(id,name,rules,memory_weight,beauty_weight,technical_weight,"
+            "emotion_weight,ranking_contract_version,favorite_bonus,is_active,created_at) "
+            "VALUES ('legacy','舊版','舊規則',20,30,40,10,3,9,0,?)", (now,),
+        )
         photos_before = [dict(row) for row in connection.execute("SELECT * FROM photos ORDER BY id")]
         non_semantic_before = [dict(row) for row in connection.execute(
             "SELECT * FROM photo_analysis WHERE score_kind<>'semantic' ORDER BY id"
@@ -2001,3 +2013,11 @@ def test_migration_58_recomposes_ai_scores_without_rewriting_evidence(monkeypatc
         profile = connection.execute("SELECT * FROM scoring_rule_versions WHERE id='old'").fetchone()
         assert profile["is_active"] == 0 and profile["rules"] == "保留自訂文字"
         assert profile["memory_weight"] == 50
+        columns = {row["name"] for row in connection.execute("PRAGMA table_info(scoring_rule_versions)")}
+        assert "favorite_bonus" not in columns
+        assert "legacy_favorite_score_bonus" in columns
+        assert profile["legacy_favorite_score_bonus"] == 0
+        legacy = connection.execute(
+            "SELECT legacy_favorite_score_bonus FROM scoring_rule_versions WHERE id='legacy'"
+        ).fetchone()
+        assert legacy["legacy_favorite_score_bonus"] == 9

@@ -30,8 +30,6 @@ from inktime.app.domain.analysis.execution_mode import (
 )
 from inktime.app.domain.analysis.scoring import (
     normalize_scoring_rules,
-    FAVORITE_SPECIAL_LEVEL_BOOST,
-    DEFAULT_RANKING_WEIGHTS,
     LOCAL_QUALITY_SCORE_KIND,
     SEMANTIC_SCORE_KIND,
     ranking_components,
@@ -177,7 +175,7 @@ class PhotoAnalysisService:
             ),
         })
 
-    def build_plan(self, *, strategy: str, provider_route: list[dict], scoring_profile: dict) -> dict:
+    def build_plan(self, *, strategy: str, provider_route: list[dict], scoring_profile_id: str) -> dict:
         """Build the sole server-authoritative non-secret Analysis Plan."""
         if self.settings is None:
             raise RuntimeError("分析設定尚未初始化")
@@ -220,8 +218,7 @@ class PhotoAnalysisService:
             low_model=str(settings.get("model.low_model", "low-cost-vision")),
             high_model=analysis_model,
             stage_two_threshold=float(settings.get("analysis.stage_two_threshold", 65)),
-            favorite_override=bool(settings.get("analysis.favorite_override", True)),
-            scoring_profile=scoring_profile,
+            scoring_profile_id=scoring_profile_id,
             caption_controls=controls,
             prompt_version=prompt_version,
             high_image_max_side=int(
@@ -1354,9 +1351,6 @@ class PhotoAnalysisService:
         low_model: str = "low-cost-vision",
         high_model: str = "high-quality-vision",
         stage_two_threshold: float = 65,
-        favorite_override: bool = True,
-        ranking_weights: dict[str, float] | None = None,
-        favorite_bonus: float = FAVORITE_SPECIAL_LEVEL_BOOST,
         scoring_version_id: str | None = None,
         force_ai: bool = False,
         force_actor: str = "system",
@@ -1378,14 +1372,7 @@ class PhotoAnalysisService:
                 low_model=low_model,
                 high_model=high_model,
                 stage_two_threshold=stage_two_threshold,
-                favorite_override=favorite_override,
-                scoring_profile={
-                    "id": scoring_version_id or "",
-                    "memory_weight": (ranking_weights or DEFAULT_RANKING_WEIGHTS)["memory"],
-                    "visual_weight": DEFAULT_RANKING_WEIGHTS["visual"],
-                    "local_weight": DEFAULT_RANKING_WEIGHTS["local_quality"],
-                    "favorite_bonus": favorite_bonus,
-                },
+                scoring_profile_id=scoring_version_id or "",
                 caption_controls=self._caption_controls(),
                 prompt_version=self._prompt_version(self._caption_controls()),
                 high_image_max_side=int(

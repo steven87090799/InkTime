@@ -19,7 +19,7 @@ def test_new_install_defaults_to_local_only_without_provider_route(app, monkeypa
     plan = app.extensions["inktime_analysis_service"].build_plan(
         strategy="smart_two_stage",
         provider_route=[],
-        scoring_profile=dict(app.extensions["inktime_scoring_repository"].current()),
+        scoring_profile_id=str(app.extensions["inktime_scoring_repository"].current()["id"]),
     )
     assert plan["ai_execution_policy"]["execution_mode"] == "local_only"
     assert plan["provider_route"] == []

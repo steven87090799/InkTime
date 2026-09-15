@@ -1,6 +1,6 @@
 # InkTime · E-Ink Memory Frame
 
-> Source baseline: 2026-09-08, current checkout. Migration 59, AI Schema v4 and ESP32 2.8.7 are separate version contracts. See the [current-state reference](docs/reference/CURRENT_STATE_ZH_TW.md).
+> Source baseline: 2026-09-13, current checkout. Migration 60, AI Schema v4 and ESP32 2.8.7 are separate version contracts. See the [current-state reference](docs/reference/CURRENT_STATE_ZH_TW.md).
 
 > For complete Web/Worker/Scheduler setup, device queues, resilience features, and the document map, also see the [Chinese README](README.md), the [documentation portal](USER_MANUAL.html), and [docs/README.md](docs/README.md).
 

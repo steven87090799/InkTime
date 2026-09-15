@@ -55,7 +55,7 @@ def reusable_analysis_fingerprint(plan: Mapping[str, Any]) -> str:
     identity = dict(plan)
     for field in (
         "caption_display_controls", "repair_policy", "ranking_weights",
-        "favorite_bonus", "scoring_profile_id",
+        "favorite_bonus", "favorite_override", "scoring_profile_id",
     ):
         identity.pop(field, None)
     return fingerprint(identity)
@@ -94,8 +94,7 @@ def build_analysis_plan(
     low_model: str,
     high_model: str,
     stage_two_threshold: float,
-    favorite_override: bool,
-    scoring_profile: Mapping[str, Any],
+    scoring_profile_id: str,
     caption_controls: Mapping[str, Any] | None,
     prompt_version: str,
     high_image_max_side: int,
@@ -163,10 +162,7 @@ def build_analysis_plan(
         "strategy": normalized_strategy,
         "model": str(high_model),
         "provider_route": route,
-        "favorite_override": bool(favorite_override),
-        "scoring_profile_id": str(scoring_profile.get("id", "")),
-        "ranking_weights": {"memory": 67.0, "visual": 33.0, "local_quality": 0.0},
-        "favorite_bonus": 1,
+        "scoring_profile_id": str(scoring_profile_id),
         "scoring_rules_sha256": rules_sha256,
         "scoring_rules": str(scoring_rules),
         "provider_behavior_revision": behavior_revision,
@@ -199,6 +195,11 @@ def build_analysis_plan(
 def normalize_analysis_plan(plan: Mapping[str, Any]) -> dict[str, Any]:
     """Upgrade a frozen legacy plan to the canonical one-image shape."""
     raw = dict(plan)
+    # Ranking is server-owned and fixed. Historical plans may contain these
+    # inert fields, but execution and new frozen plans must not carry them.
+    raw.pop("ranking_weights", None)
+    raw.pop("favorite_bonus", None)
+    raw.pop("favorite_override", None)
     strategy = normalize_analysis_strategy(raw.get("strategy", "single"))
     if "model" not in raw:
         raw["model"] = str(raw.get("high_model") or raw.get("low_model") or "")

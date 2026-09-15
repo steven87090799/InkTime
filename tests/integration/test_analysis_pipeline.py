@@ -147,7 +147,11 @@ class _BoundaryHTTPHandler(BaseHTTPRequestHandler):
             status_code = 503
 
         if state.mode.startswith("invalid_then_repair") and image_request:
-            response_content = "not-json"
+            # Keep original semantics available so these boundary cases reach
+            # the repair request while still failing schema validation.
+            response_content = json.dumps(
+                valid_result(types=["人物", "人物"]), ensure_ascii=False
+            )
         else:
             response_content = json.dumps(valid_result(), ensure_ascii=False)
         if status_code >= 400:
@@ -727,7 +731,7 @@ def test_repair_capacity_timeout_after_vision_is_terminal_without_repair_unknown
 
 def test_router_repair_capacity_is_terminal_to_worker_without_second_vision(app, tmp_path):
     boundary = KillableProcessBoundary(max_processes=1, terminate_grace_seconds=0.05)
-    provider = MockProvider(["not-json"])
+    provider = MockProvider([valid_result(types=["人物", "人物"])])
     router = _PostVisionRepairCapacityRouter([ProviderChannel(provider, max_concurrency=1)])
     photo_id, service = _isolated_service(app, tmp_path, boundary)
     jobs = app.extensions["inktime_job_service"]
@@ -987,15 +991,7 @@ def test_full_analysis_hits_historical_v2_cache_without_an_image_call(app, tmp_p
         low_model="mock",
         high_model="mock",
         stage_two_threshold=65,
-        favorite_override=True,
-        scoring_profile={
-            "id": "",
-            "memory_weight": 25,
-            "beauty_weight": 25,
-            "technical_weight": 25,
-            "emotion_weight": 25,
-            "favorite_bonus": 0,
-        },
+        scoring_profile_id="",
         caption_controls=None,
         prompt_version="legacy-test-prompt",
         high_image_max_side=1024,
@@ -1112,7 +1108,7 @@ def test_failover_rebuilds_cache_identity_for_the_next_provider(app, tmp_path):
     plan = analysis.build_plan(
         strategy="high_quality",
         provider_route=[],
-        scoring_profile=dict(app.extensions["inktime_scoring_repository"].current()),
+        scoring_profile_id=str(app.extensions["inktime_scoring_repository"].current()["id"]),
     )
     result = analysis.analyze_photo(
         photo_id=ids[0], job_id=None, provider=router, strategy="high_quality", analysis_plan=plan
@@ -1138,7 +1134,7 @@ def test_new_analysis_plan_uses_minimal_side_caption_controls_and_no_reasoning(a
     plan = service.build_plan(
         strategy="high_quality",
         provider_route=[],
-        scoring_profile=dict(app.extensions["inktime_scoring_repository"].current()),
+        scoring_profile_id=str(app.extensions["inktime_scoring_repository"].current()["id"]),
     )
     assert plan["caption_controls"] == {
         "side_caption_min_chars": 8,
@@ -1197,7 +1193,7 @@ def test_worker_context_inherits_only_the_same_frozen_plan_and_keeps_source_trac
     plan = service.build_plan(
         strategy="high_quality",
         provider_route=[],
-        scoring_profile=dict(app.extensions["inktime_scoring_repository"].current()),
+        scoring_profile_id=str(app.extensions["inktime_scoring_repository"].current()["id"]),
     )
     first = MockProvider([valid_result()])
     service.analyze_photo(
@@ -1207,10 +1203,11 @@ def test_worker_context_inherits_only_the_same_frozen_plan_and_keeps_source_trac
         scoring = app.extensions["inktime_scoring_repository"]
         renamed = scoring.create(
             name="同規則新版本名稱", rules=str(plan["scoring_rules"]),
-            weights={"memory": 67.0, "visual": 33.0, "local_quality": 0.0},
-            favorite_bonus=1, created_by=actor, source_ip="127.0.0.1",
+            created_by=actor, source_ip="127.0.0.1",
         )
-        plan = service.build_plan(strategy="high_quality", provider_route=[], scoring_profile=renamed)
+        plan = service.build_plan(
+            strategy="high_quality", provider_route=[], scoring_profile_id=str(renamed["id"])
+        )
     second = MockProvider([])
     inherited = service.analyze_photo(
         photo_id=ids[1], job_id=None, provider=second, strategy="high_quality", analysis_plan=plan
@@ -1255,13 +1252,17 @@ def test_worker_context_does_not_inherit_a_different_frozen_plan(app, tmp_path):
         )
     service = app.extensions["inktime_analysis_service"]
     profile = dict(app.extensions["inktime_scoring_repository"].current())
-    first_plan = service.build_plan(strategy="high_quality", provider_route=[], scoring_profile=profile)
+    first_plan = service.build_plan(
+        strategy="high_quality", provider_route=[], scoring_profile_id=str(profile["id"])
+    )
     first = MockProvider([valid_result()])
     service.analyze_photo(
         photo_id=ids[0], job_id=None, provider=first, strategy="high_quality", analysis_plan=first_plan
     )
     settings.update("model.analysis_model", "new-model", changed_by="test", source_ip="127.0.0.1")
-    second_plan = service.build_plan(strategy="high_quality", provider_route=[], scoring_profile=profile)
+    second_plan = service.build_plan(
+        strategy="high_quality", provider_route=[], scoring_profile_id=str(profile["id"])
+    )
     second = MockProvider([valid_result(memory_score=77)])
     result = service.analyze_photo(
         photo_id=ids[1], job_id=None, provider=second, strategy="high_quality", analysis_plan=second_plan
