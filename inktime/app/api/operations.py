@@ -74,7 +74,7 @@ def _current_analysis_retention_identity() -> tuple[tuple[str, ...], tuple[str, 
     plan = current_app.extensions["inktime_analysis_service"].build_plan(
         strategy=str(settings.get("analysis.strategy", "single")),
         provider_route=current_app.extensions["inktime_provider_service"].route_snapshot(),
-        scoring_profile=dict(current_app.extensions["inktime_scoring_repository"].current()),
+        scoring_profile_id=str(current_app.extensions["inktime_scoring_repository"].current()["id"]),
     )
     identity_plan = dict(plan)
     identity_plan.pop("caption_display_controls", None)

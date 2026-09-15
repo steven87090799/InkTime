@@ -23,13 +23,6 @@ CHOICE_EXPLANATIONS: dict[str, dict[Any, tuple[str, str]]] = {
         "local": ("僅本機分析", "只做本機品質與選片，不呼叫 Vision Provider，也不產生模型費用。"),
         "single": ("單次完整分析", "每張入選照片用一次完整 Vision 請求產生評分與文案。"),
     },
-    "analysis.copy_default_style": {
-        "natural": ("自然", "使用平實、接近日常說話的照片短句。"),
-        "warm": ("溫暖", "語氣較柔和、有溫度，但仍不可猜測照片未提供的事實。"),
-        "literary": ("文學", "語句較有意象，可能比自然風格更抽象。"),
-        "humorous": ("幽默", "使用輕鬆語氣；不適合嚴肅或不確定的照片情境。"),
-        "minimal": ("極簡", "盡量縮短文字，適合電子紙空間有限的版型。"),
-    },
     "analysis.execution_mode": {
         "disabled": ("完全停用", "不建立任何照片分析流程；既有結果仍保留。"),
         "local_only": ("僅使用本機選片", "只執行本機特徵與品質判斷，不會使用 Provider。"),

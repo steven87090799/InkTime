@@ -13,7 +13,6 @@ from inktime.app.core.paths import safe_join
 from inktime.app.core.logging import log_event
 from inktime.app.domain.analysis import (
     AnalysisValidationError,
-    REPAIR_TOKEN_CAP,
     SCHEMA_VERSION,
     build_analysis_plan,
     canonical_json,
@@ -31,8 +30,6 @@ from inktime.app.domain.analysis.execution_mode import (
 )
 from inktime.app.domain.analysis.scoring import (
     normalize_scoring_rules,
-    DEFAULT_FAVORITE_BONUS,
-    DEFAULT_RANKING_WEIGHTS,
     LOCAL_QUALITY_SCORE_KIND,
     SEMANTIC_SCORE_KIND,
     ranking_components,
@@ -63,12 +60,10 @@ class AnalysisDisabledError(RuntimeError):
     code = "ANALYSIS-DISABLED"
 
 
-PROMPT_VERSION = "photo-analysis-v4-ai-first-literary"
-# Maximum bounded response: 100 caption + 16 side-caption characters, five
-# types, two codes, six orientation evidence codes and JSON keys.  1200 tokens
-# leaves headroom for multi-token Traditional Chinese and provider formatting.
-FULL_ANALYSIS_TOKEN_CAP = 1200
-CAPTION_VARIANTS_TOKEN_CAP = FULL_ANALYSIS_TOKEN_CAP
+PROMPT_VERSION = "photo-analysis-v5-compact"
+# The compact eight-field response still needs enough headroom to complete
+# strict JSON without truncation.
+FULL_ANALYSIS_TOKEN_CAP = 512
 LOGGER = logging.getLogger("analysis")
 
 
@@ -168,61 +163,25 @@ class PhotoAnalysisService:
         if self.observability is not None:
             self.observability.record(severity, "analysis", event, message, **fields)
 
-    def _caption_controls(self) -> dict | None:
-        if self.settings is None or not bool(self.settings.get("analysis.advanced_caption_enabled", True)):
-            return None
+    def _caption_controls(self) -> dict:
         settings = self.settings
-
-        def lines(key: str) -> list[str]:
-            return [line.strip() for line in str(settings.get(key, "")).splitlines() if line.strip()]
-
+        if settings is None:
+            return normalize_caption_controls({})
         return normalize_caption_controls({
-            "caption_min_chars": int(settings.get("analysis.caption_min_chars", 10)),
-            "caption_target_chars": int(settings.get("analysis.caption_target_chars", 60)),
-            "caption_max_chars": int(settings.get("analysis.caption_max_chars", 100)),
             "side_caption_min_chars": int(settings.get("analysis.side_caption_min_chars", 8)),
-            "side_caption_target_chars": int(settings.get("analysis.side_caption_target_chars", 12)),
             "side_caption_max_chars": int(settings.get("analysis.side_caption_max_chars", 16)),
-            "copy_default_style": str(settings.get("analysis.copy_default_style", "literary")),
-            "copy_humor_level": int(settings.get("analysis.copy_humor_level", 2)),
-            "copy_poetic_level": int(settings.get("analysis.copy_poetic_level", 3)),
-            "copy_avoid_cliche": bool(settings.get("analysis.copy_avoid_cliche", True)),
-            "copy_avoid_direct_description": bool(
-                settings.get("analysis.copy_avoid_direct_description", True)
+            "side_caption_custom_rules": str(
+                settings.get("analysis.side_caption_custom_rules", "")
             ),
-            "copy_forbid_exclamation": bool(settings.get("analysis.copy_forbid_exclamation", True)),
-            "copy_forbid_like_phrase": bool(settings.get("analysis.copy_forbid_like_phrase", True)),
-            "copy_max_commas": int(settings.get("analysis.copy_max_commas", 2)),
-            "copy_avoid_abstract_ending": bool(settings.get("analysis.copy_avoid_abstract_ending", True)),
-            "copy_banned_words": lines("analysis.copy_banned_words"),
-            "copy_banned_patterns": lines("analysis.copy_banned_patterns"),
-            "copy_custom_rules": str(self.settings.get("analysis.copy_custom_rules", "")),
-            # New plans generate one side_caption. Historical cached variants
-            # remain readable and selectable by the render path.
-            "caption_variants_enabled": False,
         })
 
-    @staticmethod
-    def _caption_generation_controls(controls: dict | None) -> dict | None:
-        if not controls:
-            return None
-        return dict(controls)
-
-    @staticmethod
-    def _caption_display_controls(controls: dict | None) -> dict | None:
-        if not controls:
-            return None
-        return {"copy_default_style": str(controls.get("copy_default_style", "literary"))}
-
-    def build_plan(self, *, strategy: str, provider_route: list[dict], scoring_profile: dict) -> dict:
+    def build_plan(self, *, strategy: str, provider_route: list[dict], scoring_profile_id: str) -> dict:
         """Build the sole server-authoritative non-secret Analysis Plan."""
         if self.settings is None:
             raise RuntimeError("分析設定尚未初始化")
         settings = self.settings
         controls = self._caption_controls()
-        generation_controls = self._caption_generation_controls(controls)
-        display_controls = self._caption_display_controls(controls)
-        prompt_version = self._prompt_version(generation_controls)
+        prompt_version = self._prompt_version(controls)
         prefilter = {
             "enabled": bool(settings.get("analysis.prefilter_enabled", True)),
             "screenshots_enabled": bool(settings.get("analysis.prefilter_screenshots", True)),
@@ -253,35 +212,23 @@ class PhotoAnalysisService:
             or legacy_model_value
             or settings.get("model.low_model", "high-quality-vision")
         )
-        repair_policy = {
-            "enabled": True,
-            "model": str(settings.get("model.repair_model", analysis_model) or analysis_model),
-            "max_tokens": max(
-                256,
-                min(REPAIR_TOKEN_CAP, int(settings.get("budget.repair_max_tokens", REPAIR_TOKEN_CAP))),
-            ),
-            "max_attempts": 1,
-            "text_only": True,
-        }
         return build_analysis_plan(
             strategy=strategy,
             provider_route=provider_route,
             low_model=str(settings.get("model.low_model", "low-cost-vision")),
             high_model=analysis_model,
             stage_two_threshold=float(settings.get("analysis.stage_two_threshold", 65)),
-            favorite_override=bool(settings.get("analysis.favorite_override", True)),
-            scoring_profile=scoring_profile,
-            caption_controls=generation_controls,
+            scoring_profile_id=scoring_profile_id,
+            caption_controls=controls,
             prompt_version=prompt_version,
             high_image_max_side=int(
                 settings.get("analysis.image_max_side", settings.get("analysis.high_image_max_side", 1024))
             ),
-            caption_display_controls=display_controls,
             prefilter=prefilter,
             execution_policy=execution_policy,
             scoring_rules=normalize_scoring_rules(settings.get("analysis.scoring_rules", "")),
             reasoning_effort="none",
-            repair_policy=repair_policy,
+            repair_policy={"enabled": False},
         )
 
     @staticmethod
@@ -294,20 +241,14 @@ class PhotoAnalysisService:
         return f"{PROMPT_VERSION}-caption-{fingerprint}"
 
     @staticmethod
-    def _apply_caption_variant(result: dict, caption_controls: dict | None) -> dict:
-        return result
-
-    @staticmethod
     def _local_result(photo) -> dict:
         return {
             "schema_version": SCHEMA_VERSION,
-            "caption": "已完成本機清晰度、曝光、解析度與影像特徵分析，未將照片傳送至模型。",
             "types": ["截圖" if is_confirmed_screenshot(photo) else "其他"],
             "memory_score": 0.0, "visual_score": 0.0,
-            "special_level": 0, "special_codes": [], "people_count": 0,
+            "special_level": 0,
             "side_caption": "畫面把此刻收好了。",
             "content_filter": {code: {"detected": False, "confidence": 0.0} for code in CONTENT_FILTER_SWITCHES},
-            "subject_position": "unknown", "text_safe_area": "unknown",
             "visual_orientation": _unknown_visual_orientation(),
         }
 
@@ -500,9 +441,6 @@ class PhotoAnalysisService:
         self,
         result: dict,
         photo,
-        *,
-        ranking_weights: dict[str, float],
-        favorite_bonus: float,
     ) -> dict:
         result["local_quality_score"] = self._local_quality(photo)
         result.update(ranking_components(result, favorite=bool(photo["favorite"])))
@@ -521,8 +459,6 @@ class PhotoAnalysisService:
         result: dict,
         raw: str,
         photo,
-        ranking_weights: dict[str, float],
-        favorite_bonus: float,
         scoring_version_id: str | None,
         schema_kind: str,
         score_kind: str | None = None,
@@ -536,12 +472,7 @@ class PhotoAnalysisService:
         connection=None,
     ) -> dict:
         score_kind = resolve_score_kind(score_kind, provider=provider, stage=stage)
-        ranked = self._score_result(
-            result,
-            photo,
-            ranking_weights=ranking_weights,
-            favorite_bonus=favorite_bonus,
-        )
+        ranked = self._score_result(result, photo)
         semantic_available = score_kind == SEMANTIC_SCORE_KIND
         ranked["score_kind"] = score_kind
         ranked["semantic_scores_available"] = semantic_available
@@ -577,8 +508,8 @@ class PhotoAnalysisService:
         )
         self._activity(
             "DEBUG",
-            "caption_analysis_completed",
-            "Caption 分析完成",
+            "photo_analysis_completed",
+            "照片分析完成",
             job_id=job_id,
             photo_id=photo_id,
             stage=stage,
@@ -714,27 +645,6 @@ class PhotoAnalysisService:
             error_code=str(getattr(error, "code", "") or "")[:128] or None,
         )
 
-    @staticmethod
-    def _terminalize_post_vision_repair_failure(error: Exception, *, vision_completed: bool) -> None:
-        """Prevent any failed repair after Vision from replaying the Vision POST."""
-
-        if not vision_completed:
-            return
-        code = str(getattr(error, "code", "") or "")
-        if code in {"CONFIG_INVALID", "AUTH_REQUIRED", "VLM-004", "VLM-006", "VLM-AMBIGUOUS"}:
-            return
-        if isinstance(error, TimeoutError) or code in {
-            "AI-PROVIDER-TIMEOUT",
-            "AI-PROVIDER-UNAVAILABLE",
-            "VLM-001",
-            "VLM-002",
-            "VLM-003",
-            "VLM-005",
-            "VLM-007",
-        }:
-            error_metadata: Any = error
-            error_metadata.code = "VLM-004"
-
     def _record(
         self,
         provider: VisionProvider,
@@ -808,7 +718,6 @@ class PhotoAnalysisService:
         schema_kind: str,
         reasoning_effort: str = "none",
         caption_controls: dict | None,
-        repair_policy: dict | None,
         prompt_version: str,
         vision_input: dict,
         analysis_fingerprint: str | None = None,
@@ -838,9 +747,6 @@ class PhotoAnalysisService:
                 # frozen global repair_model could silently send a different
                 # (and unsupported) model to the configured Provider.
                 model = provider_model
-                if repair_policy is not None:
-                    repair_policy = dict(repair_policy)
-                    repair_policy["model"] = provider_model
         actual_provider = str(getattr(selected_provider, "provider_id", selected_provider.name))
 
         fingerprint_material = {
@@ -1018,7 +924,6 @@ class PhotoAnalysisService:
                     schema_kind=schema_kind,
                     reasoning_effort=reasoning_effort,
                     caption_controls=caption_controls,
-                    repair_policy=repair_policy,
                     prompt_version=prompt_version,
                     cache_schema_kind=cache_schema_kind,
                     cache_schema_version=cache_schema_version,
@@ -1095,7 +1000,6 @@ class PhotoAnalysisService:
                     schema_kind=schema_kind,
                     reasoning_effort=reasoning_effort,
                     caption_controls=caption_controls,
-                    repair_policy=repair_policy,
                     prompt_version=prompt_version,
                     analysis_fingerprint=analysis_fingerprint,
                     vision_input=vision_input,
@@ -1148,7 +1052,6 @@ class PhotoAnalysisService:
         schema_kind: str,
         reasoning_effort: str,
         caption_controls: dict | None,
-        repair_policy: dict | None,
         prompt_version: str,
         cache_schema_kind: str,
         cache_schema_version: int | None,
@@ -1373,7 +1276,7 @@ class PhotoAnalysisService:
         try:
             local_json = extract_json_value(response.content)
             candidate = local_json if isinstance(local_json, dict) else response.content
-            result = self._apply_caption_variant(validate_model_response(candidate), caption_controls)
+            result = validate_model_response(candidate)
             raw = response.content
             parsed_at = datetime.now(timezone.utc).isoformat()
             self._trace_write(
@@ -1388,17 +1291,7 @@ class PhotoAnalysisService:
                 parsed_at=parsed_at,
                 completed_at=parsed_at,
             )
-            if caption_controls and caption_controls["caption_variants_enabled"]:
-                self._activity(
-                    "DEBUG",
-                    "caption_variants_generated",
-                    "Caption 多風格候選已由單次圖片請求產生",
-                    job_id=job_id,
-                    photo_id=photo_id,
-                    stage=stage,
-                    trace_id=prompt_version,
-                )
-        except AnalysisValidationError as first_error:
+        except AnalysisValidationError as validation_error:
             self._trace_write(
                 "update_attempt_from_call",
                 vision_attempt_id,
@@ -1410,211 +1303,10 @@ class PhotoAnalysisService:
                 parse_started_at=parse_started_at,
                 parsed_at=datetime.now(timezone.utc).isoformat(),
                 error_code="ANALYSIS-SCHEMA-INVALID",
-                error_message=str(first_error),
+                error_message=str(validation_error),
                 completed_at=datetime.now(timezone.utc).isoformat(),
             )
-            vision_attempt.repair_attempted = True
-            self._activity(
-                "DEBUG",
-                "provider_json_retry",
-                "Caption Provider JSON 修復重試",
-                job_id=job_id,
-                photo_id=photo_id,
-                stage=stage,
-                trace_id=prompt_version,
-            )
-            repair_started_at = datetime.now(timezone.utc).isoformat()
-            repair_perf = time.perf_counter()
-            frozen_repair_policy = dict(repair_policy or {})
-            if not bool(frozen_repair_policy.get("enabled", True)):
-                raise first_error
-            repair_model = str(frozen_repair_policy.get("model") or model).strip() or model
-            repair_attempt_id = self._trace_write(
-                "start_attempt",
-                trace_id,
-                attempt_kind="json_repair",
-                provider=actual_call_provider.name,
-                provider_id=str(getattr(actual_call_provider, "provider_id", actual_call_provider.name)),
-                requested_model=repair_model,
-            )
-            try:
-                repair_cap = int(frozen_repair_policy.get("max_tokens", REPAIR_TOKEN_CAP))
-            except (TypeError, ValueError):
-                repair_cap = REPAIR_TOKEN_CAP
-            repair_call = {
-                "invalid_content": response.content,
-                "validation_error": str(first_error),
-                "model": repair_model,
-                "max_tokens": max(256, min(repair_cap, REPAIR_TOKEN_CAP)),
-                "stage": stage,
-                "caption_controls": caption_controls,
-                "provider_request_context_id": provider_request_context_id,
-            }
-            try:
-                if selected_channel is not None and hasattr(provider, "_execute_sticky"):
-                    repaired = provider._execute_sticky(
-                        selected_channel,
-                        "repair_json",
-                        boundary=self.process_boundary,
-                        **repair_call,
-                    )
-                elif self.process_boundary is not None and hasattr(provider, "repair_json_isolated"):
-                    repaired = provider.repair_json_isolated(self.process_boundary, **repair_call)
-                elif self.process_boundary is not None:
-                    specification = provider.process_spec()
-                    if specification is None:
-                        self.process_boundary.record_cooperative()
-                        repaired = provider.repair_json(**repair_call)
-                    else:
-                        repaired = self.process_boundary.call_provider(
-                            specification,
-                            "repair_json",
-                            timeout_seconds=float(getattr(provider, "timeout", 120)),
-                            kwargs=repair_call,
-                        )
-                else:
-                    repaired = provider.repair_json(**repair_call)
-            except Exception as repair_error:
-                self._trace_write(
-                    "update_attempt_from_call",
-                    repair_attempt_id,
-                    getattr(repair_error, "call_trace", None),
-                    status=(
-                        "AMBIGUOUS"
-                        if bool(getattr(repair_error, "ambiguous", False))
-                        else "TIMEOUT"
-                        if isinstance(repair_error, TimeoutError)
-                        else "FAILED"
-                    ),
-                    error_code=str(getattr(repair_error, "code", "") or "VLM-004"),
-                    error_message=str(repair_error),
-                    completed_at=datetime.now(timezone.utc).isoformat(),
-                )
-                # The repair request is a distinct, text-only operation.  Do
-                # not use the already-completed Vision marker as evidence that
-                # this later request was consumed; doing so would create a
-                # false json_repair charge and could misclassify a capacity
-                # timeout.  Process-boundary metadata is authoritative here.
-                repair_consumed = self._request_was_consumed(repair_error)
-                repair_unknown_usage_id = None
-                if repair_consumed:
-                    self._normalize_consumed_error(
-                        repair_error,
-                        consumed=True,
-                        request_kind="repair",
-                    )
-                    if self._requires_unknown_usage(repair_error):
-                        try:
-                            repair_provider = selected_channel.provider if selected_channel is not None else provider
-                            repair_context_bytes = len(
-                                json.dumps(
-                                    repair_call,
-                                    ensure_ascii=False,
-                                    sort_keys=True,
-                                    default=str,
-                                ).encode("utf-8")
-                            )
-                            repair_unknown_usage_id = self._record_failed_unknown_request(
-                                provider=repair_provider,
-                                model=repair_model,
-                                job_id=job_id,
-                                photo_id=photo_id,
-                                request_type="json_repair",
-                                started_at=repair_started_at,
-                                started_perf=repair_perf,
-                                error=repair_error,
-                                request_kind="repair",
-                                request_metrics=getattr(repair_provider, "last_request_metrics", {}),
-                                request_body_bytes=repair_context_bytes,
-                                retry_count=1,
-                            )
-                        except Exception as usage_error:
-                            self._activity(
-                                "ERROR",
-                                "provider_failed_usage_persist_failed",
-                                "Provider JSON 修復未知成本記錄失敗",
-                                job_id=job_id,
-                                photo_id=photo_id,
-                                error=str(usage_error)[:500],
-                            )
-                if repair_unknown_usage_id is not None:
-                    self._trace_write(
-                        "update_attempt_from_call",
-                        repair_attempt_id,
-                        getattr(repair_error, "call_trace", None),
-                        api_usage_id=repair_unknown_usage_id,
-                    )
-                if vision_attempt.vision_completed:
-                    # A repair capacity/pre-start failure cannot be safely
-                    # retried at the worker boundary: that would replay the
-                    # already-consumed Vision POST.  Keep the existing
-                    # validation/repair terminal semantics.  For a consumed
-                    # repair, unknown billing has already been recorded above
-                    # with its original provider code before this queue-level
-                    # terminal normalization.
-                    self._terminalize_post_vision_repair_failure(
-                        repair_error,
-                        vision_completed=True,
-                    )
-                raise
-            repair_cost, repair_usage_id = self._record(
-                provider,
-                repair_model,
-                job_id,
-                photo_id,
-                "json_repair",
-                repaired,
-                repair_started_at,
-                repair_perf,
-                retry_count=1,
-            )
-            total_cost += repair_cost
-            # 第二次驗證失敗直接拋出；不得無限修復。
-            repair_parse_started_at = datetime.now(timezone.utc).isoformat()
-            repaired_candidate = extract_json_value(repaired.content)
-            try:
-                result = self._apply_caption_variant(
-                    validate_model_response(
-                        repaired_candidate
-                        if isinstance(repaired_candidate, dict)
-                        else repaired.content
-                    ),
-                    caption_controls,
-                )
-            except AnalysisValidationError as repair_validation_error:
-                self._trace_write(
-                    "update_attempt_from_call",
-                    repair_attempt_id,
-                    repaired.call_trace,
-                    status="VALIDATION_FAILED",
-                    served_model=repaired.served_model,
-                    api_usage_id=repair_usage_id,
-                    response_parsed=repaired_candidate,
-                    parse_started_at=repair_parse_started_at,
-                    parsed_at=datetime.now(timezone.utc).isoformat(),
-                    error_code="ANALYSIS-SCHEMA-INVALID",
-                    error_message=str(repair_validation_error),
-                    completed_at=datetime.now(timezone.utc).isoformat(),
-                )
-                raise
-            repair_parsed_at = datetime.now(timezone.utc).isoformat()
-            self._trace_write(
-                "update_attempt_from_call",
-                repair_attempt_id,
-                repaired.call_trace,
-                status="SUCCESS",
-                served_model=repaired.served_model,
-                api_usage_id=repair_usage_id,
-                response_parsed=repaired_candidate,
-                parse_started_at=repair_parse_started_at,
-                parsed_at=repair_parsed_at,
-                completed_at=repair_parsed_at,
-            )
-            raw = repaired.content
-            total_input_tokens += repaired.usage.input_tokens
-            total_output_tokens += repaired.usage.output_tokens
-            total_cached_tokens += repaired.usage.cached_tokens
-            total_reasoning_tokens += repaired.usage.reasoning_tokens
+            raise
         self.photos.put_ai_cache(
             content_sha256=content_sha256,
             provider=cache_provider_identity,
@@ -1659,9 +1351,6 @@ class PhotoAnalysisService:
         low_model: str = "low-cost-vision",
         high_model: str = "high-quality-vision",
         stage_two_threshold: float = 65,
-        favorite_override: bool = True,
-        ranking_weights: dict[str, float] | None = None,
-        favorite_bonus: float = DEFAULT_FAVORITE_BONUS,
         scoring_version_id: str | None = None,
         force_ai: bool = False,
         force_actor: str = "system",
@@ -1683,18 +1372,9 @@ class PhotoAnalysisService:
                 low_model=low_model,
                 high_model=high_model,
                 stage_two_threshold=stage_two_threshold,
-                favorite_override=favorite_override,
-                scoring_profile={
-                    "id": scoring_version_id or "",
-                    "memory_weight": (ranking_weights or DEFAULT_RANKING_WEIGHTS)["memory"],
-                    "visual_weight": DEFAULT_RANKING_WEIGHTS["visual"],
-                    "local_weight": DEFAULT_RANKING_WEIGHTS["local_quality"],
-                    "favorite_bonus": favorite_bonus,
-                },
-                caption_controls=self._caption_generation_controls(self._caption_controls()),
-                prompt_version=self._prompt_version(
-                    self._caption_generation_controls(self._caption_controls())
-                ),
+                scoring_profile_id=scoring_version_id or "",
+                caption_controls=self._caption_controls(),
+                prompt_version=self._prompt_version(self._caption_controls()),
                 high_image_max_side=int(
                     self.settings.get(
                         "analysis.image_max_side", self.settings.get("analysis.high_image_max_side", 1024)
@@ -1702,26 +1382,7 @@ class PhotoAnalysisService:
                 )
                 if self.settings
                 else 1024,
-                caption_display_controls=self._caption_display_controls(self._caption_controls()),
-                repair_policy={
-                    "enabled": True,
-                    "model": str(
-                        self.settings.get("model.repair_model", high_model) if self.settings else high_model
-                    ),
-                    "max_tokens": max(
-                        256,
-                        min(
-                            REPAIR_TOKEN_CAP,
-                            int(
-                                self.settings.get("budget.repair_max_tokens", REPAIR_TOKEN_CAP)
-                                if self.settings
-                                else REPAIR_TOKEN_CAP
-                            ),
-                        ),
-                    ),
-                    "max_attempts": 1,
-                    "text_only": True,
-                },
+                repair_policy={"enabled": False},
             )
         analysis_spec = normalize_analysis_plan(analysis_spec)
         analysis_spec["reasoning_effort"] = normalize_reasoning_effort(
@@ -1729,19 +1390,10 @@ class PhotoAnalysisService:
         )
         strategy = str(analysis_spec["strategy"])
         model = str(analysis_spec.get("model") or analysis_spec.get("high_model") or "")
-        favorite_override = bool(analysis_spec["favorite_override"])
         caption_controls = dict(analysis_spec.get("caption_controls") or {}) or None
-        display_controls = dict(analysis_spec.get("caption_display_controls") or {})
-        repair_policy = dict(analysis_spec.get("repair_policy") or {})
-        if caption_controls:
-            # The style controls both single-caption generation and legacy
-            # cached-variant display selection, so it stays frozen in both.
-            caption_controls = dict(caption_controls) | display_controls
         prompt_version = str(analysis_spec["prompt_version"])
         vision_input = dict(analysis_spec["vision_input"])
         image_max_side = int(vision_input["max_side"])
-        ranking_weights = dict(analysis_spec["ranking_weights"])
-        favorite_bonus = float(analysis_spec["favorite_bonus"])
         scoring_version_id = str(analysis_spec["scoring_profile_id"]) or scoring_version_id
         analysis_spec_json = canonical_json(analysis_spec)
         identity_spec = dict(analysis_spec)
@@ -1792,15 +1444,13 @@ class PhotoAnalysisService:
 
         self._activity(
             "DEBUG",
-            "caption_analysis_started",
-            "Caption 分析開始",
+            "photo_analysis_started",
+            "照片分析開始",
             job_id=job_id,
             photo_id=photo_id,
             stage=strategy,
             trace_id=prompt_version,
-            advanced_caption=bool(caption_controls),
         )
-        weights = ranking_weights or DEFAULT_RANKING_WEIGHTS
         # Reuse identical bytes and semantic inputs across local ranking/version
         # changes, while retaining the current full plan for result provenance.
         inherited = self.photos.inherit_existing_analysis(
@@ -1828,8 +1478,6 @@ class PhotoAnalysisService:
                 result=result,
                 raw=raw,
                 photo=photo,
-                ranking_weights=weights,
-                favorite_bonus=favorite_bonus,
                 scoring_version_id=scoring_version_id,
                 schema_kind="basic",
                 score_kind=LOCAL_QUALITY_SCORE_KIND,
@@ -1856,8 +1504,6 @@ class PhotoAnalysisService:
                 result=result,
                 raw=raw,
                 photo=photo,
-                ranking_weights=weights,
-                favorite_bonus=favorite_bonus,
                 scoring_version_id=scoring_version_id,
                 schema_kind="basic",
                 score_kind=LOCAL_QUALITY_SCORE_KIND,
@@ -1884,8 +1530,6 @@ class PhotoAnalysisService:
                 result=result,
                 raw=raw,
                 photo=photo,
-                ranking_weights=weights,
-                favorite_bonus=favorite_bonus,
                 scoring_version_id=scoring_version_id,
                 schema_kind="basic",
                 score_kind=LOCAL_QUALITY_SCORE_KIND,
@@ -1908,8 +1552,6 @@ class PhotoAnalysisService:
                 result=result,
                 raw=raw,
                 photo=photo,
-                ranking_weights=weights,
-                favorite_bonus=favorite_bonus,
                 scoring_version_id=scoring_version_id,
                 schema_kind="basic",
                 score_kind=LOCAL_QUALITY_SCORE_KIND,
@@ -1959,7 +1601,6 @@ class PhotoAnalysisService:
             schema_kind="full",
             reasoning_effort=str(analysis_spec["reasoning_effort"]),
             caption_controls=caption_controls,
-            repair_policy=repair_policy,
             prompt_version=prompt_version,
             analysis_fingerprint=analysis_fingerprint,
             vision_input=vision_input,
@@ -1977,8 +1618,6 @@ class PhotoAnalysisService:
                 result=result,
                 raw=raw,
                 photo=photo,
-                ranking_weights=weights,
-                favorite_bonus=favorite_bonus,
                 scoring_version_id=scoring_version_id,
                 schema_kind="full",
                 score_kind=SEMANTIC_SCORE_KIND,

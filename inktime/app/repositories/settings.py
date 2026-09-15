@@ -24,7 +24,6 @@ from inktime.app.domain.analysis.scoring import (
     DEFAULT_SCORING_RULES,
 )
 from inktime.app.domain.analysis.schema import (
-    CAPTION_MAX_CHARS,
     SIDE_CAPTION_MAX_CHARS,
     SIDE_CAPTION_MIN_CHARS,
     normalize_caption_controls,
@@ -145,68 +144,12 @@ SETTING_DEFINITIONS: dict[str, dict[str, Any]] = {
         "choices": ["local", "single"],
         "restart": False,
     },
-    "analysis.advanced_caption_enabled": {
-        "category": "照片描述與相框文案",
-        "default": True,
-        "type": "boolean",
-        "description": "進階照片描述與相框文案；新安裝預設啟用，既有明確設定維持不變",
-        "risk": "啟用後的新分析會使用文案設定產生不同快取；不會改寫舊分析",
-        "restart": False,
-    },
-    "analysis.caption_variants_enabled": {
-        "category": "照片描述與相框文案",
-        "default": False,
-        "type": "boolean",
-        "description": "舊版相框候選顯示相容；新分析固定只產生一個 side_caption",
-        "risk": "開啟只影響既有 semantic_json 候選的顯示，不會要求模型產生新候選",
-        "restart": False,
-    },
-    "analysis.caption_min_chars": {
-        "category": "照片描述與相框文案",
-        "default": 10,
-        "type": "integer",
-        "description": "詳細照片描述最少字元數",
-        "risk": "必須與目標、上限保持 min ≤ target ≤ max",
-        "min": 10,
-        "max": CAPTION_MAX_CHARS,
-        "restart": False,
-    },
-    "analysis.caption_target_chars": {
-        "category": "照片描述與相框文案",
-        "default": 60,
-        "type": "integer",
-        "description": "詳細照片描述的大致目標字元數，不要求模型精確湊字數",
-        "risk": "必須與最少、上限保持 min ≤ target ≤ max",
-        "min": 10,
-        "max": CAPTION_MAX_CHARS,
-        "restart": False,
-    },
-    "analysis.caption_max_chars": {
-        "category": "照片描述與相框文案",
-        "default": CAPTION_MAX_CHARS,
-        "type": "integer",
-        "description": "詳細照片描述最多字元數",
-        "risk": "必須與最少、目標保持 min ≤ target ≤ max",
-        "min": 10,
-        "max": CAPTION_MAX_CHARS,
-        "restart": False,
-    },
     "analysis.side_caption_min_chars": {
         "category": "照片描述與相框文案",
         "default": 8,
         "type": "integer",
         "description": "相框一句話最少字元數",
-        "risk": "必須與目標、上限保持 min ≤ target ≤ max",
-        "min": SIDE_CAPTION_MIN_CHARS,
-        "max": SIDE_CAPTION_MAX_CHARS,
-        "restart": False,
-    },
-    "analysis.side_caption_target_chars": {
-        "category": "照片描述與相框文案",
-        "default": 12,
-        "type": "integer",
-        "description": "相框一句話的大致目標字元數",
-        "risk": "必須與最少、上限保持 min ≤ target ≤ max",
+        "risk": "必須與上限保持 min ≤ max",
         "min": SIDE_CAPTION_MIN_CHARS,
         "max": SIDE_CAPTION_MAX_CHARS,
         "restart": False,
@@ -216,121 +159,20 @@ SETTING_DEFINITIONS: dict[str, dict[str, Any]] = {
         "default": 16,
         "type": "integer",
         "description": "相框一句話最多字元數",
-        "risk": "必須與最少、目標保持 min ≤ target ≤ max",
+        "risk": "必須與最少字數保持 min ≤ max",
         "min": SIDE_CAPTION_MIN_CHARS,
         "max": SIDE_CAPTION_MAX_CHARS,
         "restart": False,
     },
-    "analysis.copy_default_style": {
-        "category": "照片描述與相框文案",
-        "default": "literary",
-        "type": "string",
-        "description": "單一相框文案的生成風格；有舊候選時也用於選擇顯示版本",
-        "risk": "修改後的新分析會使用不同文案風格與快取指紋",
-        "choices": ["natural", "warm", "literary", "humorous", "minimal"],
-        "restart": False,
-    },
-    "analysis.copy_humor_level": {
-        "category": "照片描述與相框文案",
-        "default": 2,
-        "type": "integer",
-        "description": "相框文案幽默程度（0 為不刻意幽默）",
-        "risk": "過高可能降低正式場合的適用性",
-        "min": 0,
-        "max": 5,
-        "restart": False,
-    },
-    "analysis.copy_poetic_level": {
-        "category": "照片描述與相框文案",
-        "default": 3,
-        "type": "integer",
-        "description": "相框文案詩意程度（0 為最直白）",
-        "risk": "過高可能讓文案較含蓄",
-        "min": 0,
-        "max": 5,
-        "restart": False,
-    },
-    "analysis.copy_avoid_cliche": {
-        "category": "照片描述與相框文案",
-        "default": True,
-        "type": "boolean",
-        "description": "避免雞湯、濫情、空泛與模板句",
-        "risk": "會限制模型可使用的常見文案語氣",
-        "restart": False,
-    },
-    "analysis.copy_avoid_direct_description": {
-        "category": "照片描述與相框文案",
-        "default": True,
-        "type": "boolean",
-        "description": "相框一句話避免只是直接重述照片內容",
-        "risk": "仍以照片可確認內容為界，不可虛構故事",
-        "restart": False,
-    },
-    "analysis.copy_forbid_exclamation": {
-        "category": "照片描述與相框文案",
-        "default": True,
-        "type": "boolean",
-        "description": "相框一句話不使用驚嘆號",
-        "risk": "降低強烈語氣",
-        "restart": False,
-    },
-    "analysis.copy_forbid_like_phrase": {
-        "category": "照片描述與相框文案",
-        "default": True,
-        "type": "boolean",
-        "description": "避免使用像是、彷彿、彷佛等比喻起手式",
-        "risk": "限制部分文學修辭",
-        "restart": False,
-    },
-    "analysis.copy_max_commas": {
-        "category": "照片描述與相框文案",
-        "default": 2,
-        "type": "integer",
-        "description": "相框一句話最多逗號數",
-        "risk": "過低會讓長句較不易閱讀",
-        "min": 0,
-        "max": 10,
-        "restart": False,
-    },
-    "analysis.copy_avoid_abstract_ending": {
-        "category": "照片描述與相框文案",
-        "default": True,
-        "type": "boolean",
-        "description": "避免以空泛人生結論收尾",
-        "risk": "限制總結式文案",
-        "restart": False,
-    },
-    "analysis.copy_banned_words": {
-        "category": "照片描述與相框文案",
-        "default": "世界\n時光\n歲月\n治癒\n剛剛好\n悄悄\n慢慢\n值得珍藏\n美好瞬間\n時光定格\n歲月靜好\n生活中的小確幸\n一切都是最好的安排",
-        "type": "string",
-        "description": "每行一個禁止詞；只在進階文案啟用時套用",
-        "risk": "過多禁止詞可能使文案選詞受限",
-        "multiline": True,
-        "rows": 8,
-        "max_length": 4000,
-        "restart": False,
-    },
-    "analysis.copy_banned_patterns": {
+    "analysis.side_caption_custom_rules": {
         "category": "照片描述與相框文案",
         "default": "",
         "type": "string",
-        "description": "每行一個禁止句型；只在進階文案啟用時套用",
-        "risk": "請使用可理解的文字片段，非正規表示式",
-        "multiline": True,
-        "rows": 5,
-        "max_length": 4000,
-        "restart": False,
-    },
-    "analysis.copy_custom_rules": {
-        "category": "照片描述與相框文案",
-        "default": "",
-        "type": "string",
-        "description": "額外文案規則；只在進階文案啟用時傳給模型",
+        "description": "額外的電子紙短文案規則；非空時才傳給模型",
         "risk": "不可要求模型猜測人物關係、地點或事件",
         "multiline": True,
         "rows": 6,
-        "max_length": 8000,
+        "max_length": 1000,
         "restart": False,
     },
     "analysis.execution_mode": {
@@ -1413,7 +1255,6 @@ _BASIC_KEYS = {
     "general.timezone",
     "analysis.strategy",
     "analysis.execution_mode",
-    "analysis.advanced_caption_enabled",
     "analysis.ai_mode",
     "analysis.ai_top_n",
     "analysis.ai_daily_photo_limit",
@@ -1465,14 +1306,9 @@ _LABEL_OVERRIDES = {
     "analysis.ai_top_n": "AI 候選照片上限",
     "analysis.ai_daily_photo_limit": "每日 AI 分析照片上限",
     "analysis.ai_monthly_photo_limit": "每月 AI 分析照片上限",
-    "analysis.advanced_caption_enabled": "進階照片描述與相框文案",
-    "analysis.caption_variants_enabled": "相框文案候選版本",
-    "analysis.caption_min_chars": "詳細描述最少字數",
-    "analysis.caption_target_chars": "詳細描述目標字數",
-    "analysis.caption_max_chars": "詳細描述最多字數",
     "analysis.side_caption_min_chars": "相框短文最少字數",
-    "analysis.side_caption_target_chars": "相框短文目標字數",
     "analysis.side_caption_max_chars": "相框短文最多字數",
+    "analysis.side_caption_custom_rules": "相框短文自訂規則",
     "render.caption_wrap_enabled": "Footer 多行文案",
     "render.caption_max_lines": "Footer 最多行數",
     "render.caption_min_font_size": "Footer 最小字體",
@@ -1534,14 +1370,6 @@ def _effective_scope(key: str, definition: dict[str, Any]) -> str:
 
 
 def _metadata_dependencies(key: str) -> list[dict[str, Any]]:
-    if key == "analysis.caption_variants_enabled":
-        return [{"key": "analysis.advanced_caption_enabled", "equals": True}]
-    if (
-        key.startswith("analysis.copy_")
-        or key.startswith("analysis.caption_")
-        or key.startswith("analysis.side_caption_")
-    ):
-        return [{"key": "analysis.advanced_caption_enabled", "equals": True}]
     if key in {"render.caption_max_lines", "render.caption_min_font_size"}:
         return [{"key": "render.caption_wrap_enabled", "equals": True}]
     if key.startswith(("model.", "budget.")) or key in {
@@ -1557,7 +1385,7 @@ def _metadata_dependencies(key: str) -> list[dict[str, Any]]:
 
 
 def _validation_group(key: str) -> str | None:
-    if key.startswith(("analysis.caption_", "analysis.side_caption_")):
+    if key in {"analysis.side_caption_min_chars", "analysis.side_caption_max_chars"}:
         return "caption_ranges"
     if key.startswith("budget."):
         return "budget_limits"
@@ -1569,10 +1397,7 @@ def _validation_group(key: str) -> str | None:
 def _govern_definition(key: str, definition: dict[str, Any]) -> None:
     risk_description = str(definition.get("risk", "依安全範圍調整"))
     risk = _risk_level(risk_description, key)
-    cache_impact = key.startswith(("analysis.caption_", "analysis.copy_", "model.")) or key in {
-        "analysis.advanced_caption_enabled",
-        "analysis.caption_variants_enabled",
-    }
+    cache_impact = key.startswith(("analysis.side_caption_", "model."))
     definition.update(
         {
             "label_zh_tw": _LABEL_OVERRIDES.get(
@@ -1639,7 +1464,6 @@ class SettingsRepository:
                 str(row["key"]): json.loads(row["value_json"])
                 for row in existing_rows
             }
-            explicit = {str(row["key"]): bool(row["updated_by"]) for row in existing_rows}
             connection.executemany(
                 "INSERT OR IGNORE INTO settings(key,category,value_json,value_type,requires_restart,updated_at) VALUES (?,?,?,?,?,?)",
                 [
@@ -1690,33 +1514,13 @@ class SettingsRepository:
                     for key, definition in SETTING_DEFINITIONS.items()
                 ],
             )
-            # Adopt prose defaults only when the old value was untouched.
-            # An explicit operator choice, including disabled captions, wins.
-            for key, old_default, new_default in (
-                ("analysis.advanced_caption_enabled", False, True),
-                ("analysis.copy_default_style", "natural", "literary"),
-                ("analysis.copy_humor_level", 1, 2),
-                ("analysis.copy_poetic_level", 1, 3),
-                ("analysis.copy_poetic_level", 2, 3),
-            ):
-                if existing.get(key) == old_default and not explicit.get(key, False):
-                    connection.execute(
-                        "UPDATE settings SET value_json=?,updated_at=? WHERE key=?",
-                        (json.dumps(new_default, ensure_ascii=False), now, key),
-                    )
-
-            # Normalize legacy ranges before any schema or validator reads
-            # them, while retaining updated_by provenance on explicit rows.
+            # Normalize active side-caption ranges without deleting legacy rows.
             caption_keys = (
-                "analysis.caption_min_chars",
-                "analysis.caption_target_chars",
-                "analysis.caption_max_chars",
                 "analysis.side_caption_min_chars",
-                "analysis.side_caption_target_chars",
                 "analysis.side_caption_max_chars",
             )
             caption_rows = connection.execute(
-                "SELECT key,value_json FROM settings WHERE key IN (?,?,?,?,?,?)",
+                "SELECT key,value_json FROM settings WHERE key IN (?,?)",
                 caption_keys,
             ).fetchall()
             stored_caption_values = {
@@ -1755,7 +1559,11 @@ class SettingsRepository:
             rows = connection.execute("SELECT * FROM settings ORDER BY category,key").fetchall()
         result = []
         for row in rows:
-            definition = SETTING_DEFINITIONS.get(row["key"], {})
+            definition = SETTING_DEFINITIONS.get(row["key"])
+            if definition is None:
+                # Retired rows remain in the database for rollback safety but
+                # are no longer part of the active settings surface.
+                continue
             public_definition = (
                 self.public_metadata(str(row["key"]))
                 if redact_sensitive and row["key"] in SENSITIVE_STATUS_KEYS
@@ -2141,41 +1949,27 @@ class SettingsRepository:
 
     @staticmethod
     def _validate_caption_ranges(values: dict[str, Any]) -> None:
-        caption_minimum = int(values["analysis.caption_min_chars"])
-        caption_target = int(values["analysis.caption_target_chars"])
-        caption_upper = int(values["analysis.caption_max_chars"])
-        if not 10 <= caption_minimum <= caption_target <= caption_upper <= CAPTION_MAX_CHARS:
-            raise ValueError(
-                "analysis.caption 長度必須符合 "
-                f"10 ≤ min ≤ target ≤ max ≤ {CAPTION_MAX_CHARS}"
-            )
         side_minimum = int(values["analysis.side_caption_min_chars"])
-        side_target = int(values["analysis.side_caption_target_chars"])
         side_upper = int(values["analysis.side_caption_max_chars"])
         if not (
             SIDE_CAPTION_MIN_CHARS
             <= side_minimum
-            <= side_target
             <= side_upper
             <= SIDE_CAPTION_MAX_CHARS
         ):
             raise ValueError(
                 "analysis.side_caption 長度必須符合 "
-                f"{SIDE_CAPTION_MIN_CHARS} ≤ min ≤ target ≤ max ≤ {SIDE_CAPTION_MAX_CHARS}"
+                f"{SIDE_CAPTION_MIN_CHARS} ≤ min ≤ max ≤ {SIDE_CAPTION_MAX_CHARS}"
             )
 
     def _caption_range_values(self, overrides: dict[str, Any] | None = None) -> dict[str, Any]:
         keys = (
-            "analysis.caption_min_chars",
-            "analysis.caption_target_chars",
-            "analysis.caption_max_chars",
             "analysis.side_caption_min_chars",
-            "analysis.side_caption_target_chars",
             "analysis.side_caption_max_chars",
         )
         with self.database.session() as connection:
             rows = connection.execute(
-                "SELECT key,value_json FROM settings WHERE key IN (?,?,?,?,?,?)", keys
+                "SELECT key,value_json FROM settings WHERE key IN (?,?)", keys
             ).fetchall()
         values = {row["key"]: json.loads(row["value_json"]) for row in rows}
         values.update(overrides or {})

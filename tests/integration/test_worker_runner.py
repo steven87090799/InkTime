@@ -238,7 +238,7 @@ def test_runner_permanently_rejects_a_frozen_disabled_analysis_plan(app, tmp_pat
     plan = app.extensions["inktime_analysis_service"].build_plan(
         strategy="high_quality",
         provider_route=[],
-        scoring_profile=dict(app.extensions["inktime_scoring_repository"].current()),
+        scoring_profile_id=str(app.extensions["inktime_scoring_repository"].current()["id"]),
     )
     monkeypatch.setattr(
         app.extensions["inktime_analysis_service"],
@@ -286,7 +286,7 @@ def test_cloud_job_with_an_empty_frozen_route_fails_without_discovering_provider
     plan = analysis.build_plan(
         strategy="high_quality",
         provider_route=[],
-        scoring_profile=dict(app.extensions["inktime_scoring_repository"].current()),
+        scoring_profile_id=str(app.extensions["inktime_scoring_repository"].current()["id"]),
     )
     jobs = app.extensions["inktime_job_service"]
     job_id = jobs.create_analysis_job(
@@ -333,7 +333,7 @@ def test_runner_uses_the_frozen_job_plan_after_settings_change(app, tmp_path, mo
     plan = analysis.build_plan(
         strategy="high_quality",
         provider_route=route,
-        scoring_profile=dict(app.extensions["inktime_scoring_repository"].current()),
+        scoring_profile_id=str(app.extensions["inktime_scoring_repository"].current()["id"]),
     )
     provider = FrozenPlanProvider()
     routed = []

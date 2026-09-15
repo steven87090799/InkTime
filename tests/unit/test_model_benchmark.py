@@ -188,7 +188,7 @@ def test_offline_benchmark_reports_no_network_or_production_mutation():
         "visual": 33.0,
         "local_quality": 0.0,
     }
-    assert report["ranking_policy"]["favorite_bonus_policy"]["applied"] is False
+    assert report["ranking_policy"]["favorite_special_level_policy"]["applied"] is False
 
 
 class _LiveMetricProvider:
@@ -203,7 +203,7 @@ class _LiveMetricProvider:
     def analyze(self, **_kwargs):
         self.analyze_count += 1
         if self.invalid_first and self.analyze_count == 1:
-            content = "not-json"
+            content = json.dumps(valid_result(types=["人物", "人物"]), ensure_ascii=False)
         else:
             content = json.dumps(valid_result(), ensure_ascii=False)
         return ProviderResponse(content, Usage(input_tokens=10, output_tokens=5, provider_reported_cost=0.1))

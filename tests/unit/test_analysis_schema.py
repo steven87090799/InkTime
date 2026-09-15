@@ -5,10 +5,12 @@ import pytest
 
 from inktime.app.domain.analysis.schema import (
     ANALYSIS_JSON_SCHEMA,
+    LEGACY_V4_JSON_SCHEMA,
     AnalysisValidationError,
     REQUIRED_FIELDS,
     json_schema_for_stage,
     validate_analysis_result,
+    validate_model_response,
 )
 
 
@@ -23,18 +25,13 @@ def content_filter_result(code=None, confidence=0.97, **updates):
 
 def valid_result(**updates):
     value = {
-        "schema_version": 4,
+        "schema_version": 5,
         "types": ["人物", "日常"],
         "memory_score": 72,
         "visual_score": 81,
         "special_level": 2,
-        "special_codes": ["meaningful_activity"],
-        "people_count": 1,
-        "caption": "男子在河畔持釣竿，背景為開闊天空與河岸，身旁草地上的釣具清楚可見。",
         "side_caption": "釣竿伸向雲層深處。",
         "content_filter": content_filter_result(),
-        "subject_position": "center",
-        "text_safe_area": "bottom_right",
         "visual_orientation": {
             "rotation_cw": 0,
             "confidence": 0.97,
@@ -46,12 +43,24 @@ def valid_result(**updates):
     return value
 
 
+def legacy_v4_result(**updates):
+    value = valid_result(schema_version=4) | {
+        "special_codes": ["meaningful_activity"],
+        "people_count": 1,
+        "caption": "男子在河畔持釣竿，背景為開闊天空與河岸，身旁草地上的釣具清楚可見。",
+        "subject_position": "center",
+        "text_safe_area": "bottom_right",
+    }
+    value.update(updates)
+    return value
+
+
 def test_strict_schema_accepts_expected_result():
     assert validate_analysis_result(json.dumps(valid_result(), ensure_ascii=False)) == valid_result()
 
 
 @pytest.mark.parametrize("field", sorted(REQUIRED_FIELDS))
-def test_every_v4_field_is_required(field):
+def test_every_v5_field_is_required(field):
     value = valid_result()
     del value[field]
     with pytest.raises(AnalysisValidationError):
@@ -70,6 +79,11 @@ def test_every_v4_field_is_required(field):
         "details",
         "should_keep",
         "bonus",
+        "caption",
+        "special_codes",
+        "people_count",
+        "subject_position",
+        "text_safe_area",
     ],
 )
 def test_rejects_obsolete_or_server_owned_fields(extra):
@@ -77,8 +91,8 @@ def test_rejects_obsolete_or_server_owned_fields(extra):
         validate_analysis_result(valid_result(**{extra: 1}))
 
 
-@pytest.mark.parametrize("version", [1, 2, 3, 5, True, 4.0])
-def test_only_v4_is_supported(version):
+@pytest.mark.parametrize("version", [1, 2, 3, 6, True, 5.0])
+def test_only_v4_and_v5_are_supported(version):
     with pytest.raises(AnalysisValidationError):
         validate_analysis_result(valid_result(schema_version=version))
 
@@ -95,18 +109,11 @@ def test_only_v4_is_supported(version):
         ("special_level", 2.5),
         ("special_level", True),
         ("special_level", 5),
-        ("people_count", -1),
-        ("people_count", False),
         ("types", []),
         ("types", ["人物", "人物"]),
         ("types", ["人物", "日常", "活動", "旅行"]),
-        ("special_codes", ["group_photo", "milestone", "ceremony"]),
-        ("special_codes", ["rare_in_your_library"]),
-        ("caption", "短"),
-        ("caption", "字" * 101),
         ("side_caption", "字" * 7),
         ("side_caption", "字" * 17),
-        ("text_safe_area", None),
         ("content_filter", {"exclude_code": "screenshot", "confidence": 0.99}),
         ("content_filter", {"exclude_code": "none", "confidence": 0.99, "exclude": True}),
         ("content_filter", {"exclude_code": "none", "confidence": 0.99}),
@@ -145,8 +152,6 @@ def test_orientation_consistency(rotation, confidence, ambiguous, evidence, vali
 
 
 def test_model_orientation_normalization_is_conservative_and_keeps_input_immutable():
-    from inktime.app.domain.analysis.schema import validate_model_response
-
     value = valid_result(visual_orientation={
         "rotation_cw": 90, "confidence": 0.9, "ambiguous": False,
         "evidence": ["faces_upright", "insufficient_visual_cues"],
@@ -165,8 +170,6 @@ def test_model_orientation_normalization_is_conservative_and_keeps_input_immutab
     ("rotation_cw", 45), ("ambiguous", "false"), ("evidence", ["invalid"]),
 ])
 def test_model_normalization_still_rejects_invalid_schema(field, invalid):
-    from inktime.app.domain.analysis.schema import validate_model_response
-
     value = valid_result()
     value["visual_orientation"][field] = invalid
     with pytest.raises(AnalysisValidationError):
@@ -174,8 +177,6 @@ def test_model_normalization_still_rejects_invalid_schema(field, invalid):
 
 
 def test_model_normalization_does_not_fill_missing_fields_or_remove_safety_fields():
-    from inktime.app.domain.analysis.schema import validate_model_response
-
     value = valid_result()
     del value["visual_orientation"]["rotation_cw"]
     with pytest.raises(AnalysisValidationError):
@@ -189,7 +190,7 @@ def test_model_normalization_does_not_fill_missing_fields_or_remove_safety_field
 @pytest.mark.parametrize("stage", ["single", "full", "stage_one", "scoring_test"])
 def test_single_schema_for_every_photo_stage(stage):
     assert json_schema_for_stage(stage) == ANALYSIS_JSON_SCHEMA
-    schema = json_schema_for_stage(stage, caption_controls={"caption_variants_enabled": True})["schema"]
+    schema = json_schema_for_stage(stage, caption_controls={"side_caption_min_chars": 8})["schema"]
     assert set(schema["properties"]) == REQUIRED_FIELDS
     assert not schema["additionalProperties"]
     for key in ("content_filter", "visual_orientation"):
@@ -199,18 +200,38 @@ def test_single_schema_for_every_photo_stage(stage):
 def test_text_is_traditional_chinese():
     result = validate_analysis_result(
         valid_result(
-            caption="他们在复古小镇看着远处风景，街道旁的树影与石板小路清楚可见。",
             side_caption="树影沿着小路慢慢展开。",
         )
     )
-    assert "他們" in result["caption"] and "樹影" in result["side_caption"]
+    assert "樹影" in result["side_caption"]
 
 
-def test_caption_controls_cannot_publish_a_contract_the_validator_rejects():
+def test_side_caption_controls_cannot_publish_a_contract_the_validator_rejects():
     schema = json_schema_for_stage('full', caption_controls={
-        'caption_min_chars': 0, 'caption_target_chars': 10, 'caption_max_chars': 20,
-    })['schema']['properties']['caption']
-    assert schema['minLength'] == 10 and schema['maxLength'] == 20
+        'side_caption_min_chars': 0, 'side_caption_max_chars': 20,
+    })['schema']['properties']['side_caption']
+    assert schema['minLength'] == 8 and schema['maxLength'] == 16
+
+
+def test_v5_exact_fields_and_legacy_v4_remains_readable():
+    assert set(ANALYSIS_JSON_SCHEMA["schema"]["properties"]) == REQUIRED_FIELDS
+    assert set(LEGACY_V4_JSON_SCHEMA["schema"]["properties"]) > REQUIRED_FIELDS
+    assert validate_analysis_result(legacy_v4_result()) == legacy_v4_result()
+
+
+def test_new_model_ingress_rejects_legacy_v4():
+    with pytest.raises(AnalysisValidationError):
+        validate_model_response(legacy_v4_result())
+
+
+@pytest.mark.parametrize("length,valid", [(7, False), (8, True), (16, True), (17, False)])
+def test_side_caption_length_contract(length, valid):
+    value = valid_result(side_caption="字" * length)
+    if valid:
+        assert validate_analysis_result(value)["side_caption"] == "字" * length
+    else:
+        with pytest.raises(AnalysisValidationError):
+            validate_analysis_result(value)
 
 
 @pytest.mark.parametrize("code", ["sexualized_content", "explicit_nudity", "female_glamour_portrait"])

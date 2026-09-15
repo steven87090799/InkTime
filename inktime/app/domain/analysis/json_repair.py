@@ -8,8 +8,46 @@ text-only repair request.
 
 from __future__ import annotations
 
+import ast
+from copy import deepcopy
 import json
 from typing import Any
+
+from inktime.app.domain.analysis.schema import AnalysisValidationError
+
+
+LEGACY_V4_SEMANTIC_INTEGRITY_FIELDS = frozenset(
+    {
+        "memory_score",
+        "visual_score",
+        "special_level",
+        "special_codes",
+        "people_count",
+        "content_filter",
+        "visual_orientation",
+        "subject_position",
+        "text_safe_area",
+    }
+)
+
+# Schema v5 intentionally removed the legacy storage/display fields.  The
+# compatibility-only repair surfaces still need an immutable snapshot, but it
+# must be derived from fields that actually exist in the response shape.
+# `types` and `side_caption` remain repairable text/category output, matching
+# the legacy contract's treatment of `caption` and `types`.
+V5_SEMANTIC_INTEGRITY_FIELDS = frozenset(
+    {
+        "memory_score",
+        "visual_score",
+        "special_level",
+        "content_filter",
+        "visual_orientation",
+    }
+)
+
+# Keep the public name for callers that only need to describe the legacy
+# contract; semantic_repair_snapshot() dispatches by schema version below.
+SEMANTIC_INTEGRITY_FIELDS = LEGACY_V4_SEMANTIC_INTEGRITY_FIELDS
 
 
 def _fenced_object(text: str) -> dict[str, Any] | None:
@@ -81,3 +119,62 @@ def extract_json_value(raw: str) -> dict[str, Any] | None:
     if text.startswith("```"):
         return _fenced_object(text)
     return _wrapped_object(text)
+
+
+def repair_source_object(raw: str) -> dict[str, Any] | None:
+    """Return only a safely recoverable source object for JSON repair.
+
+    Strict JSON, Markdown fences and wrappers are handled first. Python's
+    literal parser is a bounded fallback for unambiguous syntax differences
+    such as single quotes or a trailing comma; it cannot execute code.
+    """
+
+    extracted = extract_json_value(raw)
+    if extracted is not None:
+        return extracted
+    text = str(raw or "").strip()
+    if text.startswith("```") and text.endswith("```"):
+        lines = text.splitlines()
+        if len(lines) >= 3:
+            text = "\n".join(lines[1:-1]).strip()
+    try:
+        candidate = ast.literal_eval(text)
+    except (SyntaxError, ValueError, TypeError, MemoryError, RecursionError):
+        return None
+    return candidate if isinstance(candidate, dict) else None
+
+
+def semantic_repair_snapshot(source: dict[str, Any] | None) -> dict[str, Any]:
+    """Require all photo semantics before allowing text-only repair."""
+
+    fields = (
+        V5_SEMANTIC_INTEGRITY_FIELDS
+        if (source or {}).get("schema_version") == 5
+        else LEGACY_V4_SEMANTIC_INTEGRITY_FIELDS
+    )
+    missing = sorted(fields - set(source or {}))
+    if source is None or missing:
+        error = AnalysisValidationError(
+            "JSON 回應缺少可驗證的照片語意欄位，必須重新執行 Vision Analysis"
+            + (f"：{', '.join(missing)}" if missing else "")
+        )
+        error.code = "VLM-007"
+        raise error
+    return {field: deepcopy(source[field]) for field in fields}
+
+
+def assert_semantic_repair_integrity(
+    snapshot: dict[str, Any], repaired: dict[str, Any]
+) -> None:
+    """Reject a repair response that added or changed photo semantics."""
+
+    changed = sorted(
+        field for field, original in snapshot.items() if repaired.get(field) != original
+    )
+    if changed:
+        error = AnalysisValidationError(
+            "JSON Repair 修改了既有照片語意，必須重新執行 Vision Analysis："
+            + ", ".join(changed)
+        )
+        error.code = "VLM-007"
+        raise error

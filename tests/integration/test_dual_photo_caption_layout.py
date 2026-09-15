@@ -72,11 +72,10 @@ def test_pair_caption_plan_preserves_ai_and_local_provenance(app, tmp_path):
     app.extensions["inktime_photo_repository"].save_analysis(
         "ai-a",
         None,
-        "caption",
+        "single",
         "test-ai",
         "caption-model",
         valid_result(
-            caption="這是一段完整的照片說明文字。",
             types=["其他"],
             memory_score=90,
             visual_score=90,
@@ -94,9 +93,9 @@ def test_pair_caption_plan_preserves_ai_and_local_provenance(app, tmp_path):
     assert first["source_detail"] == {
         "provider_id": "test-ai",
         "model": "caption-model",
-        "stage": "caption",
+        "stage": "single",
         "prompt_version": "caption-test-v1",
-        "schema_version": 4,
+        "schema_version": 5,
     }
     assert first["source_updated_at"]
     assert second["photo_id"] == "local-b"
@@ -104,26 +103,24 @@ def test_pair_caption_plan_preserves_ai_and_local_provenance(app, tmp_path):
     assert second["source"] != "ai_side_caption"
 
 
-def test_caption_uses_latest_v4_analysis_side_caption(app, tmp_path):
+def test_caption_uses_latest_v5_analysis_side_caption(app, tmp_path):
     root = tmp_path / "caption-analysis-selection"
     root.mkdir()
     _photo(app, root, "caption-a", (1600, 900), "2021-07-28T10:00:00+00:00", "#4477aa")
     photos = app.extensions["inktime_photo_repository"]
 
-    def save(*, side_caption: str = "", details=None):
+    def save(*, side_caption: str = ""):
         photos.save_analysis(
             "caption-a",
             None,
-            "caption",
+            "single",
             "test-ai",
             "caption-model",
             valid_result(
-                caption="這是一段完整的照片說明文字。",
                 types=["其他"],
                 memory_score=90,
                 visual_score=90,
                 side_caption=side_caption,
-                details=details or {},
             ),
             "{}",
             prompt_version="caption-test-v1",
@@ -137,36 +134,31 @@ def test_caption_uses_latest_v4_analysis_side_caption(app, tmp_path):
     assert plan["primary_caption"]["is_ai_generated"] is True
 
 
-def test_caption_uses_v4_side_caption_instead_of_obsolete_variant_details(app, tmp_path):
+def test_caption_uses_latest_side_caption_without_variant_configuration(app, tmp_path):
     root = tmp_path / "caption-variant-selection"
     root.mkdir()
     _photo(app, root, "variant-a", (1600, 900), "2021-07-28T10:00:00+00:00", "#4477aa")
     photos = app.extensions["inktime_photo_repository"]
 
-    def save(*, details=None):
+    def save(side_caption):
         photos.save_analysis(
             "variant-a",
             None,
-            "caption",
+            "single",
             "test-ai",
             "caption-model",
             valid_result(
-                caption="這是一段完整的照片說明文字。",
                 types=["其他"],
                 memory_score=90,
                 visual_score=90,
-                side_caption="目前版本 AI 文案",
-                details=details or {},
+                side_caption=side_caption,
             ),
             "{}",
             prompt_version="caption-test-v1",
         )
 
-    save(details={"caption_variants": {"natural": "較舊的 Variant 文案"}})
-    save()
-    settings = app.extensions["inktime_settings_repository"]
-    settings.update("analysis.advanced_caption_enabled", True, changed_by="test", source_ip="test")
-    settings.update("analysis.caption_variants_enabled", True, changed_by="test", source_ip="test")
+    save("較舊版本 AI 文案")
+    save("目前版本 AI 文案")
     plan = app.extensions["inktime_render_service"].resolve_render_plan("variant-a")
     assert plan["primary_caption"]["text"] == "目前版本 AI 文案"
     assert plan["primary_caption"]["source"] == "ai_side_caption"

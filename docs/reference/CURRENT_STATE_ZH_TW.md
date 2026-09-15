@@ -7,7 +7,7 @@
 | 項目 | 原始碼值 | 權威來源 |
 |---|---|---|
 | Python 套件 | `2.0.0.dev0`，Python ≥3.10 | [`inktime/_version.py`](../../inktime/_version.py)、[`pyproject.toml`](../../pyproject.toml) |
-| SQLite Migration | 連續 `1–59` | [`migrations.py`](../../inktime/app/db/migrations.py) |
+| SQLite Migration | 連續 `1–60` | [`migrations.py`](../../inktime/app/db/migrations.py) |
 | AI Analysis Schema | 嚴格 v4；舊 v1–v3 保留歷史，不參與 v4 排名 | [`plan.py`](../../inktime/app/domain/analysis/plan.py)、[`schema.py`](../../inktime/app/domain/analysis/schema.py) |
 | ESP32 7C／PhotoPainter 韌體 | `2.8.7` | [`ink-display-7C-photo.ino`](../../esp32/ink-display-7C-photo/ink-display-7C-photo.ino) |
 | ESP32 Config Store payload | v5，讀取 v1–v5；舊容量 12、新 payload 24 slots read compatibility | [`device_config_store_core.h`](../../esp32/ink-display-7C-photo/device_config_store_core.h) |
@@ -48,4 +48,4 @@ NAS 使用[Tag 更新器](../operations/NAS_TAG_DEPLOYMENT_ZH_TW.md)拉取已發
 
 歷史紀錄（2026-09-06）：當時依部署者授權重建 OrbStack debug 三服務，驗證 Migration 53→58、ready／login 與帳號、Provider、模型價格、Secrets、Session Key 和個人設定保留；這是本機環境證據。pytest 與完整回歸仍由目前提交的 Hosted CI 決定；付費 API、NAS 更新及刷機未執行。歷史 CI 與量測保存原日期。PhotoPainter 2026-08-22／23 的局部實板結果仍見[硬體交接](../devices/PHOTOPAINTER_REV2_TG28_HARDWARE_HANDOFF_ZH_TW.md)，不推廣為目前全部功能已驗收。
 
-本次（2026-09-08）僅核對原始碼與更新文件，未重新部署、呼叫付費 API、執行 Hosted CI 或實板驗收。Migration 58 更新 AI-first 衍生排名；Migration 59 新增已確認的 16-slot PhotoPainter 能力。AI agent 修改入口見 [AI 修改導航](../AI_NAVIGATION.md)。
+本次（2026-09-13）僅核對原始碼與更新文件，未重新部署、呼叫付費 API、執行 Hosted CI 或實板驗收。Migration 58 更新 AI-first 衍生排名；Migration 59 新增已確認的 16-slot PhotoPainter 能力；Migration 60 將歷史直接加分欄位明確改名，現行 Favorite 固定只提升 special level。AI agent 修改入口見 [AI 修改導航](../AI_NAVIGATION.md)。

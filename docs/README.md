@@ -1,6 +1,6 @@
 # InkTime 文件地圖
 
-核對日期：2026-09-08；目前 checkout。先讀[現行版本與功能基線](reference/CURRENT_STATE_ZH_TW.md)，了解 Migration 59、AI Schema v4、韌體 2.8.7、local-only 預設與本次驗證範圍。
+核對日期：2026-09-13；目前 checkout。先讀[現行版本與功能基線](reference/CURRENT_STATE_ZH_TW.md)，了解 Migration 60、AI Schema v4、韌體 2.8.7、local-only 預設與本次驗證範圍。
 
 這是 InkTime 文件的單一入口。根目錄的 [`USER_MANUAL.html`](../USER_MANUAL.html) 保留可瀏覽的說明與完整文件連結；現行操作契約以本次校對的 Markdown 為準；本頁則提供適合 GitHub、純文字閱讀器與程式碼審查的 Markdown 索引。
 

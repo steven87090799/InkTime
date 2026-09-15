@@ -1,8 +1,8 @@
 import pytest
 from inktime.app.domain.analysis.scoring import (
     calculate_ranking_score,
+    FAVORITE_SPECIAL_LEVEL_BOOST,
     ranking_components,
-    DEFAULT_RANKING_WEIGHTS,
 )
 from inktime.app.domain.analysis.content_filter import evaluate_content_filter, CONTENT_FILTER_SWITCHES
 from inktime.app.domain.analysis.schema import validate_analysis_result
@@ -16,10 +16,11 @@ from tests.unit.test_analysis_schema import content_filter_result, valid_result
 def test_special_and_ranking_formula(level, bonus):
     value = valid_result(memory_score=80, visual_score=60, special_level=level)
     value["local_quality_score"] = 40
-    assert calculate_ranking_score(value, DEFAULT_RANKING_WEIGHTS) == pytest.approx(73.4 + bonus)
+    assert calculate_ranking_score(value) == pytest.approx(73.4 + bonus)
 
 
 def test_favorite_is_one_level_and_clamped():
+    assert FAVORITE_SPECIAL_LEVEL_BOOST == 1
     value = valid_result(special_level=2) | {"local_quality_score": 80}
     parts = ranking_components(value, favorite=True)
     assert parts["effective_special_level"] == 3 and parts["special_bonus"] == 9
@@ -31,9 +32,9 @@ def test_favorite_is_one_level_and_clamped():
     )
 
 
-def test_types_and_people_count_do_not_add_hidden_rarity_bonus():
-    ordinary = valid_result(types=["風景"], special_codes=[], people_count=0, special_level=2)
-    group = valid_result(types=["活動"], special_codes=["group_photo"], people_count=30, special_level=2)
+def test_types_do_not_add_hidden_rarity_bonus():
+    ordinary = valid_result(types=["風景"], special_level=2)
+    group = valid_result(types=["活動"], special_level=2)
     assert ranking_components(ordinary) == ranking_components(group)
 
 
@@ -53,7 +54,7 @@ def test_settings_control_each_content_threshold(code, confidence, enabled, excl
 @pytest.mark.parametrize("confidence", [0.2, 1.0])
 def test_ordinary_single_person_photos_have_no_gender_heuristic(confidence):
     value = valid_result(
-        types=["人物", "旅行"], people_count=1, content_filter=content_filter_result(confidence=confidence)
+        types=["人物", "旅行"], content_filter=content_filter_result(confidence=confidence)
     )
     assert evaluate_content_filter(value["content_filter"])["decision"] == "pass"
 
@@ -63,17 +64,15 @@ def test_prompt_guardrails_and_no_duplicate_default_rubric():
     prompt = provider.system_prompt
     assert prompt.count(DEFAULT_SCORING_RULES) == 1
     for text in (
-        "女性+單人絕不直接成立",
-        "普通自拍",
-        "畢業",
-        "不推論真實性別身份",
-        "排除內容也不得省略方向",
-        "夜市",
+        "不可因此自動判為色情或 glamour",
+        "自拍",
+        "輕微冷幽默",
+        "insufficient_visual_cues",
     ):
         assert text in prompt
     for old in ("technical_quality_score", "emotion_score", "memory_grade", "reason_codes"):
         assert old not in prompt
-    assert 1000 <= FULL_ANALYSIS_TOKEN_CAP < 2048
+    assert FULL_ANALYSIS_TOKEN_CAP == 512
     provider.close()
 
 
