@@ -266,7 +266,8 @@ def test_isolated_router_keeps_failover_and_repair_on_the_selected_provider():
         boundary, invalid_content="{}", validation_error="invalid", model="m"
     )
     repaired_directly = router.repair_json(invalid_content="{}", validation_error="invalid", model="m")
-    assert router.submit_batch([{"request": "x"}]) == "batch"
+    with pytest.raises(ProviderHTTPError, match="持久化"):
+        router.submit_batch([{"request": "x"}])
     assert router.poll_batch("batch") == {}
     assert router.cancel_batch("batch") == {}
     assert router.estimate_cost("m", Usage()) == 0
@@ -490,8 +491,8 @@ def test_provider_config_revision_ignores_secret_rotation_and_rejects_behavior_c
 
     with app.extensions["inktime_database"].session() as connection:
         connection.execute("UPDATE providers SET timeout_seconds=31 WHERE id=?", (provider_id,))
-    with pytest.raises(ValueError, match="設定已變更"):
-        service.build_router(snapshot)
+    assert service.route_snapshot()[0]["config_revision"] == original_revision
+    assert service.build_router(snapshot) is not None
 
     with app.extensions["inktime_database"].session() as connection:
         connection.execute("UPDATE providers SET timeout_seconds=30, enabled=0 WHERE id=?", (provider_id,))
@@ -556,3 +557,25 @@ def test_usable_route_excludes_openrouter_with_short_global_model(app):
     assert provider_id in {item["provider_id"] for item in service.route_snapshot()}
     assert provider_id not in {item["provider_id"] for item in service.usable_route_snapshot()}
     assert service.build_router(service.usable_route_snapshot()) is None
+
+
+def test_operational_provider_edits_preserve_legacy_cache_identity(app):
+    repository = app.extensions["inktime_provider_repository"]
+    service = app.extensions["inktime_provider_service"]
+    payload = {"name": "stable", "base_url": "https://example.invalid/v1", "enabled": True}
+    provider_id = repository.save(payload, user_id="test")
+    original = service.route_snapshot()
+    operational = service.operational_revision(repository.get(provider_id))
+    plan = app.extensions["inktime_analysis_service"].build_plan(
+        strategy="single", provider_route=original, scoring_profile_id="",
+    )
+    for key, value in (("timeout_seconds", 45), ("max_concurrency", 3), ("rate_limit_rpm", 20), ("token_limit_tpm", 100000), ("cooldown_seconds", 60)):
+        payload[key] = value
+        repository.save({**payload, "id": provider_id}, user_id="test")
+        assert service.route_snapshot() == original
+    assert service.operational_revision(repository.get(provider_id)) != operational
+    assert app.extensions["inktime_analysis_service"].build_plan(
+        strategy="single", provider_route=service.route_snapshot(), scoring_profile_id="",
+    ) == plan
+    repository.save({**payload, "id": provider_id, "supports_json_schema": False}, user_id="test")
+    assert service.route_snapshot()[0]["config_revision"] != original[0]["config_revision"]

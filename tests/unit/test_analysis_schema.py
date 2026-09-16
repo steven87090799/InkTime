@@ -254,3 +254,10 @@ def test_no_content_classification_can_be_omitted(code):
     del content[code]
     with pytest.raises(AnalysisValidationError):
         validate_analysis_result(valid_result(content_filter=content))
+
+
+def test_frozen_caption_limits_are_enforced_by_local_wire_validator():
+    controls = {"side_caption_min_chars": 8, "side_caption_max_chars": 10}
+    assert validate_model_response(valid_result(side_caption="甲" * 9), caption_controls=controls)
+    with pytest.raises(AnalysisValidationError):
+        validate_model_response(valid_result(side_caption="甲" * 11), caption_controls=controls)

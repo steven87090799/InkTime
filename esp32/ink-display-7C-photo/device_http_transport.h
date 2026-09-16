@@ -28,6 +28,8 @@ class DeviceHttpTransport {
  public:
   DeviceHttpTransport() = default;
   explicit DeviceHttpTransport(const String &ca_pem) : ca_pem_(ca_pem) {}
+  DeviceHttpTransport(const DeviceHttpTransport &) = delete;
+  DeviceHttpTransport &operator=(const DeviceHttpTransport &) = delete;
 
   void configure(const String &ca_pem);
 
@@ -55,6 +57,8 @@ class DeviceHttpTransport {
 
  private:
   String ca_pem_;
+  // WiFiClientSecure borrows this buffer; it must outlive the TLS client.
+  String effective_ca_pem_;
   String session_origin_;
   bool session_active_ = false;
   WiFiClient plain_client_;

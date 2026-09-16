@@ -7,9 +7,11 @@ by the settings page and then interpreted differently by a child process.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from hashlib import sha256
 import ipaddress
 import json
 import math
+import re
 from typing import Any
 from urllib.parse import urlparse
 
@@ -255,7 +257,7 @@ def validate_base_url(
     parsed = urlparse(value)
     try:
         hostname = parsed.hostname
-        parsed.port
+        _ = parsed.port
     except ValueError as exc:
         raise ValueError("PROVIDER-016 base_url 的 host 或 port 不合法") from exc
     if parsed.scheme not in {"http", "https"} or not hostname or parsed.username or parsed.password:
@@ -272,3 +274,48 @@ def validate_base_url(
         ):
             raise ValueError("PROVIDER-019 私有網路 HTTP 必須明確設定 allow_private_http=true")
     return value
+
+
+def model_request_capabilities(kind: str, model: str) -> dict:
+    """Wire differences for OpenAI reasoning models; compatible hosts opt in by kind."""
+    value = str(model).casefold()
+    o_series = kind == "openai" and bool(re.match(r"^o[1-9](?:-|$)", value))
+    return {
+        "token_parameter": "max_completion_tokens" if o_series else "max_tokens",
+        "temperature": not o_series,
+        "vision": not (kind == "openai" and (value == "o3-mini" or value.startswith("o3-mini-"))),
+    }
+
+
+def provider_revision(provider: dict, *, semantic: bool = False) -> str:
+    """Full operational revision, also the legacy semantic revision."""
+    fields = {
+        "provider_id": str(provider.get("id") or provider.get("provider_id") or ""),
+        "kind": effective_provider_kind(
+            str(provider.get("kind") or ""), str(provider.get("base_url") or "")
+        ),
+        "base_url": str(provider.get("base_url") or ""),
+        "options": normalize_options(
+            effective_provider_kind(
+                str(provider.get("kind") or "openai_compatible"), str(provider.get("base_url") or "")
+            ),
+            provider.get("options") or {},
+        ),
+        "supports_vision": bool(provider.get("supports_vision")),
+        "supports_batch": bool(provider.get("supports_batch")),
+        "supports_json_schema": bool(provider.get("supports_json_schema")),
+        "priority": int(provider.get("priority") or 0),
+        "rate_limit_rpm": provider.get("rate_limit_rpm"),
+        "token_limit_tpm": provider.get("token_limit_tpm"),
+        "max_concurrency": int(provider.get("max_concurrency") or 0),
+        "timeout_seconds": int(provider.get("timeout_seconds") or 0),
+        "cooldown_seconds": int(provider.get("cooldown_seconds") or 0),
+    }
+    configured_model = str(provider.get("model") or "").strip()
+    if configured_model:
+        fields["model"] = configured_model
+    if semantic:
+        for key in ("rate_limit_rpm", "token_limit_tpm", "max_concurrency", "timeout_seconds", "cooldown_seconds"):
+            fields.pop(key, None)
+    payload = json.dumps(fields, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return sha256(payload.encode("utf-8")).hexdigest()

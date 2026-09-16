@@ -12,11 +12,16 @@ from pathlib import Path
 import re
 import secrets
 import sqlite3
+import sys
 import time
 from urllib.parse import urlencode
 from urllib.request import HTTPCookieProcessor, Request, build_opener
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
+# CI-only fixture; the production application never imports this module.
+sys.path.insert(0, str(ROOT_DIR / "scripts" / "ci"))
+from persistence_fixture import seed as seed_paid_state, verify as verify_paid_state
+
 
 BASE_URL = os.environ.get("INKTIME_LAN_GATE_URL", "http://127.0.0.1:8765").rstrip("/")
 USERNAME = "lan-gate-admin"
@@ -344,6 +349,7 @@ def _seed_release(state_path: Path, data_dir: Path) -> None:
             (device_id, RELEASE_ID, now),
         )
         connection.commit()
+        seed_paid_state(connection)
         migration = int(connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0])
         if migration != EXPECTED_MIGRATION_VERSION:
             raise RuntimeError(f"unexpected migration version: {migration}")
@@ -471,6 +477,7 @@ def _offline_verify(state_path: Path, data_dir: Path) -> None:
     state = _read_state(state_path)
     connection = sqlite3.connect(data_dir / "inktime.db")
     try:
+        verify_paid_state(connection)
         if connection.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
             raise RuntimeError("SQLite integrity check failed")
         if (

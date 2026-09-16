@@ -90,11 +90,43 @@ def pyproject_errors(path: Path) -> list[str]:
     return errors
 
 
+
+def runtime_lock_errors(lock_path: Path, direct_path: Path) -> list[str]:
+    if not lock_path.is_file():
+        return [f"{lock_path.name}: missing target runtime lock"]
+    pattern = re.compile(r"^([A-Za-z0-9_.-]+)==([^ ]+) --hash=sha256:[0-9a-f]{64}$")
+    locked = {}
+    errors = []
+    for line in lock_path.read_text().splitlines():
+        if not line.strip() or line.startswith("#"):
+            continue
+        match = pattern.fullmatch(line)
+        if match is None:
+            errors.append(f"{lock_path.name}: every dependency needs an exact version and wheel hash")
+            continue
+        name = re.sub(r"[-_.]+", "-", match[1]).lower()
+        if name in locked:
+            errors.append(f"{lock_path.name}: duplicate dependency {name}")
+        locked[name] = match[2]
+    for line in direct_path.read_text().splitlines():
+        if not line.strip() or line.startswith("#"):
+            continue
+        name, version = line.split("==", 1)
+        if locked.get(re.sub(r"[-_.]+", "-", name).lower()) != version:
+            errors.append(f"{lock_path.name}: direct dependency differs: {name}")
+    return errors
+
+
 def main() -> int:
     errors: list[str] = []
     errors.extend(pyproject_errors(ROOT / "pyproject.toml"))
     for name in ("requirements.txt", "requirements-dev.txt", "requirements-e2e.txt"):
         errors.extend(requirement_errors(ROOT / name))
+
+    for architecture in ("amd64", "arm64"):
+        errors.extend(runtime_lock_errors(
+            ROOT / "requirements-locks" / f"linux-{architecture}-py312.txt", ROOT / "requirements.txt",
+        ))
 
     docker_lines = (ROOT / "Dockerfile").read_text(encoding="utf-8").splitlines()
     python_from = [line.strip() for line in docker_lines if line.strip().startswith("FROM python:")]

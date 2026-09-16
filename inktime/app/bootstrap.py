@@ -102,6 +102,8 @@ def _persistent_secret(runtime_config: RuntimeConfig, lock_provider: LockProvide
     if runtime_config.testing:
         return "test-secret-not-for-production"
     import os
+    import sqlite3
+    import tempfile
 
     configured = os.environ.get("INKTIME_SECRET_KEY", "").strip()
     if configured:
@@ -119,9 +121,33 @@ def _persistent_secret(runtime_config: RuntimeConfig, lock_provider: LockProvide
             value = path.read_text(encoding="utf-8").strip()
             if value:
                 return value
+            raise RuntimeError("SESSION-002 session.key 為空；請還原原金鑰")
+        if runtime_config.database_path.exists():
+            connection = sqlite3.connect(runtime_config.database_path)
+            try:
+                tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+                for table in ("users", "devices", "secrets", "photos"):
+                    if table in tables and connection.execute(f"SELECT 1 FROM {table} LIMIT 1").fetchone():  # noqa: S608 -- fixed table allowlist.
+                        raise RuntimeError("SESSION-002 既存資料缺少 session.key；請還原原金鑰或明確設定 INKTIME_SECRET_KEY")
+            finally:
+                connection.close()
         value = secrets.token_urlsafe(64)
-        path.write_text(value, encoding="utf-8")
-        path.chmod(0o600)
+        descriptor, name = tempfile.mkstemp(dir=path.parent, prefix=".session-key-")
+        temporary = Path(name)
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+                os.fchmod(stream.fileno(), 0o600)
+                stream.write(value)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, path)
+            directory = os.open(path.parent, os.O_RDONLY)
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
+        finally:
+            temporary.unlink(missing_ok=True)
         return value
 
 

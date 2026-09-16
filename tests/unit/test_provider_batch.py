@@ -373,3 +373,30 @@ def test_upload_file_side_effect_is_never_retried(tmp_path, outcome, expected_am
     assert session.calls[0][1]["files"]["file"][0] == "inktime-batch-anonymous.jsonl"
     assert "secret" not in str(raised.value)
     assert len(session.calls) == 1
+
+
+def test_batch_download_stops_at_total_limit_and_discards_partial(tmp_path, monkeypatch):
+    import inktime.app.providers.openai_compatible as module
+
+    class Stream:
+        status_code = 200
+        closed = False
+
+        def iter_content(self, chunk_size):
+            yield b"12345"
+            yield b"67890"
+            raise AssertionError("must stop before reading more")
+
+        def close(self):
+            self.closed = True
+
+    response = Stream()
+    provider = OpenAICompatibleProvider(name="test", base_url="https://api.example.invalid/v1", api_key="test")
+    monkeypatch.setattr(provider, "_send", lambda *args, **kwargs: response)
+    monkeypatch.setattr(module, "MAX_BATCH_RESULT_BYTES", 8)
+    destination = tmp_path / "results.jsonl"
+    with pytest.raises(ProviderHTTPError, match="總位元組"):
+        provider.download_file_content("file-test", destination)
+    assert response.closed
+    assert not destination.exists()
+    assert not destination.with_name("results.jsonl.part").exists()

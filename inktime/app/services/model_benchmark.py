@@ -40,7 +40,7 @@ from inktime.app.domain.analysis.scoring import (
 )
 from inktime.app.services.analysis import FULL_ANALYSIS_TOKEN_CAP
 from inktime.app.services.benchmark_metrics import calculate_benchmark_metrics
-from inktime.app.providers.base import ProviderResponse, VisionAttemptState
+from inktime.app.providers.base import ProviderResponse, VisionAttemptState, IncompleteProviderResponse, assert_complete_response
 from inktime.app.providers.config import normalize_options
 from inktime.app.providers.openai_compatible import OpenAICompatibleProvider, ProviderHTTPError
 
@@ -537,8 +537,16 @@ def _contract_metrics_snapshot(metrics: Mapping[str, Any]) -> dict[str, Any]:
 class ModelBenchmarkService:
     """Run a benchmark without mutating production domain repositories."""
 
-    def __init__(self, *, provider_factory=OpenAICompatibleProvider) -> None:
+    def __init__(self, *, provider_factory=OpenAICompatibleProvider, budgets=None) -> None:
         self.provider_factory = provider_factory
+        self.budgets = budgets
+
+    def _paid_call(self, provider, method, **kwargs):
+        if self.budgets is not None:
+            return self.budgets.call(provider, method, **kwargs)
+        if self.provider_factory is OpenAICompatibleProvider:
+            raise BenchmarkError("live benchmark requires the installation budget ledger")
+        return getattr(provider, method)(**kwargs)
 
     @staticmethod
     def build_axes(
@@ -795,7 +803,7 @@ class ModelBenchmarkService:
                         try:
                             metrics["attempted_photos"] += 1
                             metrics["vision_requests"] += 1
-                            response = provider.analyze(
+                            response = self._paid_call(provider, "analyze",
                                 image_path=image,
                                 model=axis.model,
                                 detail="high",
@@ -818,6 +826,7 @@ class ModelBenchmarkService:
                                 spent += vision_cost
                             if not vision_cost_known:
                                 report["stopped_by_budget"] = True
+                            assert_complete_response(response)
                             try:
                                 validated_result = validate_analysis_result(response.content)
                                 metrics["success_count"] += 1
@@ -833,7 +842,7 @@ class ModelBenchmarkService:
                                         continue
                                     repairs += 1
                                     metrics["repair_requests"] += 1
-                                    repair_response = provider.repair_json(
+                                    repair_response = self._paid_call(provider, "repair_json",
                                         invalid_content=json.dumps(repair_source, ensure_ascii=False),
                                         validation_error="benchmark schema validation",
                                         immutable_semantic_values=semantic_snapshot,
@@ -867,6 +876,8 @@ class ModelBenchmarkService:
                                         metrics["success_count"] += 1
                                     except AnalysisValidationError:
                                         pass
+                        except IncompleteProviderResponse:
+                            pass  # Already accounted; terminal metadata must never trigger repair.
                         except (ProviderHTTPError, OSError, ValueError):
                             # An attempted call without a response has no
                             # trustworthy usage/cost denominator entry.

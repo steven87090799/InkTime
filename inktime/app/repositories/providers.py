@@ -19,6 +19,7 @@ from inktime.app.providers.config import (
     validate_model_id,
 )
 from inktime.app.providers.openai_compatible import calculate_usage_cost
+from inktime.app.providers.config import provider_revision
 from inktime.app.repositories.settings import SecretStore
 
 
@@ -87,7 +88,8 @@ class ProviderRepository:
             raise ValueError(f"PROVIDER-020 {kind} 不支援 Batch")
         if api_key:
             self.secrets.set(secret_key, api_key, user_id)
-        with self.database.session() as connection:
+        with self.database.transaction(operation="provider_save") as connection:
+            previous_row = connection.execute("SELECT * FROM providers WHERE id=?", (provider_id,)).fetchone()
             if not model_provided:
                 existing = connection.execute("SELECT model FROM providers WHERE id=?", (provider_id,)).fetchone()
                 if existing is not None:
@@ -129,6 +131,25 @@ class ProviderRepository:
                     now,
                 ),
             )
+            if previous_row is not None:
+                previous = dict(previous_row)
+                current = dict(connection.execute("SELECT * FROM providers WHERE id=?", (provider_id,)).fetchone())
+                for item in (previous, current):
+                    item["options"] = normalize_options(
+                        effective_provider_kind(item["kind"], item["base_url"]), self._options(item),
+                    )
+                # Pin the old full hash for operational edits. This is a lazy
+                # legacy mapping: already-paid cache keys never need rewriting.
+                previous_revision = (
+                    previous["analysis_revision"]
+                    if previous.get("analysis_revision") and previous.get("analysis_revision_semantics") == provider_revision(previous, semantic=True)
+                    else provider_revision(previous)
+                )
+                revision = previous_revision if provider_revision(previous, semantic=True) == provider_revision(current, semantic=True) else None
+                connection.execute(
+                    "UPDATE providers SET analysis_revision=?,analysis_revision_semantics=? WHERE id=?",
+                    (revision, provider_revision(current, semantic=True) if revision else None, provider_id),
+                )
         return provider_id
 
     @staticmethod
@@ -247,7 +268,7 @@ class ProviderRepository:
                 SELECT id,input_tokens,output_tokens,cached_tokens,reasoning_tokens,cache_write_tokens,
                        processing_mode
                 FROM api_usage
-                WHERE provider_id=? AND model=? AND cost_source='unknown' AND {evidence}
+                WHERE provider_id=? AND model=? AND cost_source='unknown' AND usage_complete=1 AND {evidence}
                 ORDER BY id
                 """,
                 (provider_key, model_key),

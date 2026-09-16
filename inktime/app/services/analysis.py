@@ -44,14 +44,16 @@ from inktime.app.domain.photos.quality_policy import (
     local_candidate_score,
 )
 from inktime.app.providers.base import ProviderResponse, Usage, VisionAttemptState, VisionProvider
+from inktime.app.providers.base import assert_complete_response
+from inktime.app.providers.openai_compatible import ProviderHTTPError
 from inktime.app.repositories.photos import PhotoRepository
 from inktime.app.repositories.settings import SettingsRepository
 from inktime.app.repositories.usage import UsageRepository
+from inktime.app.repositories.billable_operations import BillableOperationRepository
 from inktime.app.services.budgets import BudgetService
 from inktime.app.services.usage_tracking import record_failed_unknown_usage
 
 
-LOGGER = logging.getLogger(__name__)
 
 
 class AnalysisDisabledError(RuntimeError):
@@ -656,6 +658,7 @@ class PhotoAnalysisService:
         started_at: str,
         started_perf: float,
         retry_count: int = 0,
+        operation_id: str | None = None,
     ) -> tuple[float, int]:
         recorded_model = str(response.served_model or model)
         estimated_cost = provider.estimate_cost(recorded_model, response.usage)
@@ -685,6 +688,7 @@ class PhotoAnalysisService:
             photo_id=photo_id,
             request_type=request_type,
             input_tokens=response.usage.input_tokens,
+            tokens_reported=response.usage.tokens_reported,
             output_tokens=response.usage.output_tokens,
             cached_tokens=response.usage.cached_tokens,
             estimated_cost=estimated_cost,
@@ -701,6 +705,7 @@ class PhotoAnalysisService:
             schema_chars=metrics.get("schema_chars", 0),
             request_body_bytes=metrics.get("request_body_bytes", 0),
             image_bytes=metrics.get("image_bytes", 0),
+            operation_id=operation_id,
         )
         return effective_cost, usage_id
 
@@ -834,6 +839,9 @@ class PhotoAnalysisService:
             stage=stage,
             trace_id=prompt_version,
         )
+        has_checkpoint = BillableOperationRepository(self.photos.database).check_retry(
+            content_sha256, request_fingerprint
+        )
         owner_id = str(uuid4())
         provider_timeout = max(5, int(getattr(selected_provider, "timeout", 120)))
         # A legal owner may need one vision call and one JSON repair.  Wait no
@@ -898,7 +906,7 @@ class PhotoAnalysisService:
         try:
             # A rejected budget has not entered the model-call lifecycle and
             # therefore must not create an empty observational Trace.
-            if trace_id is None and self.budgets:
+            if trace_id is None and self.budgets and not has_checkpoint:
                 self.budgets.assert_request_allowed(job_id, photo_id)
             trace_id = trace_id or self._trace_write(
                 "start_run",
@@ -1062,8 +1070,6 @@ class PhotoAnalysisService:
         provider_request_context_id: str,
         trace_id: str | None,
     ) -> tuple[dict, str, float, Usage, int]:
-        if self.budgets:
-            self.budgets.assert_request_allowed(job_id, photo_id)
         started_at = datetime.now(timezone.utc).isoformat()
         started_perf = time.perf_counter()
         settings = self.budgets.settings if self.budgets else self.settings
@@ -1079,6 +1085,18 @@ class PhotoAnalysisService:
             provider_id=str(getattr(actual_call_provider, "provider_id", actual_call_provider.name)),
             requested_model=model,
         )
+        operations = BillableOperationRepository(self.photos.database)
+        operation_id, checkpoint = operations.begin(content_sha256, vision_request_fingerprint)
+        if checkpoint is None and self.budgets:
+            try:
+                self.budgets.reserve(
+                    "vision:" + operation_id,
+                    self.budgets.estimate_reserve(actual_call_provider, model, output_tokens=max_tokens),
+                    job_id=job_id, photo_id=photo_id,
+                )
+            except Exception:
+                operations.finish(operation_id, not_sent=True)
+                raise
         try:
             call = {
                 "image_path": image,
@@ -1095,19 +1113,41 @@ class PhotoAnalysisService:
                 # the caller exactly when their transport has been handed the
                 # image.  It is deliberately not sent into a child process.
                 call["vision_attempt"] = vision_attempt
-            if selected_channel is not None and hasattr(provider, "_execute_sticky"):
-                response = provider._execute_sticky(
-                    selected_channel,
-                    "analyze",
-                    boundary=self.process_boundary,
-                    **call,
-                )
-            elif self.process_boundary is not None and hasattr(provider, "analyze_isolated"):
-                response = provider.analyze_isolated(self.process_boundary, **call)
-            elif self.process_boundary is not None:
-                specification = provider.process_spec()
-                if specification is None:
-                    self.process_boundary.record_cooperative()
+            if checkpoint is not None:
+                response = checkpoint
+            else:
+                if selected_channel is not None and hasattr(provider, "_execute_sticky"):
+                    response = provider._execute_sticky(
+                        selected_channel,
+                        "analyze",
+                        boundary=self.process_boundary,
+                        **call,
+                    )
+                elif self.process_boundary is not None and hasattr(provider, "analyze_isolated"):
+                    response = provider.analyze_isolated(self.process_boundary, **call)
+                elif self.process_boundary is not None:
+                    specification = provider.process_spec()
+                    if specification is None:
+                        self.process_boundary.record_cooperative()
+                        response = provider.analyze(
+                            image_path=image,
+                            model=model,
+                            detail=detail,
+                            stage=stage,
+                            max_tokens=max_tokens,
+                            reasoning_effort=reasoning_effort,
+                            caption_controls=caption_controls,
+                            vision_attempt=vision_attempt,
+                            provider_request_context_id=provider_request_context_id,
+                        )
+                    else:
+                        response = self.process_boundary.call_provider(
+                            specification,
+                            "analyze",
+                            timeout_seconds=float(getattr(provider, "timeout", 120)),
+                            kwargs=call,
+                        )
+                else:
                     response = provider.analyze(
                         image_path=image,
                         model=model,
@@ -1119,27 +1159,10 @@ class PhotoAnalysisService:
                         vision_attempt=vision_attempt,
                         provider_request_context_id=provider_request_context_id,
                     )
-                else:
-                    response = self.process_boundary.call_provider(
-                        specification,
-                        "analyze",
-                        timeout_seconds=float(getattr(provider, "timeout", 120)),
-                        kwargs=call,
-                    )
-            else:
-                response = provider.analyze(
-                    image_path=image,
-                    model=model,
-                    detail=detail,
-                    stage=stage,
-                    max_tokens=max_tokens,
-                    reasoning_effort=reasoning_effort,
-                    caption_controls=caption_controls,
-                    vision_attempt=vision_attempt,
-                    provider_request_context_id=provider_request_context_id,
-                )
             vision_attempt.vision_started = True
             vision_attempt.vision_completed = True
+            if checkpoint is None:
+                operations.save_response(operation_id, response)
         except TimeoutError as timeout_error:
             self._trace_write(
                 "update_attempt_from_call",
@@ -1200,6 +1223,10 @@ class PhotoAnalysisService:
             )
             raise
         except Exception as error:
+            if isinstance(error, ProviderHTTPError) and not error.ambiguous and not vision_attempt.vision_completed:
+                operations.finish(operation_id, not_sent=True)
+                if self.budgets:
+                    self.budgets.release("vision:" + operation_id)
             self._trace_write(
                 "update_attempt_from_call",
                 vision_attempt_id,
@@ -1259,8 +1286,12 @@ class PhotoAnalysisService:
             )
             raise
         total_cost, vision_usage_id = self._record(
-            provider, model, job_id, photo_id, stage, response, started_at, started_perf
+            provider, model, job_id, photo_id, stage, response, started_at, started_perf,
+            operation_id=operation_id,
         )
+        if self.budgets and (response.usage.provider_reported_cost is not None or
+                             (response.usage.tokens_reported and provider.estimate_cost(model, response.usage) is not None)):
+            self.budgets.release("vision:" + operation_id)
         self._trace_write(
             "update_run_progress",
             trace_id,
@@ -1273,10 +1304,11 @@ class PhotoAnalysisService:
         total_cached_tokens = response.usage.cached_tokens
         total_reasoning_tokens = response.usage.reasoning_tokens
         parse_started_at = datetime.now(timezone.utc).isoformat()
+        assert_complete_response(response)
         try:
             local_json = extract_json_value(response.content)
             candidate = local_json if isinstance(local_json, dict) else response.content
-            result = validate_model_response(candidate)
+            result = validate_model_response(candidate, caption_controls=caption_controls)
             raw = response.content
             parsed_at = datetime.now(timezone.utc).isoformat()
             self._trace_write(
@@ -1312,8 +1344,8 @@ class PhotoAnalysisService:
             provider=cache_provider_identity,
             model_name=model,
             prompt_version=prompt_version,
-            # A frozen v3 plan owns a v3 cache identity even when a
-            # compatibility provider still returns the accepted v2 payload.
+            # The frozen plan owns the cache identity; accepted legacy
+            # payloads retain their original schema for compatibility.
             # Legacy plans retain the result's historical schema version.
             schema_version=int(cache_schema_version or result["schema_version"]),
             schema_kind=cache_schema_kind,
@@ -1327,6 +1359,7 @@ class PhotoAnalysisService:
             vision_request_fingerprint=vision_request_fingerprint,
             vision_input_spec_json=vision_input_spec_json,
         )
+        operations.finish(operation_id)
         latency = int((time.perf_counter() - started_perf) * 1000)
         return (
             result,

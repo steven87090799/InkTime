@@ -2326,6 +2326,60 @@ MIGRATIONS = (
             "UPDATE scoring_rule_versions SET legacy_favorite_score_bonus=0 WHERE ranking_contract_version=4",
         ),
     ),
+    Migration(
+        61,
+        "持久化付費 Vision 操作與原始回應檢查點",
+        (
+            """CREATE TABLE billable_operations (
+                id TEXT PRIMARY KEY, content_sha256 TEXT NOT NULL,
+                request_fingerprint TEXT NOT NULL, state TEXT NOT NULL
+                    CHECK(state IN ('started','response','completed','not_sent','approved')),
+                response_json TEXT, resolution_note TEXT,
+                created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+            )""",
+            "CREATE INDEX idx_billable_content_state ON billable_operations(content_sha256,state)",
+            "CREATE INDEX idx_billable_request ON billable_operations(request_fingerprint,created_at)",
+            """INSERT INTO billable_operations(id,content_sha256,request_fingerprint,state,created_at,updated_at)
+                SELECT 'legacy-' || o.id,p.sha256,o.request_fingerprint,'started',o.created_at,o.created_at
+                FROM analysis_request_outcomes o JOIN photos p ON p.id=o.photo_id
+                WHERE o.requires_manual_confirmation=1 AND COALESCE(p.sha256,'')<>''""",
+            "ALTER TABLE api_usage ADD COLUMN usage_complete INTEGER NOT NULL DEFAULT 1",
+            "UPDATE api_usage SET usage_complete=0 WHERE cost_source='unknown' AND input_tokens=0 AND output_tokens=0",
+            "ALTER TABLE api_usage ADD COLUMN operation_id TEXT REFERENCES billable_operations(id)",
+            "CREATE UNIQUE INDEX idx_api_usage_operation ON api_usage(operation_id) WHERE operation_id IS NOT NULL",
+            """CREATE TABLE budget_reservations (
+                id TEXT PRIMARY KEY, amount REAL NOT NULL CHECK(amount>=0),
+                job_id TEXT REFERENCES jobs(id) ON DELETE SET NULL,
+                photo_id TEXT REFERENCES photos(id) ON DELETE SET NULL,
+                state TEXT NOT NULL CHECK(state IN ('active','released')),
+                created_at TEXT NOT NULL
+            )""",
+            "CREATE INDEX idx_budget_reservations_state ON budget_reservations(state)",
+            """CREATE TABLE usage_cost_archive (
+                job_id TEXT NOT NULL, photo_id TEXT NOT NULL, cost REAL NOT NULL,
+                PRIMARY KEY(job_id,photo_id)
+            )""",
+            "CREATE INDEX idx_usage_cost_archive_photo ON usage_cost_archive(photo_id)",
+            "ALTER TABLE providers ADD COLUMN analysis_revision TEXT",
+            "ALTER TABLE providers ADD COLUMN analysis_revision_semantics TEXT",
+            "CREATE TABLE provider_quota_state(scope TEXT PRIMARY KEY,failures INTEGER NOT NULL,circuit_until REAL NOT NULL)",
+            "CREATE TABLE provider_quota_events(id TEXT PRIMARY KEY,scope TEXT NOT NULL,started_at REAL NOT NULL,tokens INTEGER NOT NULL,lease_until REAL NOT NULL)",
+            "CREATE INDEX idx_provider_quota_scope_time ON provider_quota_events(scope,started_at)",
+            """CREATE TABLE batch_result_staging (
+                batch_id TEXT NOT NULL REFERENCES analysis_batches(id) ON DELETE CASCADE,
+                run_id TEXT NOT NULL, custom_id TEXT NOT NULL, payload_json TEXT NOT NULL,
+                PRIMARY KEY(batch_id,run_id,custom_id)
+            )""",
+            """CREATE TABLE batch_result_raw (
+                batch_id TEXT NOT NULL REFERENCES analysis_batches(id) ON DELETE CASCADE,
+                line_sha256 TEXT NOT NULL, raw_line BLOB NOT NULL,
+                PRIMARY KEY(batch_id,line_sha256)
+            )""",
+            """UPDATE jobs SET spent=(SELECT COALESCE(SUM(COALESCE(actual_cost,estimated_cost)),0)
+                FROM api_usage WHERE job_id=jobs.id AND cost_source<>'unknown')
+                WHERE EXISTS(SELECT 1 FROM api_usage WHERE job_id=jobs.id)""",
+        ),
+    ),
 )
 
 

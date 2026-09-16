@@ -758,6 +758,93 @@ def test_fake_batch_imports_unordered_results_once(app, tmp_path):
     assert usage_count == len(photo_ids)
 
 
+def test_batch_submission_obeys_global_daily_reservations(app, tmp_path):
+    _prepare_photos(app, tmp_path, count=1)
+    fake = FakeBatchProvider()
+    service = _wire_fake(app, fake)
+    service.settings.update_many({"budget.daily_stop": 0.01}, changed_by="test", source_ip="127.0.0.1")
+    result = service.submit(scope="sample", sample_count=1, created_by="tester")
+    assert result["batch_ids"] == []
+    assert fake.batch_counter == 0
+    assert service.batches.get(result["prepared_batch_ids"][0])["last_error_code"] == "BUDGET-002"
+
+
+def test_batch_cache_only_submit_finalizes_photo_without_new_remote_batch(app, tmp_path):
+    photo_ids = _prepare_photos(app, tmp_path, count=1)
+    fake = FakeBatchProvider()
+    service = _wire_fake(app, fake)
+    batch_id = service.submit(scope="sample", sample_count=1, created_by="tester")["batch_ids"][0]
+    service.poll_due(limit=10)
+    service.import_batch(batch_id)
+    with app.extensions["inktime_database"].session() as connection:
+        connection.execute("DELETE FROM photo_analysis WHERE photo_id=?", (photo_ids[0],))
+    batches_before = fake.batch_counter
+    result = service.submit(scope="sample", sample_count=1, created_by="tester")
+    assert result["batch_ids"] == []
+    assert result["cache_hits"] == 1
+    assert fake.batch_counter == batches_before
+    with app.extensions["inktime_database"].session() as connection:
+        row = connection.execute("SELECT analysis_source FROM photo_analysis WHERE photo_id=?", (photo_ids[0],)).fetchone()
+        assert row[0] == "cache"
+
+
+def test_batch_result_finalizes_same_sha_duplicates(app, tmp_path):
+    photo_ids = _prepare_photos(app, tmp_path, count=2)
+    photos = app.extensions["inktime_photo_repository"]
+    first, second = (photos.get_with_path(photo_id) for photo_id in photo_ids)
+    first_path = Path(first["root_path"]) / first["relative_path"]
+    second_path = Path(second["root_path"]) / second["relative_path"]
+    second_path.write_bytes(first_path.read_bytes())
+    with app.extensions["inktime_database"].session() as connection:
+        connection.execute("UPDATE photos SET sha256=? WHERE id=?", (first["sha256"], second["id"]))
+    fake = FakeBatchProvider()
+    service = _wire_fake(app, fake)
+    submitted = service.submit(scope="sample", sample_count=2, created_by="tester")
+    assert submitted["sha_duplicates"] == 1
+    service.poll_due(limit=10)
+    service.import_batch(submitted["batch_ids"][0])
+    with app.extensions["inktime_database"].session() as connection:
+        assert connection.execute("SELECT COUNT(DISTINCT photo_id) FROM photo_analysis").fetchone()[0] == 2
+        assert connection.execute("SELECT COUNT(*) FROM api_usage").fetchone()[0] == 1
+
+
+@pytest.mark.parametrize("failure", ["schema_invalid", "stale"])
+def test_paid_batch_result_is_kept_and_charged_before_validation(app, tmp_path, monkeypatch, failure):
+    _prepare_photos(app, tmp_path, count=1)
+    fake = FakeBatchProvider()
+    service = _wire_fake(app, fake)
+    batch_id = service.submit(scope="sample", sample_count=1, created_by="tester")["batch_ids"][0]
+    if failure == "schema_invalid":
+        original_download = fake.download_file_content
+
+        def invalid_download(file_id, destination):
+            original_download(file_id, destination)
+            line = json.loads(destination.read_text().strip())
+            line["response"]["body"]["choices"][0]["message"]["content"] = "invalid JSON"
+            destination.write_text(json.dumps(line) + "\n")
+            return destination
+
+        monkeypatch.setattr(fake, "download_file_content", invalid_download)
+    else:
+        original_plan = service._plan
+
+        def changed_plan():
+            plan, _fingerprint, model = original_plan()
+            return plan, "changed-plan", model
+
+        monkeypatch.setattr(service, "_plan", changed_plan)
+    service.poll_due(limit=10)
+    service.import_batch(batch_id)
+    service.import_batch(batch_id)
+    with app.extensions["inktime_database"].session() as connection:
+        rows = connection.execute("SELECT * FROM api_usage WHERE batch_id=?", (batch_id,)).fetchall()
+        assert len(rows) == 1
+        assert rows[0]["input_tokens"] == 100
+        item = connection.execute("SELECT status,raw_response_json FROM analysis_batch_items WHERE batch_id=?", (batch_id,)).fetchone()
+        assert item["status"] == failure
+        assert item["raw_response_json"]
+
+
 @pytest.mark.parametrize(
     "terminal_status",
     ["completed", "completed_with_errors", "failed", "cancelled", "expired"],
@@ -2267,3 +2354,50 @@ def test_poll_enqueue_is_database_only_deduplicated_and_restartable(app, monkeyp
     assert calls == [{"limit": 2}]
     assert service.jobs.get(first)["status"] == "completed"
     assert service.enqueue_poll() != first
+
+
+def test_sample_bounds_candidate_file_io_before_materialization(app, tmp_path, monkeypatch):
+    import inktime.app.services.batch_analysis as module
+
+    _prepare_photos(app, tmp_path, count=8)
+    service = _wire_fake(app, FakeBatchProvider())
+    original = module.safe_join
+    visited = []
+
+    def observed(root, relative):
+        visited.append(relative)
+        return original(root, relative)
+
+    monkeypatch.setattr(module, "safe_join", observed)
+    service.estimate(scope="sample", sample_count=2)
+    assert len(visited) <= 2
+
+
+def test_result_parser_rejects_oversized_line_before_unbounded_read(app, tmp_path):
+    service = app.extensions["inktime_batch_analysis_service"]
+    output = tmp_path / "oversized.jsonl"
+    with output.open("wb") as stream:
+        stream.write(b"x" * (4 * 1024 * 1024 + 1))
+    with pytest.raises(BatchLifecycleError, match="單行"):
+        service._read_results(output, {"id": "unused"}, is_error=False, records={})
+
+
+def test_result_staging_is_durable_and_raw_receipts_survive_close(app, tmp_path):
+    from inktime.app.repositories.batch_result_staging import BatchResultStore
+
+    _prepare_photos(app, tmp_path, count=1)
+    service = _wire_fake(app, FakeBatchProvider())
+    batch_id = service.submit(scope="sample", sample_count=1, created_by="tester")["batch_ids"][0]
+    database = app.extensions["inktime_database"]
+    store = BatchResultStore(database, batch_id)
+    store["item"] = ("success", {"custom_id": "item"}, {"id": "response"})
+    store.save_raw(b'{"custom_id":"item"}\n')
+    store.save_raw(b'{"custom_id":"item"}\n')
+    reopened = BatchResultStore(database, batch_id)
+    reopened.run_id = store.run_id
+    assert reopened["item"][2]["id"] == "response"
+    assert list(reopened) == ["item"]
+    reopened.close()
+    assert len(store) == 0
+    with database.session() as connection:
+        assert connection.execute("SELECT COUNT(*) FROM batch_result_raw WHERE batch_id=?", (batch_id,)).fetchone()[0] == 1

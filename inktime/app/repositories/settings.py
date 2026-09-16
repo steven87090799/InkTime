@@ -1893,10 +1893,8 @@ class SettingsRepository:
     @staticmethod
     def _validate_all(values: dict[str, Any]) -> None:
         SettingsRepository._validate_caption_ranges(values)
-        if float(values["budget.daily_warning"]) > float(values["budget.daily_stop"]):
-            raise ValueError("每日預算警告值不可高於停止值")
-        if float(values["budget.monthly_warning"]) > float(values["budget.monthly_stop"]):
-            raise ValueError("每月預算警告值不可高於停止值")
+        # Read-only, unwired warning thresholds must not prevent operators
+        # from lowering the enforced daily or monthly spending ceiling.
         if int(values["observability.activity_retention_days"]) < 7:
             raise ValueError("重要 Activity 至少保留 7 天，以保護錯誤追蹤與安全回復")
         if int(values["observability.activity_max_rows"]) < 1000:

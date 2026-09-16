@@ -1,19 +1,20 @@
 from __future__ import annotations
 
 from hashlib import sha256
-import json
 from typing import Any
 
 from inktime.app.domain.analysis.scoring import normalize_scoring_rules
 from inktime.app.providers.openai_compatible import OpenAICompatibleProvider
 from inktime.app.providers.config import (
     capabilities_for,
+    provider_revision,
     effective_provider_kind,
     normalize_options,
     validate_model_id,
 )
 from inktime.app.providers.router import FailoverVisionProvider, ProviderChannel
 from inktime.app.repositories.providers import ProviderRepository
+from inktime.app.repositories.provider_quota import ProviderQuotaRepository
 from inktime.app.repositories.settings import SettingsRepository
 
 
@@ -80,6 +81,11 @@ class ProviderService:
             channels.append(
                 ProviderChannel(
                     provider=provider,
+                    shared_quota=ProviderQuotaRepository(
+                        self.repository.database,
+                        sha256((provider.base_url + "|" + str(config.get("api_key") or "") + "|" + str(config.get("project_id") or "")).encode()).hexdigest(),
+                    ),
+                    request_token_reserve=max(8000, int(self.settings.get("budget.max_tokens", 8000))) + 512,
                     priority=int(snapshot.get("priority", config["priority"])),
                     max_concurrency=config["max_concurrency"],
                     requests_per_minute=config["rate_limit_rpm"],
@@ -92,34 +98,13 @@ class ProviderService:
 
     @staticmethod
     def config_revision(provider: dict[str, Any]) -> str:
-        """Fingerprint only behavior-affecting, non-secret Provider fields."""
-        fields = {
-            "provider_id": str(provider.get("id") or provider.get("provider_id") or ""),
-            "kind": effective_provider_kind(
-                str(provider.get("kind") or ""), str(provider.get("base_url") or "")
-            ),
-            "base_url": str(provider.get("base_url") or ""),
-            "options": normalize_options(
-                effective_provider_kind(
-                    str(provider.get("kind") or "openai_compatible"), str(provider.get("base_url") or "")
-                ),
-                provider.get("options") or {},
-            ),
-            "supports_vision": bool(provider.get("supports_vision")),
-            "supports_batch": bool(provider.get("supports_batch")),
-            "supports_json_schema": bool(provider.get("supports_json_schema")),
-            "priority": int(provider.get("priority") or 0),
-            "rate_limit_rpm": provider.get("rate_limit_rpm"),
-            "token_limit_tpm": provider.get("token_limit_tpm"),
-            "max_concurrency": int(provider.get("max_concurrency") or 0),
-            "timeout_seconds": int(provider.get("timeout_seconds") or 0),
-            "cooldown_seconds": int(provider.get("cooldown_seconds") or 0),
-        }
-        configured_model = str(provider.get("model") or "").strip()
-        if configured_model:
-            fields["model"] = configured_model
-        payload = json.dumps(fields, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-        return sha256(payload.encode("utf-8")).hexdigest()
+        if provider.get("analysis_revision") and provider.get("analysis_revision_semantics") == provider_revision(provider, semantic=True):
+            return str(provider["analysis_revision"])
+        return provider_revision(provider)
+
+    @staticmethod
+    def operational_revision(provider: dict[str, Any]) -> str:
+        return provider_revision(provider)
 
     def route_snapshot(self) -> list[dict]:
         """Allowlisted ordered routing identity for an Analysis Plan."""

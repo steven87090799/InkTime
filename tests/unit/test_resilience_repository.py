@@ -183,7 +183,7 @@ def test_automatic_cleanup_skips_observation_policy_without_audit_amplification(
     with database.transaction() as connection:
         connection.execute(
             "INSERT INTO api_usage(provider,model,request_type,estimated_cost,started_at,status,cost_source,image_bytes) "
-            "VALUES ('provider','model','analysis',0.25,?,'failed','unknown',1)",
+            "VALUES ('provider','model','analysis',0.25,?,'failed','estimated',1)",
             ((month_start - timedelta(days=2)).isoformat(),),
         )
 
@@ -398,9 +398,9 @@ def test_api_usage_cleanup_is_bounded_restart_safe_and_observable(tmp_path: Path
     month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
     old_rows = [
         (month_start - timedelta(days=4), "completed", "estimated", 0.10),
-        (month_start - timedelta(days=3), "failed", "unknown", 0.05),
-        (month_start - timedelta(days=2), "completed", "unknown", 0.25),
-        (month_start - timedelta(days=1), "failed", "unknown", 0.50),
+        (month_start - timedelta(days=3), "failed", "estimated", 0.05),
+        (month_start - timedelta(days=2), "completed", "estimated", 0.25),
+        (month_start - timedelta(days=1), "failed", "estimated", 0.50),
     ]
     current_month_old = (month_start + timedelta(hours=1), "completed", "unknown", 0.75)
     recent = (now - timedelta(hours=1)).isoformat()
@@ -482,7 +482,7 @@ def test_cleanup_failure_after_first_policy_commit_is_observable_and_retryable(t
     with database.transaction() as connection:
         connection.execute(
             "INSERT INTO api_usage(provider,model,request_type,estimated_cost,started_at,status,cost_source,image_bytes) "
-            "VALUES ('provider','model','analysis',0.25,?,'failed','unknown',1)",
+            "VALUES ('provider','model','analysis',0.25,?,'failed','estimated',1)",
             ((month_start - timedelta(days=2)).isoformat(),),
         )
 
@@ -520,3 +520,56 @@ def test_cleanup_failure_after_first_policy_commit_is_observable_and_retryable(t
         assert connection.execute(
             "SELECT status FROM data_cleanup_runs WHERE id=?", (retry["id"],)
         ).fetchone()[0] == "completed"
+
+
+def test_retention_preserves_minimum_newest_rows_across_restarts(tmp_path):
+    database = Database(tmp_path / "minimum-retention.sqlite3")
+    migrate(database)
+    repository = ResilienceRepository(database)
+    repository.update_retention("api_usage", {
+        "minimum_items_to_keep": 3, "retention_days": 1,
+        "cleanup_batch_size": 100, "dry_run": False,
+    })
+    with database.transaction() as connection:
+        for day in range(1, 6):
+            connection.execute(
+                "INSERT INTO api_usage(provider,model,request_type,estimated_cost,started_at,status,cost_source) "
+                "VALUES ('p','m','analysis',0.1,?,'completed','estimated')",
+                (f"2000-01-0{day}T00:00:00+00:00",),
+            )
+    assert repository.cleanup(dry_run=False)["summary"]["api_usage"] == 2
+    assert ResilienceRepository(database).cleanup(dry_run=False)["summary"]["api_usage"] == 0
+    with database.session() as connection:
+        retained = connection.execute("SELECT started_at FROM api_usage ORDER BY started_at").fetchall()
+    assert [row[0][8:10] for row in retained] == ["03", "04", "05"]
+
+
+def test_retention_uses_local_month_and_keeps_unreconciled_usage(tmp_path, monkeypatch):
+    database = Database(tmp_path / "local-month.sqlite3")
+    migrate(database)
+    repository = ResilienceRepository(database)
+    repository.update_retention("api_usage", {"retention_days": 1, "dry_run": False})
+
+    class LocalMonth(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            value = datetime(2026, 3, 3, tzinfo=timezone.utc)
+            return value if tz else value.replace(tzinfo=None)
+
+    monkeypatch.setattr(resilience_module, "datetime", LocalMonth)
+    with database.transaction() as connection:
+        connection.executemany(
+            "INSERT INTO api_usage(provider,model,request_type,estimated_cost,started_at,status,cost_source) "
+            "VALUES ('p','m',?,0.1,?,'completed',?)",
+            [
+                ("current-local-month", "2026-02-28T16:30:00+00:00", "estimated"),
+                ("closed-month", "2026-02-28T15:30:00+00:00", "estimated"),
+                ("unreconciled", "2026-01-01T00:00:00+00:00", "unknown"),
+            ],
+        )
+    assert repository.cleanup(dry_run=False)["summary"]["api_usage"] == 1
+    with database.session() as connection:
+        assert {row[0] for row in connection.execute("SELECT request_type FROM api_usage")} == {
+            "current-local-month", "unreconciled",
+        }
+        assert connection.execute("SELECT SUM(cost) FROM usage_cost_archive").fetchone()[0] == pytest.approx(0.1)

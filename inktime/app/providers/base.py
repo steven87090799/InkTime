@@ -6,6 +6,9 @@ from pathlib import Path
 from typing import Any
 
 
+MAX_BATCH_RESULT_BYTES = 256 * 1024 * 1024
+
+
 @dataclass(frozen=True)
 class Usage:
     input_tokens: int = 0
@@ -14,6 +17,7 @@ class Usage:
     reasoning_tokens: int = 0
     cache_write_tokens: int = 0
     provider_reported_cost: float | None = None
+    tokens_reported: bool = True
 
 
 @dataclass(frozen=True)
@@ -42,6 +46,17 @@ class ProviderResponse:
     request_metrics: dict[str, Any] | None = None
     served_model: str | None = None
     call_trace: ProviderCallTrace | None = None
+    finish_reason: str | None = None
+    refusal: str | None = None
+
+
+class IncompleteProviderResponse(RuntimeError):
+    code = "VLM-INCOMPLETE"
+
+
+def assert_complete_response(response: ProviderResponse) -> None:
+    if response.refusal or response.finish_reason in {"length", "content_filter", "max_tokens"}:
+        raise IncompleteProviderResponse("Provider 拒答、過濾或截斷；保留回應，不進行文字修復")
 
 
 @dataclass

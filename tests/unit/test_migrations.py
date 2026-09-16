@@ -32,7 +32,7 @@ def _run_capture_date_backfill(database_path: str, start, results) -> None:
 
 
 def test_fresh_database_is_migrated(tmp_path):
-    assert CURRENT_SCHEMA_VERSION == 60
+    assert CURRENT_SCHEMA_VERSION == 61
     database = Database(tmp_path / "inktime.db")
     assert migrate(database) == list(range(1, CURRENT_SCHEMA_VERSION + 1))
     assert database.integrity_check() == "ok"
@@ -437,7 +437,7 @@ def test_migration_48_makes_unknown_cost_nullable_and_preserves_api_usage_contra
         )
         connection.execute("DELETE FROM api_usage WHERE id=900")
         foreign_keys_before = {
-            tuple(row)
+            tuple(row[key] for key in ("table", "from", "to", "on_update", "on_delete"))
             for row in connection.execute("PRAGMA foreign_key_list(api_usage)").fetchall()
         }
 
@@ -449,7 +449,7 @@ def test_migration_48_makes_unknown_cost_nullable_and_preserves_api_usage_contra
             if row["name"] == "estimated_cost"
         )
         foreign_keys_after = {
-            tuple(row)
+            tuple(row[key] for key in ("table", "from", "to", "on_update", "on_delete"))
             for row in connection.execute("PRAGMA foreign_key_list(api_usage)").fetchall()
         }
         index_names = {
@@ -474,7 +474,16 @@ def test_migration_48_makes_unknown_cost_nullable_and_preserves_api_usage_contra
 
     assert estimated_column[3] == 0
     assert estimated_column[4] == "0"
-    assert foreign_keys_after == foreign_keys_before
+    with database.transaction() as connection:
+        assert connection.execute("SELECT operation_id FROM api_usage WHERE id=17").fetchone()[0] is None
+        connection.execute(
+            "INSERT INTO billable_operations(id,content_sha256,request_fingerprint,state,created_at,updated_at) "
+            "VALUES ('migration-contract','sha','fingerprint','completed','now','now')"
+        )
+        connection.execute("UPDATE api_usage SET operation_id='migration-contract' WHERE id=17")
+        assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+    assert foreign_keys_before <= foreign_keys_after
+    assert ("billable_operations", "operation_id", "id", "NO ACTION", "NO ACTION") in foreign_keys_after
     assert "idx_api_usage_migration_custom" in index_names
     assert "idx_api_usage_batch_item_once" in index_names
     assert tuple(legacy) == (17, "legacy", 3, 0.125, None, "estimated")

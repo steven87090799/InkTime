@@ -304,10 +304,10 @@ def test_api_usage_retention_policy_is_exposed_and_preserves_current_budget_evid
         headers={"X-CSRF-Token": csrf(client)},
     )
     assert run.status_code == 200
-    assert run.get_json()["summary"]["api_usage"] == 1
+    assert run.get_json()["summary"]["api_usage"] == 0
 
     after = budget.snapshot(photo_id="retention-photo")
-    assert after["photo_unknown_count"] == 1
+    assert after["photo_unknown_count"] == before["photo_unknown_count"] == 2
     assert photos.ai_limit_reached(daily_limit=1, monthly_limit=1) is True
     # Unknown usage remains visible and reserves installation-wide budget; it
     # no longer permanently blocks this photo merely because it lacks a price.

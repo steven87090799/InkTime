@@ -11,6 +11,16 @@ class UsageRepository:
         self.database = database
 
     @staticmethod
+    def _refresh_job_spent(connection, job_id: str | None) -> None:
+        if job_id:
+            connection.execute(
+                "UPDATE jobs SET spent=(SELECT COALESCE(SUM(COALESCE(actual_cost,estimated_cost)),0) "
+                "FROM api_usage WHERE job_id=? AND cost_source<>'unknown') "
+                "+(SELECT COALESCE(SUM(cost),0) FROM usage_cost_archive WHERE job_id=?) WHERE id=?",
+                (job_id, job_id, job_id),
+            )
+
+    @staticmethod
     def _registered_provider_id(connection, provider_id: str | None) -> str | None:
         """Keep the optional identity link valid for external/test providers."""
 
@@ -49,17 +59,25 @@ class UsageRepository:
         schema_chars: int = 0,
         request_body_bytes: int = 0,
         image_bytes: int = 0,
+        operation_id: str | None = None,
+        tokens_reported: bool = True,
     ) -> int:
         completed_at = datetime.now(timezone.utc).isoformat()
-        with self.database.session() as connection:
+        with self.database.transaction() as connection:
+            if operation_id is not None:
+                existing = connection.execute(
+                    "SELECT id FROM api_usage WHERE operation_id=?", (operation_id,)
+                ).fetchone()
+                if existing:
+                    return int(existing["id"])
             registered_provider_id = self._registered_provider_id(connection, provider_id)
             cursor = connection.execute(
                 """
                 INSERT INTO api_usage(provider,provider_id,model,job_id,photo_id,request_type,input_tokens,output_tokens,
                     cached_tokens,estimated_cost,actual_cost,started_at,completed_at,latency_ms,status,retry_count,error_code,
                     batch_id,batch_item_id,processing_mode,request_id,reasoning_tokens,cache_write_tokens,cost_source,
-                    prompt_chars,schema_chars,request_body_bytes,image_bytes)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    prompt_chars,schema_chars,request_body_bytes,image_bytes,operation_id)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 (
                     provider,
@@ -90,8 +108,12 @@ class UsageRepository:
                     max(0, int(schema_chars)),
                     max(0, int(request_body_bytes)),
                     max(0, int(image_bytes)),
+                    operation_id,
                 ),
             )
+            if cursor.rowcount:
+                connection.execute("UPDATE api_usage SET usage_complete=? WHERE id=?", (int(tokens_reported), cursor.lastrowid))
+            self._refresh_job_spent(connection, job_id)
         if cursor.lastrowid is None:
             raise RuntimeError("USAGE-001 inserted usage id unavailable")
         return int(cursor.lastrowid)
@@ -119,11 +141,12 @@ class UsageRepository:
         connection=None,
         cache_write_tokens: int = 0,
         cost_source: str = "unknown",
+        tokens_reported: bool = True,
     ) -> bool:
         """Record one Batch item exactly once; the migration enforces the same invariant."""
 
         completed_at = datetime.now(timezone.utc).isoformat()
-        context = self.database.session() if connection is None else nullcontext(connection)
+        context = self.database.transaction() if connection is None else nullcontext(connection)
         with context as active_connection:
             connection = active_connection
             registered_provider_id = self._registered_provider_id(connection, provider_id)
@@ -145,7 +168,7 @@ class UsageRepository:
                     max(0, int(input_tokens)),
                     max(0, int(output_tokens)),
                     max(0, int(cached_tokens)),
-                    max(0.0, float(estimated_cost)) if estimated_cost is not None else 0.0,
+                    max(0.0, float(estimated_cost)) if estimated_cost is not None else None,
                     max(0.0, float(actual_cost)) if actual_cost is not None else None,
                     started_at,
                     completed_at,
@@ -162,4 +185,7 @@ class UsageRepository:
                     cost_source if cost_source in {"provider_reported", "estimated", "unknown"} else "unknown",
                 ),
             )
+            if cursor.rowcount:
+                connection.execute("UPDATE api_usage SET usage_complete=? WHERE id=?", (int(tokens_reported), cursor.lastrowid))
+            self._refresh_job_spent(connection, job_id)
         return bool(cursor.rowcount)

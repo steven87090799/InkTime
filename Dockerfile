@@ -5,8 +5,10 @@ ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PIP_NO_CACHE_DIR=1
 
 WORKDIR /build
-COPY requirements.txt ./
-RUN python -m pip wheel --no-cache-dir --wheel-dir /wheels -r requirements.txt
+ARG TARGETARCH
+COPY requirements-locks/ ./requirements-locks/
+RUN cp "requirements-locks/linux-${TARGETARCH}-py312.txt" requirements.txt \
+    && python -m pip wheel --require-hashes --only-binary=:all: --no-cache-dir --wheel-dir /wheels -r requirements.txt
 
 FROM python:3.12-slim@sha256:2c941e860699f878900b0edc2403613c234d4b32eda3cc9fa7036991a2a63c4a AS runtime
 
@@ -26,8 +28,16 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 # currently postpones the SQLite FTS5 fix, so take only that runtime library
 # from Debian forky, where the fixed package is available. The base image's
 # systemd/udev libraries are not needed by InkTime and are removed below.
+# Advance this reviewed snapshot with every dependency/security refresh.
+ARG DEBIAN_SNAPSHOT=20260915T000000Z
 RUN set -eux; \
-    printf '%s\n' 'deb https://deb.debian.org/debian forky main' \
+    rm -f /etc/apt/sources.list.d/debian.sources; \
+    printf '%s\n' \
+        "deb [check-valid-until=no] https://snapshot.debian.org/archive/debian/${DEBIAN_SNAPSHOT}/ trixie main" \
+        "deb [check-valid-until=no] https://snapshot.debian.org/archive/debian/${DEBIAN_SNAPSHOT}/ trixie-updates main" \
+        "deb [check-valid-until=no] https://snapshot.debian.org/archive/debian-security/${DEBIAN_SNAPSHOT}/ trixie-security main" \
+        > /etc/apt/sources.list; \
+    printf '%s\n' "deb [check-valid-until=no] https://snapshot.debian.org/archive/debian/${DEBIAN_SNAPSHOT}/ forky main" \
         > /etc/apt/sources.list.d/inktime-runtime-fixes.list; \
     printf '%s\n' \
         'Package: *' \
@@ -66,9 +76,9 @@ RUN groupadd --gid 10001 inktime \
     && useradd --uid 10001 --gid inktime --home-dir /app --shell /usr/sbin/nologin inktime
 
 WORKDIR /app
-COPY requirements.txt ./
+COPY --from=builder /build/requirements.txt ./
 RUN --mount=type=bind,from=builder,source=/wheels,target=/wheels \
-    python -m pip install --no-cache-dir --no-compile --no-index --find-links=/wheels -r requirements.txt \
+    python -m pip install --require-hashes --no-cache-dir --no-compile --no-index --find-links=/wheels -r requirements.txt \
     && python -m pip uninstall --yes pip setuptools \
     && rm -f requirements.txt
 COPY --chown=inktime:inktime inktime/ ./inktime/

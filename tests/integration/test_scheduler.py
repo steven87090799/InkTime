@@ -171,7 +171,7 @@ def test_scheduler_retention_deletes_with_fresh_production_default(app):
         ).fetchone()
         connection.execute(
             "INSERT INTO api_usage(provider,model,request_type,estimated_cost,started_at,status,cost_source,image_bytes) "
-            "VALUES ('provider','model','scheduler-production-retention',0.25,?,'failed','unknown',1)",
+            "VALUES ('provider','model','scheduler-production-retention',0.25,?,'failed','estimated',1)",
             ((datetime.now(timezone.utc) - timedelta(days=401)).isoformat(),),
         )
     assert tuple(policy) == (1, 400, 200, 0)
@@ -1590,3 +1590,25 @@ def test_scheduler_enqueues_poll_without_running_remote_work(app, monkeypatch):
     runner.tick()
     enqueue.assert_called_once_with()
     remote.assert_not_called()
+
+
+def test_daily_backup_catches_up_after_scheduled_hour_and_restart(app, monkeypatch):
+    import inktime.app.workers.scheduler as scheduler_module
+
+    class Afternoon(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            value = datetime(2030, 5, 7, 15, 30, tzinfo=ZoneInfo("Asia/Taipei"))
+            return value.astimezone(tz) if tz else value.replace(tzinfo=None)
+
+    settings = app.extensions["inktime_settings_repository"]
+    settings.update("backup.schedule_enabled", True, changed_by="test", source_ip="127.0.0.1")
+    settings.update("backup.hour", 3, changed_by="test", source_ip="127.0.0.1")
+    monkeypatch.setattr(scheduler_module, "datetime", Afternoon)
+    SchedulerRunner(app).tick()
+    SchedulerRunner(app).tick()
+    with app.extensions["inktime_database"].session() as connection:
+        rows = connection.execute(
+            "SELECT id FROM jobs WHERE dedupe_key='scheduled-backup:2030-05-07'"
+        ).fetchall()
+    assert len(rows) == 1

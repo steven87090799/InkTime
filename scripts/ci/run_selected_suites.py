@@ -71,6 +71,7 @@ RUNNER_SUITE_TEST_PATHS: dict[str, tuple[str, ...]] = {
         "tests/integration/test_offline_schedule_runtime.py",
         "tests/integration/test_application_factory.py",
         "tests/integration/test_runtime_soak_cli.py",
+        "tests/integration/test_health_readiness.py",
     ),
     "queue_resilience_owner": (
         "tests/unit/test_device_delivery_contract.py",

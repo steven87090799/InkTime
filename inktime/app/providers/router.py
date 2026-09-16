@@ -6,6 +6,7 @@ from pathlib import Path
 import logging
 import threading
 import time
+from typing import Any
 
 from inktime.app.core.logging import log_event, should_log_rate_limited
 from .base import ProviderResponse, Usage, VisionProvider
@@ -41,6 +42,8 @@ class ProviderChannel:
     # Optional per-provider model override.  An empty value intentionally
     # falls back to the frozen/global analysis model for compatibility.
     model: str | None = None
+    shared_quota: Any = None
+    request_token_reserve: int = 8512
     semaphore: threading.BoundedSemaphore = field(init=False)
     request_times: deque = field(default_factory=deque)
     token_events: deque = field(default_factory=deque)
@@ -89,6 +92,8 @@ class FailoverVisionProvider(VisionProvider):
 
     def _can_use_channel_locked(self, channel: ProviderChannel, now: float) -> bool:
         self._prune_quota_events(channel, now)
+        if channel.shared_quota is not None:
+            return channel.shared_quota.available(channel)
         if channel.circuit_until > now:
             return False
         if channel.requests_per_minute and len(channel.request_times) >= channel.requests_per_minute:
@@ -111,6 +116,14 @@ class FailoverVisionProvider(VisionProvider):
 
         with self._lock:
             now = time.monotonic()
+            if channel.shared_quota is not None:
+                reservation = channel.shared_quota.acquire(channel)
+                if reservation is None:
+                    return False
+                reservations = getattr(self._local, "quota_reservations", {})
+                reservations[id(channel)] = reservation
+                self._local.quota_reservations = reservations
+                return True
             if not self._can_use_channel_locked(channel, now):
                 return False
             channel.request_times.append(now)
@@ -209,7 +222,15 @@ class FailoverVisionProvider(VisionProvider):
                     used_tokens = usage.input_tokens + usage.output_tokens
                     if used_tokens:
                         channel.token_events.append((time.monotonic(), used_tokens))
-        channel.semaphore.release()
+        try:
+            if channel.shared_quota is not None:
+                identifier = getattr(self._local, "quota_reservations", {}).pop(id(channel), None)
+                if identifier is not None:
+                    channel.shared_quota.release(
+                        identifier, channel, usage=usage, error=error, failure_threshold=self.failure_threshold,
+                    )
+        finally:
+            channel.semaphore.release()
 
     def _execute(self, method: str, **kwargs) -> ProviderResponse:
         last_error: Exception | None = None
@@ -378,37 +399,10 @@ class FailoverVisionProvider(VisionProvider):
         return self._execute_sticky(channel, "repair_json", boundary=boundary, **kwargs)
 
     def submit_batch(self, batch_requests, completion_window="24h") -> str:
-        last_error: Exception | None = None
-        for channel in self.channels:
-            try:
-                result = channel.provider.submit_batch(
-                    batch_requests, completion_window=completion_window
-                )
-                self._local.channel = channel
-                return result
-            except Exception as exc:
-                last_error = exc
-                if should_log_rate_limited(
-                    f"batch-provider-failover:{channel.provider.name}", interval_seconds=5
-                ):
-                    log_event(
-                        LOGGER,
-                        logging.WARNING,
-                        "Batch provider submission failed; failover will continue",
-                        event="batch_provider_failover",
-                        error_code=str(getattr(exc, "code", "VLM-007")),
-                        provider=channel.provider.name,
-                        provider_id=str(
-                            getattr(channel.provider, "provider_id", channel.provider.name)
-                        ),
-                        operation="batch_submit",
-                        failure_class=type(exc).__name__,
-                        retryable=True,
-                        ambiguous=bool(getattr(exc, "ambiguous", False)),
-                    )
-                continue
-        error = ProviderHTTPError("所有 Provider 的 Batch 提交均失敗", "VLM-007")
-        raise error from last_error
+        raise ProviderHTTPError(
+            "舊 Batch 捷徑已停用；請使用持久化 BatchAnalysisService lifecycle",
+            "BATCH-LIFECYCLE-REQUIRED",
+        )
 
     def _batch_provider(self):
         channel = getattr(self._local, "channel", None)

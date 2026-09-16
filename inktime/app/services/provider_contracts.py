@@ -18,7 +18,7 @@ from inktime.app.domain.analysis.json_repair import (
     semantic_repair_snapshot,
 )
 from inktime.app.domain.analysis.schema import AnalysisValidationError, validate_analysis_result
-from inktime.app.providers.base import ProviderResponse, VisionAttemptState
+from inktime.app.providers.base import ProviderResponse, VisionAttemptState, IncompleteProviderResponse, assert_complete_response
 
 
 CONTRACT_LEVELS = (1, 2, 3)
@@ -208,7 +208,7 @@ def _valid_level2_response(content: str) -> bool:
     )
 
 
-def run_provider_contract(provider: Any, *, level: int, model: str) -> dict[str, Any]:
+def run_provider_contract(provider: Any, *, level: int, model: str, budgets=None) -> dict[str, Any]:
     """Run one explicitly selected contract without touching production photos.
 
     Level 1 performs only the bounded `/models` connection check.  Level 2
@@ -216,6 +216,9 @@ def run_provider_contract(provider: Any, *, level: int, model: str) -> dict[str,
     never repairs.  Level 3 sends one synthetic image using the full schema and
     permits at most one text-only repair when validation fails.
     """
+
+    def paid_call(method, **kwargs):
+        return budgets.call(provider, method, **kwargs) if budgets is not None else getattr(provider, method)(**kwargs)
 
     if level not in CONTRACT_LEVELS:
         raise ValueError("Provider contract level 只允許 1、2 或 3")
@@ -271,7 +274,7 @@ def run_provider_contract(provider: Any, *, level: int, model: str) -> dict[str,
         network_request_attempts = 1
         vision_started = True
         try:
-            response = provider.analyze(
+            response = paid_call("analyze",
                 image_path=image_path,
                 model=model,
                 detail="high",
@@ -300,6 +303,17 @@ def run_provider_contract(provider: Any, *, level: int, model: str) -> dict[str,
             )
 
         usage = _usage_snapshot(provider, model, response)
+        try:
+            assert_complete_response(response)
+        except IncompleteProviderResponse as exc:
+            return _safe_failure(
+                provider, level, str(exc), usage=usage,
+                vision_requests=vision_requests,
+                network_request_attempts=network_request_attempts,
+                network_responses=network_responses,
+                vision_started=vision_started, vision_completed=vision_completed,
+                provider_error={"error_code": exc.code},
+            )
         schema_valid = False
         if level == 2:
             schema_valid = _valid_level2_response(response.content)
@@ -368,7 +382,7 @@ def run_provider_contract(provider: Any, *, level: int, model: str) -> dict[str,
             repair_attempted = True
             network_request_attempts += 1
             try:
-                repaired = provider.repair_json(
+                repaired = paid_call("repair_json",
                     invalid_content=json.dumps(repair_source, ensure_ascii=False),
                     validation_error="synthetic contract schema validation failed",
                     immutable_semantic_values=semantic_snapshot,
@@ -410,7 +424,12 @@ def run_provider_contract(provider: Any, *, level: int, model: str) -> dict[str,
             except AnalysisValidationError:
                 schema_valid = False
             except Exception as exc:
-                if usage is not None:
+                budget_blocked = str(getattr(exc, "code", "")).startswith("BUDGET-")
+                if budget_blocked:
+                    repair_requests = repair_attempts = 0
+                    repair_attempted = False
+                    network_request_attempts -= 1
+                if usage is not None and not budget_blocked:
                     usage["unknown_cost_count"] += 1
                     usage["cost_source"] = "unknown"
                 message, provider_error = _provider_failure_message(

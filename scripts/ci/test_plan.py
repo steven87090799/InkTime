@@ -197,6 +197,7 @@ INTEGRATION_TEST_OWNER_SUITES: dict[str, tuple[str, ...]] = {
         "web_api_owner",
     ),
     "tests/integration/test_runtime_soak_cli.py": ("runtime_scheduler_owner",),
+    "tests/integration/test_health_readiness.py": ("runtime_scheduler_owner",),
 }
 
 # This intentionally remains outside the bounded impact runner.  It spans
@@ -781,7 +782,7 @@ def _classify_path(path: str) -> tuple[set[str], set[str], set[str], bool]:
         suites.add("docs_contract")
         return domains, suites, gates, False
 
-    if path == "requirements.txt" or path.startswith(("constraints/", "constraints-")):
+    if path == "requirements.txt" or path.startswith(("constraints/", "constraints-", "requirements-locks/")):
         domains.add("dependencies")
         suites.update({"python_dependency_owner", "dependency_policy"})
         gates.update({"dependency_audit", "container_security"})

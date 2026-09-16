@@ -243,7 +243,7 @@ class SchedulerRunner:
             self.last_operational_retention_at = monotonic_now
         if not settings.get("backup.schedule_enabled", True):
             return
-        if now.hour == int(settings.get("backup.hour", 3)) and self.last_backup_date != now.date().isoformat():
+        if now.hour >= int(settings.get("backup.hour", 3)) and self.last_backup_date != now.date().isoformat():
             if self._safe_step("backup_enqueue", lambda: self._enqueue_backup(now, settings)):
                 self.last_backup_date = now.date().isoformat()
 

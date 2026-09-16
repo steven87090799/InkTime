@@ -520,7 +520,13 @@ jobs:
             test ! -e /app/docs
             test ! -e /app/.env
             test ! -e /app/esp32
+            test ! -e /app/.gunicorn
           '
+          docker compose --env-file .ci-lan.env logs --no-color inktime-web > .ci-web-runtime.log
+          if grep -E 'Errno 30|Control server error' .ci-web-runtime.log; then
+            echo "Gunicorn attempted a write outside the writable runtime mounts" >&2
+            exit 1
+          fi
       - name: Collect Compose diagnostics
         if: failure()
         run: |

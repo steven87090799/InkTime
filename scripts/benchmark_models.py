@@ -13,6 +13,9 @@ ROOT_DIR = Path(__file__).resolve().parents[1]
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
+from inktime.app.db import Database
+from inktime.app.repositories.settings import SettingsRepository
+from inktime.app.services.budgets import BudgetService
 from inktime.app.services.model_benchmark import (
     BenchmarkError,
     ModelBenchmarkService,
@@ -41,6 +44,7 @@ def main() -> int:
     parser.add_argument("--reasoning", default="none,low")
     parser.add_argument("--max-requests", type=int, default=40)
     parser.add_argument("--max-cost", type=float, default=1.0)
+    parser.add_argument("--database", type=Path, help="live 模式必須使用安裝中的共用帳務資料庫")
     parser.add_argument("--dataset", type=Path, help="live quality golden manifest; never a production photo path")
     parser.add_argument(
         "--confirm-live-quality",
@@ -54,7 +58,13 @@ def main() -> int:
     args = parser.parse_args()
     try:
         variants = [item == "on" for item in _csv(args.variants)]
-        service = ModelBenchmarkService()
+        budgets = None
+        if args.live:
+            if args.database is None or not args.database.is_file():
+                parser.error("live 模式必須指定既存的 --database，才能套用共用預算")
+            database = Database(args.database)
+            budgets = BudgetService(database, SettingsRepository(database))
+        service = ModelBenchmarkService(budgets=budgets)
         axes = service.build_axes(
             provider=args.provider,
             models=_csv(args.models),

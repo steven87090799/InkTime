@@ -190,6 +190,8 @@ BackupService(database, Path("/data/backups")).create(include_secrets=False)
 print(device_id)
 PY
 
+compose v1.0.0-ci-a exec -T inktime-web python - seed < scripts/ci/persistence_fixture.py
+
 snapshot() {
   compose "$1" exec -T inktime-web python - <<'PY'
 import json
@@ -209,6 +211,7 @@ PY
 }
 
 state_before=$(snapshot v1.0.0-ci-a)
+compose v1.0.0-ci-a exec -T inktime-web python - verify < scripts/ci/persistence_fixture.py
 session_hash_before=$(compose v1.0.0-ci-a exec -T inktime-web sha256sum /data/session.key)
 marker_before=$(sudo cat "${data_path}/.inktime-deployment-root")
 container_ids_before=$(compose v1.0.0-ci-a ps -q | sort)
@@ -288,6 +291,7 @@ wait "$lock_pid"
 run_updater v1.0.0-ci-b "$env_file"
 assert_runtime_contract v1.0.0-ci-b
 test "$state_before" = "$(snapshot v1.0.0-ci-b)"
+compose v1.0.0-ci-b exec -T inktime-web python - verify < scripts/ci/persistence_fixture.py
 test "$session_hash_before" = "$(compose v1.0.0-ci-b exec -T inktime-web sha256sum /data/session.key)"
 test "$marker_before" = "$(sudo cat "${data_path}/.inktime-deployment-root")"
 test "$photo_state_before" = "$(photo_state)"

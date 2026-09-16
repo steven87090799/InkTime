@@ -37,7 +37,9 @@ from inktime.app.domain.analysis.plan import SCHEMA_VERSION, provider_prompt_con
 from inktime.app.domain.analysis.schema import validate_model_response
 from inktime.app.domain.photos.quality_policy import is_confirmed_screenshot
 from inktime.app.services.analysis import FULL_ANALYSIS_TOKEN_CAP
-from inktime.app.providers.base import Usage
+from inktime.app.services.budgets import BudgetService
+from inktime.app.repositories.batch_result_staging import BatchResultStore
+from inktime.app.providers.base import MAX_BATCH_RESULT_BYTES, Usage
 from inktime.app.providers.openai_compatible import calculate_usage_cost
 from inktime.app.repositories.analysis_reservations import (
     AnalysisReservationConflict,
@@ -203,6 +205,7 @@ class BatchAnalysisService:
         self.thumbnails = thumbnails
         self.analysis = analysis
         self.settings = settings
+        self.budgets = BudgetService(database, settings)
         self.data_dir = data_dir.resolve()
         self.batch_root = self.data_dir / "batches"
         self.batch_root.mkdir(parents=True, exist_ok=True)
@@ -361,6 +364,18 @@ class BatchAnalysisService:
             active,
         )
 
+    def _finalize_cached_photo(self, photo, cached, *, plan, analysis_fingerprint,
+                               provider_id, model, vision_fp, vision_input_json, connection=None):
+        return self.analysis._save_result(
+            photo_id=str(photo["id"]), job_id=None, stage="single", provider=provider_id, model=model,
+            result=validate_analysis_result(cached["result"]), raw=str(cached["raw_json"]), photo=photo,
+            scoring_version_id=str(plan.get("scoring_profile_id") or "") or None,
+            schema_kind="full", prompt_version=str(plan["prompt_version"]),
+            analysis_fingerprint=analysis_fingerprint, analysis_spec_json=canonical_json(plan),
+            vision_request_fingerprint=vision_fp, vision_input_spec_json=vision_input_json,
+            analysis_source="cache", connection=connection,
+        )
+
     def _candidate_rows(
         self,
         *,
@@ -371,6 +386,7 @@ class BatchAnalysisService:
         plan: dict[str, Any],
         photo_ids: Iterable[str] | None,
         sample_count: int,
+        apply_cached: bool = False,
     ) -> tuple[list[dict[str, Any]], dict[str, int], str | None]:
         query, active_parameters = self._base_candidate_sql()
         parameters: list[Any] = [analysis_fingerprint, *active_parameters]
@@ -384,7 +400,23 @@ class BatchAnalysisService:
                 f"AND p.id IN ({marks})\n            ORDER BY COALESCE(p.local_candidate_score,-1) DESC,\n                     COALESCE(p.captured_at,p.created_at),p.id",
             )
             parameters.extend(requested)
+        seed: str | None = None
+        # Bound materialization and NAS stat calls before touching candidate files.
+        # Sampling order is computed in SQLite; only the selected window enters Python.
+        scan_limit = 100_000
+        if scope == "sample":
+            seed = hashlib.sha256(f"{scope}:{analysis_fingerprint}".encode("utf-8")).hexdigest()
+            scan_limit = max(1, min(int(sample_count), scan_limit))
+            query = query.rsplit("ORDER BY", 1)[0] + "ORDER BY batch_sample_key(p.id),p.id"
+        query += " LIMIT ?"
+        parameters.append(scan_limit)
         with self.database.session() as connection:
+            if seed is not None:
+                connection.create_function(
+                    "batch_sample_key", 1,
+                    lambda photo_id: hashlib.sha256(f"{seed}:{photo_id}".encode("utf-8")).hexdigest(),
+                    deterministic=True,
+                )
             rows = [dict(row) for row in connection.execute(query, parameters).fetchall()]
             never_upload = int(
                 connection.execute(
@@ -418,13 +450,6 @@ class BatchAnalysisService:
             if not source.is_file():
                 continue
             safe_rows.append({"photo": row, "source": source})
-        seed: str | None = None
-        if scope == "sample":
-            seed = hashlib.sha256(f"{scope}:{analysis_fingerprint}".encode("utf-8")).hexdigest()
-            safe_rows.sort(
-                key=lambda item: hashlib.sha256(f"{seed}:{item['photo']['id']}".encode("utf-8")).hexdigest()
-            )
-            safe_rows = safe_rows[: max(1, min(int(sample_count), 100_000))]
         candidates: list[dict[str, Any]] = []
         seen_sha: set[str] = set()
         cache_hits = 0
@@ -435,10 +460,6 @@ class BatchAnalysisService:
         for item in safe_rows:
             photo = item["photo"]
             content_sha = str(photo["sha256"] or "").casefold()
-            if content_sha in seen_sha:
-                sha_duplicates += 1
-                continue
-            seen_sha.add(content_sha)
             vision_fp = fingerprint(
                 {
                     "content_sha256": content_sha,
@@ -467,8 +488,18 @@ class BatchAnalysisService:
                 except (AnalysisValidationError, TypeError, ValueError):
                     pass
                 else:
+                    if apply_cached:
+                        self._finalize_cached_photo(
+                            photo, cached, plan=plan, analysis_fingerprint=analysis_fingerprint,
+                            provider_id=provider_id, model=model, vision_fp=vision_fp,
+                            vision_input_json=canonical_json(vision_input),
+                        )
                     cache_hits += 1
                     continue
+            if content_sha in seen_sha:
+                sha_duplicates += 1
+                continue
+            seen_sha.add(content_sha)
             candidates.append(
                 {
                     "photo": photo,
@@ -932,6 +963,10 @@ class BatchAnalysisService:
                 raise BatchLifecycleError("Batch submission 已由其他執行者持有", "BATCH-ALREADY-CLAIMED")
             if provider is None:
                 provider = self._provider(str(current["provider_id"]), plan)
+            reserved_cost = self.budgets.estimate_reserve(
+                provider, str(current["model"]), output_tokens=FULL_ANALYSIS_TOKEN_CAP, batch=True
+            ) * len(self.batches.items(batch_id))
+            self.budgets.reserve("batch:" + batch_id, reserved_cost, job_id=str(current["job_id"]) if current["job_id"] else None)
             remote = provider.create_batch(
                 str(current["input_file_id"]),
                 completion_window="24h",
@@ -956,6 +991,8 @@ class BatchAnalysisService:
                 "BATCH-SUBMISSION-UNKNOWN",
                 "BATCH-UPLOAD-UNKNOWN",
             }
+            if not ambiguous and not remote_created:
+                self.budgets.release("batch:" + batch_id)
             upload_unknown = code == "BATCH-UPLOAD-UNKNOWN" or (
                 ambiguous and current is not None and str(current["status"]) == "uploading"
             )
@@ -1043,7 +1080,11 @@ class BatchAnalysisService:
             plan=plan,
             photo_ids=photo_ids,
             sample_count=sample_count,
+            apply_cached=True,
         )
+        if not candidates and skipped["cache_hits"]:
+            return {"job_id": None, "batch_ids": [], "prepared_batch_ids": [],
+                    "candidate_count": 0, **skipped, "analysis_fingerprint": analysis_fp, "model": model}
         if not candidates:
             raise BatchLifecycleError("目前沒有符合條件的 Batch 候選", "BATCH-CANDIDATE-001")
         estimate = self._estimate_candidates(
@@ -2059,6 +2100,10 @@ class BatchAnalysisService:
                 prompt_details.get("cache_write_tokens", usage.get("cache_write_tokens", 0))
             ),
             reported_cost,
+            tokens_reported=(
+                any(usage.get(key) is not None for key in ("prompt_tokens", "input_tokens"))
+                and any(usage.get(key) is not None for key in ("completion_tokens", "output_tokens"))
+            ),
         )
 
     @staticmethod
@@ -2093,6 +2138,33 @@ class BatchAnalysisService:
         if item.get("job_item_id") and job_id:
             self.jobs.fail_batch_item(str(job_id), str(item["job_item_id"]), code, str(message))
 
+    def _persist_result_receipt(self, batch, item, line, body, provider) -> None:
+        """Paid evidence is durable even when the result cannot be applied."""
+        usage = self._usage_from_body(body)
+        estimated = provider.estimate_batch_cost(str(batch["model"]), usage)
+        actual = usage.provider_reported_cost
+        response = line.get("response") or {}
+        request_id = response.get("request_id") or line.get("request_id") or body.get("id")
+        with self.database.transaction(operation="analysis_batch_receipt") as connection:
+            self.usage.record_batch_once(
+                provider=str(batch["provider_id"]), provider_id=str(batch["provider_id"]),
+                model=str(body.get("model") or batch["model"]),
+                job_id=str(batch["job_id"]) if batch["job_id"] else None,
+                photo_id=str(item["photo_id"]), batch_id=str(batch["id"]), batch_item_id=str(item["id"]),
+                request_type="analysis_batch", input_tokens=usage.input_tokens, tokens_reported=usage.tokens_reported,
+                cached_tokens=usage.cached_tokens, output_tokens=usage.output_tokens,
+                reasoning_tokens=usage.reasoning_tokens, cache_write_tokens=usage.cache_write_tokens,
+                estimated_cost=estimated, actual_cost=actual, request_id=request_id,
+                started_at=str(batch["submitted_at"] or utc_now()),
+                cost_source="provider_reported" if actual is not None else "estimated" if estimated is not None else "unknown",
+                connection=connection,
+            )
+            connection.execute(
+                "UPDATE analysis_batch_items SET raw_response_json=COALESCE(raw_response_json,?), "
+                "request_id=COALESCE(request_id,?) WHERE id=?",
+                (json.dumps(line, ensure_ascii=False, separators=(",", ":")), request_id, str(item["id"])),
+            )
+
     def _import_success(
         self,
         batch: dict[str, Any],
@@ -2103,6 +2175,7 @@ class BatchAnalysisService:
         provider,
         current_analysis_fingerprint: str | None,
     ) -> str:
+        self._persist_result_receipt(batch, item, line, body, provider)
         if str(item["status"]) == "imported":
             return "already_imported"
         if str(item["status"]) not in {"pending", "submitted", "retry_pending"}:
@@ -2155,6 +2228,13 @@ class BatchAnalysisService:
         response = line.get("response") or {}
         request_id = response.get("request_id") or line.get("request_id")
         usage = self._usage_from_body(body)
+        choice = (body.get("choices") or [{}])[0]
+        if choice.get("finish_reason") in {"length", "content_filter", "max_tokens"} or (choice.get("message") or {}).get("refusal"):
+            self._mark_item_error(
+                item, "VLM-INCOMPLETE", "Provider 拒答、過濾或截斷", "schema_invalid",
+                job_id=str(batch["job_id"]),
+            )
+            return "schema_invalid"
         raw_content = (
             body.get("choices", [{}])[0].get("message", {}).get("content") if body.get("choices") else None
         )
@@ -2170,7 +2250,7 @@ class BatchAnalysisService:
             )
             return "schema_invalid"
         try:
-            result = validate_model_response(json.loads(raw_content))
+            result = validate_model_response(json.loads(raw_content), caption_controls=plan.get("caption_controls"))
         except (ValueError, TypeError, json.JSONDecodeError, AnalysisValidationError) as exc:
             self._mark_item_error(
                 item, "schema_invalid", str(exc), "schema_invalid", job_id=str(batch["job_id"])
@@ -2193,6 +2273,7 @@ class BatchAnalysisService:
                 return "already_imported"
             if current_item_status not in {"pending", "submitted", "retry_pending"}:
                 return current_item_status
+            canonical_result = validate_analysis_result(result)
             ranked = self.analysis._save_result(
                 photo_id=str(item["photo_id"]),
                 job_id=str(batch["job_id"]) if batch["job_id"] else None,
@@ -2219,7 +2300,7 @@ class BatchAnalysisService:
                 prompt_version=str(plan["prompt_version"]),
                 schema_version=SCHEMA_VERSION,
                 schema_kind="full",
-                result=ranked,
+                result=canonical_result,
                 raw_json=raw_content,
                 input_tokens=usage.input_tokens,
                 output_tokens=usage.output_tokens,
@@ -2230,6 +2311,20 @@ class BatchAnalysisService:
                 vision_input_spec_json=str(item["vision_input_spec_json"]),
                 connection=connection,
             )
+            duplicates = connection.execute(
+                "SELECT p.* FROM photos p WHERE p.sha256=? AND p.id<>? "
+                "AND p.lifecycle_status='active' AND p.eligible=1 AND COALESCE(p.never_upload,0)=0 "
+                "AND NOT EXISTS(SELECT 1 FROM photo_analysis a WHERE a.photo_id=p.id AND a.analysis_fingerprint=?)",
+                (str(item["content_sha256"]), str(item["photo_id"]), str(batch["analysis_fingerprint"])),
+            ).fetchall()
+            for duplicate in duplicates:
+                self._finalize_cached_photo(
+                    duplicate, {"result": canonical_result, "raw_json": raw_content}, plan=plan,
+                    analysis_fingerprint=str(batch["analysis_fingerprint"]),
+                    provider_id=str(batch["provider_id"]), model=str(batch["model"]),
+                    vision_fp=str(item["vision_request_fingerprint"]),
+                    vision_input_json=str(item["vision_input_spec_json"]), connection=connection,
+                )
             self.usage.record_batch_once(
                 provider=str(batch["provider_id"]),
                 provider_id=str(batch["provider_id"]),
@@ -2284,14 +2379,19 @@ class BatchAnalysisService:
         batch: dict[str, Any],
         *,
         is_error: bool,
-        records: dict[str, tuple[str, dict[str, Any], dict[str, Any] | None]],
+        records,
     ) -> None:
         if path is None or not path.is_file():
             return
-        with path.open("r", encoding="utf-8") as stream:
-            for line_number, raw_line in enumerate(stream, 1):
-                if len(raw_line.encode("utf-8")) > 25 * 1024 * 1024:
+        if path.stat().st_size > MAX_BATCH_RESULT_BYTES:
+            raise BatchLifecycleError("結果檔超過總位元組上限", "BATCH-OUTPUT-SIZE-001")
+        max_line_bytes = 4 * 1024 * 1024
+        with path.open("rb") as stream:
+            for line_number, raw_line in enumerate(iter(lambda: stream.readline(max_line_bytes + 1), b""), 1):
+                if len(raw_line) > max_line_bytes:
                     raise BatchLifecycleError("結果 JSONL 單行超過解析上限", "BATCH-OUTPUT-LINE-001")
+                if isinstance(records, BatchResultStore):
+                    records.save_raw(raw_line)
                 try:
                     record = json.loads(raw_line)
                 except (ValueError, json.JSONDecodeError):
@@ -2616,6 +2716,15 @@ class BatchAnalysisService:
         )
         if batch["job_id"]:
             self.photos.refresh_dirty_libraries_for_job(str(batch["job_id"]))
+        if not missing:
+            with self.database.session() as connection:
+                unaccounted = connection.execute(
+                    "SELECT COUNT(*) FROM analysis_batch_items i WHERE i.batch_id=? AND NOT EXISTS "
+                    "(SELECT 1 FROM api_usage u WHERE u.batch_item_id=i.id AND u.cost_source<>'unknown')",
+                    (batch_id,),
+                ).fetchone()[0]
+            if not unaccounted:
+                self.budgets.release("batch:" + batch_id)
         self._activity(
             "INFO" if final_status == "completed" else "WARNING",
             "batch_completed" if final_status.startswith("completed") else "batch_failed",
@@ -2773,7 +2882,7 @@ class BatchAnalysisService:
             if callable(close):
                 close()
         provider = self._provider(str(batch["provider_id"]), plan)
-        records: dict[str, tuple[str, dict[str, Any], dict[str, Any] | None]] = {}
+        records = BatchResultStore(self.database, batch_id)
         successes: set[str] = set()
         errors: set[str] = set()
         try:
@@ -2813,6 +2922,10 @@ class BatchAnalysisService:
             expected_item: dict[str, Any] | None = expected.get(custom_id)
             if expected_item is None:
                 continue
+            remote_response = record.get("response")
+            receipt_body = remote_response.get("body") if isinstance(remote_response, dict) else None
+            if isinstance(receipt_body, dict):
+                self._persist_result_receipt(batch, expected_item, record, receipt_body, provider)
             if kind == "duplicate":
                 self._mark_item_error(
                     expected_item,
@@ -2886,6 +2999,7 @@ class BatchAnalysisService:
         current = self.batches.get(batch_id)
         if current is not None and str(current["cleanup_status"]) == "completed":
             self._finish(batch_id)
+        records.close()
         result = {
             "batch_id": batch_id,
             "success": len(successes),

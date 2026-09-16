@@ -51,6 +51,7 @@ def record_failed_unknown_usage(
         photo_id=photo_id,
         request_type=request_type,
         input_tokens=0,
+        tokens_reported=False,
         output_tokens=0,
         cached_tokens=0,
         estimated_cost=None,

@@ -26,6 +26,9 @@ IMPORTANT_TABLES = (
     "analysis_batches",
     "analysis_batch_items",
     "api_usage",
+    "billable_operations",
+    "budget_reservations",
+    "provider_quota_state",
     "scan_runs",
     "scan_missing_candidates",
     "releases",
@@ -44,6 +47,9 @@ _COUNT_SQL = {
     "analysis_batches": "SELECT COUNT(*) FROM analysis_batches",
     "analysis_batch_items": "SELECT COUNT(*) FROM analysis_batch_items",
     "api_usage": "SELECT COUNT(*) FROM api_usage",
+    "billable_operations": "SELECT COUNT(*) FROM billable_operations",
+    "budget_reservations": "SELECT COUNT(*) FROM budget_reservations",
+    "provider_quota_state": "SELECT COUNT(*) FROM provider_quota_state",
     "scan_runs": "SELECT COUNT(*) FROM scan_runs",
     "scan_missing_candidates": "SELECT COUNT(*) FROM scan_missing_candidates",
     "releases": "SELECT COUNT(*) FROM releases",
@@ -91,29 +97,51 @@ def _cleanup_database_sidecars(path: Path) -> None:
         Path(f"{path}{suffix}").unlink(missing_ok=True)
 
 
+def _copy_file_to_open_fd(source: Path, destination_fd: int) -> None:
+    """Copy without reopening or replacing a securely created destination."""
+    source_fd = os.open(source, os.O_RDONLY | os.O_NOFOLLOW)
+    try:
+        os.fchmod(destination_fd, 0o600)
+        with os.fdopen(source_fd, "rb", closefd=False) as stream:
+            while chunk := stream.read(1024 * 1024):
+                remaining = memoryview(chunk)
+                while remaining:
+                    written = os.write(destination_fd, remaining)
+                    remaining = remaining[written:]
+        os.fsync(destination_fd)
+    finally:
+        os.close(source_fd)
+
+
 class BackupService:
     def __init__(self, database: Database, backup_dir: Path) -> None:
         self.database = database
         self.backup_dir = backup_dir.resolve()
         self.backup_dir.mkdir(parents=True, exist_ok=True)
 
-    def _copy_database(self, destination: Path, *, include_secrets: bool) -> dict[str, int]:
-        source = sqlite3.connect(self.database.path)
-        target = sqlite3.connect(destination)
-        try:
-            source.backup(target)
-            if not include_secrets:
-                target.execute("PRAGMA secure_delete = ON")
-                target.execute("DELETE FROM secrets")
-                target.commit()
-                target.execute("VACUUM")
-            integrity = target.execute("PRAGMA integrity_check").fetchone()
-            if integrity is None or str(integrity[0]) != "ok":
-                raise RuntimeError("BACKUP-001 備份資料庫完整性檢查失敗")
-            return _database_counts(target)
-        finally:
-            target.close()
-            source.close()
+    def _copy_database(self, destination_fd: int, *, include_secrets: bool) -> dict[str, int]:
+        # SQLite owns its snapshot inside a private directory; the public
+        # temporary destination remains the inode securely created by mkstemp.
+        with tempfile.TemporaryDirectory(dir=self.backup_dir, prefix=".inktime-snapshot-") as directory:
+            snapshot = Path(directory) / "snapshot.sqlite3"
+            source = sqlite3.connect(self.database.path)
+            target = sqlite3.connect(snapshot)
+            try:
+                source.backup(target)
+                if not include_secrets:
+                    target.execute("PRAGMA secure_delete = ON")
+                    target.execute("DELETE FROM secrets")
+                    target.commit()
+                    target.execute("VACUUM")
+                integrity = target.execute("PRAGMA integrity_check").fetchone()
+                if integrity is None or str(integrity[0]) != "ok":
+                    raise RuntimeError("BACKUP-001 備份資料庫完整性檢查失敗")
+                counts = _database_counts(target)
+            finally:
+                target.close()
+                source.close()
+            _copy_file_to_open_fd(snapshot, destination_fd)
+            return counts
 
     def _settings_export(self, database_path: Path, *, include_secrets: bool) -> bytes:
         connection = sqlite3.connect(database_path)
@@ -147,14 +175,14 @@ class BackupService:
             dir=self.backup_dir, prefix=".inktime-db-", suffix=".sqlite3", delete=False
         )
         temporary_db = Path(db_handle.name)
-        db_handle.close()
         zip_handle = tempfile.NamedTemporaryFile(
             dir=self.backup_dir, prefix=".inktime-archive-", suffix=".zip", delete=False
         )
         temporary_archive = Path(zip_handle.name)
         zip_handle.close()
         try:
-            counts = self._copy_database(temporary_db, include_secrets=include_secrets)
+            counts = self._copy_database(db_handle.fileno(), include_secrets=include_secrets)
+            db_handle.close()
             settings = self._settings_export(temporary_db, include_secrets=include_secrets)
             with temporary_db.open("rb") as stream:
                 database_hash, database_size = _stream_sha256(stream)
@@ -210,10 +238,13 @@ class BackupService:
             self.validate(temporary_archive)
             with temporary_archive.open("rb") as stream:
                 os.fsync(stream.fileno())
-            os.replace(temporary_archive, archive)
+            # Link publishes atomically and fails if the final name exists.
+            os.link(temporary_archive, archive, follow_symlinks=False)
+            temporary_archive.unlink()
             _fsync_directory(self.backup_dir)
             return archive
         finally:
+            db_handle.close()
             temporary_db.unlink(missing_ok=True)
             temporary_archive.unlink(missing_ok=True)
 
@@ -322,6 +353,8 @@ class BackupService:
     def _snapshot_current(self) -> Path:
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
         destination = self.backup_dir / f"inktime-pre-restore-{stamp}.sqlite3"
+        descriptor = os.open(destination, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        os.close(descriptor)
         source = sqlite3.connect(self.database.path)
         target = sqlite3.connect(destination)
         try:
@@ -331,9 +364,34 @@ class BackupService:
         finally:
             target.close()
             source.close()
+        with destination.open("rb") as handle:
+            os.fsync(handle.fileno())
+        self._prune_safety_snapshots(destination)
         return destination
 
-    def _replace_offline(self, staged: Path, *, manifest: dict | None) -> tuple[Path, dict[str, int]]:
+    def _prune_safety_snapshots(self, latest: Path) -> None:
+        """Keep the just-verified recovery point under all retention limits."""
+        cutoff = datetime.now(timezone.utc).timestamp() - 30 * 86400
+        snapshots = sorted(
+            self.backup_dir.glob("inktime-pre-restore-*.sqlite3"),
+            key=lambda path: path.name, reverse=True,
+        )
+        retained_bytes = latest.stat().st_size
+        retained_count = 1
+        for path in snapshots:
+            if path == latest:
+                continue
+            stat = path.stat()
+            if stat.st_mtime < cutoff or retained_count >= 3 or retained_bytes + stat.st_size > 2 * 1024**3:
+                path.unlink()
+            else:
+                path.chmod(0o600)
+                retained_bytes += stat.st_size
+                retained_count += 1
+
+    def _replace_offline(
+        self, staged: Path, *, manifest: dict | None, exact_snapshot: bool = False
+    ) -> tuple[Path, dict[str, int]]:
         runtime_lock = self.database.acquire_runtime_lock(exclusive=True, blocking=False)
         safety_copy: Path | None = None
         replaced = False
@@ -349,7 +407,7 @@ class BackupService:
                 raise ValueError(
                     f"RESTORE-006 備份 Schema Version {staged_version} 高於目前支援版本 {latest_version}"
                 )
-            if staged_version < latest_version:
+            if staged_version < latest_version and not exact_snapshot:
                 migrate(staged_database)
                 self._validate_restore_database(staged)
             with staged_database.session() as connection:
@@ -358,8 +416,8 @@ class BackupService:
             for suffix in ("-wal", "-shm"):
                 Path(f"{self.database.path}{suffix}").unlink(missing_ok=True)
             os.replace(staged, self.database.path)
-            _fsync_directory(self.database.path.parent)
             replaced = True
+            _fsync_directory(self.database.path.parent)
             counts = self._validate_restore_database(self.database.path, manifest)
             if Database(self.database.path).integrity_check(full=True) != "ok":
                 raise ValueError("RESTORE-002 還原後 integrity_check 失敗")
@@ -386,7 +444,7 @@ class BackupService:
         finally:
             runtime_lock.close()
 
-    def restore(self, archive: Path) -> dict:
+    def restore(self, archive: Path, *, exact_snapshot: bool = False) -> dict:
         """離線原子還原；任一步失敗均保持或自動回復原資料庫。"""
 
         handle = tempfile.NamedTemporaryFile(
@@ -399,7 +457,9 @@ class BackupService:
         handle.close()
         try:
             manifest = self._extract_database(archive, staged)
-            safety_copy, counts = self._replace_offline(staged, manifest=manifest)
+            safety_copy, counts = self._replace_offline(
+                staged, manifest=manifest, exact_snapshot=exact_snapshot
+            )
             return {
                 "status": "restored",
                 "safety_copy": str(safety_copy),
@@ -410,7 +470,7 @@ class BackupService:
             staged.unlink(missing_ok=True)
             _cleanup_database_sidecars(staged)
 
-    def restore_sqlite_snapshot(self, snapshot: Path) -> dict:
+    def restore_sqlite_snapshot(self, snapshot: Path, *, exact_snapshot: bool = False) -> dict:
         """供 pre-migration 原始 SQLite 備份使用的相同離線回滾路徑。"""
 
         handle = tempfile.NamedTemporaryFile(
@@ -423,7 +483,9 @@ class BackupService:
         handle.close()
         try:
             shutil.copy2(snapshot, staged)
-            safety_copy, counts = self._replace_offline(staged, manifest=None)
+            safety_copy, counts = self._replace_offline(
+                staged, manifest=None, exact_snapshot=exact_snapshot
+            )
             return {
                 "status": "restored",
                 "safety_copy": str(safety_copy),

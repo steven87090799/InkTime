@@ -182,3 +182,18 @@ def test_contract_failure_returns_safe_actionable_provider_error():
     assert "CONFIG_INVALID / HTTP 400 / invalid_model / Unknown model" in result["message"]
     assert "super-secret" not in str(result)
     assert "QUJDREVGRw" not in str(result)
+
+
+def test_terminal_provider_metadata_never_triggers_paid_repair():
+    from dataclasses import replace
+
+    for metadata in ({"finish_reason": "length"}, {"finish_reason": "content_filter"}, {"refusal": "declined"}):
+        provider = FakeContractProvider(valid=False)
+        analyze = provider.analyze
+        provider.analyze = lambda analyze=analyze, metadata=metadata, **kwargs: replace(analyze(**kwargs), **metadata)
+        result = run_provider_contract(provider, level=3, model="model")
+        assert result["ok"] is False
+        assert result["usage"]["provider_reported_cost"] == 0.08
+        assert result["provider_error"]["error_code"] == "VLM-INCOMPLETE"
+        assert len(provider.analyze_calls) == 1
+        assert provider.repair_calls == []
