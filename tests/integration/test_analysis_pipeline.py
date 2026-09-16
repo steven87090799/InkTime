@@ -1103,7 +1103,12 @@ def test_failover_rebuilds_cache_identity_for_the_next_provider(app, tmp_path):
     settings.update("analysis.prefilter_enabled", False, changed_by="test", source_ip="127.0.0.1")
     with app.extensions["inktime_database"].session() as connection:
         connection.execute("UPDATE photos SET eligible=1,exclusion_status='eligible' WHERE id=?", (ids[0],))
-    failing = FailingProvider([])
+    class RejectedProvider(FailingProvider):
+        def analyze(self, **kwargs):
+            self.analyze_calls += 1
+            raise ProviderHTTPError("request rejected before processing", "VLM-005", ambiguous=False)
+
+    failing = RejectedProvider([])
     failing.provider_id = "first-provider"
     succeeding = MockProvider([valid_result()])
     succeeding.provider_id = "second-provider"

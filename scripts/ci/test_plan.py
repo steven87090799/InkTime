@@ -197,6 +197,7 @@ INTEGRATION_TEST_OWNER_SUITES: dict[str, tuple[str, ...]] = {
         "web_api_owner",
     ),
     "tests/integration/test_runtime_soak_cli.py": ("runtime_scheduler_owner",),
+    "tests/integration/test_health_readiness.py": ("runtime_scheduler_owner",),
 }
 
 # This intentionally remains outside the bounded impact runner.  It spans

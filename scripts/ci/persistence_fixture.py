@@ -4,13 +4,10 @@ import sqlite3
 import sys
 
 
-TABLES = ("billable_operations", "api_usage", "budget_reservations", "provider_quota_state")
-
-
 def seed(connection):
     connection.execute("INSERT INTO libraries(id,name,root_path,created_at,updated_at) VALUES ('ci-paid-library','CI paid','/photos','2026-09-16','2026-09-16')")
     connection.execute("INSERT INTO photos(id,library_id,relative_path,sha256,status,created_at,updated_at) VALUES ('ci-paid-photo','ci-paid-library','ci-paid.jpg','ci-paid-sha','analyzed','2026-09-16','2026-09-16')")
-    connection.execute("INSERT INTO photo_analysis(id,photo_id,schema_version,stage,caption,types_json,raw_json,created_at) VALUES ('ci-paid-analysis','ci-paid-photo',5,'single','CI persisted analysis','[]','{}','2026-09-16')")
+    connection.execute("INSERT INTO photo_analysis(photo_id,schema_version,stage,caption,types_json,raw_json,created_at) VALUES ('ci-paid-photo',5,'single','CI persisted analysis','[]','{}','2026-09-16')")
     connection.execute(
         "INSERT INTO billable_operations(id,content_sha256,request_fingerprint,state,response_json,created_at,updated_at) "
         "VALUES ('ci-paid-operation','ci-paid-sha','ci-paid-fingerprint','response','{}','2026-09-16','2026-09-16')"
@@ -29,7 +26,7 @@ def seed(connection):
 
 
 def verify(connection):
-    assert connection.execute("SELECT caption FROM photo_analysis WHERE id='ci-paid-analysis'").fetchone() == ("CI persisted analysis",)
+    assert connection.execute("SELECT caption FROM photo_analysis WHERE photo_id='ci-paid-photo'").fetchone() == ("CI persisted analysis",)
     assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
     assert connection.execute("SELECT state,response_json FROM billable_operations WHERE id='ci-paid-operation'").fetchone() == ("response", "{}")
     assert connection.execute("SELECT operation_id,estimated_cost,actual_cost,usage_complete FROM api_usage WHERE request_type='ci-persistence'").fetchone() == ("ci-paid-operation", None, None, 0)

@@ -15,7 +15,7 @@ def test_concurrent_paid_reservations_share_atomic_global_budget(app):
     from inktime.app.services.budgets import BudgetExceeded
 
     settings = app.extensions["inktime_settings_repository"]
-    settings.update_many({"budget.daily_stop": 1, "budget.daily_warning": 0}, changed_by="test", source_ip="127.0.0.1")
+    settings.update_many({"budget.daily_stop": 1}, changed_by="test", source_ip="127.0.0.1")
     budget = app.extensions["inktime_budget_service"]
 
     def reserve(index):
@@ -35,7 +35,7 @@ def test_paid_vision_overrun_blocks_diagnostic_repair(app):
     from inktime.app.services.provider_contracts import run_provider_contract
 
     settings = app.extensions["inktime_settings_repository"]
-    settings.update_many({"budget.daily_stop": 0.05, "budget.daily_warning": 0}, changed_by="test", source_ip="127.0.0.1")
+    settings.update_many({"budget.daily_stop": 0.05}, changed_by="test", source_ip="127.0.0.1")
     provider = FakeContractProvider(valid=False)
     provider.name = "diagnostic"
     provider.estimate_cost = lambda *_args: 0.01

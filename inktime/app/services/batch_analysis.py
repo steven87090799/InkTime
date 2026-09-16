@@ -2273,6 +2273,7 @@ class BatchAnalysisService:
                 return "already_imported"
             if current_item_status not in {"pending", "submitted", "retry_pending"}:
                 return current_item_status
+            canonical_result = validate_analysis_result(result)
             ranked = self.analysis._save_result(
                 photo_id=str(item["photo_id"]),
                 job_id=str(batch["job_id"]) if batch["job_id"] else None,
@@ -2299,7 +2300,7 @@ class BatchAnalysisService:
                 prompt_version=str(plan["prompt_version"]),
                 schema_version=SCHEMA_VERSION,
                 schema_kind="full",
-                result=ranked,
+                result=canonical_result,
                 raw_json=raw_content,
                 input_tokens=usage.input_tokens,
                 output_tokens=usage.output_tokens,
@@ -2318,7 +2319,7 @@ class BatchAnalysisService:
             ).fetchall()
             for duplicate in duplicates:
                 self._finalize_cached_photo(
-                    duplicate, {"result": result, "raw_json": raw_content}, plan=plan,
+                    duplicate, {"result": canonical_result, "raw_json": raw_content}, plan=plan,
                     analysis_fingerprint=str(batch["analysis_fingerprint"]),
                     provider_id=str(batch["provider_id"]), model=str(batch["model"]),
                     vision_fp=str(item["vision_request_fingerprint"]),

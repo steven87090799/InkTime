@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import pytest
 from PIL import Image
 
@@ -39,6 +41,9 @@ class RecordingSession:
 
 
 class FakeProviderRepository:
+    def __init__(self, database):
+        self.database = database
+
     def list(self):
         return [{"id": "provider-1", "enabled": True}]
 
@@ -64,8 +69,7 @@ class FakeProviderRepository:
 
 class FakeSettingsRepository:
     def get(self, key, default=None):
-        assert key == "analysis.scoring_rules"
-        return "網頁儲存的自訂評分規則"
+        return "網頁儲存的自訂評分規則" if key == "analysis.scoring_rules" else default
 
 
 def test_default_rules_separate_ai_value_from_local_quality_and_special():
@@ -117,8 +121,8 @@ def test_provider_sends_compact_baseline_when_default_rules_are_configured():
     assert "管理員自訂評分規則" not in prompt
 
 
-def test_provider_router_reads_latest_scoring_rules_from_settings():
-    service = ProviderService(FakeProviderRepository(), FakeSettingsRepository())
+def test_provider_router_reads_latest_scoring_rules_from_settings(app):
+    service = ProviderService(FakeProviderRepository(app.extensions["inktime_database"]), FakeSettingsRepository())
 
     router = service.build_router()
 
@@ -143,7 +147,14 @@ def test_prompt_inspector_matches_wire_without_changing_fixed_schema(tmp_path, k
         wire = provider.build_analysis_request_body(
             image_path=image_path, model=model, detail="high", stage="single", caption_controls=controls,
         )
-        assert wire["messages"][0]["content"] == analysis_system_prompt(provider.scoring_rules, controls)
+        expected_prompt = analysis_system_prompt(provider.scoring_rules, controls)
+        if not supports_schema:
+            from inktime.app.providers.openai_compatible import _json_schema_for_provider
+            expected_prompt += "\n完整 JSON Schema：" + json.dumps(
+                _json_schema_for_provider(kind, "single", caption_controls=controls)["schema"],
+                ensure_ascii=False, separators=(",", ":"),
+            )
+        assert wire["messages"][0]["content"] == expected_prompt
         assert wire.get("response_format") == analysis_response_format(
             kind, "single", supports_json_schema=supports_schema, caption_controls=controls,
         )

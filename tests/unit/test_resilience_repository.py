@@ -183,7 +183,7 @@ def test_automatic_cleanup_skips_observation_policy_without_audit_amplification(
     with database.transaction() as connection:
         connection.execute(
             "INSERT INTO api_usage(provider,model,request_type,estimated_cost,started_at,status,cost_source,image_bytes) "
-            "VALUES ('provider','model','analysis',0.25,?,'failed','unknown',1)",
+            "VALUES ('provider','model','analysis',0.25,?,'failed','estimated',1)",
             ((month_start - timedelta(days=2)).isoformat(),),
         )
 

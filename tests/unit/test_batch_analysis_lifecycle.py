@@ -762,7 +762,7 @@ def test_batch_submission_obeys_global_daily_reservations(app, tmp_path):
     _prepare_photos(app, tmp_path, count=1)
     fake = FakeBatchProvider()
     service = _wire_fake(app, fake)
-    service.settings.update_many({"budget.daily_stop": 0.01, "budget.daily_warning": 0}, changed_by="test", source_ip="127.0.0.1")
+    service.settings.update_many({"budget.daily_stop": 0.01}, changed_by="test", source_ip="127.0.0.1")
     result = service.submit(scope="sample", sample_count=1, created_by="tester")
     assert result["batch_ids"] == []
     assert fake.batch_counter == 0
