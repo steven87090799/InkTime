@@ -451,8 +451,14 @@ def test_real_backup_restore_preserves_paid_state_after_database_restart(tmp_pat
     with sqlite3.connect(database.path) as connection:
         connection.execute("PRAGMA foreign_keys=ON")
         seed_paid(connection)
+    device_id, device_token = DeviceRepository(database, "paid-restore-pepper").create("paid-restore-device")
     archive = service.create()
+    manifest = service.validate(archive)
+    for table in ("billable_operations", "budget_reservations", "provider_quota_state"):
+        assert manifest["important_table_counts"][table] == 1
     with database.transaction() as connection:
+        connection.execute("UPDATE devices SET name='changed' WHERE id=?", (device_id,))
+        connection.execute("UPDATE settings SET value_json='99' WHERE key='backup.retention'")
         connection.execute("DELETE FROM api_usage")
         connection.execute("DELETE FROM billable_operations")
         connection.execute("DELETE FROM budget_reservations")
@@ -460,7 +466,10 @@ def test_real_backup_restore_preserves_paid_state_after_database_restart(tmp_pat
         connection.execute("UPDATE photo_analysis SET caption='changed'")
     service.restore(archive)
     restarted = Database(database.path)
+    assert DeviceRepository(restarted, "paid-restore-pepper").authenticate(device_token, "203.0.113.20")
     with sqlite3.connect(restarted.path) as connection:
+        assert connection.execute("SELECT name FROM devices WHERE id=?", (device_id,)).fetchone()[0] == "paid-restore-device"
+        assert connection.execute("SELECT value_json FROM settings WHERE key='backup.retention'").fetchone()[0] == "14"
         verify_paid(connection)
         assert connection.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
         assert connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] == CURRENT_SCHEMA_VERSION
