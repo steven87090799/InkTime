@@ -26,10 +26,11 @@ from inktime.app.providers.config import (
     OPENROUTER_ROUTING_KEYS,
     effective_provider_kind,
     normalize_options,
+    model_request_capabilities,
     validate_base_url,
     validate_model_id,
 )
-from .base import ProviderCallTrace, ProviderResponse, Usage, VisionAttemptState, VisionProvider
+from .base import MAX_BATCH_RESULT_BYTES, ProviderCallTrace, ProviderResponse, Usage, VisionAttemptState, VisionProvider
 
 
 LOGGER = logging.getLogger("provider_transport")
@@ -214,6 +215,8 @@ def calculate_usage_cost(
 ) -> float | None:
     """Apply the same input/cached/output contract to sync and Batch usage."""
 
+    if not usage.tokens_reported:
+        return None
     input_tokens = max(0, int(usage.input_tokens))
     cached_tokens = max(0, int(usage.cached_tokens))
     output_tokens = max(0, int(usage.output_tokens))
@@ -415,6 +418,10 @@ class OpenAICompatibleProvider(VisionProvider):
                 details.get("cache_write_tokens", usage.get("cache_write_tokens", 0))
             ),
             provider_reported_cost=reported_cost,
+            tokens_reported=(
+                any(usage.get(key) is not None for key in ("prompt_tokens", "input_tokens"))
+                and any(usage.get(key) is not None for key in ("completion_tokens", "output_tokens"))
+            ),
         )
 
     def _redact(self, message: str) -> str:
@@ -801,7 +808,9 @@ class OpenAICompatibleProvider(VisionProvider):
             )
             raise
         try:
-            content = payload["choices"][0]["message"]["content"]
+            choice = payload["choices"][0]
+            message = choice["message"]
+            content = message.get("content")
         except (KeyError, IndexError, TypeError) as exc:
             error = ProviderHTTPError(
                 "Provider 回應缺少有效 Response Body", "VLM-006", ambiguous=True
@@ -833,14 +842,16 @@ class OpenAICompatibleProvider(VisionProvider):
         if isinstance(content, list):
             content = "".join(str(part.get("text", "")) for part in content if isinstance(part, dict))
         headers = getattr(response, "headers", {}) or {}
-        request_id = headers.get("x-request-id") or headers.get("x-openrouter-request-id")
+        request_id = headers.get("x-request-id") or headers.get("x-openrouter-request-id") or payload.get("id")
         served_model = str(payload.get("model")) if payload.get("model") else None
         result = ProviderResponse(
-            content=str(content).strip(),
+            content=str(content or "").strip(),
             usage=self._usage(payload),
             request_id=request_id,
             request_metrics=dict(self.last_request_metrics),
             served_model=served_model,
+            finish_reason=str(choice.get("finish_reason") or "") or None,
+            refusal=str(message.get("refusal") or "") or None,
             call_trace=call_trace(
                 response=response,
                 response_received_at=response_received_at,
@@ -872,6 +883,8 @@ class OpenAICompatibleProvider(VisionProvider):
         reasoning_effort: str | None = None,
         provider_request_context_id: str | None = None,
     ) -> dict[str, Any]:
+        if not model_request_capabilities(self.kind, model)["vision"]:
+            raise ValueError("PROVIDER-022 指定模型不支援圖片輸入")
         media_type = {
             ".gif": "image/gif",
             ".jpeg": "image/jpeg",
@@ -910,6 +923,11 @@ class OpenAICompatibleProvider(VisionProvider):
         )
         if response_format is not None:
             body["response_format"] = response_format
+        else:
+            body["messages"][0]["content"] += "\n完整 JSON Schema：" + json.dumps(
+                _json_schema_for_provider(self.kind, stage, caption_controls=caption_controls or self.caption_controls)["schema"],
+                ensure_ascii=False, separators=(",", ":"),
+            )
         if max_tokens is not None:
             body["max_tokens"] = max_tokens
         self._apply_provider_request_policy(
@@ -959,6 +977,11 @@ class OpenAICompatibleProvider(VisionProvider):
         less-private route or receiving a different structured-output policy.
         """
 
+        capabilities = model_request_capabilities(self.kind, model)
+        if capabilities["token_parameter"] != "max_tokens" and "max_tokens" in body:  # noqa: S105 -- parameter name
+            body[capabilities["token_parameter"]] = body.pop("max_tokens")
+        if not capabilities["temperature"]:
+            body.pop("temperature", None)
         if self.kind == "openrouter":
             validate_model_id(self.kind, model, base_url=self.base_url, required=True)
             routing = {key: self.options[key] for key in OPENROUTER_ROUTING_KEYS if key in self.options}
@@ -981,7 +1004,13 @@ class OpenAICompatibleProvider(VisionProvider):
             # output budget remains available for the JSON response.
             body["reasoning"] = {"effort": normalized_effort}
         elif self.supports_reasoning_effort and allow_reasoning and reasoning_effort is not None:
-            body["reasoning_effort"] = normalize_reasoning_effort(reasoning_effort)
+            effort = normalize_reasoning_effort(reasoning_effort)
+            if capabilities["token_parameter"] == "max_completion_tokens":  # noqa: S105 -- parameter name
+                if effort == "none":
+                    raise ValueError("PROVIDER-022 o-series 需要 low、medium 或 high reasoning effort")
+                if effort not in {"low", "medium", "high"}:
+                    raise ValueError("PROVIDER-022 不支援的 o-series reasoning effort")
+            body["reasoning_effort"] = effort
         return body
 
     def analyze(
@@ -1221,6 +1250,7 @@ class OpenAICompatibleProvider(VisionProvider):
         destination.parent.mkdir(parents=True, exist_ok=True)
         temporary = destination.with_name(destination.name + ".part")
         temporary.unlink(missing_ok=True)
+        response = None
         try:
             response = self._send(
                 "GET",
@@ -1234,8 +1264,12 @@ class OpenAICompatibleProvider(VisionProvider):
             with temporary.open("wb") as stream:
                 os.chmod(temporary, 0o600)
                 iterator = response.iter_content(chunk_size=1024 * 1024)
+                total_bytes = 0
                 for chunk in iterator:
                     if chunk:
+                        total_bytes += len(chunk)
+                        if total_bytes > MAX_BATCH_RESULT_BYTES:
+                            raise ProviderHTTPError("Batch 結果下載超過總位元組上限", "BATCH-FILE-LIMIT")
                         stream.write(chunk)
                 stream.flush()
                 os.fsync(stream.fileno())
@@ -1247,6 +1281,9 @@ class OpenAICompatibleProvider(VisionProvider):
             if isinstance(exc, ProviderHTTPError):
                 raise
             raise ProviderHTTPError("Batch 檔案下載中斷", "BATCH-FILE-003") from exc
+        finally:
+            if response is not None and hasattr(response, "close"):
+                response.close()
 
     def delete_remote_file(self, file_id: str) -> dict:
         if not file_id:

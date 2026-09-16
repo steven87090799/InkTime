@@ -479,9 +479,17 @@ def test_spawned_consumed_vision_timeout_is_terminal_and_billed_once(app, tmp_pa
         snapshot = budgets.snapshot(job_id=job_id, photo_id=photo_id)
         assert snapshot["photo_unknown_count"] == 1
         assert snapshot["job_unknown_count"] == 1
-        # Unknown history remains auditable and reserved globally, but it no
-        # longer permanently blocks this photo or every later Job.
+        # Budget reserves and the durable no-resend gate are separate contracts.
         budgets.assert_request_allowed(job_id, photo_id)
+        from inktime.app.repositories.billable_operations import UnreconciledOperationError
+
+        with pytest.raises(UnreconciledOperationError) as blocked:
+            service.analyze_photo(
+                photo_id=photo_id, job_id=_test_job(app, "later job"), provider=provider,
+                strategy="high_quality", high_model="test-model", force_ai=True,
+            )
+        assert classify_failure(blocked.value) == FailureClass.TERMINAL_NO_RETRY
+        assert state.vision_requests == 1
     finally:
         boundary.shutdown()
         provider.close()

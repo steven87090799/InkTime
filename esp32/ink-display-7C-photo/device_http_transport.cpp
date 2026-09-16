@@ -129,14 +129,16 @@ bool DeviceHttpTransport::beginSession(
   session_origin_ = origin;
   session_active_ = true;
   if (origin.startsWith("https://")) {
-    const String ca = effectiveCa(ca_pem_);
-    secure_client_.setCACert(ca.c_str());
+    if (effective_ca_pem_.isEmpty()) effective_ca_pem_ = effectiveCa(ca_pem_);
+    secure_client_.setCACert(effective_ca_pem_.c_str());
   }
   return true;
 }
 
 void DeviceHttpTransport::closeSession() {
   secure_client_.stop();
+  secure_client_.setCACert(nullptr);
+  effective_ca_pem_ = "";
   plain_client_.stop();
   session_origin_ = "";
   session_active_ = false;
@@ -215,8 +217,8 @@ bool DeviceHttpTransport::begin(
   http.setTimeout(timeout_ms);
   http.setFollowRedirects(HTTPC_DISABLE_FOLLOW_REDIRECTS);
   if (url.startsWith("https://")) {
-    const String ca = effectiveCa(ca_pem_);
-    secure_client_.setCACert(ca.c_str());
+    if (effective_ca_pem_.isEmpty()) effective_ca_pem_ = effectiveCa(ca_pem_);
+    secure_client_.setCACert(effective_ca_pem_.c_str());
     if (!http.begin(secure_client_, url)) {
       error_code = "DEVICE-TLS-BEGIN";
       error_message = "HTTPS client 初始化失敗";

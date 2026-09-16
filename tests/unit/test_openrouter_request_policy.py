@@ -7,6 +7,25 @@ import pytest
 
 from inktime.app.providers.base import ProviderResponse, Usage
 from inktime.app.providers.openai_compatible import OpenAICompatibleProvider, ProviderHTTPError
+from inktime.app.providers.openai_compatible import calculate_usage_cost
+from inktime.app.services.batch_analysis import BatchAnalysisService
+
+
+@pytest.mark.parametrize("payload", [{}, {"usage": None}, {"usage": {}}, {"usage": {"prompt_tokens": 12}}])
+def test_missing_usage_never_becomes_zero_cost(payload):
+    for usage in (OpenAICompatibleProvider._usage(payload), BatchAnalysisService._usage_from_body(payload)):
+        assert not usage.tokens_reported
+        assert calculate_usage_cost({}, usage) is None
+        assert calculate_usage_cost({}, usage, batch=True) is None
+
+
+def test_explicit_zero_usage_and_provider_cost_remain_distinct():
+    zero = OpenAICompatibleProvider._usage({"usage": {"prompt_tokens": 0, "completion_tokens": 0}})
+    assert zero.tokens_reported
+    assert calculate_usage_cost({}, zero) == 0
+    reported = OpenAICompatibleProvider._usage({"usage": {"cost": 0.05}})
+    assert not reported.tokens_reported
+    assert reported.provider_reported_cost == 0.05
 
 
 class CaptureProvider(OpenAICompatibleProvider):
@@ -218,3 +237,42 @@ def test_openrouter_no_compatible_endpoint_404_is_retryable():
     assert error.response_info["provider_error_code"] == "404"
     assert "No endpoints found" in error.response_info["provider_error_message"]
     provider.close()
+
+
+def test_disabled_structured_output_includes_complete_text_schema(tmp_path):
+    from inktime.app.domain.analysis.schema import json_schema_for_stage
+
+    image = tmp_path / "synthetic.jpg"
+    image.write_bytes(b"synthetic")
+    provider = _provider(kind="openai_compatible")
+    provider.supports_json_schema = False
+    body = provider.build_analysis_request_body(
+        image_path=image, model="vision-model", detail="high", stage="single",
+    )
+    assert "response_format" not in body
+    prompt = body["messages"][0]["content"]
+    schema = json.loads(prompt.split("完整 JSON Schema：", 1)[1])
+    assert schema == json_schema_for_stage("single")["schema"]
+
+
+@pytest.mark.parametrize("model", ["o1", "o3", "o3-2025-04-16", "o4-mini"])
+def test_o_series_uses_completion_cap_without_temperature(tmp_path, model):
+    image = tmp_path / "synthetic.jpg"
+    image.write_bytes(b"synthetic")
+    provider = _provider(kind="openai")
+    body = provider.build_analysis_request_body(
+        image_path=image, model=model, detail="high", stage="single",
+        max_tokens=512, reasoning_effort="low",
+    )
+    assert body["max_completion_tokens"] == 512
+    assert "max_tokens" not in body and "temperature" not in body
+    provider.repair_json(invalid_content="{}", validation_error="invalid", model=model, max_tokens=512)
+    assert provider.captured_body["max_completion_tokens"] == 512
+    assert "temperature" not in provider.captured_body
+
+
+def test_text_only_model_is_rejected_before_reading_image(tmp_path):
+    with pytest.raises(ValueError, match="不支援圖片"):
+        _provider(kind="openai").build_analysis_request_body(
+            image_path=tmp_path / "missing.jpg", model="o3-mini", detail="high", stage="single",
+        )

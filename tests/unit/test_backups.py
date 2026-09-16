@@ -237,6 +237,32 @@ def test_post_replace_validation_failure_automatically_recovers_current_database
         assert connection.execute("SELECT caption FROM photo_analysis").fetchone()[0] == "重要分析"
 
 
+def test_restore_directory_fsync_failure_recovers_original_database(monkeypatch, tmp_path):
+    import inktime.app.services.backups as backup_module
+
+    database, service = make_service(tmp_path)
+    seed(database)
+    archive = service.create()
+    seed(database, extra_photo=True)
+    original_fsync = backup_module._fsync_directory
+    failed = False
+
+    def fail_once(path):
+        nonlocal failed
+        if path == database.path.parent and not failed:
+            failed = True
+            raise OSError("forced directory fsync failure")
+        original_fsync(path)
+
+    monkeypatch.setattr(backup_module, "_fsync_directory", fail_once)
+    with pytest.raises(OSError, match="forced directory fsync failure"):
+        service.restore(archive)
+    assert failed
+    with database.session() as connection:
+        assert connection.execute("SELECT COUNT(*) FROM photos").fetchone()[0] == 2
+        assert connection.execute("SELECT caption FROM photo_analysis").fetchone()[0] == "重要分析"
+
+
 def test_empty_sqlite_snapshot_is_rejected_before_current_database_is_touched(tmp_path):
     database, service = make_service(tmp_path)
     seed(database)
@@ -249,6 +275,28 @@ def test_empty_sqlite_snapshot_is_rejected_before_current_database_is_touched(tm
     with database.session() as connection:
         assert connection.execute("SELECT COUNT(*) FROM photos").fetchone()[0] == 1
         assert connection.execute("SELECT caption FROM photo_analysis").fetchone()[0] == "重要分析"
+
+
+def test_exact_snapshot_restore_does_not_run_forward_migrations(monkeypatch, tmp_path):
+    import inktime.app.db.migrations as migration_module
+    import inktime.app.services.backups as backup_module
+
+    database, service = make_service(tmp_path)
+    old = Database(tmp_path / "old.sqlite3")
+    with monkeypatch.context() as patch:
+        patch.setattr(migration_module, "MIGRATIONS", MIGRATIONS[:-1])
+        migrate(old)
+    old_version = old.schema_version()
+    with old.session() as connection:
+        connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+
+    def forbidden_migration(*args, **kwargs):
+        raise AssertionError("exact rollback must not migrate")
+
+    monkeypatch.setattr(backup_module, "migrate", forbidden_migration)
+    restored = service.restore_sqlite_snapshot(old.path, exact_snapshot=True)
+    assert restored["schema_version"] == old_version
+    assert database.schema_version() == old_version
 
 
 def test_fresh_volume_restore_preserves_platform_identity_and_roles(tmp_path):
@@ -331,3 +379,22 @@ def test_fresh_volume_restore_preserves_platform_identity_and_roles(tmp_path):
     finally:
         scheduler.close()
         worker.close()
+
+
+def test_safety_snapshots_are_private_and_keep_latest_verified_point(tmp_path):
+    import os
+    import stat
+
+    database, service = make_service(tmp_path)
+    seed(database)
+    snapshots = [service._snapshot_current() for _ in range(5)]
+    remaining = list(service.backup_dir.glob("inktime-pre-restore-*.sqlite3"))
+    assert len(remaining) == 3
+    assert snapshots[-1] in remaining
+    assert all(stat.S_IMODE(path.stat().st_mode) == 0o600 for path in remaining)
+    for path in remaining:
+        os.utime(path, (1, 1))
+    latest = service._snapshot_current()
+    assert list(service.backup_dir.glob("inktime-pre-restore-*.sqlite3")) == [latest]
+    with sqlite3.connect(latest) as connection:
+        assert connection.execute("PRAGMA integrity_check").fetchone()[0] == "ok"

@@ -781,7 +781,7 @@ def _classify_path(path: str) -> tuple[set[str], set[str], set[str], bool]:
         suites.add("docs_contract")
         return domains, suites, gates, False
 
-    if path == "requirements.txt" or path.startswith(("constraints/", "constraints-")):
+    if path == "requirements.txt" or path.startswith(("constraints/", "constraints-", "requirements-locks/")):
         domains.add("dependencies")
         suites.update({"python_dependency_owner", "dependency_policy"})
         gates.update({"dependency_audit", "container_security"})

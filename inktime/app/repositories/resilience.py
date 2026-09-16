@@ -1336,15 +1336,37 @@ class ResilienceRepository:
                         # BudgetService and AI-limit both use the current calendar
                         # month.  A shorter operator retention value must not erase
                         # that in-window evidence before the month closes.
+                        from inktime.app.repositories.settings import SettingsRepository
+                        from inktime.app.services.usage_periods import usage_periods
+
+                        periods = usage_periods(
+                            str(SettingsRepository(self.database).get("general.timezone", "Asia/Taipei")),
+                            now=datetime.now(timezone.utc),
+                        )
                         ids = connection.execute(
-                            "SELECT id FROM api_usage WHERE started_at<? AND date(started_at)<date('now','start of month') ORDER BY started_at,id LIMIT ?",
-                            (cutoff, int(policy["cleanup_batch_size"])),
+                            "SELECT id FROM api_usage WHERE started_at<? AND started_at<? "
+                            "AND cost_source<>'unknown' AND operation_id IS NULL AND batch_item_id IS NULL "
+                            "ORDER BY started_at,id LIMIT ?",
+                            (cutoff, periods["month_start"], int(policy["cleanup_batch_size"])),
                         ).fetchall()
                     else:
                         ids = connection.execute(
                             f"SELECT {id_column} FROM {table} WHERE {time_column}<? ORDER BY {time_column},{id_column} LIMIT ?",  # noqa: S608 -- mapping is fixed above
                             (cutoff, int(policy["cleanup_batch_size"])),
                         ).fetchall()
+                    minimum = max(0, int(policy["minimum_items_to_keep"]))
+                    if minimum and ids:
+                        # Protect the newest minimum in the same writer transaction.
+                        # The candidate list is already bounded by cleanup_batch_size.
+                        placeholders = ",".join("?" for _ in ids)
+                        protected = connection.execute(
+                            f"SELECT {id_column} FROM (SELECT {id_column} FROM {table} "  # noqa: S608 -- fixed mapping
+                            f"ORDER BY {time_column} DESC,{id_column} DESC LIMIT ?) "
+                            f"WHERE {id_column} IN ({placeholders})",  # noqa: S608 -- fixed mapping
+                            (minimum, *(row[0] for row in ids)),
+                        ).fetchall()
+                        protected_ids = {str(row[0]) for row in protected}
+                        ids = [row for row in ids if str(row[0]) not in protected_ids]
                     for row in ids:
                         identifier = str(row[0])
                         connection.execute(
@@ -1359,6 +1381,14 @@ class ResilienceRepository:
                             ),
                         )
                         if not dry_run:
+                            if table == "api_usage":
+                                connection.execute(
+                                    "INSERT INTO usage_cost_archive(job_id,photo_id,cost) "
+                                    "SELECT COALESCE(job_id,''),COALESCE(photo_id,''),COALESCE(actual_cost,estimated_cost,0) "
+                                    "FROM api_usage WHERE id=? "
+                                    "ON CONFLICT(job_id,photo_id) DO UPDATE SET cost=cost+excluded.cost",
+                                    (identifier,),
+                                )
                             connection.execute(  # noqa: S608 -- mapping is fixed above
                                 f"DELETE FROM {table} WHERE {id_column}=?",  # noqa: S608 -- mapping is fixed above
                                 (identifier,),

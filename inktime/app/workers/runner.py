@@ -28,11 +28,250 @@ from inktime.app.domain.analysis.scoring import LOCAL_QUALITY_SCORE_KIND
 LOGGER = logging.getLogger("worker")
 
 
+def _execute_job_item(app, item, *, job, settings, provider, provider_error, analysis, analysis_plan, execution, progress_items, progress_seconds, scanner_disk_batch_size, scanner_write_batch_size, scanner_missing_threshold_ratio, scanner_safety, runtime_settings, scan_cancel_requested, log_scan_progress):
+    if job["kind"] == "analysis" and execution == "disabled":
+        raise AnalysisDisabledError("Frozen Analysis Plan 指定完全停用；工作項目已拒絕")
+    if provider_error is not None:
+        raise provider_error
+    if job["kind"] == "analysis_batch_poll":
+        return app.extensions["inktime_batch_analysis_service"].poll_due(limit=2)
+    if job["kind"] == "analysis_batch_import":
+        return app.extensions["inktime_batch_analysis_service"].import_batch(
+            str(settings["batch_id"]),
+            cleanup_only=bool(settings.get("cleanup_only", False)),
+        )
+    if job["kind"] == "render_preview":
+        operation = str(settings.get("operation", ""))
+        started = time.perf_counter()
+        if operation == "compare":
+            result = app.extensions["inktime_render_workload_service"].compare(settings)
+        elif operation == "simulate":
+            result = app.extensions["inktime_render_workload_service"].simulate(settings)
+        elif operation == "test_release":
+            result = app.extensions["inktime_render_workload_service"].test_release(
+                settings,
+                {
+                    "job_id": str(job["id"]),
+                    "item_id": str(item["id"]),
+                    "worker_id": str(item["worker_id"]),
+                    "idempotency_key": str(item["idempotency_key"]),
+                },
+            )
+        elif operation == "library_preview":
+            service = app.extensions["inktime_render_service"]
+            render_cache = app.extensions["inktime_render_cache"]
+            result = app.extensions["inktime_render_workload_service"].library_preview(
+                settings,
+                {
+                    "job_id": str(job["id"]),
+                    "item_id": str(item["id"]),
+                    "worker_id": str(item["worker_id"]),
+                    "idempotency_key": str(item["idempotency_key"]),
+                },
+                render_service=service,
+                render_cache=render_cache,
+            )
+        elif operation == "dual_pair_compare":
+            result = app.extensions["inktime_render_workload_service"].dual_pair_compare(
+                settings,
+                {
+                    "job_id": str(job["id"]),
+                    "item_id": str(item["id"]),
+                    "worker_id": str(item["worker_id"]),
+                    "idempotency_key": str(item["idempotency_key"]),
+                },
+                render_service=app.extensions["inktime_render_service"],
+            )
+        elif operation == "history_test_release":
+            result = app.extensions["inktime_render_workload_service"].test_release(
+                settings,
+                {
+                    "job_id": str(job["id"]),
+                    "item_id": str(item["id"]),
+                    "worker_id": str(item["worker_id"]),
+                    "idempotency_key": str(item["idempotency_key"]),
+                },
+            )
+        else:
+            raise ValueError("RENDER-008 不支援的背景渲染工作")
+        result["render_duration_ms"] = int((time.perf_counter() - started) * 1000)
+        return result
+    if job["kind"] == "scan":
+        scanner = PhotoScanner(
+            app.extensions["inktime_photo_repository"],
+            PhotoPreprocessor(),
+            app.extensions["inktime_thumbnail_cache"],
+        )
+        return scanner.scan(
+            settings.get("library_name", "主要照片庫"),
+            Path(settings["root_path"]),
+            mode=str(settings.get("mode", "incremental")),
+            trigger_source=str(settings.get("trigger_source", "api")),
+            build_thumbnails=bool(settings.get("build_thumbnails", True)),
+            disk_batch_size=int(settings.get("disk_batch_size", scanner_disk_batch_size)),
+            write_batch_size=scanner_write_batch_size,
+            missing_threshold_ratio=float(
+                settings.get("missing_threshold_percent", scanner_missing_threshold_ratio * 100)
+            )
+            / 100,
+            cancel_requested=scan_cancel_requested,
+            progress_callback=log_scan_progress,
+            progress_interval_items=progress_items,
+            progress_interval_seconds=progress_seconds,
+            **scanner_safety,
+        )
+    if job["kind"] == "render":
+        offline_prepare = settings.get("offline_prepare")
+        if isinstance(offline_prepare, dict):
+            return app.extensions["inktime_display_preparation_service"].prepare_device_day(
+                device_id=str(offline_prepare["device_id"]),
+                target_date=str(offline_prepare["target_date"]),
+                created_by=str(job["created_by"] or "system"),
+                expected_config_version=(
+                    int(offline_prepare["config_version"])
+                    if offline_prepare.get("config_version") is not None
+                    else None
+                ),
+            )
+        display_prepare = settings.get("display_prepare")
+        if display_prepare is not None:
+            return app.extensions["inktime_display_preparation_service"].prepare(
+                display_prepare,
+                created_by=str(job["created_by"] or "system"),
+            )
+        arguments = (
+            [str(value) for value in settings.get("photo_ids", [])],
+            str(job["created_by"] or "system"),
+        )
+        history = settings.get("history")
+        if "profile_keys" in settings or "device_ids" in settings:
+            kwargs = {}
+            if "profile_keys" in settings:
+                kwargs["profile_keys"] = [str(value) for value in settings["profile_keys"]]
+            if "device_ids" in settings:
+                kwargs["device_ids"] = [str(value) for value in settings["device_ids"]]
+            if isinstance(history, dict):
+                kwargs["history"] = history
+            release = app.extensions["inktime_render_service"].publish(*arguments, **kwargs)
+        else:
+            if isinstance(history, dict):
+                release = app.extensions["inktime_render_service"].publish(
+                    *arguments, history=history
+                )
+            else:
+                release = app.extensions["inktime_render_service"].publish(*arguments)
+        return release
+    if job["kind"] == "virtual_display":
+        root = Path(settings["root_path"]).expanduser().resolve()
+        scanner = PhotoScanner(
+            app.extensions["inktime_photo_repository"],
+            PhotoPreprocessor(),
+            app.extensions["inktime_thumbnail_cache"],
+        )
+        scan = scanner.scan(
+            settings.get("library_name", "電子紙模擬照片"),
+            root,
+            mode="incremental",
+            trigger_source="virtual-display",
+            build_thumbnails=False,
+            disk_batch_size=scanner_disk_batch_size,
+            write_batch_size=scanner_write_batch_size,
+            missing_threshold_ratio=scanner_missing_threshold_ratio,
+            cancel_requested=scan_cancel_requested,
+            progress_callback=log_scan_progress,
+            progress_interval_items=progress_items,
+            progress_interval_seconds=progress_seconds,
+            **scanner_safety,
+        )
+        photo_ids = app.extensions["inktime_photo_repository"].list_existing_photo_ids(
+            str(scan["library_id"]),
+            root,
+            limit=int(settings.get("quantity", 5)),
+        )
+        if not photo_ids:
+            raise ValueError("IMG-002 模擬照片資料夾內沒有可用圖片")
+        candidate_repository = app.extensions["inktime_render_candidate_repository"]
+        photo_repository = app.extensions["inktime_photo_repository"]
+        for photo_id in photo_ids:
+            if candidate_repository.get(photo_id) is not None:
+                continue
+            photo_repository.save_analysis(
+                photo_id,
+                str(job["id"]),
+                "local",
+                "local",
+                "virtual-display-local",
+                app.extensions["inktime_analysis_service"]._local_result(photo_repository.get_with_path(photo_id)),
+                "{}",
+                score_kind=LOCAL_QUALITY_SCORE_KIND,
+            )
+        release = app.extensions["inktime_render_service"].publish(
+            photo_ids,
+            str(job["created_by"] or "system"),
+            profile_keys=[str(settings["profile_key"])],
+        )
+        return {"scan": scan, "release": release}
+    if job["kind"] == "backup":
+        path = app.extensions["inktime_backup_service"].create()
+        removed = app.extensions["inktime_backup_service"].enforce_retention(
+            max(0, int(settings.get("retention_days", 14)))
+        )
+        return {"backup": path.name, "removed": removed}
+    if job["kind"] == "cleanup":
+        cache = app.extensions["inktime_thumbnail_cache"]
+        inventory = cache.inventory()
+        return cache.cleanup(
+            max_bytes=int(settings.get("max_bytes", 5 * 1024 * 1024 * 1024)),
+            retention_days=int(settings.get("retention_days", 30)),
+            active_hashes=app.extensions["inktime_photo_repository"].active_hashes_for(
+                [entry[4] for entry in inventory]
+            ),
+            inventory=inventory,
+        )
+    if job["kind"] == "webhook":
+        return app.extensions["inktime_notification_service"].deliver_one(
+            int(settings["notification_id"])
+        )
+    return analysis.analyze_photo(
+        photo_id=item["photo_id"],
+        job_id=job["id"],
+        provider=provider,
+        strategy=job["strategy"],
+        analysis_plan=analysis_plan,
+        force_ai=bool(settings.get("force_ai", False)),
+        force_actor=str(job["created_by"] or "system"),
+        force_recompute=bool(job["force_recompute"]),
+    )
+
+
+def _run_local_job_item(*, config, item, context):
+    from inktime.app.bootstrap import bootstrap_services
+
+    container = bootstrap_services(config, role="worker")
+    try:
+        repository = container.extensions["inktime_job_repository"]
+
+        def cancelled():
+            job = repository.get(context["job"]["id"])
+            return job is None or job["status"] in {"cancelled", "paused", "failed"}
+
+        return _execute_job_item(
+            container, item, **context, provider=None, provider_error=None,
+            analysis=container.extensions["inktime_analysis_service"],
+            runtime_settings=container.extensions["inktime_settings_repository"],
+            scan_cancel_requested=cancelled, log_scan_progress=None,
+        )
+    finally:
+        container.close()
+
+
 class WorkerRunner:
     IDLE_BACKOFF_SECONDS = (15.0, 30.0, 60.0)
 
-    def __init__(self, app) -> None:
+    def __init__(self, app, *, isolate_local: bool | None = None) -> None:
         self.app = app
+        config = app.extensions.get("inktime_runtime_config")
+        self.isolate_local = (not bool(getattr(config, "testing", False))) if isolate_local is None else isolate_local
         self.stop = threading.Event()
         self.current: BoundedJobWorker | None = None
 
@@ -195,218 +434,29 @@ class WorkerRunner:
                 scanner_safety=scanner_safety,
                 runtime_settings=runtime_settings,
             ):
-                if job["kind"] == "analysis" and execution == "disabled":
-                    raise AnalysisDisabledError("Frozen Analysis Plan 指定完全停用；工作項目已拒絕")
-                if provider_error is not None:
-                    raise provider_error
-                if job["kind"] == "analysis_batch_poll":
-                    return self.app.extensions["inktime_batch_analysis_service"].poll_due(limit=2)
-                if job["kind"] == "analysis_batch_import":
-                    return self.app.extensions["inktime_batch_analysis_service"].import_batch(
-                        str(settings["batch_id"]),
-                        cleanup_only=bool(settings.get("cleanup_only", False)),
-                    )
-                if job["kind"] == "render_preview":
-                    operation = str(settings.get("operation", ""))
-                    started = time.perf_counter()
-                    if operation == "compare":
-                        result = self.app.extensions["inktime_render_workload_service"].compare(settings)
-                    elif operation == "simulate":
-                        result = self.app.extensions["inktime_render_workload_service"].simulate(settings)
-                    elif operation == "test_release":
-                        result = self.app.extensions["inktime_render_workload_service"].test_release(
-                            settings,
-                            {
-                                "job_id": str(job["id"]),
-                                "item_id": str(item["id"]),
-                                "worker_id": str(item["worker_id"]),
-                                "idempotency_key": str(item["idempotency_key"]),
-                            },
+                local_kind = str(job["kind"]) in {
+                    "scan", "render", "render_preview", "virtual_display", "backup", "cleanup"
+                } or (str(job["kind"]) == "analysis" and (str(job["strategy"]) == "local" or execution == "local_only"))
+                if self.isolate_local and local_kind:
+                    from inktime.app.workers.process_boundary import ProcessCallError, ProcessCallTimeout
+
+                    try:
+                        return self.app.extensions["inktime_process_boundary"].call(
+                            _run_local_job_item,
+                            timeout_seconds=max(1, int(settings.get("timeout_seconds", 0) or 900)),
+                            kwargs={"config": self.app.extensions["inktime_runtime_config"],
+                                    "item": dict(item), "context": {"job": dict(job), "settings": settings, "analysis_plan": analysis_plan, "execution": execution, "progress_items": progress_items, "progress_seconds": progress_seconds, "scanner_disk_batch_size": scanner_disk_batch_size, "scanner_write_batch_size": scanner_write_batch_size, "scanner_missing_threshold_ratio": scanner_missing_threshold_ratio, "scanner_safety": scanner_safety}},
+                            cancel_requested=self.stop.is_set,
+                            process_name="inktime-local-job",
                         )
-                    elif operation == "library_preview":
-                        service = self.app.extensions["inktime_render_service"]
-                        render_cache = self.app.extensions["inktime_render_cache"]
-                        result = self.app.extensions["inktime_render_workload_service"].library_preview(
-                            settings,
-                            {
-                                "job_id": str(job["id"]),
-                                "item_id": str(item["id"]),
-                                "worker_id": str(item["worker_id"]),
-                                "idempotency_key": str(item["idempotency_key"]),
-                            },
-                            render_service=service,
-                            render_cache=render_cache,
-                        )
-                    elif operation == "dual_pair_compare":
-                        result = self.app.extensions["inktime_render_workload_service"].dual_pair_compare(
-                            settings,
-                            {
-                                "job_id": str(job["id"]),
-                                "item_id": str(item["id"]),
-                                "worker_id": str(item["worker_id"]),
-                                "idempotency_key": str(item["idempotency_key"]),
-                            },
-                            render_service=self.app.extensions["inktime_render_service"],
-                        )
-                    elif operation == "history_test_release":
-                        result = self.app.extensions["inktime_render_workload_service"].test_release(
-                            settings,
-                            {
-                                "job_id": str(job["id"]),
-                                "item_id": str(item["id"]),
-                                "worker_id": str(item["worker_id"]),
-                                "idempotency_key": str(item["idempotency_key"]),
-                            },
-                        )
-                    else:
-                        raise ValueError("RENDER-008 不支援的背景渲染工作")
-                    result["render_duration_ms"] = int((time.perf_counter() - started) * 1000)
-                    return result
-                if job["kind"] == "scan":
-                    scanner = PhotoScanner(
-                        self.app.extensions["inktime_photo_repository"],
-                        PhotoPreprocessor(),
-                        self.app.extensions["inktime_thumbnail_cache"],
-                    )
-                    return scanner.scan(
-                        settings.get("library_name", "主要照片庫"),
-                        Path(settings["root_path"]),
-                        mode=str(settings.get("mode", "incremental")),
-                        trigger_source=str(settings.get("trigger_source", "api")),
-                        build_thumbnails=bool(settings.get("build_thumbnails", True)),
-                        disk_batch_size=int(settings.get("disk_batch_size", scanner_disk_batch_size)),
-                        write_batch_size=scanner_write_batch_size,
-                        missing_threshold_ratio=float(
-                            settings.get("missing_threshold_percent", scanner_missing_threshold_ratio * 100)
-                        )
-                        / 100,
-                        cancel_requested=scan_cancel_requested,
-                        progress_callback=log_scan_progress,
-                        progress_interval_items=progress_items,
-                        progress_interval_seconds=progress_seconds,
-                        **scanner_safety,
-                    )
-                if job["kind"] == "render":
-                    offline_prepare = settings.get("offline_prepare")
-                    if isinstance(offline_prepare, dict):
-                        return self.app.extensions["inktime_display_preparation_service"].prepare_device_day(
-                            device_id=str(offline_prepare["device_id"]),
-                            target_date=str(offline_prepare["target_date"]),
-                            created_by=str(job["created_by"] or "system"),
-                            expected_config_version=(
-                                int(offline_prepare["config_version"])
-                                if offline_prepare.get("config_version") is not None
-                                else None
-                            ),
-                        )
-                    display_prepare = settings.get("display_prepare")
-                    if display_prepare is not None:
-                        return self.app.extensions["inktime_display_preparation_service"].prepare(
-                            display_prepare,
-                            created_by=str(job["created_by"] or "system"),
-                        )
-                    arguments = (
-                        [str(value) for value in settings.get("photo_ids", [])],
-                        str(job["created_by"] or "system"),
-                    )
-                    history = settings.get("history")
-                    if "profile_keys" in settings or "device_ids" in settings:
-                        kwargs = {}
-                        if "profile_keys" in settings:
-                            kwargs["profile_keys"] = [str(value) for value in settings["profile_keys"]]
-                        if "device_ids" in settings:
-                            kwargs["device_ids"] = [str(value) for value in settings["device_ids"]]
-                        if isinstance(history, dict):
-                            kwargs["history"] = history
-                        release = self.app.extensions["inktime_render_service"].publish(*arguments, **kwargs)
-                    else:
-                        if isinstance(history, dict):
-                            release = self.app.extensions["inktime_render_service"].publish(
-                                *arguments, history=history
-                            )
-                        else:
-                            release = self.app.extensions["inktime_render_service"].publish(*arguments)
-                    return release
-                if job["kind"] == "virtual_display":
-                    root = Path(settings["root_path"]).expanduser().resolve()
-                    scanner = PhotoScanner(
-                        self.app.extensions["inktime_photo_repository"],
-                        PhotoPreprocessor(),
-                        self.app.extensions["inktime_thumbnail_cache"],
-                    )
-                    scan = scanner.scan(
-                        settings.get("library_name", "電子紙模擬照片"),
-                        root,
-                        mode="incremental",
-                        trigger_source="virtual-display",
-                        build_thumbnails=False,
-                        disk_batch_size=scanner_disk_batch_size,
-                        write_batch_size=scanner_write_batch_size,
-                        missing_threshold_ratio=scanner_missing_threshold_ratio,
-                        cancel_requested=scan_cancel_requested,
-                        progress_callback=log_scan_progress,
-                        progress_interval_items=progress_items,
-                        progress_interval_seconds=progress_seconds,
-                        **scanner_safety,
-                    )
-                    photo_ids = self.app.extensions["inktime_photo_repository"].list_existing_photo_ids(
-                        str(scan["library_id"]),
-                        root,
-                        limit=int(settings.get("quantity", 5)),
-                    )
-                    if not photo_ids:
-                        raise ValueError("IMG-002 模擬照片資料夾內沒有可用圖片")
-                    candidate_repository = self.app.extensions["inktime_render_candidate_repository"]
-                    photo_repository = self.app.extensions["inktime_photo_repository"]
-                    for photo_id in photo_ids:
-                        if candidate_repository.get(photo_id) is not None:
-                            continue
-                        photo_repository.save_analysis(
-                            photo_id,
-                            str(job["id"]),
-                            "local",
-                            "local",
-                            "virtual-display-local",
-                            self.app.extensions["inktime_analysis_service"]._local_result(photo_repository.get_with_path(photo_id)),
-                            "{}",
-                            score_kind=LOCAL_QUALITY_SCORE_KIND,
-                        )
-                    release = self.app.extensions["inktime_render_service"].publish(
-                        photo_ids,
-                        str(job["created_by"] or "system"),
-                        profile_keys=[str(settings["profile_key"])],
-                    )
-                    return {"scan": scan, "release": release}
-                if job["kind"] == "backup":
-                    path = self.app.extensions["inktime_backup_service"].create()
-                    removed = self.app.extensions["inktime_backup_service"].enforce_retention(
-                        max(0, int(settings.get("retention_days", 14)))
-                    )
-                    return {"backup": path.name, "removed": removed}
-                if job["kind"] == "cleanup":
-                    cache = self.app.extensions["inktime_thumbnail_cache"]
-                    inventory = cache.inventory()
-                    return cache.cleanup(
-                        max_bytes=int(settings.get("max_bytes", 5 * 1024 * 1024 * 1024)),
-                        retention_days=int(settings.get("retention_days", 30)),
-                        active_hashes=self.app.extensions["inktime_photo_repository"].active_hashes_for(
-                            [entry[4] for entry in inventory]
-                        ),
-                        inventory=inventory,
-                    )
-                if job["kind"] == "webhook":
-                    return self.app.extensions["inktime_notification_service"].deliver_one(
-                        int(settings["notification_id"])
-                    )
-                return analysis.analyze_photo(
-                    photo_id=item["photo_id"],
-                    job_id=job["id"],
-                    provider=provider,
-                    strategy=job["strategy"],
-                    analysis_plan=analysis_plan,
-                    force_ai=bool(settings.get("force_ai", False)),
-                    force_actor=str(job["created_by"] or "system"),
-                    force_recompute=bool(job["force_recompute"]),
+                    except ProcessCallTimeout as exc:
+                        exc.code = "JOB-LOCAL-TIMEOUT"
+                        raise
+                    except ProcessCallError as exc:
+                        exc.code = "JOB-LOCAL-FAILED"
+                        raise
+                return _execute_job_item(
+                    self.app, item, job=job, settings=settings, provider=provider, provider_error=provider_error, analysis=analysis, analysis_plan=analysis_plan, execution=execution, progress_items=progress_items, progress_seconds=progress_seconds, scanner_disk_batch_size=scanner_disk_batch_size, scanner_write_batch_size=scanner_write_batch_size, scanner_missing_threshold_ratio=scanner_missing_threshold_ratio, scanner_safety=scanner_safety, runtime_settings=runtime_settings, scan_cancel_requested=scan_cancel_requested, log_scan_progress=log_scan_progress
                 )
 
             def record_result(result: dict, *, job=job, settings=settings) -> None:

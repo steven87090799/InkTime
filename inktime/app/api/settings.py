@@ -718,7 +718,9 @@ def test_provider(provider_id: str):
             base_url=str(config.get("base_url") or ""),
             required=True,
         )
-        result = run_provider_contract(provider, level=level, model=model)
+        result = run_provider_contract(
+            provider, level=level, model=model, budgets=current_app.extensions["inktime_budget_service"]
+        )
     except (ValueError, KeyError) as exc:
         abort(400, description=f"SET-005 {exc}")
     finally:

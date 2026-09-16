@@ -24,6 +24,7 @@ def main() -> None:
         default=Path(os.environ.get("INKTIME_DATABASE", "/data/inktime.db")),
     )
     parser.add_argument("--backup-dir", type=Path)
+    parser.add_argument("--exact-snapshot", action="store_true", help="保留快照 Schema，不執行 Migration；還原後使用相容的舊版本啟動")
     parser.add_argument("--yes", action="store_true", help="確認執行原子還原")
     args = parser.parse_args()
     if not args.yes:
@@ -39,9 +40,9 @@ def main() -> None:
         (args.backup_dir or database_path.parent / "backups").expanduser().resolve(),
     )
     result = (
-        service.restore(backup)
+        service.restore(backup, exact_snapshot=args.exact_snapshot)
         if backup.suffix.casefold() == ".zip"
-        else service.restore_sqlite_snapshot(backup)
+        else service.restore_sqlite_snapshot(backup, exact_snapshot=args.exact_snapshot)
     )
     print(json.dumps(result, ensure_ascii=False, indent=2))
 

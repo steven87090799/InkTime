@@ -1163,7 +1163,7 @@ class JobRepository:
                     )
                     if cursor.rowcount:
                         connection.execute(
-                            "UPDATE jobs SET completed_items=completed_items+1, spent=spent+?, heartbeat_at=? WHERE id=?",
+                            "UPDATE jobs SET completed_items=completed_items+1, spent=CASE WHEN (EXISTS(SELECT 1 FROM api_usage WHERE job_id=jobs.id) OR EXISTS(SELECT 1 FROM usage_cost_archive WHERE job_id=jobs.id)) THEN (SELECT COALESCE(SUM(COALESCE(actual_cost,estimated_cost)),0) FROM api_usage WHERE job_id=jobs.id AND cost_source<>'unknown')+(SELECT COALESCE(SUM(cost),0) FROM usage_cost_archive WHERE job_id=jobs.id) ELSE spent+? END, heartbeat_at=? WHERE id=?",
                             (actual_cost, now, job_id),
                         )
                 connection.execute("COMMIT")
@@ -1198,7 +1198,7 @@ class JobRepository:
             if cursor.rowcount:
                 connection.execute(
                     """
-                    UPDATE jobs SET failed_items=failed_items+1,spent=spent+?,heartbeat_at=?
+                    UPDATE jobs SET failed_items=failed_items+1,spent=CASE WHEN (EXISTS(SELECT 1 FROM api_usage WHERE job_id=jobs.id) OR EXISTS(SELECT 1 FROM usage_cost_archive WHERE job_id=jobs.id)) THEN (SELECT COALESCE(SUM(COALESCE(actual_cost,estimated_cost)),0) FROM api_usage WHERE job_id=jobs.id AND cost_source<>'unknown')+(SELECT COALESCE(SUM(cost),0) FROM usage_cost_archive WHERE job_id=jobs.id) ELSE spent+? END,heartbeat_at=?
                     WHERE id=?
                     """,
                     (actual_cost, now, job_id),
@@ -1555,7 +1555,7 @@ class JobRepository:
             )
             if cursor.rowcount:
                 connection.execute(
-                    "UPDATE jobs SET completed_items=completed_items+1,spent=spent+?,heartbeat_at=? WHERE id=?",
+                    "UPDATE jobs SET completed_items=completed_items+1,spent=CASE WHEN (EXISTS(SELECT 1 FROM api_usage WHERE job_id=jobs.id) OR EXISTS(SELECT 1 FROM usage_cost_archive WHERE job_id=jobs.id)) THEN (SELECT COALESCE(SUM(COALESCE(actual_cost,estimated_cost)),0) FROM api_usage WHERE job_id=jobs.id AND cost_source<>'unknown')+(SELECT COALESCE(SUM(cost),0) FROM usage_cost_archive WHERE job_id=jobs.id) ELSE spent+? END,heartbeat_at=? WHERE id=?",
                     (actual_cost, now, job_id),
                 )
             return bool(cursor.rowcount)

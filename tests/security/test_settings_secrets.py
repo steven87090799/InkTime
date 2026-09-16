@@ -44,7 +44,7 @@ def test_provider_model_is_saved_rendered_and_used_by_contract_test(client, app,
 
     captured = {}
 
-    def fake_contract(_provider, *, level, model):
+    def fake_contract(_provider, *, level, model, budgets=None):
         captured.update(level=level, model=model)
         return {"ok": True, "message": "ok"}
 

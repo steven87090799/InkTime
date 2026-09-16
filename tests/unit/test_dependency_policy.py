@@ -144,3 +144,17 @@ def test_requires_python_rejects_specifiers_that_do_not_accept_python_310(tmp_pa
     content = VALID_PYPROJECT.replace('requires-python = ">=3.10"', f'requires-python = "{specifier}"')
     errors = pyproject_errors(_write_pyproject(tmp_path, content))
     assert any("requires-python" in error for error in errors)
+
+
+def test_runtime_locks_require_hashes_and_matching_direct_versions(tmp_path):
+    from scripts.check_dependency_policy import runtime_lock_errors
+
+    direct = tmp_path / "requirements.txt"
+    direct.write_text("requests==2.34.2\n")
+    lock = tmp_path / "linux-amd64-py312.txt"
+    lock.write_text("requests==2.34.2 --hash=sha256:" + "a" * 64 + "\n")
+    assert runtime_lock_errors(lock, direct) == []
+    lock.write_text("requests==2.34.2\n")
+    assert runtime_lock_errors(lock, direct)
+    lock.write_text("requests==2.33.0 --hash=sha256:" + "a" * 64 + "\n")
+    assert runtime_lock_errors(lock, direct)

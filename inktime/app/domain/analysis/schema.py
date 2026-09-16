@@ -285,7 +285,7 @@ def _validate(value: Any, schema: dict[str, Any], path: str) -> None:
         raise AnalysisValidationError(f"{path} 長度不合法")
 
 
-def validate_model_response(raw: str | dict) -> dict:
+def validate_model_response(raw: str | dict, *, caption_controls: dict[str, Any] | None = None) -> dict:
     """Normalize only conservative orientation contradictions at model ingress.
 
     Validate the complete shape first: missing fields, invalid enums/types,
@@ -298,7 +298,7 @@ def validate_model_response(raw: str | dict) -> dict:
         except json.JSONDecodeError as exc:
             raise AnalysisValidationError("模型回傳無效 JSON") from exc
     value = to_taiwan_traditional(deepcopy(raw))
-    _validate(value, ANALYSIS_JSON_SCHEMA["schema"], "analysis")
+    _validate(value, json_schema_for_stage("single", caption_controls=caption_controls)["schema"], "analysis")
     if not isinstance(value, dict):
         raise AnalysisValidationError("analysis 必須是 object")
     orientation = value["visual_orientation"]

@@ -66,9 +66,10 @@ curl -fsS http://127.0.0.1:${INKTIME_PORT:-8765}/health/ready
 docker compose run --rm --no-deps inktime-web \
   python scripts/restore_backup.py \
   /data/backups/inktime-pre-migration-YYYYMMDDTHHMMSSffffffZ.sqlite3 \
+  --exact-snapshot \
   --database /data/inktime.db \
   --backup-dir /data/backups \
   --yes
 ```
 
-接著切回與該 Schema 相容的舊映像／Git Commit，再啟動服務。不可只切回程式碼而保留較新的正式資料庫，也不可在線上複製單一 `.db` 檔取代 WAL 一致備份。
+`--exact-snapshot` 會驗證完整性並保留快照的 Schema，不執行新版 Migration；一般還原仍會向前升級。接著切回與該 Schema 相容的舊映像／Git Commit，再啟動服務，核對 readiness、Schema 版本與照片／分析筆數。不可先用新版服務啟動精確還原後的資料庫，否則它會再次升級。不可只切回程式碼而保留較新的正式資料庫，也不可在線上複製單一 `.db` 檔取代 WAL 一致備份。

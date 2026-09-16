@@ -42,7 +42,8 @@ def test_trusted_lan_http_is_strictly_rfc1918_and_https_remains_verified():
     assert "if (http && !isRfc1918LiteralHost(host))" in transport
     assert 'error_code = "DEVICE-HTTP-PUBLIC-DISALLOWED"' in transport
     assert 'if (https && !validCa(effectiveCa(ca_pem)))' in transport
-    assert "secure_client_.setCACert(ca.c_str());" in transport
+    assert "secure_client_.setCACert(effective_ca_pem_.c_str());" in transport
+    assert "const String ca = effectiveCa(ca_pem_);" not in transport
     assert "setInsecure" not in transport
 
 
@@ -174,3 +175,13 @@ def test_remote_config_persists_candidate_before_runtime_commit():
     assert persist < commit < changed
     assert "serverConfigChanged = true;" not in block[failure:commit]
     assert "saveConfig(cfg);" not in block
+
+
+def test_ca_storage_outlives_tls_and_is_cleared_only_after_stop():
+    header = HEADER.read_text()
+    transport = TRANSPORT.read_text()
+    assert header.index("String effective_ca_pem_") < header.index("WiFiClientSecure secure_client_")
+    assert "DeviceHttpTransport(const DeviceHttpTransport &) = delete" in header
+    close = transport[transport.index("void DeviceHttpTransport::closeSession"):]
+    assert close.index("secure_client_.stop()") < close.index("effective_ca_pem_ =")
+    assert "setCACert(effective_ca_pem_.c_str())" in transport

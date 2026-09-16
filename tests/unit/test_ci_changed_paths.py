@@ -141,3 +141,9 @@ def test_manual_full_suite_is_explicit():
     flags = classify_paths(["docs/README.md"], force_full_suite=True)
 
     assert flags["full_suite"] is True
+
+
+@pytest.mark.parametrize("architecture", ["amd64", "arm64"])
+def test_runtime_lock_changes_route_dependency_and_container_gates(architecture):
+    flags = classify_paths([f"requirements-locks/linux-{architecture}-py312.txt"])
+    assert flags["dependencies"] is True
