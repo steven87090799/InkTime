@@ -1,8 +1,10 @@
 """Canonical hosted-CI planner entrypoint.
 
 ``test_plan.py`` retains InkTime's existing path/domain/tier architecture.  This
-module adds only planner-wide invariants and provenance fields that every
-workflow must consume identically.  No routing policy lives in workflow YAML.
+module adds planner-wide invariants, provenance fields, and a narrowly scoped
+workflow-only routing alias that every workflow consumes identically.  The
+alias keeps release-workflow orchestration changes on CI-contract validation
+without downgrading any runtime/container/NAS source change.
 """
 
 from __future__ import annotations
@@ -24,12 +26,51 @@ from scripts.ci.test_plan import (
     build_test_plan,
 )
 
+_RELEASE_WORKFLOW_PATH = ".github/workflows/publish-container.yml"
+_GENERIC_CI_WORKFLOW_PATH = ".github/workflows/ci.yml"
+
 
 def _ordered(values: Iterable[str]) -> list[str]:
     value_set = set(values)
     known = [value for value in GATE_ORDER if value in value_set]
     known_set = set(known)
     return known + sorted(value_set - known_set)
+
+
+def _normalise_paths(paths: Iterable[str]) -> list[str]:
+    normalised: list[str] = []
+    seen: set[str] = set()
+    for raw_path in paths:
+        path = str(raw_path).strip().replace("\\", "/")
+        while path.startswith("./"):
+            path = path[2:]
+        if path and path not in seen:
+            normalised.append(path)
+            seen.add(path)
+    return normalised
+
+
+def _planning_paths(paths: Iterable[str]) -> tuple[list[str], list[str]]:
+    """Return reported paths and the conservative planner surface to evaluate.
+
+    A PR that changes only the tag-triggered container publish workflow cannot
+    alter the NAS updater, persistence contract, image contents, or Dockerfile.
+    Treat that one-file orchestration edit like ordinary CI configuration so it
+    still runs the source-owned CI contract tests, secret scan, and actionlint,
+    but does not rebuild/scanner-test the production image or run the A-to-B NAS
+    preservation E2E solely because an action version changed.
+
+    The alias is intentionally exact: any additional changed path disables it,
+    so mixed release-workflow + runtime/container/NAS changes retain the full
+    source-owned impact routing from ``test_plan.py``. Full-mode events such as
+    main pushes and ``full-ci`` requests remain full because mode selection is
+    driven by event context after the alias is applied.
+    """
+
+    changed_paths = _normalise_paths(paths)
+    if changed_paths == [_RELEASE_WORKFLOW_PATH]:
+        return changed_paths, [_GENERIC_CI_WORKFLOW_PATH]
+    return changed_paths, changed_paths
 
 
 def build_canonical_plan(
@@ -45,7 +86,10 @@ def build_canonical_plan(
     """
 
     context = event_context or {}
-    plan = dict(build_test_plan(paths, context))
+    changed_paths, planning_paths = _planning_paths(paths)
+    plan = dict(build_test_plan(planning_paths, context))
+    if planning_paths != changed_paths:
+        plan["changed_paths"] = changed_paths
     event_name = str(context.get("event_name", "")).strip()
 
     if plan["ci_mode"] == FULL_MODE:
