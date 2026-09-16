@@ -91,31 +91,51 @@ def _cleanup_database_sidecars(path: Path) -> None:
         Path(f"{path}{suffix}").unlink(missing_ok=True)
 
 
+def _copy_file_to_open_fd(source: Path, destination_fd: int) -> None:
+    """Copy without reopening or replacing a securely created destination."""
+    source_fd = os.open(source, os.O_RDONLY | os.O_NOFOLLOW)
+    try:
+        os.fchmod(destination_fd, 0o600)
+        with os.fdopen(source_fd, "rb", closefd=False) as stream:
+            while chunk := stream.read(1024 * 1024):
+                remaining = memoryview(chunk)
+                while remaining:
+                    written = os.write(destination_fd, remaining)
+                    remaining = remaining[written:]
+        os.fsync(destination_fd)
+    finally:
+        os.close(source_fd)
+
+
 class BackupService:
     def __init__(self, database: Database, backup_dir: Path) -> None:
         self.database = database
         self.backup_dir = backup_dir.resolve()
         self.backup_dir.mkdir(parents=True, exist_ok=True)
 
-    def _copy_database(self, destination: Path, *, include_secrets: bool) -> dict[str, int]:
-        descriptor = os.open(destination, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-        os.close(descriptor)
-        source = sqlite3.connect(self.database.path)
-        target = sqlite3.connect(destination)
-        try:
-            source.backup(target)
-            if not include_secrets:
-                target.execute("PRAGMA secure_delete = ON")
-                target.execute("DELETE FROM secrets")
-                target.commit()
-                target.execute("VACUUM")
-            integrity = target.execute("PRAGMA integrity_check").fetchone()
-            if integrity is None or str(integrity[0]) != "ok":
-                raise RuntimeError("BACKUP-001 備份資料庫完整性檢查失敗")
-            return _database_counts(target)
-        finally:
-            target.close()
-            source.close()
+    def _copy_database(self, destination_fd: int, *, include_secrets: bool) -> dict[str, int]:
+        # SQLite owns its snapshot inside a private directory; the public
+        # temporary destination remains the inode securely created by mkstemp.
+        with tempfile.TemporaryDirectory(dir=self.backup_dir, prefix=".inktime-snapshot-") as directory:
+            snapshot = Path(directory) / "snapshot.sqlite3"
+            source = sqlite3.connect(self.database.path)
+            target = sqlite3.connect(snapshot)
+            try:
+                source.backup(target)
+                if not include_secrets:
+                    target.execute("PRAGMA secure_delete = ON")
+                    target.execute("DELETE FROM secrets")
+                    target.commit()
+                    target.execute("VACUUM")
+                integrity = target.execute("PRAGMA integrity_check").fetchone()
+                if integrity is None or str(integrity[0]) != "ok":
+                    raise RuntimeError("BACKUP-001 備份資料庫完整性檢查失敗")
+                counts = _database_counts(target)
+            finally:
+                target.close()
+                source.close()
+            _copy_file_to_open_fd(snapshot, destination_fd)
+            return counts
 
     def _settings_export(self, database_path: Path, *, include_secrets: bool) -> bytes:
         connection = sqlite3.connect(database_path)
@@ -149,14 +169,14 @@ class BackupService:
             dir=self.backup_dir, prefix=".inktime-db-", suffix=".sqlite3", delete=False
         )
         temporary_db = Path(db_handle.name)
-        db_handle.close()
         zip_handle = tempfile.NamedTemporaryFile(
             dir=self.backup_dir, prefix=".inktime-archive-", suffix=".zip", delete=False
         )
         temporary_archive = Path(zip_handle.name)
         zip_handle.close()
         try:
-            counts = self._copy_database(temporary_db, include_secrets=include_secrets)
+            counts = self._copy_database(db_handle.fileno(), include_secrets=include_secrets)
+            db_handle.close()
             settings = self._settings_export(temporary_db, include_secrets=include_secrets)
             with temporary_db.open("rb") as stream:
                 database_hash, database_size = _stream_sha256(stream)
@@ -212,10 +232,13 @@ class BackupService:
             self.validate(temporary_archive)
             with temporary_archive.open("rb") as stream:
                 os.fsync(stream.fileno())
-            os.replace(temporary_archive, archive)
+            # Link publishes atomically and fails if the final name exists.
+            os.link(temporary_archive, archive, follow_symlinks=False)
+            temporary_archive.unlink()
             _fsync_directory(self.backup_dir)
             return archive
         finally:
+            db_handle.close()
             temporary_db.unlink(missing_ok=True)
             temporary_archive.unlink(missing_ok=True)
 

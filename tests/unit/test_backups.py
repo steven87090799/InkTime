@@ -152,7 +152,7 @@ def test_backup_excludes_secrets_and_restores_analysis_and_photo_state(tmp_path)
     with database.session() as connection:
         photo = connection.execute("SELECT favorite,status FROM photos WHERE id='photo'").fetchone()
         assert tuple(photo) == (1, "analyzed")
-        assert connection.execute("SELECT caption FROM photo_analysis").fetchone()[0] == "重要分析"
+        assert connection.execute("SELECT caption FROM photo_analysis WHERE photo_id='photo'").fetchone()[0] == "重要分析"
         assert connection.execute("SELECT COUNT(*) FROM photos").fetchone()[0] == 1
         assert connection.execute("SELECT COUNT(*) FROM releases").fetchone()[0] == 1
         assert connection.execute("SELECT COUNT(*) FROM display_history").fetchone()[0] == 1
@@ -196,7 +196,7 @@ def test_corrupt_backup_never_overwrites_current_database(tmp_path):
 
     with database.session() as connection:
         assert connection.execute("SELECT COUNT(*) FROM photos").fetchone()[0] == 1
-        assert connection.execute("SELECT caption FROM photo_analysis").fetchone()[0] == "重要分析"
+        assert connection.execute("SELECT caption FROM photo_analysis WHERE photo_id='photo'").fetchone()[0] == "重要分析"
 
 
 def test_restore_requires_all_runtime_processes_to_be_stopped(tmp_path):
@@ -234,7 +234,7 @@ def test_post_replace_validation_failure_automatically_recovers_current_database
 
     with database.session() as connection:
         assert connection.execute("SELECT COUNT(*) FROM photos").fetchone()[0] == 2
-        assert connection.execute("SELECT caption FROM photo_analysis").fetchone()[0] == "重要分析"
+        assert connection.execute("SELECT caption FROM photo_analysis WHERE photo_id='photo'").fetchone()[0] == "重要分析"
 
 
 def test_restore_directory_fsync_failure_recovers_original_database(monkeypatch, tmp_path):
@@ -260,7 +260,7 @@ def test_restore_directory_fsync_failure_recovers_original_database(monkeypatch,
     assert failed
     with database.session() as connection:
         assert connection.execute("SELECT COUNT(*) FROM photos").fetchone()[0] == 2
-        assert connection.execute("SELECT caption FROM photo_analysis").fetchone()[0] == "重要分析"
+        assert connection.execute("SELECT caption FROM photo_analysis WHERE photo_id='photo'").fetchone()[0] == "重要分析"
 
 
 def test_empty_sqlite_snapshot_is_rejected_before_current_database_is_touched(tmp_path):
@@ -274,7 +274,7 @@ def test_empty_sqlite_snapshot_is_rejected_before_current_database_is_touched(tm
 
     with database.session() as connection:
         assert connection.execute("SELECT COUNT(*) FROM photos").fetchone()[0] == 1
-        assert connection.execute("SELECT caption FROM photo_analysis").fetchone()[0] == "重要分析"
+        assert connection.execute("SELECT caption FROM photo_analysis WHERE photo_id='photo'").fetchone()[0] == "重要分析"
 
 
 def test_exact_snapshot_restore_does_not_run_forward_migrations(monkeypatch, tmp_path):
@@ -398,3 +398,70 @@ def test_safety_snapshots_are_private_and_keep_latest_verified_point(tmp_path):
     assert list(service.backup_dir.glob("inktime-pre-restore-*.sqlite3")) == [latest]
     with sqlite3.connect(latest) as connection:
         assert connection.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+
+
+@pytest.mark.parametrize("failure_stage", ["copy", "verify"])
+def test_backup_failure_cleans_temporary_files_without_publishing(tmp_path, monkeypatch, failure_stage):
+    import inktime.app.services.backups as module
+
+    database, service = make_service(tmp_path)
+    seed(database)
+    existing = service.create()
+    original = existing.read_bytes()
+
+    def fail(*args, **kwargs):
+        raise OSError("injected backup failure")
+
+    if failure_stage == "copy":
+        monkeypatch.setattr(module, "_copy_file_to_open_fd", fail)
+    else:
+        monkeypatch.setattr(service, "validate", fail)
+    with pytest.raises(OSError, match="injected backup failure"):
+        service.create()
+    assert existing.read_bytes() == original
+    assert list(service.backup_dir.iterdir()) == [existing]
+
+
+def test_backup_open_fd_keeps_destination_inode_and_rejects_source_symlink(tmp_path):
+    import os
+    import tempfile
+    from inktime.app.services.backups import _copy_file_to_open_fd
+
+    source = tmp_path / "source"
+    source.write_bytes(b"durable source")
+    descriptor, name = tempfile.mkstemp(dir=tmp_path)
+    try:
+        inode = os.fstat(descriptor).st_ino
+        _copy_file_to_open_fd(source, descriptor)
+        assert Path(name).stat().st_ino == inode
+        assert Path(name).read_bytes() == source.read_bytes()
+        link = tmp_path / "symlink"
+        link.symlink_to(source)
+        with pytest.raises(OSError):
+            _copy_file_to_open_fd(link, descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def test_real_backup_restore_preserves_paid_state_after_database_restart(tmp_path):
+    from scripts.ci.persistence_fixture import seed as seed_paid, verify as verify_paid
+
+    database, service = make_service(tmp_path)
+    seed(database)
+    with sqlite3.connect(database.path) as connection:
+        connection.execute("PRAGMA foreign_keys=ON")
+        seed_paid(connection)
+    archive = service.create()
+    with database.transaction() as connection:
+        connection.execute("DELETE FROM api_usage")
+        connection.execute("DELETE FROM billable_operations")
+        connection.execute("DELETE FROM budget_reservations")
+        connection.execute("DELETE FROM provider_quota_state")
+        connection.execute("UPDATE photo_analysis SET caption='changed'")
+    service.restore(archive)
+    restarted = Database(database.path)
+    with sqlite3.connect(restarted.path) as connection:
+        verify_paid(connection)
+        assert connection.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+        assert connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] == CURRENT_SCHEMA_VERSION
+        assert connection.execute("SELECT caption FROM photo_analysis WHERE photo_id='photo'").fetchone()[0] == "重要分析"

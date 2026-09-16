@@ -18,3 +18,6 @@ accesslog = "-" if os.environ.get("INKTIME_ACCESS_LOG", "0") == "1" else None
 loglevel = os.environ.get("INKTIME_GUNICORN_LOG_LEVEL", "warning").lower()
 capture_output = True
 worker_tmp_dir = "/tmp"  # noqa: S108 - container provides a dedicated bounded tmpfs.
+
+# Container lifecycle uses signals; the optional gunicornc socket is unused.
+control_socket_disable = True
