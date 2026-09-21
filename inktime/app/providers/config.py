@@ -287,7 +287,9 @@ def model_request_capabilities(kind: str, model: str) -> dict:
     }
 
 
-def provider_revision(provider: dict, *, semantic: bool = False) -> str:
+def provider_revision(
+    provider: dict, *, semantic: bool = False, legacy_semantic: bool = False
+) -> str:
     """Full operational revision, also the legacy semantic revision."""
     fields = {
         "provider_id": str(provider.get("id") or provider.get("provider_id") or ""),
@@ -328,9 +330,27 @@ def provider_revision(provider: dict, *, semantic: bool = False) -> str:
             "max_concurrency",
             "timeout_seconds",
             "cooldown_seconds",
-            "priority",
-            "supports_batch",
         ):
             fields.pop(key, None)
+        if not legacy_semantic:
+            fields.pop("priority", None)
+            fields.pop("supports_batch", None)
     payload = json.dumps(fields, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return sha256(payload.encode("utf-8")).hexdigest()
+
+
+def provider_analysis_revision(provider: dict) -> str:
+    """Preserve a paid-cache alias only if its stored semantics still match.
+
+    Migration 61 stored hashes that included routing priority and Batch support.
+    Accept that exact old hash on upgrade, without accepting arbitrary stale
+    aliases after a model, endpoint or other wire-affecting change.
+    """
+    revision = provider.get("analysis_revision")
+    semantics = provider.get("analysis_revision_semantics")
+    if revision and semantics in {
+        provider_revision(provider, semantic=True),
+        provider_revision(provider, semantic=True, legacy_semantic=True),
+    }:
+        return str(revision)
+    return provider_revision(provider)

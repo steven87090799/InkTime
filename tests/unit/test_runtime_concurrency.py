@@ -198,6 +198,51 @@ def test_hard_timeout_terminates_joins_and_rejects_late_result(app):
     assert not [child for child in multiprocessing.active_children() if child.name == "inktime-bounded-child"]
 
 
+def test_soft_timeout_reaches_shutdown_fence_without_external_stop(app, monkeypatch):
+    from concurrent.futures import Future
+    from types import SimpleNamespace
+    import inktime.app.workers.job_worker as module
+
+    repository = app.extensions["inktime_job_repository"]
+    job_id = repository.create_maintenance(
+        kind="cleanup", name="soft timeout", settings={}, created_by="test",
+    )
+    app.extensions["inktime_job_service"].start(job_id)
+    clock = {"now": 100.0, "waits": 0}
+    shutdown = []
+
+    class PendingExecutor:
+        def __init__(self, **kwargs):
+            pass
+
+        def submit(self, function, item):
+            future = Future()
+            future.set_running_or_notify_cancel()
+            return future
+
+        def shutdown(self, *, wait, cancel_futures):
+            shutdown.append((wait, cancel_futures))
+
+    def bounded_wait(futures, timeout=None, **kwargs):
+        clock["waits"] += 1
+        assert clock["waits"] < 6, "soft timeout never established a shutdown deadline"
+        assert timeout is not None
+        clock["now"] += max(float(timeout), 0.01)
+        return set(), set(futures)
+
+    monkeypatch.setattr(module, "ThreadPoolExecutor", PendingExecutor)
+    monkeypatch.setattr(module, "wait", bounded_wait)
+    monkeypatch.setattr(module, "time", SimpleNamespace(monotonic=lambda: clock["now"]))
+    worker = BoundedJobWorker(repository, lambda item: {}, concurrency=1, timeout_seconds=1)
+    worker.SHUTDOWN_DRAIN_SECONDS = 0.1
+    worker.run_job(job_id)
+    item = repository.list_items(job_id)[0]
+    assert item["status"] == "failed"
+    assert item["error_code"] == "JOB-SHUTDOWN-AMBIGUOUS"
+    assert item["attempts"] == 1
+    assert shutdown == [(False, True)]
+
+
 def test_shutdown_fences_running_future_and_only_retries_queued_work(app):
     repository = app.extensions["inktime_job_repository"]
     job_id = repository.create_maintenance(

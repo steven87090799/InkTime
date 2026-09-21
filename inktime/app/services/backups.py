@@ -3,7 +3,6 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from hashlib import sha256
 import json
-import logging
 import os
 from pathlib import Path
 import shutil
@@ -13,12 +12,10 @@ from typing import IO
 import zipfile
 
 from inktime import __version__
-from inktime.app.core.logging import log_event
 from inktime.app.db import Database
 from inktime.app.db.migrations import MIGRATIONS, migrate
 
 
-LOGGER = logging.getLogger("backup")
 BACKUP_FORMAT_VERSION = 2
 IMPORTANT_TABLES = (
     "photos",
@@ -132,42 +129,18 @@ class BackupService:
             try:
                 source.backup(target)
                 if not include_secrets:
-                    # VACUUM materialises a full copy of the database in SQLite's
-                    # temp directory.  The container sets no TMPDIR/SQLITE_TMPDIR
-                    # and runs on a read-only rootfs, so SQLite would fall through
-                    # to /tmp -- a small tmpfs (256 MiB for the worker).  Any
-                    # database larger than that fails with "database or disk is
-                    # full" and the nightly backup stops working permanently.
-                    # Pin the compaction scratch space to the backup directory,
-                    # which lives on the same /data volume as the snapshot.
-                    # temp_store_directory is deprecated-but-functional; if a
-                    # future SQLite drops it the compaction would silently move
-                    # back to /tmp, so verify it applied and say so rather than
-                    # regressing quietly.  Never fatal: a backup is more useful
-                    # than a perfectly-placed temp file.
-                    scratch = str(directory)
-                    try:
-                        target.execute(
-                            "PRAGMA temp_store_directory = '{}'".format(
-                                scratch.replace("'", "''")
-                            )
-                        )
-                        applied = target.execute("PRAGMA temp_store_directory").fetchone()
-                    except sqlite3.DatabaseError:
-                        applied = None
-                    if applied is None or str(applied[0]) != scratch:
-                        log_event(
-                            LOGGER,
-                            logging.WARNING,
-                            "無法將 VACUUM 暫存目錄指向 /data；大型資料庫備份可能因 /tmp 空間不足失敗",
-                            event="backup_temp_store_not_applied",
-                            error_code="BACKUP-002",
-                            operation="backup_vacuum",
-                        )
                     target.execute("PRAGMA secure_delete = ON")
                     target.execute("DELETE FROM secrets")
                     target.commit()
-                    target.execute("VACUUM")
+                    # INTO uses this explicit file for the rebuilt database;
+                    # never mutate SQLite's process-global temp directory in a
+                    # running web/worker process. Keep all full-size copies on
+                    # the backup volume and verify before publishing the ZIP.
+                    compacted = Path(directory) / "compacted.sqlite3"
+                    target.execute("VACUUM INTO ?", (str(compacted),))
+                    target.close()
+                    target = sqlite3.connect(compacted)
+                    snapshot = compacted
                 integrity = target.execute("PRAGMA integrity_check").fetchone()
                 if integrity is None or str(integrity[0]) != "ok":
                     raise RuntimeError("BACKUP-001 備份資料庫完整性檢查失敗")

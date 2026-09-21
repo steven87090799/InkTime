@@ -18,14 +18,8 @@ class BudgetExceeded(RuntimeError):
 
 
 class BudgetService:
-    # A reservation models one in-flight paid request.  No provider call can
-    # legitimately stay in flight for hours, but several failure paths (timeout,
-    # transport error, success with no reported cost) never released one and
-    # there was no sweeper, so leaked rows were summed into daily AND monthly
-    # spend forever -- eventually tripping budget.daily_stop / monthly_stop and
-    # halting all analysis with no way to recover from the UI.  Stale rows stop
-    # counting after this window; genuinely billed spend is still accounted for
-    # through api_usage (including the cost_source='unknown' reserve).
+    # Age only selects reconciliation candidates. A timeout, restart or overdue
+    # Batch does not prove that a remote request was free or has been accounted.
     RESERVATION_MAX_AGE_SECONDS = 24 * 60 * 60
 
     def __init__(self, database: Database, settings: SettingsRepository) -> None:
@@ -43,18 +37,28 @@ class BudgetService:
         return (datetime.now(timezone.utc) - timedelta(seconds=window)).isoformat()
 
     def expire_stale_reservations(self) -> int:
-        """Release reservations that outlived any plausible in-flight request."""
+        """Recover old Vision reservations only with durable settlement evidence.
 
-        # The table's CHECK constraint allows only 'active'/'released', and a
-        # swept reservation is exactly a release -- the request it guarded can no
-        # longer be in flight.  Reuse the existing state rather than rebuilding
-        # the table for a diagnostic distinction.
+        Batch reservations belong to the importer, which knows when every item
+        is accounted. Unidentified/diagnostic and ambiguous reservations remain
+        reserved; absence of usage is never evidence of zero cost.
+        """
         cutoff = self._reservation_cutoff()
         with self.database.transaction(operation="budget_reservation_expiry") as connection:
             return int(
                 connection.execute(
-                    "UPDATE budget_reservations SET state='released' "
-                    "WHERE state='active' AND created_at<?",
+                    """UPDATE budget_reservations SET state='released'
+                    WHERE state='active' AND created_at<? AND id LIKE 'vision:%' AND EXISTS (
+                        SELECT 1 FROM billable_operations o
+                        WHERE o.id=substr(budget_reservations.id,8)
+                          AND (o.state='not_sent' OR (
+                              o.state IN ('response','completed') AND EXISTS (
+                                  SELECT 1 FROM api_usage u WHERE u.operation_id=o.id
+                                    AND u.cost_source<>'unknown'
+                                    AND COALESCE(u.actual_cost,u.estimated_cost) IS NOT NULL
+                              )
+                          ))
+                    )""",
                     (cutoff,),
                 ).rowcount
             )
@@ -110,8 +114,8 @@ class BudgetService:
                 "SELECT COALESCE(SUM(amount),0) total, "
                 "COALESCE(SUM(CASE WHEN job_id=? THEN amount ELSE 0 END),0) job, "
                 "COALESCE(SUM(CASE WHEN photo_id=? THEN amount ELSE 0 END),0) photo "
-                "FROM budget_reservations WHERE state='active' AND created_at>=?",
-                (job_id, photo_id, self._reservation_cutoff()),
+                "FROM budget_reservations WHERE state='active'",
+                (job_id, photo_id),
             ).fetchone()
 
         reserve = max(0.01, min(100.0, float(self.settings.get("budget.unknown_request_reserve", 0.25))))

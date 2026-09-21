@@ -258,9 +258,8 @@ class SchedulerRunner:
                 self._safe_step("operational_cleanup", lambda: resilience.cleanup(dry_run=False))
             budgets = self.app.extensions.get("inktime_budget_service")
             if budgets is not None:
-                # Without this sweep a leaked reservation stays 'active' forever
-                # and is summed into both daily and monthly spend, eventually
-                # halting all analysis with BudgetExceeded.
+                # Recover settled Vision reservations after interrupted cleanup.
+                # Unknown paid work must retain its budget across restarts.
                 self._safe_step("budget_reservation_expiry", budgets.expire_stale_reservations)
             self.last_operational_retention_at = monotonic_now
         if not settings.get("backup.schedule_enabled", True):

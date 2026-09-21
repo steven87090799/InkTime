@@ -2396,32 +2396,13 @@ MIGRATIONS = (
                 value TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             )""",
-            # Migration 53 ran every stored AI payload through the s2twp
-            # converter, which performs Taiwanese *vocabulary* substitution and
-            # rewrote the enum member 文件 into 檔案.  檔案 is not in ALLOWED_TYPES,
-            # so those rows can no longer be re-validated or inherited.  Repair
-            # the enum member only; no other stored text is touched.
-            """UPDATE photo_analysis
-               SET types_json=replace(types_json,'"檔案"','"文件"')
-               WHERE types_json LIKE '%"檔案"%'""",
-            """UPDATE ai_analysis_cache
-               SET result_json=replace(result_json,'"檔案"','"文件"')
-               WHERE result_json LIKE '%"檔案"%'""",
-            """UPDATE job_items
-               SET result_json=replace(result_json,'"檔案"','"文件"')
-               WHERE result_json LIKE '%"檔案"%'""",
-            """UPDATE ai_trace_runs
-               SET final_result_json=replace(final_result_json,'"檔案"','"文件"')
-               WHERE final_result_json LIKE '%"檔案"%'""",
-            """UPDATE ai_trace_attempts
-               SET response_parsed_json=replace(response_parsed_json,'"檔案"','"文件"')
-               WHERE response_parsed_json LIKE '%"檔案"%'""",
-            # Six policies shipped in migration 46 never received an explicit
-            # dry_run value, so they inherited the column default of 1 and have
-            # been evaluated-but-never-enforced ever since, while last_run_at
-            # kept advancing and made them look healthy.  Enable only rows that
-            # still carry their shipped defaults, exactly as migration 49 did
-            # for api_usage, so any administrator edit is preserved.
+            # Structured enum repair runs in migration 63 below. Never
+            # replace matching strings in captions or unrelated JSON fields.
+            # Five implemented policies shipped without an explicit
+            # dry_run value. Promote their untouched defaults to automatic
+            # cleanup; last_run_at still means evaluation, not proof of deletion.
+            # Preserve administrator edits, as migration 49 did for api_usage.
+            # Shadow has no cleanup handler and stays observation-only.
             """UPDATE data_retention_policies
                SET dry_run=0,updated_at=datetime('now')
                WHERE dry_run=1
@@ -2434,14 +2415,74 @@ MIGRATIONS = (
                  AND (
                        (data_type='decision_trace' AND retention_days=180)
                     OR (data_type='decision_candidate' AND retention_days=60)
-                    OR (data_type='shadow_preview' AND retention_days=30)
                     OR (data_type='device_event' AND retention_days=180)
                     OR (data_type='queue_event' AND retention_days=90)
                     OR (data_type='job_log' AND retention_days=30)
                  )""",
         ),
     ),
+    Migration(
+        63,
+        "補齊文件 enum 歷史修復並保留 Shadow 觀察模式",
+        (
+            # Recover untouched defaults from early PR builds of migration 62.
+            # Explicit administrator edits use ISO timestamps and are preserved.
+            """UPDATE data_retention_policies SET dry_run=1,updated_at=datetime('now')
+               WHERE data_type='shadow_preview' AND dry_run=0 AND enabled=1
+                 AND retention_days=30 AND maximum_items IS NULL
+                 AND maximum_bytes IS NULL AND minimum_items_to_keep=0
+                 AND cleanup_batch_size=200 AND updated_at NOT LIKE '%T%'""",
+        ),
+    ),
 )
+
+
+def _repair_document_types(value: object) -> bool:
+    """Repair only protocol types, including saved job result envelopes."""
+    if not isinstance(value, dict):
+        return False
+    changed = False
+    types = value.get("types")
+    if isinstance(types, list) and "檔案" in types:
+        value["types"] = ["文件" if item == "檔案" else item for item in types]
+        changed = True
+    for key in ("analysis", "result", "canonical_result"):
+        changed = _repair_document_types(value.get(key)) or changed
+    return changed
+
+
+def _apply_document_type_repairs(connection: sqlite3.Connection) -> None:
+    # Stream bounded batches; no full-history materialization during upgrade.
+    for table, id_column, columns in (
+        ("photo_analysis", "id", ("types_json", "raw_json", "semantic_json")),
+        ("ai_analysis_cache", "rowid", ("result_json",)),
+        ("job_items", "id", ("result_json",)),
+        ("ai_trace_runs", "id", ("final_result_json",)),
+        ("ai_trace_attempts", "id", ("response_parsed_json",)),
+    ):
+        cursor = connection.execute(
+            f"SELECT {id_column},{','.join(columns)} FROM {table}"  # noqa: S608 -- fixed table/column allowlist
+        )
+        while rows := cursor.fetchmany(200):
+            for row in rows:
+                updates = {}
+                for column in columns:
+                    try:
+                        parsed = json.loads(row[column])
+                    except (TypeError, ValueError):
+                        continue
+                    envelope = {"types": parsed} if column == "types_json" else parsed
+                    if _repair_document_types(envelope):
+                        updates[column] = json.dumps(
+                            envelope["types"] if column == "types_json" else envelope,
+                            ensure_ascii=False, separators=(",", ":"),
+                        )
+                if updates:
+                    assignments = ",".join(f"{column}=?" for column in updates)
+                    connection.execute(
+                        f"UPDATE {table} SET {assignments} WHERE {id_column}=?",  # noqa: S608 -- fixed allowlist
+                        (*updates.values(), row[id_column]),
+                    )
 
 
 def _apply_migration_58_data_fixes(connection) -> None:
@@ -3062,6 +3103,8 @@ def migrate(database: Database, backup_dir: Path | None = None) -> list[int]:
                         _apply_migration_53_data_fixes(connection)
                     if migration.version == 58:
                         _apply_migration_58_data_fixes(connection)
+                    if migration.version == 63:
+                        _apply_document_type_repairs(connection)
                     connection.execute(
                         "INSERT INTO schema_migrations(version, name, applied_at) VALUES (?, ?, ?)",
                         (migration.version, migration.name, _utc_now()),

@@ -405,7 +405,7 @@ class BoundedJobWorker:
                             timeout_triggered = True
                             # Thread 無法被安全強制終止；停止 claim、要求 cooperative
                             # cancellation，並持續追蹤 Future 到真正完成。
-                            self.stop_event.set()
+                            self.request_stop()
                     continue
                 for future in done:
                     item_id, _started = futures.pop(future)

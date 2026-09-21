@@ -1,7 +1,7 @@
 """Regression tests for the defects found in the 2026-09 production readiness review.
 
-Each test names the ISSUE id it locks down.  Every one of them fails on the
-parent commit and passes after the corresponding fix.
+Includes the original remediation checks and follow-up upgrade/recovery
+regressions. Hosted CI is the execution authority for these tests.
 """
 
 from __future__ import annotations
@@ -224,32 +224,51 @@ def test_pair_selection_never_repeats_a_photo(app, monkeypatch):
     assert len(identifiers) == len(set(identifiers)), f"duplicate photo in one release: {identifiers}"
 
 
-# ISSUE-006 -- leaked budget reservations halted analysis permanently.
-def test_stale_budget_reservations_stop_counting_and_are_swept(app):
+def test_stale_budget_reservations_require_settlement_evidence(app):
+    from inktime.app.repositories.usage import UsageRepository
+
     budgets = app.extensions["inktime_budget_service"]
     database = app.extensions["inktime_database"]
     stale = (datetime.now(timezone.utc) - timedelta(days=3)).isoformat()
     fresh = datetime.now(timezone.utc).isoformat()
-    with database.transaction(operation="test_seed") as connection:
+    operations = {
+        "started": "started", "saved": "response", "unknown": "completed",
+        "settled": "completed", "zero": "completed", "not-sent": "not_sent",
+        "saved-accounted": "response",
+    }
+    with database.transaction() as connection:
+        for name, state in operations.items():
+            connection.execute(
+                "INSERT INTO billable_operations(id,content_sha256,request_fingerprint,state,created_at,updated_at) "
+                "VALUES (?,?,?,?,?,?)", (name, name, name, state, stale, stale),
+            )
+        for name in (*("vision:" + key for key in operations), "batch:unimported", "diagnostic-unknown"):
+            connection.execute(
+                "INSERT INTO budget_reservations(id,amount,state,created_at) VALUES (?,1,'active',?)",
+                (name, stale),
+            )
         connection.execute(
-            "INSERT INTO budget_reservations(id,amount,job_id,photo_id,state,created_at) "
-            "VALUES ('vision:stale',5.0,NULL,NULL,'active',?)",
-            (stale,),
-        )
-        connection.execute(
-            "INSERT INTO budget_reservations(id,amount,job_id,photo_id,state,created_at) "
-            "VALUES ('vision:fresh',1.0,NULL,NULL,'active',?)",
+            "INSERT INTO budget_reservations(id,amount,state,created_at) VALUES ('fresh',1,'active',?)",
             (fresh,),
         )
-    # The abandoned reservation must not inflate spend for ever.
-    assert budgets.snapshot()["reserved"] == pytest.approx(1.0)
-    assert budgets.expire_stale_reservations() == 1
-    with database.session() as connection:
-        states = dict(
-            connection.execute("SELECT id,state FROM budget_reservations").fetchall()
+    usage = UsageRepository(database)
+    for name, cost in (("unknown", None), ("settled", 1.0), ("zero", 0.0), ("saved-accounted", 0.5)):
+        usage.record(
+            provider="test", model="test", job_id=None, photo_id=None,
+            request_type="vision", input_tokens=0, output_tokens=0, cached_tokens=0,
+            estimated_cost=None, actual_cost=cost, started_at=stale, latency_ms=1,
+            status="completed", operation_id=name, tokens_reported=cost is not None,
+            cost_source="unknown" if cost is None else "provider_reported",
         )
-    assert states["vision:stale"] == "released"
-    assert states["vision:fresh"] == "active"
+    assert budgets.snapshot()["reserved"] == pytest.approx(10.0)
+    assert budgets.expire_stale_reservations() == 4
+    assert budgets.snapshot()["reserved"] == pytest.approx(6.0)
+    assert budgets.expire_stale_reservations() == 0
+    with database.session() as connection:
+        released = {row[0] for row in connection.execute(
+            "SELECT id FROM budget_reservations WHERE state='released'"
+        )}
+    assert released == {"vision:settled", "vision:zero", "vision:not-sent", "vision:saved-accounted"}
 
 
 # ISSUE-017 -- the CI paid-state fixture seeded a reservation with a hard-coded
@@ -273,9 +292,7 @@ def test_ci_paid_state_fixture_survives_the_reservation_sweeper(app, tmp_path):
     connection.execute("PRAGMA foreign_keys=ON")
     try:
         fixture.seed(connection)
-        # The scheduler runs this on its operational-retention cadence, including
-        # across a container update.  A freshly seeded reservation is in flight
-        # and must not be touched.
+        # Unknown paid state must survive scheduler reconciliation and updates.
         assert budgets.expire_stale_reservations() == 0
         fixture.verify(connection)
     finally:
@@ -312,7 +329,7 @@ def test_master_secret_mismatch_is_refused(app, monkeypatch):
 
 
 # ISSUE-008 -- retention policies shipped observation-only for ever.
-def test_shipped_retention_policies_actually_delete(app):
+def test_only_implemented_retention_policies_default_to_enforcement(app):
     database = app.extensions["inktime_database"]
     with database.session() as connection:
         rows = connection.execute(
@@ -322,4 +339,136 @@ def test_shipped_retention_policies_actually_delete(app):
         ).fetchall()
     assert rows, "expected the shipped operational retention policies to exist"
     observation_only = sorted(str(row["data_type"]) for row in rows if int(row["dry_run"]) == 1)
-    assert observation_only == [], f"still evaluated-but-never-enforced: {observation_only}"
+    assert observation_only == ["shadow_preview"]
+
+
+def test_retention_deletes_expired_job_events_and_preserves_recent_ones(app):
+    from inktime.app.repositories.resilience import ResilienceRepository
+
+    database = app.extensions["inktime_database"]
+    job_id = app.extensions["inktime_job_repository"].create_maintenance(
+        kind="backup", name="retention regression", settings={}, created_by=None,
+    )
+    with database.transaction() as connection:
+        for event, days in (("expired", 40), ("recent", 1)):
+            connection.execute(
+                "INSERT INTO job_events(job_id,event,message,created_at) VALUES (?,?,?,?)",
+                (job_id, event, event, (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()),
+            )
+    ResilienceRepository(database).cleanup(dry_run=False)
+    with database.session() as connection:
+        events = {row[0] for row in connection.execute(
+            "SELECT event FROM job_events WHERE job_id=?", (job_id,),
+        )}
+    assert "expired" not in events
+    assert "recent" in events
+
+
+@pytest.mark.parametrize("previous_version", [61, 62])
+def test_upgrade_repairs_document_payloads_without_rewriting_prose(tmp_path, monkeypatch, previous_version):
+    from inktime.app.db import Database
+    from inktime.app.db import migrations
+    from inktime.app.domain.analysis.schema import validate_analysis_result
+
+    all_migrations = migrations.MIGRATIONS
+    database = Database(tmp_path / "upgrade.db")
+    monkeypatch.setattr(migrations, "MIGRATIONS", all_migrations[:previous_version])
+    migrations.migrate(database)
+    payload = _analysis_payload(types=["檔案"])
+    raw = json.dumps(payload, ensure_ascii=True)
+    with database.transaction() as connection:
+        connection.execute(
+            "INSERT INTO libraries(id,name,root_path,created_at,updated_at) "
+            "VALUES ('l','test','/photos',datetime('now'),datetime('now'))"
+        )
+        connection.execute(
+            "INSERT INTO photos(id,library_id,relative_path,status,created_at,updated_at) "
+            "VALUES ('p','l','photo.jpg','analyzed',datetime('now'),datetime('now'))"
+        )
+        connection.execute(
+            "INSERT INTO photo_analysis(photo_id,schema_version,stage,types_json,side_caption,raw_json,semantic_json,created_at) "
+            "VALUES ('p',5,'single',?,?,?,?,datetime('now'))",
+            (json.dumps(["檔案"]), payload["side_caption"], raw, raw),
+        )
+        connection.execute(
+            "INSERT INTO ai_analysis_cache(content_sha256,provider,model_name,prompt_version,schema_version,"
+            "schema_kind,result_json,raw_json,created_at) VALUES ('sha','p','m','v',5,'full',?,?,datetime('now'))",
+            (raw, raw),
+        )
+        connection.execute(
+            "INSERT INTO jobs(id,kind,name,status,strategy,settings_json,created_at) "
+            "VALUES ('j','analysis','test','completed','single','{}',datetime('now'))"
+        )
+        connection.execute(
+            "INSERT INTO job_items(id,job_id,result_json,available_at) VALUES ('i','j',?,datetime('now'))",
+            (json.dumps({"analysis": payload, "message": "檔案"}, ensure_ascii=False),),
+        )
+        connection.execute(
+            "INSERT INTO ai_trace_runs(trace_id,photo_id,stage,status,started_at,final_result_json,created_at) "
+            "VALUES ('t','p','single','SUCCESS',datetime('now'),?,datetime('now'))", (raw,),
+        )
+        connection.execute(
+            "INSERT INTO ai_trace_attempts(trace_id,attempt_number,attempt_kind,provider,requested_model,status,"
+            "response_raw_sanitized,response_parsed_json,created_at) "
+            "VALUES ('t',1,'vision','p','m','SUCCESS',?,?,datetime('now'))", (raw, raw),
+        )
+        # Simulate the old PR's default promotion of the unsupported policy.
+        connection.execute(
+            "UPDATE data_retention_policies SET dry_run=0,updated_at=datetime('now') WHERE data_type='shadow_preview'"
+        )
+    monkeypatch.setattr(migrations, "MIGRATIONS", all_migrations)
+    assert migrations.migrate(database) == list(range(previous_version + 1, 64))
+    assert migrations.migrate(database) == []
+    with database.session() as connection:
+        row = connection.execute("SELECT * FROM photo_analysis WHERE photo_id='p'").fetchone()
+        assert json.loads(row["types_json"]) == ["文件"]
+        assert validate_analysis_result(row["raw_json"])["types"] == ["文件"]
+        assert json.loads(row["semantic_json"])["types"] == ["文件"]
+        assert row["side_caption"] == payload["side_caption"]
+        for table, column in (
+            ("photo_analysis", "raw_json"), ("ai_analysis_cache", "result_json"),
+            ("ai_trace_runs", "final_result_json"), ("ai_trace_attempts", "response_parsed_json"),
+        ):
+            repaired = json.loads(connection.execute(
+                f"SELECT {column} FROM {table}"  # noqa: S608 -- fixed test allowlist
+            ).fetchone()[0])
+            assert repaired["types"] == ["文件"]
+            assert repaired["side_caption"] == payload["side_caption"]
+        item = json.loads(connection.execute("SELECT result_json FROM job_items WHERE id='i'").fetchone()[0])
+        assert item["analysis"]["types"] == ["文件"]
+        assert item["message"] == "檔案"
+        assert connection.execute("SELECT raw_json FROM ai_analysis_cache").fetchone()[0] == raw
+        assert connection.execute("SELECT response_raw_sanitized FROM ai_trace_attempts").fetchone()[0] == raw
+        assert connection.execute(
+            "SELECT dry_run FROM data_retention_policies WHERE data_type='shadow_preview'"
+        ).fetchone()[0] == 1
+
+
+def test_shadow_upgrade_preserves_explicit_administrator_policy(tmp_path, monkeypatch):
+    from inktime.app.db import Database
+    from inktime.app.db import migrations
+
+    all_migrations = migrations.MIGRATIONS
+    database = Database(tmp_path / "custom-policy.db")
+    monkeypatch.setattr(migrations, "MIGRATIONS", all_migrations[:62])
+    migrations.migrate(database)
+    with database.transaction() as connection:
+        connection.execute(
+            "UPDATE data_retention_policies SET dry_run=0,updated_at=? WHERE data_type='shadow_preview'",
+            (datetime.now(timezone.utc).isoformat(),),
+        )
+    monkeypatch.setattr(migrations, "MIGRATIONS", all_migrations)
+    migrations.migrate(database)
+    with database.session() as connection:
+        assert connection.execute(
+            "SELECT dry_run FROM data_retention_policies WHERE data_type='shadow_preview'"
+        ).fetchone()[0] == 0
+
+
+def test_document_repair_only_changes_protocol_types():
+    from inktime.app.db.migrations import _repair_document_types
+
+    value = {"types": ["檔案"], "side_caption": "檔案", "metadata": {"types": ["檔案"]}}
+    assert _repair_document_types(value)
+    assert value == {"types": ["文件"], "side_caption": "檔案", "metadata": {"types": ["檔案"]}}
+    assert not _repair_document_types(value)

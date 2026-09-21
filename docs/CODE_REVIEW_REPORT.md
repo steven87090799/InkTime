@@ -1,5 +1,15 @@
 # InkTime Code Review Report
 
+> Historical report from the original remediation pass. Its issue counts and
+> “Fixed” labels are not a current acceptance statement. The branch was reviewed
+> again and several implementations were corrected; use
+> [the follow-up remediation record](operations/CODE_REVIEW_FOLLOWUP_20260921.md)
+> for current behavior, attribution, validation limits and unresolved scope.
+> In particular, age-only budget expiry, global SQLite temp-directory changes,
+> broad JSON replacement and automatic Shadow cleanup are superseded. The
+> companion inventory for the claimed 42 remaining verified findings was not
+> supplied with this branch, so that total was not independently confirmed.
+
 | | |
 |---|---|
 | **Repository** | `github.com/steven87090799/InkTime` |

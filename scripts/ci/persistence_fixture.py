@@ -6,15 +6,10 @@ from datetime import datetime, timezone
 
 
 def _now() -> str:
-    """Timestamp for rows whose age is meaningful to the runtime.
+    """Use a realistic timestamp; age alone never settles an unknown charge.
 
-    A budget reservation models one in-flight paid request, and the scheduler
-    now releases reservations that outlive any plausible request so a leaked one
-    cannot inflate spend for ever.  A hard-coded date would therefore age past
-    that window and make this fixture fail purely because time passed, which
-    says nothing about whether an update preserved the state.  Seed "now" so the
-    reservation is genuinely in flight and the assertion keeps testing
-    preservation across the update rather than the sweeper's threshold.
+    Separate regression coverage ages reservations past the reconciliation
+    window and verifies that unaccounted requests retain their budget.
     """
 
     return datetime.now(timezone.utc).isoformat()
