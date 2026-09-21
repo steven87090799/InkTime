@@ -2,6 +2,22 @@
 import json
 import sqlite3
 import sys
+from datetime import datetime, timezone
+
+
+def _now() -> str:
+    """Timestamp for rows whose age is meaningful to the runtime.
+
+    A budget reservation models one in-flight paid request, and the scheduler
+    now releases reservations that outlive any plausible request so a leaked one
+    cannot inflate spend for ever.  A hard-coded date would therefore age past
+    that window and make this fixture fail purely because time passed, which
+    says nothing about whether an update preserved the state.  Seed "now" so the
+    reservation is genuinely in flight and the assertion keeps testing
+    preservation across the update rather than the sweeper's threshold.
+    """
+
+    return datetime.now(timezone.utc).isoformat()
 
 
 def seed(connection):
@@ -17,7 +33,8 @@ def seed(connection):
         "VALUES ('ci-paid','ci-model','ci-persistence',NULL,NULL,'2026-09-16','failed','unknown','ci-paid-operation',0)"
     )
     connection.execute(
-        "INSERT INTO budget_reservations(id,amount,state,created_at) VALUES ('ci-paid-reservation',0.01,'active','2026-09-16')"
+        "INSERT INTO budget_reservations(id,amount,state,created_at) VALUES ('ci-paid-reservation',0.01,'active',?)",
+        (_now(),),
     )
     connection.execute(
         "INSERT INTO provider_quota_state(scope,failures,circuit_until) VALUES ('ci-paid-provider',2,2000000000)"

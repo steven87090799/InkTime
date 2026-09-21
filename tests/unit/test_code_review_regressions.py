@@ -252,6 +252,36 @@ def test_stale_budget_reservations_stop_counting_and_are_swept(app):
     assert states["vision:fresh"] == "active"
 
 
+# ISSUE-017 -- the CI paid-state fixture seeded a reservation with a hard-coded
+# date, so the ISSUE-006 sweeper released it once that date aged past the window
+# and the NAS update E2E failed for a reason unrelated to preservation.  Cover it
+# here so the failure surfaces in unit CI instead of only in the slow E2E.
+def test_ci_paid_state_fixture_survives_the_reservation_sweeper(app, tmp_path):
+    import importlib.util
+    import sqlite3
+
+    database = app.extensions["inktime_database"]
+    budgets = app.extensions["inktime_budget_service"]
+
+    spec = importlib.util.spec_from_file_location(
+        "persistence_fixture", "scripts/ci/persistence_fixture.py"
+    )
+    fixture = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(fixture)
+
+    connection = sqlite3.connect(database.path)
+    connection.execute("PRAGMA foreign_keys=ON")
+    try:
+        fixture.seed(connection)
+        # The scheduler runs this on its operational-retention cadence, including
+        # across a container update.  A freshly seeded reservation is in flight
+        # and must not be touched.
+        assert budgets.expire_stale_reservations() == 0
+        fixture.verify(connection)
+    finally:
+        connection.close()
+
+
 # ISSUE-007 -- a wrong (not merely missing) master secret was undetectable.
 def test_master_secret_fingerprint_is_recorded(app):
     database = app.extensions["inktime_database"]

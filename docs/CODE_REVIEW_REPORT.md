@@ -21,13 +21,15 @@ Counts are the **actual** findings recorded below. Nothing here is padded or inv
 |---|---:|---:|---:|
 | Critical | 0 | 0 | 0 |
 | High | 30 | 10 | 20 |
-| Medium | 26 | 6 | 20 |
+| Medium | 27 | 7 | 20 |
 | Low | 2 | 0 | 2 |
-| **Verified subtotal** | **58** | **16** | **42** |
+| **Verified subtotal** | **59** | **17** | **42** |
 | Info / Needs Verification (single-pass, not independently re-checked) | 216 | 0 | 216 |
-| **Total recorded** | **274** | **16** | **258** |
+| **Total recorded** | **275** | **17** | **258** |
 
-57 findings came from the review passes; **ISSUE-016 was found during the second-round review** of the fixes themselves.
+57 findings came from the review passes; **ISSUE-016 was found during the second-round review** of
+the fixes, and **ISSUE-017 was found by CI** — a real regression this change introduced, caught
+because the branch was pushed for CI rather than merged straight to `main`.
 
 **There is no Critical finding.** Three findings were initially rated Critical by the discovery pass; an independent adversarial verification pass downgraded all three to High because none causes permanent data loss, credential disclosure, database corruption or device brick. That downgrade is recorded rather than hidden — see ISSUE-002, ISSUE-003 and ISSUE-008.
 
@@ -75,6 +77,7 @@ Counts are the **actual** findings recorded below. Nothing here is padded or inv
 | ISSUE-014 | Medium | NVS key `offretry_attempt` is 16 chars (limit 15) | `esp32/ink-display-7C-photo/ink-display-7C-photo.ino:716,729,741` | Offline retry backoff never escalates; drains battery during an outage | ✅ Fixed |
 | ISSUE-015 | Medium | `goDeepSleepUntilEpoch` has no maximum-sleep clamp | `esp32/ink-display-7C-photo/ink-display-7C-photo.ino:2482-2494` | A bad RTC read can park the panel indefinitely | ✅ Fixed |
 | ISSUE-016 | Medium | A migration contract test asserted the ISSUE-009 defect as expected behaviour | `tests/unit/test_migrations.py:129-139` | CI stayed green while six retention policies never deleted a row | ✅ Fixed |
+| ISSUE-017 | Medium | CI paid-state fixture seeds a budget reservation with a hard-coded date | `scripts/ci/persistence_fixture.py:26-29` | Any age-aware reservation logic makes the NAS update E2E fail for a reason unrelated to preservation | ✅ Fixed |
 
 ### 2.2 Verified but not fixed
 
@@ -537,6 +540,58 @@ assert retention_dry_run_defaults == {
 
 ---
 
+### ISSUE-017 — CI paid-state fixture hard-codes a reservation timestamp
+
+- **Severity:** Medium (test infrastructure).
+- **Confidence:** Confirmed — this was a **real regression introduced by ISSUE-007 and caught by CI**, not by local testing.
+- **Found during:** the CI run on this branch. The `NAS pull-only A to B update and data preservation` job failed in 1m 38s, having passed in 1m 53s on the base commit `d0c6d4d`.
+- **Location:** `scripts/ci/persistence_fixture.py:26-29`.
+
+**Offending code (before):**
+
+```python
+connection.execute(
+    "INSERT INTO budget_reservations(id,amount,state,created_at) "
+    "VALUES ('ci-paid-reservation',0.01,'active','2026-09-16')"
+)
+...
+assert connection.execute(
+    "SELECT amount,state FROM budget_reservations WHERE id='ci-paid-reservation'"
+).fetchone() == (0.01, "active")
+```
+
+**Description.** The fixture proves paid state survives an A→B container update. It seeds a
+`budget_reservations` row with the literal date `2026-09-16` and asserts it is still `active`
+afterwards. The ISSUE-007 sweeper releases `active` reservations older than 24 hours, and the
+scheduler runs that sweep on its operational-retention cadence — including across the update. By
+the CI run date the seeded row was five days old, so it was correctly released and the assertion
+failed.
+
+**Root cause.** The hard-coded date was a latent time-bomb: it encoded "now" at the moment the
+fixture was written, and nothing had ever examined reservation *age* before. The first piece of
+age-aware logic to land was guaranteed to break it, regardless of correctness.
+
+**Why the fixture was changed rather than the sweeper.** A reservation active for five days is, by
+definition, leaked — no provider request runs that long — and releasing it is the entire point of
+ISSUE-007. The fixture's *intent* is preservation across an update, not "a leaked reservation lives
+for ever". Seeding `now()` keeps the assertion exactly as strict while making it test what it
+claims to. **The assertion itself is unchanged**; only the timestamp became time-relative. Note the
+sweeper does not delete the row or its amount — it transitions state, so the paid-state evidence
+survives either way.
+
+**Files changed:** `scripts/ci/persistence_fixture.py`, `tests/unit/test_code_review_regressions.py`.
+
+**Verification.** `test_ci_paid_state_fixture_survives_the_reservation_sweeper` loads the real CI
+fixture, runs the real sweeper, and asserts the fresh reservation is untouched and `verify()`
+passes — moving this failure from the slow NAS E2E into unit CI. The companion
+`test_stale_budget_reservations_stop_counting_and_are_swept` still proves a genuinely stale
+reservation *is* released, so the ISSUE-007 fix is not weakened. Both were re-run against a real
+migrated database.
+
+**Status:** ✅ Fixed
+
+---
+
 ## 4. Verification Performed
 
 ### 4.1 Environment limitation — read this before trusting the results
@@ -557,7 +612,7 @@ To obtain any runtime signal, a **test-harness-only** compatibility layer was in
 |---|---|---|
 | Lint | `ruff check inktime tests scripts server.py analyze_photos.py` | ✅ **All checks passed** |
 | Type check | `mypy` | ⚠️ 15 errors, **all pre-existing POSIX-attribute artifacts of running on Windows** (`fcntl.flock`, `os.fchmod`, `os.getuid`, `resource.getrusage`, `os.getloadavg`). None are in changed lines. Linux CI is green at the base commit. |
-| New regression tests | `pytest tests/unit/test_code_review_regressions.py` | ✅ **16 passed** |
+| New regression tests | `pytest tests/unit/test_code_review_regressions.py` | ✅ **17 passed** |
 | Migration contract | `pytest tests/unit/test_migrations.py` | ✅ **45 passed**, 1 deselected (see below) |
 | Migration end-to-end | `migrate()` on a fresh database | ✅ 62 applied, `integrity_check=ok`, re-run is a no-op, all 8 retention policies enforce |
 | Pre-fix reproduction | direct execution against stashed base code | ✅ Every fixed defect reproduced on `d0c6d4d` |
@@ -691,5 +746,6 @@ After this change the deployment is materially safer but **still not production-
 | `inktime/app/workers/scheduler.py` | ISSUE-007, ISSUE-013 |
 | `esp32/ink-display-7C-photo/ink-display-7C-photo.ino` | ISSUE-014, ISSUE-015 |
 | `tests/unit/test_migrations.py` | ISSUE-016 (schema version 61→62; retention contract corrected) |
-| `tests/unit/test_code_review_regressions.py` | new — 16 regression tests |
+| `scripts/ci/persistence_fixture.py` | ISSUE-017 (reservation timestamp made time-relative) |
+| `tests/unit/test_code_review_regressions.py` | new — 17 regression tests |
 </content>
