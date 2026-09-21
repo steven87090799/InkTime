@@ -71,6 +71,18 @@ POSITIONS = [
     "bottom_right",
     "unknown",
 ]
+# Every enum member the wire schema can carry.  These are protocol identifiers,
+# not prose, so Traditional-Chinese conversion must leave them untouched: s2twp
+# rewrites 文件 -> 檔案, which then fails its own enum check and terminally
+# rejects (after billing) any photo the model classified as a document.
+PROTOCOL_ENUM_VALUES = frozenset(
+    set(ALLOWED_TYPES)
+    | set(SPECIAL_CODES)
+    | set(CONTENT_FILTER_CODES)
+    | set(ORIENTATION_EVIDENCE)
+    | set(POSITIONS)
+    | {"none"}
+)
 
 
 def _object(properties: dict) -> dict:
@@ -297,7 +309,7 @@ def validate_model_response(raw: str | dict, *, caption_controls: dict[str, Any]
             raw = json.loads(raw)
         except json.JSONDecodeError as exc:
             raise AnalysisValidationError("模型回傳無效 JSON") from exc
-    value = to_taiwan_traditional(deepcopy(raw))
+    value = to_taiwan_traditional(deepcopy(raw), protected=PROTOCOL_ENUM_VALUES)
     _validate(value, json_schema_for_stage("single", caption_controls=caption_controls)["schema"], "analysis")
     if not isinstance(value, dict):
         raise AnalysisValidationError("analysis 必須是 object")
@@ -326,7 +338,7 @@ def validate_analysis_result(
             error = AnalysisValidationError("模型回傳無效 JSON")
             error.code = "VLM-003"
             raise error from exc
-    value = to_taiwan_traditional(deepcopy(raw))
+    value = to_taiwan_traditional(deepcopy(raw), protected=PROTOCOL_ENUM_VALUES)
     if not isinstance(value, dict):  # Narrow the type after the schema validator accepts it.
         raise AnalysisValidationError("analysis 必須是 object")
     version = value.get("schema_version")

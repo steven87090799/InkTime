@@ -8,6 +8,7 @@ from inktime.app.providers.openai_compatible import OpenAICompatibleProvider
 from inktime.app.providers.config import (
     capabilities_for,
     provider_revision,
+    provider_analysis_revision,
     effective_provider_kind,
     normalize_options,
     validate_model_id,
@@ -98,9 +99,7 @@ class ProviderService:
 
     @staticmethod
     def config_revision(provider: dict[str, Any]) -> str:
-        if provider.get("analysis_revision") and provider.get("analysis_revision_semantics") == provider_revision(provider, semantic=True):
-            return str(provider["analysis_revision"])
-        return provider_revision(provider)
+        return provider_analysis_revision(provider)
 
     @staticmethod
     def operational_revision(provider: dict[str, Any]) -> str:
