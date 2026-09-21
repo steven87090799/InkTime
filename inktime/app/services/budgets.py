@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import math
 import time
 from uuid import uuid4
@@ -18,9 +18,46 @@ class BudgetExceeded(RuntimeError):
 
 
 class BudgetService:
+    # A reservation models one in-flight paid request.  No provider call can
+    # legitimately stay in flight for hours, but several failure paths (timeout,
+    # transport error, success with no reported cost) never released one and
+    # there was no sweeper, so leaked rows were summed into daily AND monthly
+    # spend forever -- eventually tripping budget.daily_stop / monthly_stop and
+    # halting all analysis with no way to recover from the UI.  Stale rows stop
+    # counting after this window; genuinely billed spend is still accounted for
+    # through api_usage (including the cost_source='unknown' reserve).
+    RESERVATION_MAX_AGE_SECONDS = 24 * 60 * 60
+
     def __init__(self, database: Database, settings: SettingsRepository) -> None:
         self.database = database
         self.settings = settings
+
+    def _reservation_cutoff(self) -> str:
+        try:
+            window = float(
+                self.settings.get("budget.reservation_max_age_seconds", self.RESERVATION_MAX_AGE_SECONDS)
+            )
+        except (TypeError, ValueError):
+            window = float(self.RESERVATION_MAX_AGE_SECONDS)
+        window = max(600.0, min(window, 7 * 24 * 60 * 60.0))
+        return (datetime.now(timezone.utc) - timedelta(seconds=window)).isoformat()
+
+    def expire_stale_reservations(self) -> int:
+        """Release reservations that outlived any plausible in-flight request."""
+
+        # The table's CHECK constraint allows only 'active'/'released', and a
+        # swept reservation is exactly a release -- the request it guarded can no
+        # longer be in flight.  Reuse the existing state rather than rebuilding
+        # the table for a diagnostic distinction.
+        cutoff = self._reservation_cutoff()
+        with self.database.transaction(operation="budget_reservation_expiry") as connection:
+            return int(
+                connection.execute(
+                    "UPDATE budget_reservations SET state='released' "
+                    "WHERE state='active' AND created_at<?",
+                    (cutoff,),
+                ).rowcount
+            )
 
     @staticmethod
     def _billable_evidence_sql(alias: str = "") -> str:
@@ -73,7 +110,8 @@ class BudgetService:
                 "SELECT COALESCE(SUM(amount),0) total, "
                 "COALESCE(SUM(CASE WHEN job_id=? THEN amount ELSE 0 END),0) job, "
                 "COALESCE(SUM(CASE WHEN photo_id=? THEN amount ELSE 0 END),0) photo "
-                "FROM budget_reservations WHERE state='active'", (job_id, photo_id),
+                "FROM budget_reservations WHERE state='active' AND created_at>=?",
+                (job_id, photo_id, self._reservation_cutoff()),
             ).fetchone()
 
         reserve = max(0.01, min(100.0, float(self.settings.get("budget.unknown_request_reserve", 0.25))))

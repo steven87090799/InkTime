@@ -623,7 +623,7 @@ static void clearConfigNVS() {
     if (legacyCleared && prefs.begin("dashcfg", true)) {
       const char* keys[] = {
         "last_epoch", "last_ntp", "wifi_bssid", "wifi_channel",
-        "offretry_attempt", "offretry_epoch", "offretry_next", "pwr_retry",
+        "offretry_try", "offretry_epoch", "offretry_next", "pwr_retry",
         "ack_item", "ack_version", "ack_event", "ack_attempt", "ack_next",
         "ssid", "pass", "hostport", "ca_pem", "devtoken", "tzmin", "tz",
         "hour", "minute", "rot180", "prefetch", "delivery", "button", "cfgver", "scnt",
@@ -704,10 +704,16 @@ static void clearPowerRecoveryAttempt() {
   prefs.end();
 }
 
+// NVS keys are limited to 15 characters (NVS_KEY_NAME_MAX_SIZE is 16 including
+// the terminator).  The previous key "offretry_attempt" was 16 characters, so
+// every put/get silently failed: the attempt counter always read back as 0 and
+// the offline retry backoff never escalated past the first 15-minute tier,
+// retrying every 15 minutes for the whole outage instead of backing off to
+// 30 and then 60 minutes.  "offretry_try" is 12 characters.
 static bool loadOfflineRetryState(
   uint8_t &attemptOut, int64_t &epochOut, int64_t &nextSlotOut) {
   prefs.begin("dashcfg", true);
-  const uint8_t storedAttempt = prefs.getUChar("offretry_attempt", 0U);
+  const uint8_t storedAttempt = prefs.getUChar("offretry_try", 0U);
   const int64_t storedEpoch = prefs.getLong64("offretry_epoch", 0);
   const int64_t storedNextSlot = prefs.getLong64("offretry_next", 0);
   prefs.end();
@@ -720,7 +726,7 @@ static bool loadOfflineRetryState(
 static void saveOfflineRetryState(uint8_t attempt, int64_t epoch, int64_t nextSlotEpoch) {
   prefs.begin("dashcfg", false);
   const size_t attemptWritten = prefs.putUChar(
-    "offretry_attempt", attempt > 2U ? 2U : attempt);
+    "offretry_try", attempt > 2U ? 2U : attempt);
   const size_t epochWritten = prefs.putLong64("offretry_epoch", epoch);
   const size_t nextWritten = prefs.putLong64(
     "offretry_next", nextSlotEpoch > 0 ? nextSlotEpoch : 0);
@@ -732,7 +738,7 @@ static void saveOfflineRetryState(uint8_t attempt, int64_t epoch, int64_t nextSl
 
 static void clearOfflineRetryState() {
   prefs.begin("dashcfg", false);
-  if (prefs.remove("offretry_attempt")) recordNvsWrite();
+  if (prefs.remove("offretry_try")) recordNvsWrite();
   if (prefs.remove("offretry_epoch")) recordNvsWrite();
   if (prefs.remove("offretry_next")) recordNvsWrite();
   prefs.end();
@@ -2474,10 +2480,17 @@ void goDeepSleepMinutes(uint32_t minutes) {
 }
 
 void goDeepSleepUntilEpoch(time_t nowEpoch, time_t nextEpoch) {
-  goDeepSleepSeconds(inktime::exactSleepSeconds(
-    static_cast<uint64_t>(nowEpoch),
-    static_cast<uint64_t>(nextEpoch)
-  ));
+  // goDeepSleepMinutes already clamps to 24 hours; this entry point did not.
+  // A corrupt RTC read, a bad stored schedule epoch, or a negative time_t cast
+  // to uint64_t could otherwise park the panel for years with no wake source
+  // other than a manual power cycle.  Never sleep past one day.
+  static constexpr uint64_t kMaxSleepSeconds = 24ULL * 60ULL * 60ULL;
+  uint64_t seconds = inktime::exactSleepSeconds(
+    static_cast<uint64_t>(nowEpoch < 0 ? 0 : nowEpoch),
+    static_cast<uint64_t>(nextEpoch < 0 ? 0 : nextEpoch)
+  );
+  if (seconds > kMaxSleepSeconds) seconds = kMaxSleepSeconds;
+  goDeepSleepSeconds(seconds);
 }
 
 // =======================

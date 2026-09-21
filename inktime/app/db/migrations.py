@@ -2380,6 +2380,67 @@ MIGRATIONS = (
                 WHERE EXISTS(SELECT 1 FROM api_usage WHERE job_id=jobs.id)""",
         ),
     ),
+    Migration(
+        62,
+        "修復 OpenCC 誤改的 types enum、啟用未修改的作業保留政策並記錄主密鑰指紋",
+        (
+            # A non-reversible fingerprint of the master secret.  Restoring a
+            # metadata backup onto a deployment that generated a fresh
+            # session.key silently re-keys the device HMAC pepper and the
+            # SecretStore Fernet key: every frame gets 401 and every stored
+            # secret becomes undecryptable.  The existing SESSION-002 guard only
+            # fires when session.key is ABSENT, never when it is present but
+            # wrong, so record the identity and verify it at every startup.
+            """CREATE TABLE IF NOT EXISTS runtime_identity (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )""",
+            # Migration 53 ran every stored AI payload through the s2twp
+            # converter, which performs Taiwanese *vocabulary* substitution and
+            # rewrote the enum member 文件 into 檔案.  檔案 is not in ALLOWED_TYPES,
+            # so those rows can no longer be re-validated or inherited.  Repair
+            # the enum member only; no other stored text is touched.
+            """UPDATE photo_analysis
+               SET types_json=replace(types_json,'"檔案"','"文件"')
+               WHERE types_json LIKE '%"檔案"%'""",
+            """UPDATE ai_analysis_cache
+               SET result_json=replace(result_json,'"檔案"','"文件"')
+               WHERE result_json LIKE '%"檔案"%'""",
+            """UPDATE job_items
+               SET result_json=replace(result_json,'"檔案"','"文件"')
+               WHERE result_json LIKE '%"檔案"%'""",
+            """UPDATE ai_trace_runs
+               SET final_result_json=replace(final_result_json,'"檔案"','"文件"')
+               WHERE final_result_json LIKE '%"檔案"%'""",
+            """UPDATE ai_trace_attempts
+               SET response_parsed_json=replace(response_parsed_json,'"檔案"','"文件"')
+               WHERE response_parsed_json LIKE '%"檔案"%'""",
+            # Six policies shipped in migration 46 never received an explicit
+            # dry_run value, so they inherited the column default of 1 and have
+            # been evaluated-but-never-enforced ever since, while last_run_at
+            # kept advancing and made them look healthy.  Enable only rows that
+            # still carry their shipped defaults, exactly as migration 49 did
+            # for api_usage, so any administrator edit is preserved.
+            """UPDATE data_retention_policies
+               SET dry_run=0,updated_at=datetime('now')
+               WHERE dry_run=1
+                 AND enabled=1
+                 AND maximum_items IS NULL
+                 AND maximum_bytes IS NULL
+                 AND minimum_items_to_keep=0
+                 AND cleanup_batch_size=200
+                 AND updated_at NOT LIKE '%T%'
+                 AND (
+                       (data_type='decision_trace' AND retention_days=180)
+                    OR (data_type='decision_candidate' AND retention_days=60)
+                    OR (data_type='shadow_preview' AND retention_days=30)
+                    OR (data_type='device_event' AND retention_days=180)
+                    OR (data_type='queue_event' AND retention_days=90)
+                    OR (data_type='job_log' AND retention_days=30)
+                 )""",
+        ),
+    ),
 )
 
 
@@ -2714,9 +2775,10 @@ def _traditional_json_text(value: object) -> str | None:
     except (TypeError, ValueError):
         return None
 
+    from inktime.app.domain.analysis.schema import PROTOCOL_ENUM_VALUES
     from inktime.app.domain.analysis.traditional_chinese import to_taiwan_traditional
 
-    converted = to_taiwan_traditional(parsed)
+    converted = to_taiwan_traditional(parsed, protected=PROTOCOL_ENUM_VALUES)
     if converted == parsed:
         return None
     return json.dumps(converted, ensure_ascii=False, separators=(",", ":"))

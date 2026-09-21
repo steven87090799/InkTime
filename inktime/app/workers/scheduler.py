@@ -201,7 +201,23 @@ class SchedulerRunner:
                 # The scheduled identity is already owned by a live Job.  Move
                 # the cron cursor once after confirming the existing Job is
                 # active; do not create a second queue entry on every tick.
-                schedule_repository.mark_enqueued(task, now)
+                # mark_enqueued parses the cron expression, so it can raise on a
+                # malformed stored schedule.  Keep it inside the same per-task
+                # guard as _enqueue_task: one bad task must not abort the rest
+                # of this tick.
+                try:
+                    schedule_repository.mark_enqueued(task, now)
+                except Exception as exc:
+                    self._record_schedule_exception(task, exc, now)
+                    log_event(
+                        LOGGER,
+                        logging.ERROR,
+                        "排程游標更新失敗；其他排程持續執行",
+                        event="scheduled_task_cursor_failed",
+                        error_code=failure_code(exc),
+                        details={"task": task["key"], "failure_class": classify_failure(exc).value},
+                    )
+                    continue
                 log_event(
                     LOGGER,
                     logging.DEBUG,
@@ -240,6 +256,12 @@ class SchedulerRunner:
                 self._safe_step("operational_expire", resilience.expire_operational_data)
                 self._safe_step("cleanup_audit_gc", resilience.cleanup_audit_history)
                 self._safe_step("operational_cleanup", lambda: resilience.cleanup(dry_run=False))
+            budgets = self.app.extensions.get("inktime_budget_service")
+            if budgets is not None:
+                # Without this sweep a leaked reservation stays 'active' forever
+                # and is summed into both daily and monthly spend, eventually
+                # halting all analysis with BudgetExceeded.
+                self._safe_step("budget_reservation_expiry", budgets.expire_stale_reservations)
             self.last_operational_retention_at = monotonic_now
         if not settings.get("backup.schedule_enabled", True):
             return

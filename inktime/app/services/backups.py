@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from hashlib import sha256
 import json
+import logging
 import os
 from pathlib import Path
 import shutil
@@ -12,10 +13,12 @@ from typing import IO
 import zipfile
 
 from inktime import __version__
+from inktime.app.core.logging import log_event
 from inktime.app.db import Database
 from inktime.app.db.migrations import MIGRATIONS, migrate
 
 
+LOGGER = logging.getLogger("backup")
 BACKUP_FORMAT_VERSION = 2
 IMPORTANT_TABLES = (
     "photos",
@@ -129,6 +132,38 @@ class BackupService:
             try:
                 source.backup(target)
                 if not include_secrets:
+                    # VACUUM materialises a full copy of the database in SQLite's
+                    # temp directory.  The container sets no TMPDIR/SQLITE_TMPDIR
+                    # and runs on a read-only rootfs, so SQLite would fall through
+                    # to /tmp -- a small tmpfs (256 MiB for the worker).  Any
+                    # database larger than that fails with "database or disk is
+                    # full" and the nightly backup stops working permanently.
+                    # Pin the compaction scratch space to the backup directory,
+                    # which lives on the same /data volume as the snapshot.
+                    # temp_store_directory is deprecated-but-functional; if a
+                    # future SQLite drops it the compaction would silently move
+                    # back to /tmp, so verify it applied and say so rather than
+                    # regressing quietly.  Never fatal: a backup is more useful
+                    # than a perfectly-placed temp file.
+                    scratch = str(directory)
+                    try:
+                        target.execute(
+                            "PRAGMA temp_store_directory = '{}'".format(
+                                scratch.replace("'", "''")
+                            )
+                        )
+                        applied = target.execute("PRAGMA temp_store_directory").fetchone()
+                    except sqlite3.DatabaseError:
+                        applied = None
+                    if applied is None or str(applied[0]) != scratch:
+                        log_event(
+                            LOGGER,
+                            logging.WARNING,
+                            "無法將 VACUUM 暫存目錄指向 /data；大型資料庫備份可能因 /tmp 空間不足失敗",
+                            event="backup_temp_store_not_applied",
+                            error_code="BACKUP-002",
+                            operation="backup_vacuum",
+                        )
                     target.execute("PRAGMA secure_delete = ON")
                     target.execute("DELETE FROM secrets")
                     target.commit()
@@ -407,9 +442,11 @@ class BackupService:
                 raise ValueError(
                     f"RESTORE-006 備份 Schema Version {staged_version} 高於目前支援版本 {latest_version}"
                 )
+            migrated = False
             if staged_version < latest_version and not exact_snapshot:
                 migrate(staged_database)
                 self._validate_restore_database(staged)
+                migrated = True
             with staged_database.session() as connection:
                 connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
             safety_copy = self._snapshot_current()
@@ -418,7 +455,15 @@ class BackupService:
             os.replace(staged, self.database.path)
             replaced = True
             _fsync_directory(self.database.path.parent)
-            counts = self._validate_restore_database(self.database.path, manifest)
+            # The manifest records counts as they were when the backup was taken.
+            # If migrations ran above, a data-fixing migration may legitimately
+            # have changed them, so comparing post-migration counts against the
+            # pre-migration manifest would fail a restore that actually
+            # succeeded.  Enforce the count contract only when the snapshot was
+            # restored at its original schema version.
+            counts = self._validate_restore_database(
+                self.database.path, None if migrated else manifest
+            )
             if Database(self.database.path).integrity_check(full=True) != "ok":
                 raise ValueError("RESTORE-002 還原後 integrity_check 失敗")
             return safety_copy, counts

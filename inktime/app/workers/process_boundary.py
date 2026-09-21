@@ -28,6 +28,11 @@ class ProcessCallTimeout(TimeoutError):
 
 class ProcessCallError(RuntimeError):
     code = "AI-PROVIDER-UNAVAILABLE"
+    # True only when the caller's cancel_requested() asked us to stop (graceful
+    # shutdown).  The child is terminated before it can report, so the work did
+    # not complete and the item must go back on the queue rather than be
+    # dead-lettered as a genuine failure.
+    cancelled: bool = False
     child_started: bool = False
     ambiguous: bool | None = None
     vision_started: bool | None = None
@@ -228,7 +233,9 @@ class KillableProcessBoundary:
                 while not receiver.poll(min(0.1, max(0.0, deadline - time.monotonic()))):
                     if cancel_requested is not None and cancel_requested():
                         self._terminate(process)
-                        raise ProcessCallError("child process cancelled")
+                        cancellation = ProcessCallError("child process cancelled")
+                        cancellation.cancelled = True
+                        raise cancellation
                     if time.monotonic() >= deadline:
                         with self._lock:
                             self._metrics["timeout"] += 1
