@@ -3,8 +3,8 @@
   "description": "Machine-readable AI editing routes and default read boundaries for InkTime.",
   "context_command": "python scripts/ci/ai_context.py <task-id>",
   "default_policy": {
-    "first_pass_max_files": 4,
-    "first_pass_max_lines": 800,
+    "first_pass_max_files": 3,
+    "first_pass_max_lines": 300,
     "expand_requires_evidence": true,
     "full_audit_requires_explicit_request": true,
     "hardware_exception": "Read docs/devices/PHOTOPAINTER_SAFETY_CONTRACT.md first for hardware safety tasks; historical evidence on demand.",
@@ -36,9 +36,23 @@
       "README.en.md",
       "USER_MANUAL.html",
       "docs/README.md",
-      "~/.codex/memories/**"
+      "~/.codex/memories/**",
+      "docs/reports/**",
+      "docs/CODE_REVIEW_REPORT.md",
+      "docs/operations/*_20*.md",
+      ".ruff_cache/**",
+      "**/__pycache__/**",
+      ".venv/**",
+      "node_modules/**",
+      "build/**",
+      "dist/**",
+      "**/session.key*",
+      "**/*.jsonl"
     ],
-    "targeted_skip_context_tool": true
+    "targeted_skip_context_tool": true,
+    "default_route_max_items": 6,
+    "default_route_reads_source": false,
+    "normal_tool_output_max_lines": 120
   },
   "task_routes": [
     {

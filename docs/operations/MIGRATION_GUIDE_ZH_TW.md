@@ -58,7 +58,7 @@ Migration 33 不會把 `cost_source='unknown'` 的 historical row 推論成 `est
 
 本次跨日 staged-next 修復不新增 SQLite schema，也不修改既有 Migration；`MIGRATION=none`。明日 schedule 以 PhotoPainter SD 上 bounded 的 `staged_next.json`、`.tmp` 與 `.bak` 保存，active schedule 仍由既有 snapshot／Queue schema 管理。部署時不需重跑資料遷移；需確認韌體版本同時支援 `target=current|next`、future rotation、午夜 promote 與 non-terminal prefetch ACK。
 
-## 目前主線 Migration 34–57
+## 歷史升級 Migration 34–57
 
 以下依原始碼逐版列出名稱；既有 1–33 說明保留作歷史升級背景，並非最高版本。
 
@@ -89,6 +89,23 @@ Migration 33 不會把 `cost_source='unknown'` 的 historical row 推論成 `est
 | 56 | 持久化照片庫排序待重算狀態 |
 | 57 | Vision v4 歷史排序與 E6 排除轉換 |
 
-Migration 51 保存 AI Trace run／attempt 與預設 30 天保留政策；52 為 Provider 加入可空白的 `model`。空白保持全域模型 fallback，已設定值納入路由與凍結計畫。版本數字與 API／Config Store schema 不同，完整對照見[現行基線](../reference/CURRENT_STATE_ZH_TW.md)。升級、fresh、rollback 與 restore 證據由目前 source 對應的 Hosted CI 決定。本次另在獲授權的 OrbStack debug 環境驗證 53→57，不能替代 NAS 實測或完整 Hosted CI。
+Migration 51 保存 AI Trace run／attempt 與預設 30 天保留政策；52 為 Provider 加入可空白的 `model`。空白保持全域模型 fallback，已設定值納入路由與凍結計畫。版本數字與 API／Config Store schema 不同，完整對照見[現行基線](../reference/CURRENT_STATE_ZH_TW.md)。升級、fresh、rollback 與 restore 證據由目前 source 對應的 Hosted CI 決定。歷史文件曾記錄獲授權 OrbStack debug 的 53→57 驗證，不能替代 NAS 實測或完整 Hosted CI。
 
 Migration 55 會退休舊排名權重、將文案長度改為 10／60／100 並把完整／變體分析上限收斂至 1200；57 將舊 v1–v3 語意結果標為歷史並精準解除舊 E6 自動排除。升級前應備份，再核對個人設定與 [Vision v4 契約](../archive/contracts/VISION_SCHEMA_V4.md)。設定快照會略過目前版本不認識的舊 key，原始資料列仍保留，避免退休設定阻止一般設定儲存。
+
+## 現行 Migration 58–63
+
+截至 2026-09-22，`MIGRATIONS` 最高為 63；現行基線與部署版號應分開核對。
+
+| 版本 | 升級行為與相容性 |
+|---|---|
+| 58 | 固定 67／33／0 的 AI-first 衍生排名；不重新呼叫模型 |
+| 59 | 明確保存 PhotoPainter 16-slot 能力；不擅自截短既有排程 |
+| 60 | 將歷史直接最愛加分欄位改名；現行最愛固定提升 special level |
+| 61 | 付費操作檢查點、usage operation 身分、共享預算／限流與 Batch 暫存 |
+| 62 | runtime key fingerprint；五種未自訂的保留政策啟用自動清理 |
+| 63 | 只修已知分析 JSON 的 types enum；恢復未自訂 Shadow 觀察模式 |
+
+62／63 升級後須核對匹配的 `session.key`、實際保留政策與未知付費操作。JSON 修復不全域替換 caption，也不改 Provider 原始回應；沒有證據時不猜測還原已被早期程式改寫的文字。Shadow 沒有 cleanup handler；其旗標不是清理成功證據。詳見[資料保留](../resilience/DATA_RETENTION_ZH_TW.md)與[備份還原](BACKUP_RESTORE_ZH_TW.md)。
+
+Schema v5 是模型資料契約，並非 SQLite Migration 版本。已存 v4 仍可讀取，不為升級精簡欄位自動重分析；新輸出以[現行 Vision Schema](../VISION_SCHEMA.md)為準。

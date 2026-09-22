@@ -11,7 +11,7 @@ Web「備份與還原」建立的 ZIP 使用 SQLite online backup API 取得一�
 - `settings.json`：可讀的一般設定匯出，不含 Secret。
 - `manifest.json`：備份格式、應用程式版本、Database Schema Version、每個檔案 SHA-256／大小及重要資料表筆數。
 
-預設不包含 API Key、Webhook Token、原始照片、縮圖快取、已渲染的 Release 檔案或 Log。Secret 會從備份用的 SQLite 副本刪除並執行 secure delete／VACUUM；還原後請在 Provider／通知設定重新輸入。原始照片與 `/data/releases` 仍須使用 NAS snapshot 或其他檔案備份制度；SQLite 內的顯示／發布歷史紀錄會保留，但沒有對應 Release 檔案時不能直接回滾到該輸出。
+預設不包含 API Key、Webhook Token、原始照片、縮圖快取、已渲染的 Release 檔案或 Log。Secret 會從備份用的 SQLite 副本刪除並執行 secure delete／`VACUUM INTO`；還原後請在 Provider／通知設定重新輸入。原始照片與 `/data/releases` 仍須使用 NAS snapshot 或其他檔案備份制度；SQLite 內的顯示／發布歷史紀錄會保留，但沒有對應 Release 檔案時不能直接回滾到該輸出。
 
 Manifest 的 `backup_scope` 明確區分 Metadata database、Release payload 與原始照片。平台啟動 reconciliation 會把 DB 有紀錄但檔案缺失標記 `payload_missing`、把檔案存在但 DB 無紀錄標記 orphan，並將失效 latest pointer 回復到同 Profile 最新的完整 published Release；未知 Release 不會自動刪除。`display_history` 是歷史事實，即使 Payload 已不存在也保留。
 
@@ -44,7 +44,7 @@ docker compose up -d
 2. 驗證備份格式、固定檔案清單、SHA-256、Schema Version、SQLite integrity、Migration 狀態及重要資料表筆數。
 3. 用 SQLite backup API 建立目前資料庫的 `inktime-pre-restore-*.sqlite3` 安全副本。
 4. 必要時只在暫存資料庫執行舊版 Schema Migration，再 checkpoint WAL。
-5. 原子替換正式資料庫，重新執行完整性與筆數檢查。
+5. 原子替換正式資料庫，重新執行完整性檢查；只有未向前 Migration 時才直接比對原 Manifest 筆數，避免把升級新增／修復資料誤判為還原失敗。
 6. 任一還原後檢查失敗時，自動以安全副本回復原資料庫；安全副本會保留供人工查核。
 
 啟動後依序確認：
@@ -73,3 +73,9 @@ docker compose run --rm --no-deps inktime-web \
 ```
 
 `--exact-snapshot` 會驗證完整性並保留快照的 Schema，不執行新版 Migration；一般還原仍會向前升級。接著切回與該 Schema 相容的舊映像／Git Commit，再啟動服務，核對 readiness、Schema 版本與照片／分析筆數。不可先用新版服務啟動精確還原後的資料庫，否則它會再次升級。不可只切回程式碼而保留較新的正式資料庫，也不可在線上複製單一 `.db` 檔取代 WAL 一致備份。
+
+## 密鑰與備份磁碟
+
+Metadata ZIP 不包含 `session.key`，但 DB 可能已有 Migration 62 的主密鑰指紋。恢復到其他主機時應一併安全恢復匹配密鑰或使用[Secret Recovery](SECRET_RECOVERY_ZH_TW.md) 流程；`SESSION-003` 表示已知指紋不符，不可刪掉指紋繞過。缺少指紋的舊備份不能證明密鑰相符。
+
+建立 ZIP 時先在備份目錄的私有暫存目錄產生 SQLite 快照，再以 `VACUUM INTO` 指定同一備份磁碟上的壓縮副本；不改程序全域 `temp_store_directory`。磁碟需容納快照、壓縮副本與 ZIP，檔案驗證通過後才發布備份。
