@@ -185,3 +185,51 @@ def test_ca_storage_outlives_tls_and_is_cleared_only_after_stop():
     close = transport[transport.index("void DeviceHttpTransport::closeSession"):]
     assert close.index("secure_client_.stop()") < close.index("effective_ca_pem_ =")
     assert "setCACert(effective_ca_pem_.c_str())" in transport
+
+
+def test_ntp_and_tls_have_explicit_bounded_waits():
+    transport = TRANSPORT.read_text(encoding="utf-8")
+    assert "secure_client_.setHandshakeTimeout(10);" in transport
+    firmware = FIRMWARE.read_text(encoding="utf-8")
+    sync = firmware[firmware.index("bool syncTime(") : firmware.index("static bool normalizedBackendBase")]
+    assert "kNtpBudgetMs = 15000U" in sync
+    assert "static_cast<uint32_t>(millis() - started) < kNtpBudgetMs" in sync
+    assert "getLocalTime(&outLocal, 0)" in sync
+    assert "getLocalTime(&outLocal)" not in sync
+
+
+def test_ack_append_and_remove_use_tested_in_place_mutation():
+    firmware = FIRMWARE.read_text(encoding="utf-8")
+    mutation = firmware[firmware.index("static bool persistPendingQueueAck(") : firmware.index("static PendingQueueAck loadPendingQueueAck()")]
+    assert "inktime::ackjournal::appendEntry(" in mutation
+    assert mutation.count("inktime::ackjournal::eraseEntry(") == 2
+    assert "PendingQueueAck next[" not in mutation
+    assert mutation.count("journal, current, count, activeBank, generation, legacyPresent);") == 2
+
+
+def test_display_record_is_atomic_and_interrupted_refresh_cannot_skip():
+    firmware = FIRMWARE.read_text(encoding="utf-8")
+    save = firmware[firmware.index("static void saveDisplayRecord(") : firmware.index("static bool restoreLastSuccessfulPhoto()")]
+    assert 'prefs.putBytes("disp_record", &blob, sizeof(blob))' in save
+    assert "memcmp(&blob, &readback, sizeof(blob)) == 0" in save
+    assert 'if (verified && prefs.putBool("disp_pending", false)' in save
+    for key in ("last_sha", "last_rel", "last_prof", "last_board", "last_rot", "last_ok", "disp_ver"):
+        assert f'"{key}"' not in save
+    load = firmware[firmware.index("static StoredDisplayRecord loadDisplayRecord()") : firmware.index("static bool runFormalFrameGcForWake(")]
+    assert 'prefs.isKey("disp_record")' in load
+    assert "blob.crc != inktime::crc32" in load
+    assert "return canonical;" in load
+    draw = firmware[firmware.index("bool drawFromFrameData(") :]
+    assert draw.index('prefs.putBool("disp_pending", true)') < draw.index("photoPainter.displayFrame(")
+    assert "if (!protectedAttempt)" in draw
+    skip = firmware[firmware.index("static bool shouldSkipCurrentDisplay(") :]
+    assert skip.index("if (pending) return false;") < skip.index("loadDisplayRecord()")
+
+
+def test_ack_corruption_fails_closed_and_blob_allocation_is_bounded():
+    firmware = FIRMWARE.read_text(encoding="utf-8")
+    assert "if (canonicalPresent && !legacyPresent) return false;" in firmware
+    assert "result == ESP_ERR_NVS_NOT_FOUND ? 0U : UINT8_MAX" in firmware
+    assert "if (length != expectedSize || length == 0U) return false;" in firmware
+    resume = firmware[firmware.index("static bool resumePendingQueueAck(") :]
+    assert resume.index("if (count == UINT8_MAX)") < resume.index("postQueueAckBatch(")

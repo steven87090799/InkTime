@@ -409,7 +409,33 @@ static void assertLegacyBatchAndDuplicateFailureWindows() {
     "accepted", "permanent"}));
 }
 
+static void assertBoundedEntryMutation() {
+  std::string entries[32];
+  uint8_t count = 0U;
+  for (uint8_t index = 0U; index < 32U; ++index) {
+    assert(inktime::ackjournal::appendEntry(
+      entries, count, 32U, std::to_string(index)));
+    assert(count == index + 1U);
+    for (uint8_t prior = 0U; prior <= index; ++prior) {
+      assert(entries[prior] == std::to_string(prior));
+    }
+  }
+  assert(!inktime::ackjournal::appendEntry(entries, count, 32U, std::string("overflow")));
+  assert(count == 32U);
+  assert(!inktime::ackjournal::eraseEntry(entries, count, 32U));
+  assert(inktime::ackjournal::eraseEntry(entries, count, 7U));
+  assert(count == 31U);
+  for (uint8_t index = 0U; index < count; ++index) {
+    assert(entries[index] == std::to_string(index < 7U ? index : index + 1U));
+  }
+  assert(inktime::ackjournal::appendEntry(entries, count, 32U, std::string("new")));
+  assert(entries[31] == "new");
+  while (count != 0U) assert(inktime::ackjournal::eraseEntry(entries, count, 0U));
+  assert(!inktime::ackjournal::eraseEntry(entries, count, 0U));
+}
+
 int main() {
+  assertBoundedEntryMutation();
   assertPreviousSnapshotAfterFault(FakeNvs::Fault::FirstRecord);
   assertPreviousSnapshotAfterFault(FakeNvs::Fault::MiddleRecord);
   assertPreviousSnapshotAfterFault(FakeNvs::Fault::LastRecord);

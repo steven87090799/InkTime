@@ -10,6 +10,26 @@ namespace ackjournal {
 
 constexpr uint8_t kMaximumEntries = 32U;
 
+// Mutate only the RAM replacement; durable state changes through commitSnapshot.
+// Shared with host tests so appending to a non-empty journal cannot drop entries.
+template <typename Entry>
+inline bool appendEntry(Entry* entries, uint8_t& count, uint8_t capacity,
+                        const Entry& pending) {
+  if (entries == nullptr || count >= capacity) return false;
+  entries[count++] = pending;
+  return true;
+}
+
+template <typename Entry>
+inline bool eraseEntry(Entry* entries, uint8_t& count, uint8_t index) {
+  if (entries == nullptr || index >= count) return false;
+  for (uint8_t next = index + 1U; next < count; ++next) {
+    entries[next - 1U] = entries[next];
+  }
+  entries[--count] = Entry{};
+  return true;
+}
+
 // The transaction core deliberately knows nothing about Preferences/NVS.  The
 // firmware adapter supplies exact write/read-back semantics, while host tests
 // inject a fake store and fail each phase independently.
