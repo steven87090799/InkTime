@@ -2468,6 +2468,17 @@ static void enterDeepSleepSeconds(uint64_t seconds, bool retainMaxAwakeRecovery)
 
   uint64_t us = seconds * 1000000ULL;
 
+  // Sleep has been selected; no more network work belongs to this wake. Stop radios before
+  // bounded I2C/EPD/storage cleanup and the possible 2 s KEY-release wait.
+  closeWakeHttpSession();
+  WiFi.disconnect(false, false);
+  WiFi.mode(WIFI_OFF);
+  esp_wifi_stop();
+
+#if defined(CONFIG_BT_ENABLED)
+  esp_bt_controller_disable();
+#endif
+
 #if INKTIME_PHOTOPAINTER_ENABLED
   photoPainter.prepareForDeepSleep();
   photoPainter.enableWakeSources();
@@ -2478,15 +2489,6 @@ static void enterDeepSleepSeconds(uint64_t seconds, bool retainMaxAwakeRecovery)
     frameData = nullptr;
     frameDataSize = 0;
   }
-
-  closeWakeHttpSession();
-  WiFi.disconnect(false, false);
-  WiFi.mode(WIFI_OFF);
-  esp_wifi_stop();
-
-#if defined(CONFIG_BT_ENABLED)
-  esp_bt_controller_disable();
-#endif
 
   prepareDeepSleepDomains(retainMaxAwakeRecovery);
   esp_sleep_enable_timer_wakeup(us);
@@ -6027,7 +6029,7 @@ void reportDeviceStatus(Config &cfg, bool displayUpdated) {
     cfg, telemetryNow, runtimeTelemetry.next_wake_epoch, runtimeTelemetry.next_network_sync_epoch);
 
 #if INKTIME_PHOTOPAINTER_ENABLED
-  photoPainter.readEnvironment();
+  photoPainter.refreshPowerState();
   uint32_t validatedScheduleVersion = 0U;
   if (validatedActiveScheduleVersion(cfg, telemetryNow, validatedScheduleVersion)) {
     runtimeTelemetry.applied_offline_schedule_version = validatedScheduleVersion;
@@ -6131,10 +6133,6 @@ void reportDeviceStatus(Config &cfg, bool displayUpdated) {
   if (photoPainter.batteryPercent() >= 0) {
     payload["battery_percent"] = photoPainter.batteryPercent();
     payload["battery_percent_estimated"] = true;
-  }
-  if (photoPainter.environmentValid()) {
-    payload["temperature_c"] = photoPainter.temperatureC();
-    payload["humidity_percent"] = photoPainter.humidityPercent();
   }
   payload["button_wakeup"] = photoPainter.wokeFromUserButton();
   // Legacy wire field names retained for server compatibility; values now represent internal frame storage I/O.
@@ -6805,9 +6803,6 @@ void setup() {
     }
     if (!photoPainter.rtcReady()) {
       INK_LOG_WARN("photopainter_rtc_unavailable", "RTC is unavailable; network time remains required");
-    }
-    if (!photoPainter.shtc3Ready()) {
-      INK_LOG_WARN("photopainter_sensor_unavailable", "SHTC3 telemetry is unavailable");
     }
   }
   // Recovery is a deliberate hold distinct from the established shorter
