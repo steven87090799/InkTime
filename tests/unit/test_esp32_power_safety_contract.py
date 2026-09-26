@@ -643,3 +643,44 @@ def test_unused_audio_keeps_pa_low_without_disabling_shared_audio_rail():
     assert "FFat.end();" in sleep
     assert "SD.end();" not in sleep
     assert "sdReady_" not in sleep
+
+
+def test_unused_environment_sensor_sleeps_without_conversions_or_telemetry():
+    support = SUPPORT.read_text(encoding="utf-8")
+    sensor = _between(support, "class Shtc3Adapter", "class Pcf85063Adapter")
+    assert "photopainter_sensor::disableMeasurements(" in sensor
+    assert "impl_->sensor.disableMeasurements()" in support
+    assert "photopainter_sensor_sleep_unconfirmed" in support
+    assert "photopainter_environment_disabled" in support
+    assert "impl_->sensor.read(" not in support
+    assert "0x7CA2" not in support
+    firmware = FIRMWARE.read_text(encoding="utf-8")
+    report = _between(
+        firmware, "void reportDeviceStatus(", "static bool displayPairingCode("
+    )
+    assert "photoPainter.refreshPowerState();" in report
+    assert 'payload["battery_voltage"]' in report
+    assert 'payload["temperature_c"]' not in report
+    assert 'payload["humidity_percent"]' not in report
+    assert "photopainter_sensor_unavailable" not in firmware
+
+
+def test_removed_audio_rail_helper_cannot_be_reintroduced_as_a_power_optimization():
+    support = SUPPORT.read_text(encoding="utf-8")
+    assert "powerDownUnusedAudio" not in support
+    assert "photopainter_audio_power.h" not in support
+    assert not (SUPPORT.parent / "photopainter_audio_power.h").exists()
+    assert "digitalWrite(board_.audio.paEnable, LOW)" in support
+    assert "if (pin != kNoPin) pinMode(pin, INPUT);" in support
+
+
+def test_sleep_stops_network_before_bounded_peripheral_cleanup_and_key_wait():
+    firmware = FIRMWARE.read_text(encoding="utf-8")
+    sleep = _between(
+        firmware, "static void enterDeepSleepSeconds(", "static void goDeepSleepSeconds("
+    )
+    assert sleep.index("closeWakeHttpSession();") < sleep.index("WiFi.mode(WIFI_OFF);")
+    assert sleep.index("esp_wifi_stop();") < sleep.index("photoPainter.prepareForDeepSleep();")
+    assert sleep.index("esp_wifi_stop();") < sleep.index("photoPainter.enableWakeSources();")
+    assert "esp_sleep_enable_timer_wakeup(us);" in sleep
+    assert "esp_sleep_disable_wakeup_source" not in sleep

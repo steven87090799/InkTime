@@ -18,7 +18,7 @@
 #include "photopainter_core.h"
 #include "photopainter_wake_core.h"
 #include "power_manager.h"
-#include "photopainter_audio_power.h"
+#include "photopainter_sensor_power.h"
 #include "firmware_observability.h"
 #include "spectra6_73.h"
 
@@ -29,7 +29,7 @@
 namespace inktime {
 
 // PhotoPainter Rev2.0 schematic: TG28 UP1 is at 0x34 and ALDO4 feeds EPD_VCC.
-// EPD writes remain REG95[4:0]/REG90[3]; the unused-audio helper only clears REG90[2].
+// Only EPD REG95[4:0]/REG90[3] may be written. ALDO3 / Audio_VCC stays powered.
 constexpr uint8_t kPhotoPainterPmicAddress = 0x34;
 constexpr uint8_t kTg28Status1 = 0x00;
 constexpr uint8_t kTg28Status2 = 0x01;
@@ -45,7 +45,6 @@ constexpr uint32_t kTg28Aldo4ColdStartSettleMs = 500U;
 constexpr uint32_t kEpdPostInitSettleMs = 3000U;
 constexpr gpio_num_t kPhotoPainterPowerLed = GPIO_NUM_45;
 constexpr gpio_num_t kPhotoPainterActivityLed = GPIO_NUM_42;
-constexpr uint8_t kShtc3Address = 0x70;
 constexpr uint8_t kPcf85063Address = 0x51;
 constexpr size_t kIoChunkSize = 4096;
 constexpr uint32_t kI2cTimeoutMs = 50;
@@ -427,22 +426,6 @@ class ProbePowerManager final : public PowerManager {
     return true;
   }
 
-  bool powerDownUnusedAudio() {
-    if (type_ != PmicType::TG28) return false;
-    const photopainter_audio::Result result = photopainter_audio::powerDownUnusedAudio(bus_);
-    if (result == photopainter_audio::Result::AlreadyOff
-        || result == photopainter_audio::Result::Disabled) {
-      INK_LOG_INFO("audio_power_off", "Unused Audio_VCC ALDO3 verified off");
-      return true;
-    }
-    lastError_ = "PMIC-AUDIO-OFF";
-    type_ = PmicType::Unknown;
-    INK_LOG_ERROR("audio_power_off_failed",
-      String("result=") + String(static_cast<unsigned>(result))
-        + "; stop board I2C/EPD work; no further rail writes");
-    return false;
-  }
-
   bool prepareDisplayPower() {
     lastError_ = "";
     if (type_ != PmicType::TG28) {
@@ -597,57 +580,13 @@ class Shtc3Adapter {
  public:
   explicit Shtc3Adapter(BoundedI2cBus& bus) : bus_(bus) {}
 
-  bool begin() {
-    ready_ = false;
-    if (!bus_.probe(kShtc3Address) || !bus_.writeCommand(kShtc3Address, 0x3517, true)) {
-      return false;
-    }
-    delay(1);
-    if (!bus_.writeCommand(kShtc3Address, 0xEFC8, true)) {
-      sleep();
-      return false;
-    }
-    delay(2);
-    uint8_t id[3] = {0, 0, 0};
-    if (!bus_.readBytes(kShtc3Address, id, sizeof(id))) {
-      sleep();
-      return false;
-    }
-    ready_ = shtc3Crc8(id, 2) == id[2]
-          && ((static_cast<uint16_t>(id[0]) << 8U | id[1]) & 0x083FU) == 0x0807U;
-    sleep();
-    return ready_;
-  }
-
-  bool read(float& temperatureC, float& humidityPercent) {
-    if (!ready_ || !bus_.writeCommand(kShtc3Address, 0x3517, true)) return false;
-    delay(1);
-    if (!bus_.writeCommand(kShtc3Address, 0x7CA2, true)) {
-      sleep();
-      return false;
-    }
-    const uint32_t started = millis();
-    while (millis() - started < 15) delay(1);
-    uint8_t bytes[6] = {0, 0, 0, 0, 0, 0};
-    if (!bus_.readBytes(kShtc3Address, bytes, sizeof(bytes))) {
-      sleep();
-      return false;
-    }
-    sleep();
-    if (shtc3Crc8(bytes, 2) != bytes[2] || shtc3Crc8(bytes + 3, 2) != bytes[5]) {
-      return false;
-    }
-    const uint16_t rawTemperature = static_cast<uint16_t>(bytes[0]) << 8U | bytes[1];
-    const uint16_t rawHumidity = static_cast<uint16_t>(bytes[3]) << 8U | bytes[4];
-    temperatureC = -45.0f + 175.0f * rawTemperature / 65535.0f;
-    humidityPercent = 100.0f * rawHumidity / 65535.0f;
-    return humidityPercent >= 0.0f && humidityPercent <= 100.0f;
+  photopainter_sensor::SleepResult disableMeasurements() {
+    return photopainter_sensor::disableMeasurements(
+      bus_, [](uint32_t milliseconds) { delay(milliseconds); });
   }
 
  private:
-  void sleep() { (void)bus_.writeCommand(kShtc3Address, 0xB098, true); }
   BoundedI2cBus& bus_;
-  bool ready_ = false;
 };
 
 class Pcf85063Adapter {
@@ -895,14 +834,18 @@ bool PhotoPainterSupport::begin() {
     // state without enabling audio output or changing ALDO4.
     const bool audioReady = true;
     if (audioReady) {
-      shtc3Ready_ = impl_->sensor.begin();
+      const auto sensorSleep = impl_->sensor.disableMeasurements();
+      if (sensorSleep != photopainter_sensor::SleepResult::CommandAccepted) {
+        INK_LOG_WARN("photopainter_sensor_sleep_unconfirmed",
+          "Temperature/humidity disabled; SHTC3 sleep command unconfirmed");
+      }
+      INK_LOG_INFO("photopainter_environment_disabled", "Temperature/humidity sampling disabled");
       rtcReady_ = impl_->rtc.begin();
     } else {
       lastError_ = impl_->power.lastError();
     }
-    PP_LOG("[I2C] pmic=%s ready=%d shtc3=%d rtc=%d\n",
-           pmicTypeName(impl_->power.type()), pmicReady ? 1 : 0,
-           shtc3Ready_ ? 1 : 0, rtcReady_ ? 1 : 0);
+    PP_LOG("[I2C] pmic=%s ready=%d environment=disabled rtc=%d\n",
+           pmicTypeName(impl_->power.type()), pmicReady ? 1 : 0, rtcReady_ ? 1 : 0);
   }
 
   const bool pristineStorage = storagePartitionErased();
@@ -1807,15 +1750,6 @@ uint32_t PhotoPainterSupport::i2cFailClosedCount() const {
 
 void PhotoPainterSupport::refreshPowerState() {
   if (impl_ != nullptr) impl_->power.refreshMeasurements();
-}
-
-void PhotoPainterSupport::readEnvironment() {
-  environmentValid_ = false;
-  if (impl_ == nullptr) return;
-  refreshPowerState();
-  if (shtc3Ready_) {
-    environmentValid_ = impl_->sensor.read(temperatureC_, humidityPercent_);
-  }
 }
 
 bool PhotoPainterSupport::usbConnected() const {

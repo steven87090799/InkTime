@@ -78,7 +78,6 @@ class PhotoPainterSupport {
   bool writeRtc(time_t epoch);
   bool readRtc(time_t& epoch);
   void refreshPowerState();
-  void readEnvironment();
   void prepareForDeepSleep();
   void enableWakeSources();
 
@@ -90,7 +89,6 @@ class PhotoPainterSupport {
     return storageCorrupt_ ? "STORAGE_CORRUPT" : (storageReady_ ? "ready" : "unavailable");
   }
   bool rtcReady() const { return rtcReady_; }
-  bool shtc3Ready() const { return shtc3Ready_; }
   bool forceNetworkRefresh() const { return forceNetworkRefresh_; }
   bool recoveryServiceRequested() const { return recoveryServiceRequested_; }
   bool wokeFromUserButton() const { return wokeFromUserButton_; }
@@ -100,9 +98,6 @@ class PhotoPainterSupport {
   PmicType pmicType() const;
   float batteryVoltage() const;
   int batteryPercent() const;
-  float temperatureC() const { return temperatureC_; }
-  float humidityPercent() const { return humidityPercent_; }
-  bool environmentValid() const { return environmentValid_; }
   uint32_t lastRefreshDurationMs() const { return lastRefreshDurationMs_; }
   uint32_t storageReadBytes() const { return storageReadBytes_; }
   uint32_t storageWriteBytes() const { return storageWriteBytes_; }
@@ -130,16 +125,12 @@ class PhotoPainterSupport {
   bool storageReady_ = false;
   bool storageCorrupt_ = false;
   bool rtcReady_ = false;
-  bool shtc3Ready_ = false;
   bool forceNetworkRefresh_ = false;
   bool recoveryServiceRequested_ = false;
   bool wokeFromUserButton_ = false;
   bool batteryStatusRequested_ = false;
   bool earlyEpdTransportReady_ = false;
   bool earlyEpdPinsReady_ = false;
-  bool environmentValid_ = false;
-  float temperatureC_ = 0.0f;
-  float humidityPercent_ = 0.0f;
   uint32_t lastRefreshDurationMs_ = 0;
   uint32_t storageReadBytes_ = 0;
   uint32_t storageWriteBytes_ = 0;
