@@ -131,6 +131,9 @@ bool DeviceHttpTransport::beginSession(
   if (origin.startsWith("https://")) {
     if (effective_ca_pem_.isEmpty()) effective_ca_pem_ = effectiveCa(ca_pem_);
     secure_client_.setCACert(effective_ca_pem_.c_str());
+    // Arduino's TLS handshake has its own timeout (seconds), independent of
+    // HTTPClient connect/read limits; its default is 120 seconds.
+    secure_client_.setHandshakeTimeout(10);
   }
   return true;
 }
@@ -219,6 +222,9 @@ bool DeviceHttpTransport::begin(
   if (url.startsWith("https://")) {
     if (effective_ca_pem_.isEmpty()) effective_ca_pem_ = effectiveCa(ca_pem_);
     secure_client_.setCACert(effective_ca_pem_.c_str());
+    // Arduino's TLS handshake has its own timeout (seconds), independent of
+    // HTTPClient connect/read limits; its default is 120 seconds.
+    secure_client_.setHandshakeTimeout(10);
     if (!http.begin(secure_client_, url)) {
       error_code = "DEVICE-TLS-BEGIN";
       error_message = "HTTPS client 初始化失敗";

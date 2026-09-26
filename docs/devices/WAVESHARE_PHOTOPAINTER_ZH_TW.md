@@ -122,8 +122,9 @@ Stock 原始碼使用相對秒數 timer，不足以證明支援 InkTime 的任�
 
 ## I²C、PMIC、RTC 與感測器
 
-- I²C 單一裝置失敗不會中止其他裝置。SHTC3 以 0x70 probe，量測後驗證兩段
-  CRC-8 並送回 sleep；CRC 錯誤不回報溫濕度。
+- I²C 單一裝置失敗不會中止其他裝置。SHTC3 溫濕度量測已停用；開機只送
+  wake → 等待 1 ms → sleep，不做 ID probe、量測或溫濕度回報。sleep ACK 無法確認
+  時記錄警告，不重送命令／重設共用 bus；電池遙測與 RTC 繼續運作。
 - 開機與有界重試前先釋放 SDA／SCL；若 reset 中斷 transaction，最多以 open-drain
   SCL 送九個 clock 再送 STOP。程式永遠不主動驅動 I²C 高電位，兩線仍為 low 時立即
   fail-closed，等待完整斷電恢復，不繼續寫 PMIC 或驅動 EPD。
@@ -284,10 +285,37 @@ SD 的 TF1 pin 4 直接接 DCDC1 的 VCC3V3，與 ESP32／SHTC3 共用，**無�
 不能用把所有 SD 腳拉 LOW 的方法省電。下一次 deep-sleep wake 重新初始化 SD 後讀檔。
 這是停止通訊／卡片閒置，不是 SD 斷電；也不承諾特定卡的 standby current。
 
-Host 測試保留 ALDO3 helper 的 register 邊界覆蓋，boot／sleep 接線契約則明確禁止啟動
-流程呼叫它。2026-09-14 已完成 debug 編譯、app-only 燒錄、digest 驗證與完整斷電冷啟動；
+2026-09-23 移除已停用的 ALDO3 關電 helper 與其舊測試，改由契約測試禁止重新引入。
+2026-09-14 曾完成 debug 編譯、app-only 燒錄、digest 驗證與完整斷電冷啟動；
 共享 I²C 恢復後配對畫面完成刷新。KEY／timer wake、SD 讀寫、電流比較仍未執行，不能
 據此宣稱待機耗電或電池續航已修復。
+
+## 2026-09-23 不使用感測／音訊的省電設定
+
+重新查核官方 main，仍為上節的 `a5e8f757ba0cafbb5586f07d3e83bda3184c0845`。
+一般照片模式保留 timer，未呼叫 PMIC sleep；功耗測試的 ALDO3／ALDO4 關電、IRQ／
+REG26 變更與 GPIO0-only 喚醒不適用 InkTime，不能用其測試程式推導本韌體已達 ≤1 mA。
+
+- **溫濕度停用**：SHTC3 與 ESP／SD 共用 VCC3V3，沒有可單獨切斷的電源開關。
+  使用 [Sensirion SHTC3 datasheet v4 §5.2](https://sensirion.com/media/documents/643F9C8E/63A5A436/Datasheet_SHTC3.pdf)
+  的 sleep 命令 `0xB098`；先短暫 wake 可同時處理上電 idle 與 ESP deep-sleep 後
+  感測器已 asleep 的情況。不啟動任何 conversion，也不回報溫濕度。datasheet 的
+  0.3 µA typical／0.6 µA maximum 是指定條件下的**單顆感測器**睡眠規格，不是整板量測。
+  先前正常讀值路徑已送 sleep，所以這次主要省去量測及通訊，不能宣稱大幅降低原有睡眠電流。
+- **音訊功能停用，供電保留**：PA GPIO7 LOW、I²S GPIO14～18 input，不啟動 codec／
+  麥克風錄音或播放。不修改 codec 寄存器、不關 ALDO3；不把 PA 關閉描述為音訊晶片斷電。
+  刪除可關 ALDO3 的舊 helper，避免將既有硬體故障重新引入。
+- **提早關閉網路**：確定進入睡眠後，先結束 HTTP/TLS、Wi-Fi／BT，再做 EPD／FFat／
+  I²C 收尾與最多 2 秒的 KEY 放開等待；仍保留正式 ACK、timer 與 GPIO4 喚醒。
+  此變更降低收尾階段的無線活動時間，不改深睡時的電源 rail。
+- **其他既有措施**：EPD controller POWER_OFF、LED 關閉、FFat unmount、Wire.end 與
+  RTC 記憶體電源策略維持現有安全流程。Enhanced 使用 Internal FFat，不初始化 SD；
+  若沒有 SD 用途，可在關機時取出卡片，避免未使用卡片仍接 VCC3V3 的待機負載。
+
+使用者不進行實際電流量測，因此本次只能確認程式行為；整板睡眠電流、節省比例與
+續航天數皆為 **未確認**，不以 Hosted CI 替代。Wi-Fi 深睡期間無法接收 server push，
+按現有排程定時醒來同步新照片；本次不增加輪詢頻率，也不取消 timer 換取更低電流。
+上一份 `630817f` 燒錄映像不包含本節變更，新版須另外建立映像後才能燒錄。
 
 ## 自動能源遙測
 
