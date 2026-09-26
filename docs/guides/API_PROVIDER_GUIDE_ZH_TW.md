@@ -1,5 +1,7 @@
 # InkTime 模型 API 接入與控制台填寫指南
 
+正常照片工作使用 Schema v5 與一次 Vision，不追加模型 JSON 修復或長描述請求。下文 repair 設定適用於明確使用修復功能的診斷／評分台／Benchmark，不代表正常照片流程。
+
 > 適用於目前 InkTime Web 管理介面，專案程式核對日期：2026-09-03（`51309e2`）。廠商段落是接入範例，不表示本次已驗證帳號權限、即時模型清單或費率。模型名稱、費率與 Rate Limit 會隨廠商調整；正式啟用前，請以各廠商控制台顯示的最新資料為準。
 
 這份文件說明如何把雲端或本地視覺模型接入 InkTime，以及「模型」與「設定」頁的每個欄位應該怎麼填。InkTime 目前使用 **OpenAI Chat Completions 相容格式**傳送 JPEG 圖片，模型必須能同時完成：
@@ -52,7 +54,7 @@
 | 故障冷卻秒數 | `300` | 發生失敗或 429 後暫時避開此 Provider；若廠商有明確 `Retry-After`，InkTime 會尊重較長時間。 |
 | Provider options | OpenRouter 可填 `order`、`only`／`ignore`、`data_collection`、`zdr`、`sort`、`max_price`、`session_sticky` 等 JSON | 未知欄位、互斥 routing 組合與非 HTTPS `http_referer` 會被拒絕；細節見 [OpenRouter 正式 Provider](../providers/OPENROUTER_ZH_TW.md)。 |
 | 支援 Batch API | OpenRouter／Ollama 不可勾；generic 相容端點只有在完整支援 `/files`、`/batches`、結果／錯誤檔與刪除時才勾選 | `kind=openrouter` 有 server-side hard guard；CI 使用 Fake Provider，不會呼叫真實 OpenAI。 |
-| 支援嚴格 JSON Schema | 確定支援才勾；不確定先取消 | 勾選後 InkTime 會傳送 OpenAI 形式的 `response_format: json_schema`。不支援的端點通常回 400。取消後仍會在應用層驗證 JSON，失敗時最多做一次純文字修復。 |
+| 支援嚴格 JSON Schema | 確定支援才勾；不確定先取消 | 勾選後 InkTime 會傳送 OpenAI 形式的 `response_format: json_schema`。不支援的端點通常回 400。取消後仍會在應用層驗證 JSON，正常照片工作失敗時不追加模型修復；Full Contract 診斷／評分台等獨立流程可有受控文字修復。 |
 
 儲存後按「測試」。看到「連線成功」後，還不能直接跑全相簿；請繼續完成模型名稱與單張照片測試。
 
@@ -64,7 +66,7 @@
 |---|---|---|
 | `model.low_model` | 舊版設定讀取相容欄位 | 新工作 canonical 為一次完整 Vision；Web `analysis.image_max_side` 提供 1024／1600；512 另由底層 plan／benchmark 支援，不會建立 legacy 第二次圖片請求。 |
 | `model.analysis_model` | 新單次完整照片分析 | 填 Provider 能接受圖片與 Schema 的**完整模型 ID**，OpenRouter 必須包含 provider 前綴。 |
-| `model.repair_model` | 只接收文字的 JSON 修復 | 最多一次；不會收到圖片。預設 cap 1200 tokens。 |
+| `model.repair_model` | 診斷／評分台等獨立流程的文字修復；正常照片分析不用 | 最多一次；不會收到圖片。預設 cap 1200 tokens。 |
 
 Provider 專屬模型會同時覆蓋 analysis 與 repair 的全域模型。模型 ID 必須原樣複製，包含大小寫、斜線、冒號與版本尾碼。例如 OpenRouter 常見 `廠商/模型`，Ollama 常見 `模型:尺寸`。不要把模型的中文名稱或產品頁標題填進去。
 

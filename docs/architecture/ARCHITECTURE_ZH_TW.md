@@ -1,6 +1,6 @@
 # InkTime 專案架構與照片評分流程
 
-> 現行主線 Migration 59、AI Schema v4 與三程序基線見[版本參考](../reference/CURRENT_STATE_ZH_TW.md)。下文 Migration 22–24 是功能引入歷史，不是目前最高版本。
+> 現行主線 Migration 63、AI Schema v5 與三程序基線見[版本參考](../reference/CURRENT_STATE_ZH_TW.md)。下文 Migration 22–24 是功能引入歷史，不是目前最高版本。
 
 > 決策與韌性擴充：Migration 22 加入 Decision Trace、回饋、Shadow、Queue、Retention 與 Canary 資料；Migration 23 補強決策關聯，Migration 24 補上分析／Vision Input 指紋。正式發布仍由 `RenderService → ReleaseCoordinator` 管理；追蹤或 Shadow 寫入失敗不會中斷正式 Release。
 
@@ -37,7 +37,7 @@ flowchart TB
     end
 
     BROWSER --> WEB
-    DEVICE -->|"Bearer Token"| WEB
+    DEVICE -->|"Device Secret／Legacy Bearer"| WEB
     WEB --> ROUTE --> SERVICE
     WORKER --> SERVICE
     SCHEDULER --> SERVICE
@@ -57,7 +57,7 @@ flowchart TB
 | 登入、權限、CSRF | `inktime/app/api/auth.py`、`web/access.py` | `repositories/auth.py`、`core/security.py` |
 | 照片掃描與本地特徵 | `workers/scanner.py` | `domain/photos/preprocessing.py`、`repositories/photos.py` |
 | 單次模型分析與舊策略正規化 | `services/analysis.py`、`domain/analysis/plan.py` | `providers/openai_compatible.py`、`domain/analysis/schema.py` |
-| v4 評分規則、固定排名、測試與還原 | `api/scoring.py`、`services/scoring_lab.py` | `repositories/scoring.py`、`domain/analysis/scoring.py` |
+| 現行評分規則、固定排名、測試與還原 | `api/scoring.py`、`services/scoring_lab.py` | `repositories/scoring.py`、`domain/analysis/scoring.py` |
 | 背景工作、暫停與恢復 | `workers/runner.py`、`workers/job_worker.py` | `repositories/jobs.py` |
 | 模型路由、限流與熔斷 | `providers/router.py` | `services/providers.py`、`repositories/providers.py` |
 | Token、成本與停止線 | `services/budgets.py` | `repositories/usage.py`、`repositories/settings.py` |
@@ -67,6 +67,17 @@ flowchart TB
 | 安全分析歷史清理 | `repositories/photo_analysis_retention.py` | `api/operations.py` |
 | 管理介面 | `web/templates/` | `web/static/`、對應的 `api/*.py` |
 | Docker 與啟動 | `docker-compose.yml`、`Dockerfile` | `server.py`、`platform.py` |
+
+## 分層責任與持久化邊界
+
+- API／Web 驗證輸入、角色、CSRF 並建立工作；長時間圖片／模型處理由 Worker 執行。
+- Service 編排交易與跨資源操作；Repository 集中 SQL，domain 保持規則與圖片處理邏輯。
+- Provider 封裝外部協定與回應，不替代持久化付費狀態與預算帳務。
+- `billable_operations` 保存 started／response／completed 等檢查點；`api_usage.operation_id` 維持一次對帳。租約到期不代表請求未送出。
+- `budget_reservations` 的未知費用不按年齡自動釋放；Scheduler 僅回收符合未送出／已對帳證據的保留額。
+- `runtime_identity` 檢查已知 DB／session key 身分；`ReleaseCoordinator` 補償 DB 與檔案 pointer 的不一致。
+
+需要調整這些行為時，沿本次函式追直接依賴與對應案例，不讀整份 migration、分析服務或所有 integration tests。
 
 ## 照片從掃描到發布
 
@@ -78,17 +89,17 @@ flowchart LR
     DUP -->|"否"| STRATEGY{"分析策略"}
     STRATEGY -->|"local"| LOCAL_SCORE["本機影像品質分析"]
     STRATEGY -->|"single"| VISION["一次高細節 Vision 模型"]
-    VISION --> SAVE["保存 v4 memory／visual、綜合分與規則版本"]
+    VISION --> SAVE["保存 v5 memory／visual、綜合分與規則版本"]
     LOCAL_SCORE --> LOCAL_SAVE["保存 local_score；semantic ranking=NULL"]
     INHERIT --> SAVE
-    SAVE --> PICK["回憶分通過門檻<br/>依 semantic 綜合分排序"] --> RELEASE["480×800 四色／六色／七色 Release<br/>Profile + 抖動 + SHA-256"]
+    SAVE --> PICK["資格與內容檢查通過<br/>依 semantic 綜合分排序"] --> RELEASE["480×800 四色／六色／七色 Release<br/>Profile + 抖動 + SHA-256"]
     LOCAL_SAVE --> LOCAL_PICK["依本機候選品質選片"] --> RELEASE
     RELEASE --> DEVICE["ESP32 驗證 SHA-256 後顯示"]
 ```
 
 ## 評分與「權重」的實際狀態
 
-真正的 Vision v4 語意分析一次回傳兩個獨立分數；本機品質由 Server 計算：
+現行 v5／相容 v4 語意分析一次回傳兩個獨立分數；本機品質由 Server 計算：
 
 | 分數 | 意義 | 現在由誰決定 |
 |---|---|---|
@@ -96,7 +107,7 @@ flowchart LR
 | `visual_score` | 構圖、光線與整體視覺吸引力 | 視覺模型依固定 Prompt 判斷 |
 | `local_quality_score` | 清晰、曝光、解析度與截圖特徵 | Server 本機規則計算 |
 
-`memory_score` 是模型直接輸出的回看價值。只有有效 Schema v4 的 `score_kind=semantic` 結果保存 AI 排名：回憶 67%、視覺 33%，再依特殊程度與最愛提升套用固定 bonus。`automatic_ai` 須本機特徵與模型分析都完成，且照片合格；本機品質只過濾，不加分、不補位。不使用 percentile、照片庫稀有度、E6 加權或最低回憶分。歷史日期模式先限定日期範圍，再依 AI 分數排序。`local_quality` 僅保留品質證據與本機模式候選分；`legacy` 保留歷史，不轉換為 v4。
+`memory_score` 是模型直接輸出的回看價值。只有有效 Schema v5／相容 v4 的 `score_kind=semantic` 結果保存 AI 排名：回憶 67%、視覺 33%，再依特殊程度與最愛提升套用固定 bonus。`automatic_ai` 須本機特徵與模型分析都完成，且照片合格；本機品質只過濾，不加分、不補位。不使用 percentile、照片庫稀有度、E6 加權或最低回憶分。歷史日期模式先限定日期範圍，再依 AI 分數排序。`local_quality` 僅保留品質證據與本機模式候選分；`legacy` 保留歷史，不直接轉換為現行 semantic 排名。
 
 ### 不改程式碼可以調整的項目
 
@@ -106,7 +117,7 @@ flowchart LR
 |---|---|---:|
 | `model.analysis_model` | 單次完整 Vision 模型 | `gpt-4o` |
 | `model.low_model`／`model.high_model` | 舊版模型設定 | 僅讀取相容，不恢復第二次圖片請求 |
-| 「評分」控制中心 | v4 規則、固定排名公式、版本歷史與單張測試 | 內建 Schema v4 規則 |
+| 「評分」控制中心 | 現行規則、固定排名公式、版本歷史與單張測試 | 內建現行 Schema 規則 |
 | `analysis.stage_two_threshold` | 舊版兩階段設定的讀取相容欄位 | 65 |
 | `render.memory_threshold` | 舊設定相容欄位，自動 AI 選片已不使用 | 70 |
 
@@ -114,13 +125,13 @@ flowchart LR
 
 ### 要改評分規則時看哪裡
 
-- 可編輯 v4 Prompt 評分細則：管理介面「評分」頁；儲存時建立不可覆寫的歷史版本。排名的 67／33／0 公式與特殊程度 bonus 固定。
+- 可編輯現行 Prompt 評分細則：管理介面「評分」頁；儲存時建立不可覆寫的歷史版本。排名的 67／33／0 公式與特殊程度 bonus 固定。
 - 單張測試：`api/scoring.py` 暫存與刪除上傳檔，`services/scoring_lab.py` 呼叫目前高品質模型並記錄用量。
 - 版本保存與還原：`repositories/scoring.py` 與 SQLite `scoring_rule_versions`。
 - 評分規則版本化預設：`inktime/app/domain/analysis/scoring.py` 的 `DEFAULT_SCORING_RULES`。
 - 不可由網頁覆寫的 JSON／語言／防虛構指令：`inktime/app/providers/openai_compatible.py` 的 `SYSTEM_PROMPT`。
 - 分數欄位、型別與 0–100 範圍：`inktime/app/domain/analysis/schema.py`。
-- 單次圖片請求與文字修復界線：`inktime/app/services/analysis.py`；每張照片最多一次圖片請求，JSON 修復只允許文字請求。
+- 單次圖片請求界線：`inktime/app/services/analysis.py`；正常照片工作只送一次 Vision，本機抽取 JSON 後驗證，不追加模型 JSON 修復。診斷／評分台／Benchmark 的修復流程另行限制。
 - 本機影像品質與候選分：`inktime/app/domain/photos/quality_policy.py` 的 `evaluate_local_quality()` 與 `local_candidate_score()`；不再由 `_local_result()` 產生 semantic ranking。
 - Worker 如何讀取設定：`inktime/app/workers/runner.py`。
 - 電子紙自動選片排序：`inktime/app/services/rendering.py`。
@@ -134,7 +145,7 @@ flowchart LR
 
 ```mermaid
 flowchart LR
-    SETTINGS_UI["評分控制中心<br/>v4 規則、固定公式、版本"] --> SETTINGS_API["POST /api/v1/scoring/profiles"]
+    SETTINGS_UI["評分控制中心<br/>現行規則、固定公式、版本"] --> SETTINGS_API["POST /api/v1/scoring/profiles"]
     SETTINGS_API --> VALIDATE["ScoringProfileRepository 驗證與交易"]
     VALIDATE --> SETTINGS_DB[("settings")]
     VALIDATE --> VERSIONS[("scoring_rule_versions")]
@@ -145,11 +156,7 @@ flowchart LR
 
 ## 建議閱讀順序
 
-1. [`README.md`](../../README.md)：功能、部署與主要入口。
-2. 本文件：執行架構、模組地圖與評分流程。
-3. `inktime/app/factory.py`、`bootstrap.py`：Web／Worker／Scheduler 如何共用 RuntimeConfig 與 Service 組裝。
-4. 依上方模組地圖進入目標功能。
-5. [`FINAL_IMPLEMENTATION_REPORT_ZH_TW.md`](../archive/reports/FINAL_IMPLEMENTATION_REPORT_ZH_TW.md)：歷史完成證據與已知限制。
+人類初次了解產品可讀 [`README.md`](../../README.md)；AI 修改依 [AGENTS.md](../../AGENTS.md)，從指定檔案／符號開始，不按文件清單預載。只有啟動組裝問題才讀 `factory.py`／`bootstrap.py`，其餘依模組地圖定位。歷史報告只供特定回歸查證。
 
 ## 正式候選與 Release Coordinator
 
