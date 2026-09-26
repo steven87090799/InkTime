@@ -4,6 +4,7 @@
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
 #include <Preferences.h>
+#include <nvs.h>
 #include <SPI.h>
 #include <time.h>
 #include <sys/time.h>
@@ -814,7 +815,38 @@ static void saveLastPhotoIndex(size_t index) {
 }
 #endif
 
+struct __attribute__((packed)) DisplayRecordBlob {
+  uint32_t version;
+  char sha256[65];
+  char releaseId[129];
+  char renderProfile[65];
+  char boardProfile[97];
+  int16_t rotation;
+  uint8_t succeeded;
+  uint32_t crc;
+};
+
 static StoredDisplayRecord loadDisplayRecord() {
+  StoredDisplayRecord canonical = {};
+  if (!prefs.begin("dashcfg", true)) return canonical;
+  if (prefs.isKey("disp_record")) {
+    DisplayRecordBlob blob = {};
+    const bool complete = prefs.getBytesLength("disp_record") == sizeof(blob)
+      && prefs.getBytes("disp_record", &blob, sizeof(blob)) == sizeof(blob);
+    prefs.end();
+    if (!complete || blob.version != 2U || blob.succeeded > 1U
+        || blob.crc != inktime::crc32(reinterpret_cast<const uint8_t*>(&blob),
+                                    offsetof(DisplayRecordBlob, crc))
+        || blob.sha256[64] != '\0' || blob.releaseId[128] != '\0'
+        || blob.renderProfile[64] != '\0' || blob.boardProfile[96] != '\0'
+        || !inktime::isSha256HexValue(blob.sha256)
+        || !blob.releaseId[0] || !blob.renderProfile[0] || !blob.boardProfile[0]
+        || (blob.rotation != 0 && blob.rotation != 180)) return canonical;
+    canonical = {blob.sha256, blob.releaseId, blob.renderProfile,
+                 blob.boardProfile, blob.rotation, blob.succeeded != 0U, true};
+    return canonical;
+  }
+  prefs.end();
   prefs.begin("dashcfg", true);
   const uint8_t version = prefs.getUChar("disp_ver", 0);
   StoredDisplayRecord record = {
@@ -872,22 +904,33 @@ static void saveDisplayRecord(const Config &cfg, bool succeeded) {
       || currentRenderProfile.length() == 0U || currentRenderProfile.length() > 64U) {
     return;
   }
-  prefs.begin("dashcfg", false);
-  const size_t versionWritten = prefs.putUChar("disp_ver", 1U);
-  const size_t shaWritten = prefs.putString("last_sha", currentPayloadSha256);
-  const size_t releaseWritten = prefs.putString("last_rel", currentReleaseId);
-  const size_t profileWritten = prefs.putString("last_prof", currentRenderProfile);
-  const size_t boardWritten = prefs.putString("last_board", kBoardConfig.name);
-  const size_t rotationWritten = prefs.putShort("last_rot", cfg.rotate180 ? 180 : 0);
-  const size_t successWritten = prefs.putBool("last_ok", succeeded);
+  DisplayRecordBlob blob = {};
+  blob.version = 2U;
+  currentPayloadSha256.toCharArray(blob.sha256, sizeof(blob.sha256));
+  currentReleaseId.toCharArray(blob.releaseId, sizeof(blob.releaseId));
+  currentRenderProfile.toCharArray(blob.renderProfile, sizeof(blob.renderProfile));
+  if (strlen(kBoardConfig.name) >= sizeof(blob.boardProfile)) return;
+  memcpy(blob.boardProfile, kBoardConfig.name, strlen(kBoardConfig.name));
+  blob.rotation = cfg.rotate180 ? 180 : 0;
+  blob.succeeded = succeeded ? 1U : 0U;
+  blob.crc = inktime::crc32(reinterpret_cast<const uint8_t*>(&blob),
+                           offsetof(DisplayRecordBlob, crc));
+  if (!prefs.begin("dashcfg", false)) return;
+  const size_t written = prefs.putBytes("disp_record", &blob, sizeof(blob));
+  if (written > 0U) recordNvsWrite();
+  DisplayRecordBlob readback = {};
+  const bool verified = written == sizeof(blob)
+    && prefs.getBytesLength("disp_record") == sizeof(readback)
+    && prefs.getBytes("disp_record", &readback, sizeof(readback)) == sizeof(readback)
+    && memcmp(&blob, &readback, sizeof(blob)) == 0;
+  // Keep the in-progress marker until the complete record is durable. A
+  // reset during refresh must not let the previous successful image skip.
+  if (verified && prefs.putBool("disp_pending", false) > 0U) recordNvsWrite();
   prefs.end();
-  if (versionWritten > 0U) recordNvsWrite();
-  if (shaWritten > 0U) recordNvsWrite();
-  if (releaseWritten > 0U) recordNvsWrite();
-  if (profileWritten > 0U) recordNvsWrite();
-  if (boardWritten > 0U) recordNvsWrite();
-  if (rotationWritten > 0U) recordNvsWrite();
-  if (successWritten > 0U) recordNvsWrite();
+  if (!verified) {
+    lastDeviceWarningCode = "DEVICE-DISPLAY-RECORD";
+    lastDeviceWarningMessage = "顯示紀錄寫入或 readback 失敗";
+  }
 }
 
 #if INKTIME_PHOTOPAINTER_ENABLED
@@ -922,6 +965,13 @@ static bool restoreLastSuccessfulPhoto() {
 #endif
 
 static bool shouldSkipCurrentDisplay(const Config &cfg) {
+  if (!prefs.begin("dashcfg", true)) return false;
+  // Legacy multi-key records remain usable for recovery/GC, but cannot
+  // prove an atomic successful display. Require one fresh canonical record.
+  const bool pending = !prefs.isKey("disp_record")
+    || prefs.getBool("disp_pending", false);
+  prefs.end();
+  if (pending) return false;
   const StoredDisplayRecord stored = loadDisplayRecord();
 #if INKTIME_PHOTOPAINTER_ENABLED
   const bool forcedRefresh = photoPainter.forceNetworkRefresh();
@@ -1201,10 +1251,11 @@ static bool terminalAckEvidence(const PendingQueueAck &pending) {
 static bool readAckJournalBytes(
   Preferences &journal,
   const String &key,
-  std::string &bytes
+  std::string &bytes,
+  size_t expectedSize
 ) {
   const size_t length = journal.getBytesLength(key.c_str());
-  if (length == 0U) return false;
+  if (length != expectedSize || length == 0U) return false;
   bytes.assign(length, '\0');
   return journal.getBytes(key.c_str(), &bytes[0], length) == length;
 }
@@ -1253,7 +1304,7 @@ class AckJournalPreferencesStorage final : public inktime::ackjournal::Storage {
       return false;
     }
     std::string readback;
-    const bool exact = readAckJournalBytes(journal_, key, readback) && readback == bytes;
+    const bool exact = readAckJournalBytes(journal_, key, readback, sizeof(AckJournalBlob)) && readback == bytes;
     if (!exact) {
       lastDeviceErrorCode = "DEVICE-QUEUE-ACK-JOURNAL";
       lastDeviceErrorMessage = "ACK journal replacement blob exact readback 失敗";
@@ -1337,7 +1388,7 @@ class AckJournalPreferencesStorage final : public inktime::ackjournal::Storage {
     if (journal_.getBytesLength(metaKey.c_str()) == 0U) return true;
     present = true;
     std::string metadata;
-    if (!readAckJournalBytes(journal_, metaKey, metadata)
+    if (!readAckJournalBytes(journal_, metaKey, metadata, sizeof(AckJournalSnapshotMeta))
         || metadata.size() != sizeof(AckJournalSnapshotMeta)) return false;
     AckJournalSnapshotMeta meta = {};
     memcpy(&meta, metadata.data(), sizeof(meta));
@@ -1353,7 +1404,7 @@ class AckJournalPreferencesStorage final : public inktime::ackjournal::Storage {
     for (uint8_t index = 0U; index < meta.count; ++index) {
       std::string record;
       const String key = ackJournalBankKey(bank, index);
-      if (!readAckJournalBytes(journal_, key, record)
+      if (!readAckJournalBytes(journal_, key, record, sizeof(AckJournalBlob))
           || record.size() != sizeof(AckJournalBlob)) return false;
       AckJournalBlob blob = {};
       memcpy(&blob, record.data(), sizeof(blob));
@@ -1514,6 +1565,15 @@ static bool loadAckJournalState(
     generation = snapshot.generation;
     return true;
   }
+  // Canonical evidence must never be mistaken for a fresh empty journal.
+  bool canonicalPresent = journal.isKey("active")
+    || journal.isKey("meta_G") || journal.isKey("meta_H");
+  for (uint8_t index = 0U; index < inktime::kMaxAckJournalEntries; ++index) {
+    canonicalPresent = canonicalPresent
+      || journal.isKey(ackJournalBankKey('G', index).c_str())
+      || journal.isKey(ackJournalBankKey('H', index).c_str());
+  }
+  if (canonicalPresent && !legacyPresent) return false;
   uint8_t legacyCount = min(
     journal.getUChar("count", 0U),
     static_cast<uint8_t>(inktime::kMaxAckJournalEntries));
@@ -1527,7 +1587,8 @@ static bool loadAckJournalState(
   }
   for (uint8_t index = 0U; index < legacyCount; ++index) {
     PendingQueueAck pending = readAckJournalEntry(journal, index);
-    if (pending.valid && entries != nullptr) entries[count++] = pending;
+    if (!pending.valid) return false;
+    if (entries != nullptr) entries[count++] = pending;
   }
   return true;
 }
@@ -1574,27 +1635,29 @@ static uint8_t loadAckJournalEntries(
   PendingQueueAck *entries,
   uint8_t capacity
 ) {
-  if (entries == nullptr || capacity == 0U) return 0U;
+  if (entries == nullptr || capacity < inktime::kMaxAckJournalEntries) return UINT8_MAX;
   Preferences journal;
-  if (!journal.begin("acklog", true)) return 0U;
-  PendingQueueAck loadedEntries[inktime::kMaxAckJournalEntries] = {};
+  if (!journal.begin("acklog", true)) {
+    nvs_handle_t handle;
+    const esp_err_t result = nvs_open("acklog", NVS_READONLY, &handle);
+    if (result == ESP_OK) nvs_close(handle);
+    return result == ESP_ERR_NVS_NOT_FOUND ? 0U : UINT8_MAX;
+  }
   uint8_t count = 0U;
   char activeBank = 0;
   uint64_t generation = 0U;
   bool legacyPresent = false;
   const bool loaded = loadAckJournalState(
-    journal, loadedEntries, count, activeBank, generation, legacyPresent);
+    journal, entries, count, activeBank, generation, legacyPresent);
   (void)activeBank;
   (void)generation;
   (void)legacyPresent;
   if (!loaded) {
     journal.end();
-    return 0U;
+    return UINT8_MAX;
   }
-  const uint8_t copied = min(count, capacity);
-  for (uint8_t index = 0U; index < copied; ++index) entries[index] = loadedEntries[index];
   journal.end();
-  return copied;
+  return count;
 }
 
 static bool removeLegacyPendingQueueAck() {
@@ -1643,8 +1706,6 @@ static bool persistPendingQueueAck(const PendingQueueAck &pending) {
       return true;
     }
   }
-  PendingQueueAck next[inktime::kMaxAckJournalEntries] = {};
-  uint8_t nextCount = count;
   if (count >= inktime::kMaxAckJournalEntries) {
     uint8_t evictionIndex = count;
     for (uint8_t index = 0; index < count; ++index) {
@@ -1665,20 +1726,17 @@ static bool persistPendingQueueAck(const PendingQueueAck &pending) {
       lastDeviceWarningCode = "DEVICE-QUEUE-ACK-JOURNAL-COMPACTED";
       lastDeviceWarningMessage = "ACK journal 已滿，已優先淘汰可重建的 non-terminal ACK";
     }
-    nextCount = 0U;
-    for (uint8_t index = 0U; index < count; ++index) {
-      if (index != evictionIndex) next[nextCount++] = current[index];
-    }
+    inktime::ackjournal::eraseEntry(current, count, evictionIndex);
   }
-  if (nextCount >= inktime::kMaxAckJournalEntries) {
+  if (!inktime::ackjournal::appendEntry(
+        current, count, inktime::kMaxAckJournalEntries, pending)) {
     journal.end();
     lastDeviceErrorCode = "DEVICE-QUEUE-ACK-JOURNAL";
     lastDeviceErrorMessage = "ACK journal replacement state 超過 bounded capacity";
     return false;
   }
-  next[nextCount++] = pending;
   const bool committed = commitAckJournalEntries(
-    journal, next, nextCount, activeBank, generation, legacyPresent);
+    journal, current, count, activeBank, generation, legacyPresent);
   journal.end();
   return committed;
 }
@@ -1711,13 +1769,9 @@ static bool removePendingQueueAck(const PendingQueueAck &pending) {
     }
   }
   if (found < count) {
-    PendingQueueAck next[inktime::kMaxAckJournalEntries] = {};
-    uint8_t nextCount = 0U;
-    for (uint8_t index = 0U; index < count; ++index) {
-      if (index != found) next[nextCount++] = current[index];
-    }
+    inktime::ackjournal::eraseEntry(current, count, found);
     const bool committed = commitAckJournalEntries(
-      journal, next, nextCount, activeBank, generation, legacyPresent);
+      journal, current, count, activeBank, generation, legacyPresent);
     journal.end();
     return committed;
   }
@@ -1729,6 +1783,7 @@ static PendingQueueAck loadPendingQueueAck() {
   PendingQueueAck entries[inktime::kMaxAckJournalEntries] = {};
   const uint8_t count = loadAckJournalEntries(
     entries, inktime::kMaxAckJournalEntries);
+  if (count == UINT8_MAX) return {};
   if (count > 0U) return entries[0];
 
   // Migrate the pre-journal single pending record without losing an event
@@ -2413,6 +2468,17 @@ static void enterDeepSleepSeconds(uint64_t seconds, bool retainMaxAwakeRecovery)
 
   uint64_t us = seconds * 1000000ULL;
 
+  // Sleep has been selected; no more network work belongs to this wake. Stop radios before
+  // bounded I2C/EPD/storage cleanup and the possible 2 s KEY-release wait.
+  closeWakeHttpSession();
+  WiFi.disconnect(false, false);
+  WiFi.mode(WIFI_OFF);
+  esp_wifi_stop();
+
+#if defined(CONFIG_BT_ENABLED)
+  esp_bt_controller_disable();
+#endif
+
 #if INKTIME_PHOTOPAINTER_ENABLED
   photoPainter.prepareForDeepSleep();
   photoPainter.enableWakeSources();
@@ -2423,15 +2489,6 @@ static void enterDeepSleepSeconds(uint64_t seconds, bool retainMaxAwakeRecovery)
     frameData = nullptr;
     frameDataSize = 0;
   }
-
-  closeWakeHttpSession();
-  WiFi.disconnect(false, false);
-  WiFi.mode(WIFI_OFF);
-  esp_wifi_stop();
-
-#if defined(CONFIG_BT_ENABLED)
-  esp_bt_controller_disable();
-#endif
 
   prepareDeepSleepDomains(retainMaxAwakeRecovery);
   esp_sleep_enable_timer_wakeup(us);
@@ -2939,8 +2996,11 @@ bool syncTime(const Config &cfg, struct tm &outLocal, bool forceNtp = false) {
   long offsetSec = (long)cfg.tz_offset_minutes * 60;
   configTime(offsetSec, 0, "pool.ntp.org", "time.nist.gov", "ntp.aliyun.com");
 
-  for (int i = 0; i < 30; ++i) {
-    if (getLocalTime(&outLocal)
+  // getLocalTime defaults to a blocking 5 s timeout. Poll without that
+  // hidden wait; unsigned subtraction remains safe across millis() rollover.
+  constexpr uint32_t kNtpBudgetMs = 15000U;
+  while (static_cast<uint32_t>(millis() - started) < kNtpBudgetMs) {
+    if (getLocalTime(&outLocal, 0)
         && sntp_get_sync_status() == SNTP_SYNC_STATUS_COMPLETED) {
 #if DEBUG_LOG
       char buf[64];
@@ -2959,7 +3019,7 @@ bool syncTime(const Config &cfg, struct tm &outLocal, bool forceNtp = false) {
       runtimeTelemetry.ntp_sync_ms = millis() - started;
       return true;
     }
-    delay(500);
+    delay(10);
   }
 #if DEBUG_LOG
   DBG_PRINTLN("[TIME] syncTime FAILED");
@@ -3880,6 +3940,11 @@ static bool resumePendingQueueAck(Config &cfg) {
   PendingQueueAck pending[inktime::kMaxAckJournalEntries] = {};
   const uint8_t count = loadAckJournalEntries(
     pending, inktime::kMaxAckJournalEntries);
+  if (count == UINT8_MAX) {
+    lastDeviceErrorCode = "DEVICE-QUEUE-ACK-JOURNAL";
+    lastDeviceErrorMessage = "ACK journal 無法驗證，保留原始資料";
+    return false;
+  }
   for (uint8_t offset = 0U; offset < count; offset += kQueueAckBatchMaxEvents) {
     const uint8_t remaining = count - offset;
     const uint8_t batchCount = min(remaining, kQueueAckBatchMaxEvents);
@@ -5964,7 +6029,7 @@ void reportDeviceStatus(Config &cfg, bool displayUpdated) {
     cfg, telemetryNow, runtimeTelemetry.next_wake_epoch, runtimeTelemetry.next_network_sync_epoch);
 
 #if INKTIME_PHOTOPAINTER_ENABLED
-  photoPainter.readEnvironment();
+  photoPainter.refreshPowerState();
   uint32_t validatedScheduleVersion = 0U;
   if (validatedActiveScheduleVersion(cfg, telemetryNow, validatedScheduleVersion)) {
     runtimeTelemetry.applied_offline_schedule_version = validatedScheduleVersion;
@@ -6069,10 +6134,6 @@ void reportDeviceStatus(Config &cfg, bool displayUpdated) {
     payload["battery_percent"] = photoPainter.batteryPercent();
     payload["battery_percent_estimated"] = true;
   }
-  if (photoPainter.environmentValid()) {
-    payload["temperature_c"] = photoPainter.temperatureC();
-    payload["humidity_percent"] = photoPainter.humidityPercent();
-  }
   payload["button_wakeup"] = photoPainter.wokeFromUserButton();
   // Legacy wire field names retained for server compatibility; values now represent internal frame storage I/O.
   payload["sd_read_bytes"] = photoPainter.storageReadBytes();
@@ -6162,6 +6223,16 @@ static bool displayPairingCode(const Config &cfg, const String &pairingCode) {
 
 bool drawFromFrameData(const Config &cfg) {
   (void)cfg;
+  if (!prefs.begin("dashcfg", false)) return false;
+  const size_t written = prefs.putBool("disp_pending", true);
+  if (written > 0U) recordNvsWrite();
+  const bool protectedAttempt = written > 0U && prefs.getBool("disp_pending", false);
+  prefs.end();
+  if (!protectedAttempt) {
+    lastDeviceErrorCode = "DEVICE-DISPLAY-RECORD";
+    lastDeviceErrorMessage = "無法持久化刷新進行中旗標";
+    return false;
+  }
 
 #if INKTIME_PHOTOPAINTER_ENABLED
   if (!frameNativePalette || frameDataSize != inktime::kPhotoPainterFrameBytes) return false;
@@ -6732,9 +6803,6 @@ void setup() {
     }
     if (!photoPainter.rtcReady()) {
       INK_LOG_WARN("photopainter_rtc_unavailable", "RTC is unavailable; network time remains required");
-    }
-    if (!photoPainter.shtc3Ready()) {
-      INK_LOG_WARN("photopainter_sensor_unavailable", "SHTC3 telemetry is unavailable");
     }
   }
   // Recovery is a deliberate hold distinct from the established shorter
