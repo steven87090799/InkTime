@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
+import hmac
 import logging
 import secrets
 import time
@@ -151,6 +153,55 @@ def _persistent_secret(runtime_config: RuntimeConfig, lock_provider: LockProvide
         return value
 
 
+def _assert_master_secret_identity(database, secret: str, *, testing: bool) -> None:
+    """Refuse to start when the master secret no longer matches this database.
+
+    ``secret`` is simultaneously the Flask session key, the SecretStore Fernet
+    key and the HMAC pepper behind ``devices.device_secret_hash``.  Pairing a
+    restored database with a different key silently 401s every frame and makes
+    every stored provider credential undecryptable, and ``_persistent_secret``
+    cannot detect it because session.key is present -- just wrong.  Record a
+    non-reversible fingerprint on first use and verify it from then on.
+    """
+
+    import hashlib
+    import os
+
+    if testing:
+        return
+    fingerprint = hashlib.sha256(
+        b"inktime-master-secret-fingerprint\x00" + secret.encode("utf-8")
+    ).hexdigest()
+    now = datetime.now(timezone.utc).isoformat()
+    with database.transaction(operation="master_secret_identity") as connection:
+        row = connection.execute(
+            "SELECT value FROM runtime_identity WHERE key='master_secret_fingerprint'"
+        ).fetchone()
+        stored = str(row["value"]) if row is not None else ""
+        if stored and not hmac.compare_digest(stored, fingerprint):
+            if os.environ.get("INKTIME_ALLOW_SECRET_ROTATION", "").strip() != "1":
+                raise RuntimeError(
+                    "SESSION-003 主密鑰與資料庫不符；請還原原本的 session.key "
+                    "或設定 INKTIME_SECRET_KEY。確認要改用新密鑰時，"
+                    "設定 INKTIME_ALLOW_SECRET_ROTATION=1；"
+                    "所有裝置必須重新配對，且既有 Secret 無法解密。"
+                )
+            log_event(
+                LOGGER,
+                logging.WARNING,
+                "主密鑰已輪替；裝置憑證與既有 Secret 需重新建立",
+                event="master_secret_rotated",
+                error_code="SESSION-003",
+            )
+        if stored != fingerprint:
+            connection.execute(
+                "INSERT INTO runtime_identity(key,value,updated_at) "
+                "VALUES ('master_secret_fingerprint',?,?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at",
+                (fingerprint, now),
+            )
+
+
 def bootstrap_services(
     runtime_config: RuntimeConfig | None = None,
     *,
@@ -190,6 +241,7 @@ def bootstrap_services(
         extensions["inktime_runtime_lock"] = database.acquire_runtime_lock(exclusive=False)
 
     secret = _persistent_secret(config, locks)
+    _assert_master_secret_identity(database, secret, testing=config.testing)
     settings_repository = SettingsRepository(database)
     settings_repository.ensure_defaults()
     schedule_repository = ScheduledTaskRepository(database)

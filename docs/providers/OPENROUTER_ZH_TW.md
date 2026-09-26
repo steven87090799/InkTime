@@ -1,5 +1,7 @@
 # OpenRouter 正式 Provider 與隱私／路由設定
 
+正常照片分析只送一次圖片 Vision，沒有額外模型 JSON 修復；本文件的 repair contract 僅約束另外提供修復能力的診斷／測試流程。
+
 本文件對應目前程式的 `kind=openrouter` Provider。它不是另一套分析引擎，而是由 `OpenAICompatibleProvider` 以 OpenRouter 專用 request contract 傳送 Chat Completions。正式 API、模型 ID、資料處理政策與可用能力會變動；啟用前請以 [OpenRouter Models](https://openrouter.ai/models) 與 [官方 API 文件](https://openrouter.ai/docs/api/reference/overview) 為準。
 
 ## 控制台最小設定
@@ -73,7 +75,7 @@ InkTime 對 Vision 一律明確送出 `reasoning: {"effort": ...}`；選擇 `non
 
 ### JSON repair 也必須遵守同一份 policy
 
-Vision 回應若只需要一次 JSON schema repair，repair request 仍會送出上一個模型產出的文字內容，因此不能遺失 privacy／routing contract。Vision 與 repair 共用同一個 adapter helper：`provider` 只取 `OPENROUTER_ROUTING_KEYS` allowlist，保留 `require_parameters`、`allow_fallbacks`、`data_collection`、`zdr`、`usage.include=true` 與啟用時的 `session_id`。Repair 是 text-only，沒有 `image_url`、不重新讀圖片、不重新觸發 Vision，也不送 `reasoning`；OpenRouter 的 `max` 仍只在 Vision request 轉為 `xhigh`。
+在 Provider 診斷、評分台或 Benchmark 的受控修復流程中，若需要一次 JSON schema repair，repair request 仍會送出上一個模型產出的文字內容，因此不能遺失 privacy／routing contract。Vision 與 repair 共用同一個 adapter helper：`provider` 只取 `OPENROUTER_ROUTING_KEYS` allowlist，保留 `require_parameters`、`allow_fallbacks`、`data_collection`、`zdr`、`usage.include=true` 與啟用時的 `session_id`。Repair 是 text-only，沒有 `image_url`、不重新讀圖片、不重新觸發 Vision，也不送 `reasoning`；OpenRouter 的 `max` 仍只在 Vision request 轉為 `xhigh`。
 
 若設定了 `http_referer`／`app_title`，adapter 會送出 OpenRouter 文件所需的 `HTTP-Referer`／`X-Title` headers；不設定就不猜測、不填入 placeholder。
 

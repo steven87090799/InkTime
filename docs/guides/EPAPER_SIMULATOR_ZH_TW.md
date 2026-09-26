@@ -62,4 +62,4 @@ flowchart LR
 | 改最終電子紙排版與選片 | `inktime/app/services/rendering.py` |
 | 改色盤、抖動或二進位格式 | `inktime/app/domain/rendering/palette.py` |
 
-Provider 必須至少提供 OpenAI 相容的 Chat Completions 回應：`choices[].message.content` 放分析 JSON，`usage` 提供 Token 數。InkTime 會用嚴格 Schema 驗證，最多只做一次不重傳圖片的純文字 JSON 修復，避免無限重試與失控費用。詳細規格見 [模型與 API Provider 指南](API_PROVIDER_GUIDE_ZH_TW.md)及 [Token 成本指南](../reference/TOKEN_COST_GUIDE_ZH_TW.md)。
+Provider 必須至少提供 OpenAI 相容的 Chat Completions 回應：`choices[].message.content` 放分析 JSON，`usage` 提供 Token 數。正常照片分析以一次 Vision 回應進行本機 JSON 抽取與嚴格 Schema v5 驗證，失敗不追加模型 JSON 修復。模擬器本身可使用本機分析／已發布內容，不需要模型請求。詳細規格見 [模型與 API Provider 指南](API_PROVIDER_GUIDE_ZH_TW.md)及 [Token 成本指南](../reference/TOKEN_COST_GUIDE_ZH_TW.md)。

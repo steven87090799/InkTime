@@ -32,7 +32,7 @@ def _run_capture_date_backfill(database_path: str, start, results) -> None:
 
 
 def test_fresh_database_is_migrated(tmp_path):
-    assert CURRENT_SCHEMA_VERSION == 61
+    assert CURRENT_SCHEMA_VERSION == 63
     database = Database(tmp_path / "inktime.db")
     assert migrate(database) == list(range(1, CURRENT_SCHEMA_VERSION + 1))
     assert database.integrity_check() == "ok"
@@ -127,14 +127,16 @@ def test_fresh_database_is_migrated(tmp_path):
     } <= pairing_columns
     assert "pairing_code_ciphertext" not in pairing_columns
     assert tuple(api_usage_policy) == (1, 400, 0, 200, 0)
+    # Implemented retention policies enforce; Shadow remains observation-only
+    # until it has an actual cleanup handler.
     assert retention_dry_run_defaults == {
         "ai_trace": 0,
         "api_usage": 0,
-        "decision_candidate": 1,
-        "decision_trace": 1,
-        "device_event": 1,
-        "job_log": 1,
-        "queue_event": 1,
+        "decision_candidate": 0,
+        "decision_trace": 0,
+        "device_event": 0,
+        "job_log": 0,
+        "queue_event": 0,
         "shadow_preview": 1,
     }
     with database.session() as connection:

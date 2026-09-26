@@ -579,3 +579,48 @@ def test_operational_provider_edits_preserve_legacy_cache_identity(app):
     ) == plan
     repository.save({**payload, "id": provider_id, "supports_json_schema": False}, user_id="test")
     assert service.route_snapshot()[0]["config_revision"] != original[0]["config_revision"]
+
+
+def test_upgrade_preserves_old_semantic_alias_and_frozen_route(app):
+    from inktime.app.providers.config import provider_revision
+
+    repository = app.extensions["inktime_provider_repository"]
+    service = app.extensions["inktime_provider_service"]
+    payload = {"name": "upgrade", "base_url": "https://example.invalid/v1", "enabled": True}
+    provider_id = repository.save(payload, user_id="test")
+    route = service.route_snapshot()
+    original_plan = app.extensions["inktime_analysis_service"].build_plan(
+        strategy="single", provider_route=route, scoring_profile_id="",
+    )
+    payload.update(id=provider_id, timeout_seconds=45)
+    repository.save(payload, user_id="test")
+    current = repository.get(provider_id)
+    legacy_semantics = provider_revision(current, semantic=True, legacy_semantic=True)
+    assert legacy_semantics != provider_revision(current, semantic=True)
+    assert provider_revision(current) != route[0]["config_revision"]
+    with app.extensions["inktime_database"].transaction() as connection:
+        connection.execute(
+            "UPDATE providers SET analysis_revision_semantics=? WHERE id=?",
+            (legacy_semantics, provider_id),
+        )
+    assert service.route_snapshot() == route
+    assert service.build_router(route) is not None
+    assert app.extensions["inktime_analysis_service"].build_plan(
+        strategy="single", provider_route=service.route_snapshot(), scoring_profile_id="",
+    ) == original_plan
+    repository.save({**payload, "priority": 20}, user_id="test")
+    assert service.route_snapshot()[0]["config_revision"] == route[0]["config_revision"]
+    repository.save({**payload, "base_url": "https://changed.invalid/v1"}, user_id="test")
+    with pytest.raises(ValueError, match="設定已變更"):
+        service.build_router(route)
+
+
+def test_legacy_semantic_alias_cannot_hide_changed_wire_settings():
+    from inktime.app.providers.config import provider_analysis_revision, provider_revision
+
+    original = {"id": "p", "kind": "openai", "base_url": "https://example.invalid/v1", "model": "old"}
+    changed = {
+        **original, "model": "new", "analysis_revision": "old-paid-cache",
+        "analysis_revision_semantics": provider_revision(original, semantic=True, legacy_semantic=True),
+    }
+    assert provider_analysis_revision(changed) == provider_revision(changed)

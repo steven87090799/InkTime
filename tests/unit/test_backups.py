@@ -111,6 +111,22 @@ def make_service(tmp_path: Path) -> tuple[Database, BackupService]:
 CURRENT_SCHEMA_VERSION = max(migration.version for migration in MIGRATIONS)
 
 
+def test_repeated_backups_leave_other_sqlite_connections_unchanged(tmp_path):
+    database, service = make_service(tmp_path)
+    seed(database)
+    with sqlite3.connect(database.path) as observer:
+        original_directory = observer.execute("PRAGMA temp_store_directory").fetchall()
+        observer.execute("CREATE TEMP TABLE backup_observer(value TEXT)")
+        observer.execute("INSERT INTO backup_observer VALUES ('retained')")
+        observer.commit()
+        for _ in range(2):
+            archive = service.create()
+            assert archive.exists()
+            assert observer.execute("PRAGMA temp_store_directory").fetchall() == original_directory
+            assert observer.execute("SELECT value FROM backup_observer").fetchone()[0] == "retained"
+    assert not list(service.backup_dir.glob(".inktime-snapshot-*"))
+
+
 def test_backup_excludes_secrets_and_restores_analysis_and_photo_state(tmp_path):
     database, service = make_service(tmp_path)
     seed(database)

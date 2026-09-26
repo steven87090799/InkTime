@@ -132,7 +132,15 @@ class BackupService:
                     target.execute("PRAGMA secure_delete = ON")
                     target.execute("DELETE FROM secrets")
                     target.commit()
-                    target.execute("VACUUM")
+                    # INTO uses this explicit file for the rebuilt database;
+                    # never mutate SQLite's process-global temp directory in a
+                    # running web/worker process. Keep all full-size copies on
+                    # the backup volume and verify before publishing the ZIP.
+                    compacted = Path(directory) / "compacted.sqlite3"
+                    target.execute("VACUUM INTO ?", (str(compacted),))
+                    target.close()
+                    target = sqlite3.connect(compacted)
+                    snapshot = compacted
                 integrity = target.execute("PRAGMA integrity_check").fetchone()
                 if integrity is None or str(integrity[0]) != "ok":
                     raise RuntimeError("BACKUP-001 備份資料庫完整性檢查失敗")
@@ -407,9 +415,11 @@ class BackupService:
                 raise ValueError(
                     f"RESTORE-006 備份 Schema Version {staged_version} 高於目前支援版本 {latest_version}"
                 )
+            migrated = False
             if staged_version < latest_version and not exact_snapshot:
                 migrate(staged_database)
                 self._validate_restore_database(staged)
+                migrated = True
             with staged_database.session() as connection:
                 connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
             safety_copy = self._snapshot_current()
@@ -418,7 +428,15 @@ class BackupService:
             os.replace(staged, self.database.path)
             replaced = True
             _fsync_directory(self.database.path.parent)
-            counts = self._validate_restore_database(self.database.path, manifest)
+            # The manifest records counts as they were when the backup was taken.
+            # If migrations ran above, a data-fixing migration may legitimately
+            # have changed them, so comparing post-migration counts against the
+            # pre-migration manifest would fail a restore that actually
+            # succeeded.  Enforce the count contract only when the snapshot was
+            # restored at its original schema version.
+            counts = self._validate_restore_database(
+                self.database.path, None if migrated else manifest
+            )
             if Database(self.database.path).integrity_check(full=True) != "ok":
                 raise ValueError("RESTORE-002 還原後 integrity_check 失敗")
             return safety_copy, counts

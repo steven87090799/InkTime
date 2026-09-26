@@ -20,7 +20,7 @@
 | `analysis.prefilter_sensitivity` | conservative | conservative／balanced／aggressive | 越積極越省 Token，也越可能誤排除 | 否 |
 | `analysis.scoring_rules` | 內建完整規則 | 100–12000 字元 | 影響新分析結果 | 否 |
 | 綜合排序公式 | 67／33／0 | 固定為回憶／視覺／本機品質 | 公式不可由舊版權重介面改寫 | 否 |
-| 最愛照片提升 | 特殊程度 +1 | 固定且最高為 level 4 | 影響 v4 排名，不改模型原始分 | 否 |
+| 最愛照片提升 | 特殊程度 +1 | 固定且最高為 level 4 | 影響現行 semantic 排名，不改模型原始分 | 否 |
 | `analysis.concurrency` | 1 | 1–8，Intel N100 建議 1；確認 RSS 後最多先試 2 | 過高觸發限流／圖片記憶體尖峰 | 否 |
 | `worker.queue_multiplier` | 1 | 1–4，N100 建議 1 | 增加記憶體中 Future | 否 |
 | `worker.poll_seconds` | 15 | 1–60；低待機可設 30–60 | 越小待機喚醒越多 | 否 |
@@ -134,12 +134,12 @@ ExifTool 能提供 MIME、相機、軟體、拍攝時間與 GPS 等中繼資料�
 
 ## 照片評分與門檻
 
-真正完成 Vision v4 分析時，模型輸出回憶與視覺兩個 0–100 分數及特殊程度；資料列以 `score_kind=semantic` 標記。固定排序為回憶 67%、視覺 33%，再套用特殊程度 bonus（0／2／5／9／14；最愛提升 1 級）。本機只負責基本品質門檻；automatic_ai 必須本機與有效 AI 分析都完成。未完成不補位，不再使用照片庫稀有度、percentile、E6 加權或最低回憶分。日期主題仍依設定限制候選範圍；範圍內依 AI 分數排序，不加入播放次數加減分。舊版分析保留且不轉成 v4；Migration 58 只重算已有 v4 的衍生排序，不重跑模型。
+完成現行 v5／相容 v4 分析時，模型輸出回憶與視覺兩個 0–100 分數及特殊程度；資料列以 `score_kind=semantic` 標記。固定排序為回憶 67%、視覺 33%，再套用特殊程度 bonus（0／2／5／9／14；最愛提升 1 級）。本機只負責基本品質門檻；automatic_ai 必須本機與有效 AI 分析都完成。未完成不補位，不再使用照片庫稀有度、percentile、E6 加權或最低回憶分。日期主題仍依設定限制候選範圍；範圍內依 AI 分數排序，不加入播放次數加減分。v1–v3 分析保留且不直接轉成現行 semantic 排名；Migration 58 只重算已有 v4 的衍生排序，不重跑模型。
 
 - 改模型：在「設定」調整 `model.analysis_model`，並在「模型」頁設定 Provider。
 - 舊版 `model.low_model`／`model.high_model` 與 `analysis.stage_two_threshold` 僅供相容讀取，不會恢復第二次圖片請求。
 - 改 AI 選片偏好：在提示詞與評分控制中心調整評分參考；`render.memory_threshold` 已停用。
-- 查看模型評分規則與固定排名公式：到「評分」頁；Schema v4 不提供舊版四項權重調整。
+- 查看模型評分規則與固定排名公式：到「評分」頁；現行 Schema 不提供舊版四項權重調整。
 - 測試照片：在「評分」頁選一張照片並確認付費請求；暫存檔會在請求結束後刪除，Token、費用與延遲仍寫入成本紀錄。
 - 還原：版本歷史的「還原此版本」會建立一個新的目前版本，不會刪除或覆寫任何歷史。
 - AI 語意評分預設位於 `inktime/app/domain/analysis/scoring.py`，本機品質規則位於 `inktime/app/domain/photos/quality_policy.py`；兩者分開並透過版本化規則保存修改歷史。

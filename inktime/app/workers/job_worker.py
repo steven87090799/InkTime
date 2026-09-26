@@ -405,7 +405,7 @@ class BoundedJobWorker:
                             timeout_triggered = True
                             # Thread 無法被安全強制終止；停止 claim、要求 cooperative
                             # cancellation，並持續追蹤 Future 到真正完成。
-                            self.stop_event.set()
+                            self.request_stop()
                     continue
                 for future in done:
                     item_id, _started = futures.pop(future)
@@ -419,11 +419,14 @@ class BoundedJobWorker:
             # cannot be killed safely; fence it as terminal/ambiguous so its
             # late side effects cannot be followed by a duplicate retry.
             if futures:
-                remaining = (
-                    None
-                    if self.shutdown_deadline is None
-                    else max(0.0, self.shutdown_deadline - time.monotonic())
-                )
+                # The drain must always be bounded.  request_stop() sets
+                # shutdown_deadline, but the soft timeout_seconds path sets
+                # stop_event directly without one; passing timeout=None there
+                # blocked the worker forever on a hung thread, so the container
+                # stayed alive, kept its lease and processed nothing.
+                if self.shutdown_deadline is None:
+                    self.shutdown_deadline = time.monotonic() + self.SHUTDOWN_DRAIN_SECONDS
+                remaining = max(0.0, self.shutdown_deadline - time.monotonic())
                 done, _pending = wait(futures, timeout=remaining)
                 for future in done:
                     item_id, _started = futures.pop(future)
