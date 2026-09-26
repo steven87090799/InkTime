@@ -2,7 +2,7 @@
 
 本頁處理 InkTime 照片分析 API 的 Token 與帳務。若問題是 coding agent 每次修改都讀大量程式，已知位置直接使用 TARGETED；只有探索才用 [AI 修改導航](../AI_NAVIGATION.md)；兩者是不同的用量來源。
 
-新安裝 `local_only` 不產生模型費用；一般 AI 工作必須明確啟用 `automatic_ai`。`single` 不代表供應商永遠只計一次費：新建重跑工作、允許的重試與文字修復可能增加帳務，應以 usage／Provider 對帳。
+新安裝 `local_only` 不產生模型費用；一般 AI 工作必須明確啟用 `automatic_ai`。`single` 不代表供應商永遠只計一次費：另建工作、人工核准的重送與獨立診斷／評分台／Benchmark 可能增加帳務，應以 usage／Provider 對帳。
 
 成本節省順序：掃描時排除影片／動畫 → SHA-256 相同內容繼承 → pHash 近似群組 → 本機截圖／明顯品質缺陷預篩選 → E6 六色適合度模擬 → 同一 plan／Vision fingerprint 的快取 → 一次圖片 Vision（Web 預設 1024px、可選 1600px）。主要分析一次輸出所有欄位，不再另傳圖片產生短文案。
 
@@ -10,7 +10,7 @@
 
 E6 適合度完全在本機計算，量測正式六色色盤量化後的對比、主體、膚色與文字／邊緣保留；只參與顯示分數，不再作自動排除門檻，也不計入本機品質分。補算 E6 不會呼叫 Provider。Migration 57 只解除符合舊 E6 規則且未人工覆寫的自動排除；其他排除與人工決定保留。
 
-每次 response usage 寫入 provider、model、job、photo、request type、input/output/cached Token、成本、延遲、狀態與重試。JSON 修復只傳文字且最多一次。
+每次 response usage 寫入 provider、model、job、photo、request type、input/output/cached Token、成本、延遲、狀態與重試。正常照片工作只做本機 JSON 抽取與嚴格驗證，不追加模型 JSON 修復；Schema 無效時保留費用證據並失敗。
 
 建議先設定每日／每月停止值、工作預算與單張上限。工作預估是區間，不是帳單保證；模型價格、圖片 Token 算法、Batch 折扣與快取命中都會影響實際成本。成本接近警告值時先暫停工作，核對 Provider 控制台與 InkTime usage。
 
@@ -34,9 +34,9 @@ Migration 33 不會依照完全為零的 token、prompt／schema／request／ima
 
 | 請求 | 影像邊長 | 最大 completion tokens | 備註 |
 |---|---:|---:|---|
-| 完整分析 | 512／1024／1600 | 1200 | 一次輸出分數、分類、原因與顯示文案欄位 |
+| 完整分析 | 512／1024／1600 | 1200 | 一次輸出 v5 分數、分類、短句、內容過濾與方向；不產生長描述 |
 | 變體分析 | 512／1024／1600 | 1200 | 僅在明確指定變體時使用 |
-| JSON 修復 | 無圖片 | 1200 | 最多一次，repair model 只接收文字 |
+| 診斷／評分台等獨立 JSON 修復 | 無圖片 | 1200 | 僅適用有修復流程的功能；正常照片分析不使用 |
 
 每次 request 另保存 `prompt_chars`、`schema_chars`、`request_body_bytes` 與 `image_bytes`，讓圖片尺寸、Prompt、Schema 與傳輸大小可被分開追蹤；這些指標不是 Provider billing 的替代品。
 
@@ -45,3 +45,9 @@ Migration 33 不會依照完全為零的 token、prompt／schema／request／ima
 OpenRouter 使用正式 `kind=openrouter` Provider contract，routing/privacy options 會進入 request body，並可使用 `order`、`only`／`ignore`、`data_collection`、`zdr`、`sort` 與 `max_price` 等受控欄位。OpenRouter request 不走 InkTime 的 OpenAI Batch 路徑；Batch 只保留給明確支援 `/files`、`/batches`、結果／錯誤檔與刪除的 generic 相容 Provider。完整設定見 [OpenRouter 正式 Provider 與安全契約](../providers/OPENROUTER_ZH_TW.md)。
 
 正式啟用前請先使用 [Model Benchmark 規格](../providers/MODEL_BENCHMARK_ZH_TW.md) 的離線預設模式建立可重現的 JSON／Markdown 報告，再由管理員依實際 Provider policy、價格與少量人工 sample 決定是否送出真實請求。
+
+## 重啟、未知回應與保留額
+
+Migration 61 的 `billable_operations` 在送出前保存操作，收到回應後先保存原始回應與帳務；可從保存結果恢復解析，不能以 Worker 重啟或快取租約到期為理由重送。`tokens_reported=False` 與明確回報 0 Token 不同。
+
+未對帳 Vision、Batch、診斷與未知來源保留額持續計入預算，不因超過 24 小時失效。Scheduler 只回收已證實未送出，或已保存回應／完成且有確定費用的 Vision 保留額；Batch 在完整 import／對帳後釋放。對帳前不要刪帳目來解除停止線。

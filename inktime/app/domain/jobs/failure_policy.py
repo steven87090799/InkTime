@@ -57,6 +57,10 @@ RETRYABLE_CODES = frozenset(
         "PROVIDER_TIMEOUT",
         "AI-PROVIDER-TIMEOUT",
         "AI-PROVIDER-UNAVAILABLE",
+        # Graceful shutdown terminated an isolated local child before it could
+        # report.  Only re-runnable local kinds use that boundary, so the item
+        # is safe to retry and must not be dead-lettered by a routine restart.
+        "JOB-SHUTDOWN-CANCELLED",
         "JOB-003",
         "JOB-004",
         "DISPLAY-005",

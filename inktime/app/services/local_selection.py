@@ -407,7 +407,16 @@ class LocalSelectionPolicy:
                 ]
                 primary["pair_score"] = pair_score
                 primary["pair_score_components"] = pair_components
-                selected = [primary, secondary] + selected[2:]
+                # `secondary` is chosen from allowed[:50] excluding only
+                # `primary`, so it can already appear later in `selected`.
+                # Slicing from index 2 also discarded the original selected[1]
+                # even when it was a distinct, still-needed candidate.  Rebuild
+                # from the full tail instead, keeping order and dropping only
+                # the two photos now pinned to the first two slots.
+                pinned = {str(primary["id"]), str(secondary["id"])}
+                selected = [primary, secondary] + [
+                    row for row in selected[1:] if str(row["id"]) not in pinned
+                ]
         selected = selected[:needed]
         selected_stages = [stage_by_id[str(row["id"])] for row in selected]
         fallback_type = (

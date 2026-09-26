@@ -453,7 +453,19 @@ class WorkerRunner:
                         exc.code = "JOB-LOCAL-TIMEOUT"
                         raise
                     except ProcessCallError as exc:
-                        exc.code = "JOB-LOCAL-FAILED"
+                        # A graceful-shutdown cancellation is not a job failure.
+                        # Every kind routed through this boundary is local and
+                        # re-runnable (scan/render/backup/cleanup/local analysis),
+                        # and the child was terminated before it could report, so
+                        # the item must return to the queue.  Classifying it as
+                        # JOB-LOCAL-FAILED made it TERMINAL_NO_RETRY, so a routine
+                        # `docker stop` or NAS reboot permanently dead-lettered
+                        # whatever was running.
+                        exc.code = (
+                            "JOB-SHUTDOWN-CANCELLED"
+                            if getattr(exc, "cancelled", False)
+                            else "JOB-LOCAL-FAILED"
+                        )
                         raise
                 return _execute_job_item(
                     self.app, item, job=job, settings=settings, provider=provider, provider_error=provider_error, analysis=analysis, analysis_plan=analysis_plan, execution=execution, progress_items=progress_items, progress_seconds=progress_seconds, scanner_disk_batch_size=scanner_disk_batch_size, scanner_write_batch_size=scanner_write_batch_size, scanner_missing_threshold_ratio=scanner_missing_threshold_ratio, scanner_safety=scanner_safety, runtime_settings=runtime_settings, scan_cancel_requested=scan_cancel_requested, log_scan_progress=log_scan_progress
@@ -639,7 +651,25 @@ class WorkerRunner:
         log_event(LOGGER, logging.INFO, "背景 Worker 已啟動", event="worker_started")
         idle_index = 0
         while not self.stop.is_set():
-            processed = self.run_once()
+            try:
+                processed = self.run_once()
+            except Exception as exc:
+                # An unexpected error must not take the container down: Docker
+                # restarts it, it claims the same poison job, and the queue is
+                # blocked by a crash loop.  Mirror SchedulerRunner.run_forever:
+                # log with a stable code and recover after a bounded delay.
+                log_event(
+                    LOGGER,
+                    logging.ERROR,
+                    "Worker 主迴圈發生未預期錯誤；將以有界延遲恢復",
+                    event="worker_loop_failed",
+                    error_code="JOB-005",
+                    failure_class=type(exc).__name__,
+                    details={"error_type": exc.__class__.__name__},
+                )
+                self.stop.wait(30)
+                idle_index = 0
+                continue
             if processed == 0:
                 configure_logging(settings_repository=repository)
                 # Idle polling is deliberately adaptive: a quiet NAS wakes at

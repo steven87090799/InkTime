@@ -11,8 +11,10 @@ FULL_AUDIT → subsystem-by-subsystem → compact conclusion per subsystem
            → never load whole repository at once
 ```
 
-未知位置時只選一條 route：`python3 scripts/ci/ai_context.py <task-id> --max-items 12`。
-輸出是候選路徑與下一個 rg 指令，非必讀清單；contracts/tests 都是按需線索。
+未知位置時只選一條 route：`python3 scripts/ci/ai_context.py <task-id> --max-items 6`。
+預設只輸出候選路徑與下一個 rg 指令，不開啟候選原始碼。需要符號提示才加
+`--symbols --max-items 6`；contracts/tests 都是按需線索，非必讀清單。
+首輪最多 3 檔／300 行，單次輸出通常不超過 120 行；不足再以具體依據擴大。
 每次擴大閱讀都要有依賴、錯誤或契約證據。已知畫面或 repository 不必經範例路由繞路。
 
 | Route | 用途 |
