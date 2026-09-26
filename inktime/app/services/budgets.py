@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import math
 import time
 from uuid import uuid4
@@ -18,9 +18,50 @@ class BudgetExceeded(RuntimeError):
 
 
 class BudgetService:
+    # Age only selects reconciliation candidates. A timeout, restart or overdue
+    # Batch does not prove that a remote request was free or has been accounted.
+    RESERVATION_MAX_AGE_SECONDS = 24 * 60 * 60
+
     def __init__(self, database: Database, settings: SettingsRepository) -> None:
         self.database = database
         self.settings = settings
+
+    def _reservation_cutoff(self) -> str:
+        try:
+            window = float(
+                self.settings.get("budget.reservation_max_age_seconds", self.RESERVATION_MAX_AGE_SECONDS)
+            )
+        except (TypeError, ValueError):
+            window = float(self.RESERVATION_MAX_AGE_SECONDS)
+        window = max(600.0, min(window, 7 * 24 * 60 * 60.0))
+        return (datetime.now(timezone.utc) - timedelta(seconds=window)).isoformat()
+
+    def expire_stale_reservations(self) -> int:
+        """Recover old Vision reservations only with durable settlement evidence.
+
+        Batch reservations belong to the importer, which knows when every item
+        is accounted. Unidentified/diagnostic and ambiguous reservations remain
+        reserved; absence of usage is never evidence of zero cost.
+        """
+        cutoff = self._reservation_cutoff()
+        with self.database.transaction(operation="budget_reservation_expiry") as connection:
+            return int(
+                connection.execute(
+                    """UPDATE budget_reservations SET state='released'
+                    WHERE state='active' AND created_at<? AND id LIKE 'vision:%' AND EXISTS (
+                        SELECT 1 FROM billable_operations o
+                        WHERE o.id=substr(budget_reservations.id,8)
+                          AND (o.state='not_sent' OR (
+                              o.state IN ('response','completed') AND EXISTS (
+                                  SELECT 1 FROM api_usage u WHERE u.operation_id=o.id
+                                    AND u.cost_source<>'unknown'
+                                    AND COALESCE(u.actual_cost,u.estimated_cost) IS NOT NULL
+                              )
+                          ))
+                    )""",
+                    (cutoff,),
+                ).rowcount
+            )
 
     @staticmethod
     def _billable_evidence_sql(alias: str = "") -> str:
@@ -73,7 +114,8 @@ class BudgetService:
                 "SELECT COALESCE(SUM(amount),0) total, "
                 "COALESCE(SUM(CASE WHEN job_id=? THEN amount ELSE 0 END),0) job, "
                 "COALESCE(SUM(CASE WHEN photo_id=? THEN amount ELSE 0 END),0) photo "
-                "FROM budget_reservations WHERE state='active'", (job_id, photo_id),
+                "FROM budget_reservations WHERE state='active'",
+                (job_id, photo_id),
             ).fetchone()
 
         reserve = max(0.01, min(100.0, float(self.settings.get("budget.unknown_request_reserve", 0.25))))

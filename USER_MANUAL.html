@@ -1240,7 +1240,7 @@
     <main class="main-content">
         <article class="markdown-body" id="content">
             <h1 id="inktime-墨水屏電子相框系統-終極百科全書級操作手冊與開發者指南" class="doc-h1">InkTime 墨水屏電子相框系統 終極百科全書級操作手冊與開發者指南</h1>
-<p class="doc-p"><a class="doc-link" href="docs/AI_NAVIGATION.md">AI 修改導航</a> · <a class="doc-link" href="docs/AI_CONTEXT_INDEX.json">機器可讀任務索引</a> · <a class="doc-link" href="AGENTS.md">AGENTS.md</a>。<strong>2026-09-13 文件核對：</strong>功能基準為目前 checkout 原始碼，Migration 61、嚴格 AI Schema v5、ESP32 2.8.7，新增安裝預設 <code>local_only</code>。章節與索引維持原位置，部署、評分與設定範例依目前程式校正。版本與驗證範圍見<a class="doc-link" href="docs/reference/CURRENT_STATE_ZH_TW.md">現行基線</a>；歷史 CI 與實板量測保留原日期。</p>
+<p class="doc-p"><a class="doc-link" href="docs/AI_NAVIGATION.md">AI 修改導航</a> · <a class="doc-link" href="docs/AI_CONTEXT_INDEX.json">機器可讀任務索引</a> · <a class="doc-link" href="AGENTS.md">AGENTS.md</a>。<strong>2026-09-22 文件核對：</strong>功能基準為目前 checkout 原始碼，Migration 63、嚴格 AI Schema v5、ESP32 2.8.7，新增安裝預設 <code>local_only</code>。章節與索引維持原位置，部署、評分與設定範例依目前程式校正。版本與驗證範圍見<a class="doc-link" href="docs/reference/CURRENT_STATE_ZH_TW.md">現行基線</a>；歷史 CI 與實板量測保留原日期。</p>
 
 
 <hr class="doc-divider">
@@ -1314,7 +1314,7 @@
 <p class="doc-p">目前韌體入口為 <a class="doc-link" href="esp32/ink-display-7C-photo/README.md">7C README</a>，正式建置使用 repository 的 Arduino CLI 設定與 Hosted CI；不要使用舊手冊自製的 PlatformIO 配方。PhotoPainter 必須選 ESP32-S3、16 MiB Flash、8 MiB OPI PSRAM 與相符的 Board Profile。工具版本、依賴與完整命令見 <a class="doc-link" href="docs/devices/ESP32_GUIDE_ZH_TW.md">ESP32 開發指南</a>。</p>
 <hr class="doc-divider">
 <h3 id="sec-3-2" class="doc-h3">3.2 韌體原始碼邏輯與驅動初始化序列</h3>
-<p class="doc-p">現行韌體先驗證 Board Profile、持久設定與啟動原因；Enhanced timer wake 可從已驗證 SD frame 完成離線排程，其他路徑依配對與交付模式存取 Manifest／Queue。下載必須驗證尺寸、雜湊、方向與內容身分，再刷新並回報真正顯示結果；不能把收到 HTTP 200 當成顯示完成。</p>
+<p class="doc-p">現行韌體先驗證 Board Profile、持久設定與啟動原因；Enhanced timer wake 可從已驗證 Internal FFat frame 完成離線排程，其他路徑依配對與交付模式存取 Manifest／Queue。下載必須驗證尺寸、雜湊、方向與內容身分，再刷新並回報真正顯示結果；不能把收到 HTTP 200 當成顯示完成。</p>
 <p class="doc-p">PhotoPainter 沿用已驗證的 POWER_ON、booster、DISPLAY_REFRESH、POWER_OFF 順序，BUSY 等待有上限；不套用另一面板的 DEEP_SLEEP 指令，也不關閉 ALDO4。失敗保留最後可用畫面，細節見 <a class="doc-link" href="docs/devices/WAVESHARE_PHOTOPAINTER_ZH_TW.md">顯示與恢復契約</a>。</p>
 <hr class="doc-divider">
 <h3 id="sec-3-3" class="doc-h3">3.3 燒錄、Wi-Fi 配網與自動配對流程</h3>
@@ -1347,7 +1347,7 @@
 <hr class="doc-divider">
 <h3 id="sec-5-2" class="doc-h3">5.2 照片庫與照片詳情 (Photos & Photo Detail)</h3>
 <p class="doc-p">照片庫位於 <code>/photos</code>，使用分頁、路徑／描述搜尋與篩選；詳細頁保留 EXIF、分析歷史、成本、方向與人工修正。AI 語意、本機品質與歷史結果各自標示來源，不跨母體比較。</p>
-<p class="doc-p">最愛使 v4 特殊程度提升一級，最多 level 4，並沿用本機品質規則的最愛保護；它不繞過 AI 內容排除。人工改日期、方向與裁切不修改原圖。重新分析建立新工作及歷史紀錄，操作與 API 以 <a class="doc-link" href="docs/guides/USER_GUIDE_ZH_TW.md">使用者指南</a>、<a class="doc-link" href="inktime/app/api/photos.py">photos.py</a> 為準。</p>
+<p class="doc-p">最愛使現行 semantic 結果的特殊程度提升一級，最多 level 4，並沿用本機品質規則的最愛保護；它不繞過 AI 內容排除。人工改日期、方向與裁切不修改原圖。重新分析建立新工作及歷史紀錄，操作與 API 以 <a class="doc-link" href="docs/guides/USER_GUIDE_ZH_TW.md">使用者指南</a>、<a class="doc-link" href="inktime/app/api/photos.py">photos.py</a> 為準。</p>
 <hr class="doc-divider">
 <h3 id="sec-5-3" class="doc-h3">5.3 預篩選排除清單 (Excluded Photos)</h3>
 <p class="doc-p">排除清單位於 <code>/photos/excluded</code>，可查本機截圖／品質證據以及 AI 內容分類。E6 不再作自動排除門檻。AI 的 sexualized_content、explicit_nudity、female_glamour_portrait 各自套用開關與信心門檻；普通女性旅遊、自拍與生活照不能只因人物性別被當成寫真。</p>
@@ -1361,7 +1361,7 @@
 <ul class="doc-list"><li><strong>URL 路由</strong>：<code>/providers</code> (GET) 與 <code>/costs</code> (GET)</li><li><strong>畫面指標</strong>：</li><li>當月與每日 Token 累積費用折線圖與模型費用比例圓餅圖。</li><li><strong>頁面控制按鈕與設定</strong>：</li><li><code>[新增 Provider]</code>：輸入 Name, Base URL, API Key（Fernet 加密）、Model Name (如 <code>gpt-4o-mini</code>, <code>qwen-vl-max</code>) 與 Prompt 單價。</li><li><code>[Level 1／連線]</code>：只做設定／<code>/models</code> capability check，不送圖片。</li><li><code>[Vision Level 2]</code>：使用 256px deterministic synthetic image，最多一次 Vision、<code>max_tokens≤256</code>、不做 repair；按下前會確認可能費用。</li><li><code>[Full Contract Level 3]</code>：使用 synthetic image 驗證完整 Schema、usage、cost 與 OpenRouter policy，最多一次 Vision 加一次 text-only repair；不讀 production photo。</li><li>Level 2/3 不會因為開啟頁面自動執行。</li><li><strong>成本門檻欄位</strong>：</li><li><code>budget.daily_warning</code> ($USD)：每日警告門檻。</li><li><code>budget.daily_stop</code> ($USD)：每日熔斷停止門檻。</li></ul>
 <hr class="doc-divider">
 <h3 id="sec-5-6" class="doc-h3">5.6 評分控制中心 (Scoring Lab)</h3>
-<p class="doc-p"><code>/scoring</code> 提供 v4 規則、固定排名公式、版本歷史與單張測試；已移除舊四權重及旅行加分滑桿。</p>
+<p class="doc-p"><code>/scoring</code> 提供現行 Schema 規則、固定排名公式、版本歷史與單張測試；已移除舊四權重及旅行加分滑桿。</p>
 <div class="code-wrapper"><pre><code class="language-text">base = round(memory * 0.67 + visual * 0.33, 2)
 effective_special_level = clamp(ai_special_level + favorite_adjustment, 0, 4)
 special_bonus = [0, 2, 5, 9, 14][effective_special_level]
@@ -1462,18 +1462,18 @@ raw = round(clamp(base + special_bonus, 0, 100), 2)
                 </div>
 <hr class="doc-divider">
 <h3 id="sec-7-2" class="doc-h3">7.2 送往 Vision LLM 之 Request Input Payload JSON</h3>
-<p class="doc-p">Provider adapter 依供應商能力建立請求，以下是欄位概念，實際 prompt／strict Schema 由 <a class="doc-link" href="inktime/app/domain/analysis/plan.py">Analysis Plan</a> 與 <a class="doc-link" href="inktime/app/providers/openai_compatible.py">Provider adapter</a> 產生。每 plan 最多一次圖片 Vision；純文字 JSON Repair 只修語法、Markdown fence、明確安全的型別與多餘欄位，不得補寫或改寫照片語意。語意欄位缺少或改變時改由有界工作重新執行 Vision。Web 縮圖預設 1024，支援 1600，底層另支援 512。</p>
+<p class="doc-p">Provider adapter 依供應商能力建立請求，以下是欄位概念，實際 prompt／strict Schema 由 <a class="doc-link" href="inktime/app/domain/analysis/plan.py">Analysis Plan</a> 與 <a class="doc-link" href="inktime/app/providers/openai_compatible.py">Provider adapter</a> 產生。正常照片每 plan 最多一次圖片 Vision；只在本機抽取 JSON 與嚴格驗證，不追加模型 JSON Repair 或長描述請求。語意欄位缺少時保存失敗與費用證據；未知付費狀態不得自動重送。Web 縮圖預設 1024，支援 1600，底層另支援 512。</p>
 <div class="code-wrapper"><pre><code class="language-text">model: Provider 專屬完整模型 ID，留白才使用全域模型
 image: 經方向處理且有界的 JPEG 縮圖
 response_format: 依 Provider 能力選用的結構化 JSON 契約
 max completion tokens: 1200 上限
-output schema: 嚴格 v4，繁體中文描述與短文案
+output schema: 嚴格 v5，繁體中文短句、分數、分類、內容過濾與方向
 </code></pre></div>
 <hr class="doc-divider">
 <h3 id="sec-7-3" class="doc-h3">7.3 Vision LLM 回傳之 Response JSON (<code>ANALYSIS_JSON_SCHEMA</code>)</h3>
-<p class="doc-p">以下為嚴格 v4 回應範例，欄位與額外屬性限制以 <a class="doc-link" href="inktime/app/domain/analysis/schema.py">ANALYSIS_JSON_SCHEMA</a> 為準。<code>memory_score</code> 是一般回看價值／AI 回憶價值，不是 Personal Memory Importance；模型不得猜使用者私人關係或私人重要性。模型回傳分類證據，Server 決定排除與本機排名，不接收模型自行決定的 should_keep。</p>
+<p class="doc-p">以下為嚴格 v5 回應範例；已存 v4 依原版相容讀取，欄位與額外屬性限制以 <a class="doc-link" href="inktime/app/domain/analysis/schema.py">ANALYSIS_JSON_SCHEMA</a> 為準。<code>memory_score</code> 是一般回看價值／AI 回憶價值，不是 Personal Memory Importance；模型不得猜使用者私人關係或私人重要性。模型回傳分類證據，Server 決定排除與本機排名，不接收模型自行決定的 should_keep。</p>
 <div class="code-wrapper"><pre><code class="language-json">{
-  &quot;schema_version&quot;: 4,
+  &quot;schema_version&quot;: 5,
   &quot;types&quot;: [
     &quot;家庭&quot;,
     &quot;旅行&quot;,
@@ -1482,13 +1482,7 @@ output schema: 嚴格 v4，繁體中文描述與短文案
   &quot;memory_score&quot;: 88.5,
   &quot;visual_score&quot;: 92,
   &quot;special_level&quot;: 2,
-  &quot;special_codes&quot;: [
-    &quot;family_moment&quot;,
-    &quot;travel_memory&quot;
-  ],
-  &quot;people_count&quot;: 3,
-  &quot;caption&quot;: &quot;一家人在海岸邊合照，陽光照亮海面，也照著孩子開心的笑容。&quot;,
-  &quot;side_caption&quot;: &quot;海風吹來一家人的笑聲&quot;,
+  &quot;side_caption&quot;: &quot;海風輕拂岸邊的笑容&quot;,
   &quot;content_filter&quot;: {
     &quot;sexualized_content&quot;: {
       &quot;detected&quot;: false,
@@ -1503,8 +1497,6 @@ output schema: 嚴格 v4，繁體中文描述與短文案
       &quot;confidence&quot;: 0.98
     }
   },
-  &quot;subject_position&quot;: &quot;center&quot;,
-  &quot;text_safe_area&quot;: &quot;bottom&quot;,
   &quot;visual_orientation&quot;: {
     &quot;rotation_cw&quot;: 0,
     &quot;confidence&quot;: 0.95,
@@ -1932,7 +1924,7 @@ INKTIME_GUNICORN_LOG_LEVEL=warning
 <tr><td>analysis.prefilter_sensitivity</td><td>本機預篩選</td><td>conservative</td><td>conservative／balanced／aggressive</td><td>預篩選敏感度：conservative 保守、balanced 平衡、aggressive 積極</td><td>越積極可節省更多 Token，但誤排除夜景、極簡構圖或舊照片的機率越高</td></tr>
 <tr><td>analysis.e6_prefilter_enabled</td><td>本機預篩選</td><td>true</td><td>boolean</td><td>舊版設定；E6 現在只影響電子紙顯示順位，不影響照片價值與 AI eligibility</td><td>保留供既有設定畫面辨識，不再套用於本機預篩選</td></tr>
 <tr><td>analysis.e6_min_score</td><td>本機預篩選</td><td>25</td><td>0 ~ 100</td><td>舊版門檻；E6 現在只影響電子紙顯示順位，不影響照片價值與 AI eligibility</td><td>保留供既有設定畫面辨識，不再套用於本機預篩選</td></tr>
-<tr><td>analysis.scoring_rules</td><td>照片評分規則</td><td>內建 Schema v4 規則（見 scoring.py）</td><td>string</td><td>模型判斷哪些照片應取得較高或較低分的規則</td><td>修改後會影響新分析結果；既有照片分數不會自動重算</td></tr>
+<tr><td>analysis.scoring_rules</td><td>照片評分規則</td><td>內建現行 Schema 規則（見 scoring.py）</td><td>string</td><td>模型判斷哪些照片應取得較高或較低分的規則</td><td>修改後會影響新分析結果；既有照片分數不會自動重算</td></tr>
 <tr><td>analysis.concurrency</td><td>分析設定</td><td>1</td><td>1 ~ 8</td><td>Worker 最大並行數</td><td>Intel N100 建議 1；過高可能觸發 Rate Limit 或造成圖片解碼記憶體尖峰</td></tr>
 <tr><td>worker.queue_multiplier</td><td>效能與待機</td><td>1</td><td>1 ~ 4</td><td>每個並行槽預先排入記憶體的工作數</td><td>數值越高吞吐可能略增，但同時保留更多圖片與 Future</td></tr>
 <tr><td>worker.poll_seconds</td><td>效能與待機</td><td>15</td><td>1 ~ 60</td><td>沒有工作時 Worker 的自適應檢查基準秒數（15→30→60，上限 60）</td><td>數值越小反應越快，但會增加待機喚醒與 SQLite 讀取；沒有跨程序 wake signal 時不可超過 60 秒</td></tr>
@@ -1951,9 +1943,9 @@ INKTIME_GUNICORN_LOG_LEVEL=warning
 <tr><td>offline.server_prefetch_margin_minutes</td><td>效能與待機</td><td>15</td><td>0 ~ 60</td><td>離線排程在裝置 Prefetch 前預留的伺服器準備緩衝（分鐘）</td><td>過短可能來不及完成渲染；過長會增加暫存內容保留時間</td></tr>
 <tr><td>offline.future_schedule_prepare_hour_local</td><td>效能與待機</td><td>20</td><td>0 ~ 23</td><td>裝置本地時間到達此時後，Scheduler 預先準備下一個本地日排程</td><td>過晚可能縮短渲染緩衝；過早會增加未來 Slot 暫存時間</td></tr>
 <tr><td>analysis.max_retries</td><td>分析設定</td><td>3</td><td>0 ~ 10</td><td>單一項目最大嘗試次數</td><td>重試會增加成本</td></tr>
-<tr><td>model.low_model</td><td>模型設定</td><td>gpt-4o-mini</td><td>string</td><td>第一階段低成本模型</td><td>模型必須支援圖片與 JSON Schema</td></tr>
+<tr><td>model.low_model</td><td>模型設定</td><td>gpt-4o-mini</td><td>string</td><td>舊模型讀取相容欄位；新工作使用單次分析</td><td>模型必須支援圖片與 JSON Schema</td></tr>
 <tr><td>model.analysis_model</td><td>模型設定</td><td>gpt-4o</td><td>string</td><td>新單次照片分析使用的 Vision 模型</td><td>模型必須支援圖片與 JSON Schema；價格與上下文限制由管理員確認</td></tr>
-<tr><td>model.repair_model</td><td>模型設定</td><td>gpt-4o-mini</td><td>string</td><td>只接收文字的 JSON 修復模型；不會收到圖片</td><td>修復模型不可取代主 Vision 分析，也不可重新上傳照片</td></tr>
+<tr><td>model.repair_model</td><td>模型設定</td><td>gpt-4o-mini</td><td>string</td><td>診斷／評分台等獨立流程的 JSON 修復模型；正常照片分析不用</td><td>修復模型不可取代主 Vision 分析，也不可重新上傳照片</td></tr>
 <tr><td>model.high_model</td><td>模型設定</td><td>gpt-4o</td><td>string</td><td>舊版高品質模型的讀取相容欄位；新工作由 model.analysis_model 取代</td><td>僅保留歷史工作相容性，不會啟用第二次圖片請求</td></tr>
 <tr><td>batch.model</td><td>Batch 分析</td><td>gpt-5.6-luna</td><td>string</td><td>OpenAI Batch 完整照片分析模型</td><td>模型必須在已啟用且支援 Batch 的 Provider 上可用</td></tr>
 <tr><td>batch.reasoning_effort</td><td>Batch 分析</td><td>none</td><td>none／low／medium／high／xhigh／max</td><td>官方 OpenAI GPT-5.6 Luna 的推理強度</td><td>提高推理強度會增加成本與延遲；相容 Provider 不會收到此欄位</td></tr>
@@ -1971,7 +1963,7 @@ INKTIME_GUNICORN_LOG_LEVEL=warning
 <tr><td>budget.unknown_request_reserve</td><td>成本設定</td><td>0.25</td><td>0.01 ~ 100</td><td>每筆尚未完成成本定價的請求預留金額（美元）</td><td>只對有可計費證據的 unknown 請求計入；同照片或同工作仍會阻擋重試</td></tr>
 <tr><td>budget.max_tokens</td><td>成本設定</td><td>8000</td><td>256 ~ 1000000</td><td>單次請求最大 Token 估算上限</td><td>需與 Provider 模型能力相容</td></tr>
 <tr><td>budget.full_analysis_max_tokens</td><td>成本設定</td><td>1200</td><td>256 ~ 1200</td><td>單次完整 Vision 分析的硬上限</td><td>過高會增加成本；實際值仍受 budget.max_tokens 夾制</td></tr>
-<tr><td>budget.caption_variants_max_tokens</td><td>成本設定</td><td>1200</td><td>256 ~ 1200</td><td>Schema v4 相框短句輸出上限</td><td>固定只產生一個 side_caption，實際值仍受 budget.max_tokens 夾制</td></tr>
+<tr><td>budget.caption_variants_max_tokens</td><td>成本設定</td><td>1200</td><td>256 ~ 1200</td><td>現行 Schema 相框短句輸出上限</td><td>固定只產生一個 side_caption，實際值仍受 budget.max_tokens 夾制</td></tr>
 <tr><td>budget.repair_max_tokens</td><td>成本設定</td><td>1200</td><td>256 ~ 1200</td><td>文字 JSON 修復請求的硬上限</td><td>修復不可重新上傳圖片；實際值仍受 budget.max_tokens 夾制</td></tr>
 <tr><td>render.memory_threshold</td><td>渲染設定</td><td>70</td><td>0 ~ 100</td><td>歷史今日選片最低回憶分數</td><td>過高可能沒有候選照片</td></tr>
 <tr><td>render.caption_wrap_enabled</td><td>照片描述與相框文案</td><td>false</td><td>boolean</td><td>相框文案依實際字型像素寬度換行；預設關閉並維持既有單行截斷</td><td>啟用後最多兩行，必要時縮小字型；完整原文不會被修改</td></tr>
@@ -2062,6 +2054,9 @@ INKTIME_GUNICORN_LOG_LEVEL=warning
 <ul class="doc-list"><li><strong>可能原因</strong>：</li><li>有背景 Worker 或掃描器正執行長時間的 SQLite 寫入交易。</li><li>Gunicorn 部署了多個 Process，在無跨程序寫入鎖的情況下競爭寫入資料庫。</li><li><strong>排除步驟與診斷</strong>：</li><li>確定系統均使用 <code>ManagedConnection</code> 進行連線。</li><li>在 <code>/settings</code> 將 <code>scanner.write_batch_size</code> 由 1000 降低為 <code>500</code>，縮短單次 <code>fcntl.flock</code> 鎖定時間。</li></ul>
 <h4 id="現象-2-熱備份還原失敗-提示-restore-001-inktime-web-worker-或-scheduler-尚未停止" class="doc-h4">現象 2：熱備份還原失敗，提示 <code>RESTORE-001: InkTime Web、Worker 或 Scheduler 尚未停止</code></h4>
 <hr class="doc-divider">
+<p class="doc-p"><strong>文件與 AI 閱讀政策（2026-09-22）：</strong>現行版本集中於 <a href="docs/reference/CURRENT_STATE_ZH_TW.md">版本基線</a>；AI 以 <a href="AGENTS.md">AGENTS.md</a> 為唯一入口，已知位置不載入整份手冊。首輪最多 3 檔／300 行，導航工具預設只列路徑。正常照片分析僅一次 Vision，不追加模型 JSON 修復；診斷／評分台的修復另計。Migration 62／63 加入密鑰指紋、定點 enum 修復及保留政策更正，詳見 <a href="docs/operations/MIGRATION_GUIDE_ZH_TW.md">遷移指南</a> 與 <a href="docs/resilience/DATA_RETENTION_ZH_TW.md">資料保留</a>。歷史報告維持原日期，不代表目前驗收。</p>
+<ul class="doc-list"><li><a href="docs/devices/PHOTOPAINTER_SAFETY_CONTRACT.md">PhotoPainter 精簡安全契約</a></li><li><a href="docs/operations/REVIEW_REMEDIATION_20260916.md">2026-09-16 修復歷史</a></li><li><a href="docs/operations/CODE_REVIEW_FOLLOWUP_20260921.md">2026-09-21 修復歷史</a></li><li><a href="docs/CODE_REVIEW_REPORT.md">原審查歷史快照</a></li></ul>
+<ul class="doc-list"><li><a href="docs/analysis/PHOTO_SELECTION_AI_FIRST_ZH_TW.md">現行選片契約</a></li><li><a href="docs/archive/analysis/PHOTO_SELECTION_AI_FIRST_20260905.md">2026-09-05 選片歷史</a></li></ul>
 <h2 id="sec-15" class="doc-h2"><span class="h2-anchor-icon">#</span> 十五、 文件地圖與 Markdown 索引</h2>
 <p class="doc-p">本章保留原手冊的完整閱讀方式，並提供目前專案內 <strong>全部 Markdown 文件</strong> 的單一入口。每一列都列出實際相對路徑、檔名、用途與可直接開啟的連結；文件移動後，應同步更新本章與 <a href="docs/README.md" class="doc-link">docs/README.md</a>。</p>
 <p class="doc-p">本手冊的既有章節適合連續閱讀；遇到安裝、維運、裝置、架構或歷史決策等需要深入查核的議題，請依下列連結前往對應的 Markdown 原始文件。<strong>archive/</strong> 下的內容是歷史證據，不應作為現行行為規格。</p>
@@ -2338,7 +2333,7 @@ INKTIME_GUNICORN_LOG_LEVEL=warning
 
             insertCard('sec-1', '<h4>現行架構基準</h4><p>Web、Worker 與 Scheduler 是分離的 Runtime；Web 不執行長時間圖片工作。照片掃描、本機特徵、分析、Render Plan、Release Coordinator 與裝置下載皆有明確責任邊界；Decision Trace、Shadow、離線 Queue、資料保留與 Canary 失敗時不應中斷既有正式 Release。</p>');
             insertCard('sec-4', '<h4>現行分析與 Provider 行為</h4><ul><li><code>analysis.execution_mode</code> 是權威：<code>disabled</code>、<code>local_only</code>、<code>local_with_manual_ai</code>、<code>automatic_ai</code>；新安裝預設為 <code>local_only</code>。</li><li>僅 <code>automatic_ai</code> 會依設定自動呼叫 Provider；本機選片不讀取 Provider Secret、不建立模型請求、也不產生成本。</li><li>Provider 使用 OpenAI Chat Completions 相容介面；可設定路由、限流、熔斷與快取，請勿把特定模型名稱視為固定契約。</li></ul>');
-            insertCard('sec-5', '<h4>控制台目前涵蓋的功能</h4><ul><li>照片庫、排除／還原、方向與裁切、掃描與本機特徵。</li><li>分析工作、選片預覽、Provider／成本、評分版本與單張測試。</li><li>Provider 測試分為 <code>Level 1／連線</code>、<code>Vision Level 2</code>、<code>Full Contract Level 3</code>；Level 2/3 只在按鈕確認後使用 synthetic image，不會自動執行。</li><li>Render Plan、8 種版型、模擬器、字型覆蓋驗證、Release 與回滾。</li><li>裝置自動配對／Legacy Token／Stock 模式、面板／能源設定、Manifest、SHA-256 驗證、狀態回報與離線 Queue。</li><li>設定快照、備份、診斷、Activity、Decision Trace、Shadow、Retention 與 Canary Rollout。</li></ul><p>目前 AI 分析契約是本機預篩選後每張最多一個 Vision 圖片請求；若 JSON 不合格，只允許一次文字式修復，結果可在 <code>/review/photos</code> 以游標、篩選與人工狀態管理。PhotoPainter 先走 Stock 相容 <code>/dataUP</code>；需多時刻離線顯示時才啟用 Enhanced Offline Schedule。</p>');
+            insertCard('sec-5', '<h4>控制台目前涵蓋的功能</h4><ul><li>照片庫、排除／還原、方向與裁切、掃描與本機特徵。</li><li>分析工作、選片預覽、Provider／成本、評分版本與單張測試。</li><li>Provider 測試分為 <code>Level 1／連線</code>、<code>Vision Level 2</code>、<code>Full Contract Level 3</code>；Level 2/3 只在按鈕確認後使用 synthetic image，不會自動執行。</li><li>Render Plan、8 種版型、模擬器、字型覆蓋驗證、Release 與回滾。</li><li>裝置自動配對／Legacy Token／Stock 模式、面板／能源設定、Manifest、SHA-256 驗證、狀態回報與離線 Queue。</li><li>設定快照、備份、診斷、Activity、Decision Trace、Shadow、Retention 與 Canary Rollout。</li></ul><p>目前 AI 分析契約是本機預篩選後每張最多一個 Vision 圖片請求；若 JSON 不合格，保存錯誤與費用證據，不追加模型修復，結果可在 <code>/review/photos</code> 以游標、篩選與人工狀態管理。PhotoPainter 先走 Stock 相容 <code>/dataUP</code>；需多時刻離線顯示時才啟用 Enhanced Offline Schedule。</p>');
             insertCard('sec-6', '<h4>除錯安全基準</h4><p>Debug、Activity 與診斷輸出不得記錄 API Key、Device Secret、配對碼、Bearer Token、未遮罩路徑或精確 GPS。先使用診斷 Bundle、工作詳情與設備回報定位問題；實體裝置成功顯示與本機／CI 成功是不同層級的證據。</p>');
 
             replaceAfterHeading('sec-7-1', '<p class="doc-p">掃描結果以 <code>photos</code>、Library 與本機特徵為核心：相對路徑、SHA-256、尺寸、EXIF／方向、狀態、本機品質、E6 適合度與 <code>eligible</code> 共同決定是否能進入候選池。相同內容雜湊只在符合規則時繼承結果；原始檔變更會清除過期特徵與分析。</p><div class="current-card"><h4>資料使用原則</h4><p>地點只以離線解析的粗略城市參與選片；精確 GPS、照片路徑與 Secret 不寫入 Decision Trace 或 Release Metadata。</p></div>');

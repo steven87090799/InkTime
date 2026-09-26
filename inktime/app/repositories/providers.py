@@ -19,7 +19,7 @@ from inktime.app.providers.config import (
     validate_model_id,
 )
 from inktime.app.providers.openai_compatible import calculate_usage_cost
-from inktime.app.providers.config import provider_revision
+from inktime.app.providers.config import provider_analysis_revision, provider_revision
 from inktime.app.repositories.settings import SecretStore
 
 
@@ -140,11 +140,7 @@ class ProviderRepository:
                     )
                 # Pin the old full hash for operational edits. This is a lazy
                 # legacy mapping: already-paid cache keys never need rewriting.
-                previous_revision = (
-                    previous["analysis_revision"]
-                    if previous.get("analysis_revision") and previous.get("analysis_revision_semantics") == provider_revision(previous, semantic=True)
-                    else provider_revision(previous)
-                )
+                previous_revision = provider_analysis_revision(previous)
                 revision = previous_revision if provider_revision(previous, semantic=True) == provider_revision(current, semantic=True) else None
                 connection.execute(
                     "UPDATE providers SET analysis_revision=?,analysis_revision_semantics=? WHERE id=?",

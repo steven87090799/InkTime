@@ -287,7 +287,9 @@ def model_request_capabilities(kind: str, model: str) -> dict:
     }
 
 
-def provider_revision(provider: dict, *, semantic: bool = False) -> str:
+def provider_revision(
+    provider: dict, *, semantic: bool = False, legacy_semantic: bool = False
+) -> str:
     """Full operational revision, also the legacy semantic revision."""
     fields = {
         "provider_id": str(provider.get("id") or provider.get("provider_id") or ""),
@@ -315,7 +317,40 @@ def provider_revision(provider: dict, *, semantic: bool = False) -> str:
     if configured_model:
         fields["model"] = configured_model
     if semantic:
-        for key in ("rate_limit_rpm", "token_limit_tpm", "max_concurrency", "timeout_seconds", "cooldown_seconds"):
+        # The semantic revision feeds provider_prompt_contract_sha256 and hence
+        # the ai_analysis_cache key, so it must contain only inputs that can
+        # change the provider's Vision request or JSON contract.  `priority` is
+        # pure routing order and `supports_batch` is a capability flag; neither
+        # reaches the wire.  Leaving them in meant that re-ordering providers, or
+        # enabling Batch mode to save money, silently invalidated every paid
+        # analysis already in the cache and re-billed the whole library.
+        for key in (
+            "rate_limit_rpm",
+            "token_limit_tpm",
+            "max_concurrency",
+            "timeout_seconds",
+            "cooldown_seconds",
+        ):
             fields.pop(key, None)
+        if not legacy_semantic:
+            fields.pop("priority", None)
+            fields.pop("supports_batch", None)
     payload = json.dumps(fields, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return sha256(payload.encode("utf-8")).hexdigest()
+
+
+def provider_analysis_revision(provider: dict) -> str:
+    """Preserve a paid-cache alias only if its stored semantics still match.
+
+    Migration 61 stored hashes that included routing priority and Batch support.
+    Accept that exact old hash on upgrade, without accepting arbitrary stale
+    aliases after a model, endpoint or other wire-affecting change.
+    """
+    revision = provider.get("analysis_revision")
+    semantics = provider.get("analysis_revision_semantics")
+    if revision and semantics in {
+        provider_revision(provider, semantic=True),
+        provider_revision(provider, semantic=True, legacy_semantic=True),
+    }:
+        return str(revision)
+    return provider_revision(provider)

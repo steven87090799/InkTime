@@ -2,6 +2,17 @@
 import json
 import sqlite3
 import sys
+from datetime import datetime, timezone
+
+
+def _now() -> str:
+    """Use a realistic timestamp; age alone never settles an unknown charge.
+
+    Separate regression coverage ages reservations past the reconciliation
+    window and verifies that unaccounted requests retain their budget.
+    """
+
+    return datetime.now(timezone.utc).isoformat()
 
 
 def seed(connection):
@@ -17,7 +28,8 @@ def seed(connection):
         "VALUES ('ci-paid','ci-model','ci-persistence',NULL,NULL,'2026-09-16','failed','unknown','ci-paid-operation',0)"
     )
     connection.execute(
-        "INSERT INTO budget_reservations(id,amount,state,created_at) VALUES ('ci-paid-reservation',0.01,'active','2026-09-16')"
+        "INSERT INTO budget_reservations(id,amount,state,created_at) VALUES ('ci-paid-reservation',0.01,'active',?)",
+        (_now(),),
     )
     connection.execute(
         "INSERT INTO provider_quota_state(scope,failures,circuit_until) VALUES ('ci-paid-provider',2,2000000000)"
