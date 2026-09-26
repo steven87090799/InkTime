@@ -1,24 +1,64 @@
 # InkTime｜照片分析與電子紙回憶管理平台
 
-> 原始碼基準以目前 checkout 為準，不固定綁定單一 Git commit SHA；部署中的版本請從 Web「診斷」頁確認 Git revision。SQLite Migration 61、AI Schema v5、ESP32 2.8.7；詳細版本、預設值與驗收邊界見[現行基線](docs/reference/CURRENT_STATE_ZH_TW.md)。
+> 文件核對日期 2026-09-22；原始碼基準以目前 checkout 為準，不固定綁定單一 Git commit SHA；部署中的版本請從 Web「診斷」頁確認 Git revision。SQLite Migration 63、AI Schema v5、ESP32 2.8.7；詳細版本、預設值與驗收邊界見[現行基線](docs/reference/CURRENT_STATE_ZH_TW.md)。
 
 [English README](README.en.md) · [HTML 手冊與文件入口](USER_MANUAL.html) · [完整 Markdown 文件地圖](docs/README.md) · [完整程式流程圖](#完整程式流程圖從啟動照片分析到電子紙顯示) · [快速開始](docs/getting-started/QUICK_START_ZH_TW.md) · [電子紙模擬器](docs/guides/EPAPER_SIMULATOR_ZH_TW.md) · [N100 Docker 部署規格](docs/operations/DOCKER_GUIDE_ZH_TW.md) · [完整上線指南](docs/operations/PRODUCTION_DEPLOYMENT_GUIDE_ZH_TW.md) · [NAS Tag 更新](docs/operations/NAS_TAG_DEPLOYMENT_ZH_TW.md) · [ESP32／電子紙指南](docs/devices/ESP32_GUIDE_ZH_TW.md) · [ESP32 自動配對與憑證](docs/devices/ESP32_AUTOMATIC_PAIRING_ZH_TW.md) · [Waveshare PhotoPainter](docs/devices/WAVESHARE_PHOTOPAINTER_ZH_TW.md) · [ESP32 TLS／配網信任根](docs/devices/ESP32_TLS_PROVISIONING_ZH_TW.md) · [OpenRouter Provider](docs/providers/OPENROUTER_ZH_TW.md) · [模型 Benchmark](docs/providers/MODEL_BENCHMARK_ZH_TW.md) · [資源與低功耗](docs/operations/N100_RESOURCE_GUIDE_ZH_TW.md) · [Log 指南](docs/operations/LOGGING_GUIDE_ZH_TW.md)
 
 InkTime 會在本地掃描相簿、擷取 EXIF 與品質特徵，先辨識重複與不適合顯示的照片。新安裝預設只做本機選片；明確啟用 AI 後，才以可控預算的視覺模型產生繁體中文描述、分類、分數與電子紙短文案。所有工作、模型、成本、裝置、渲染、備份與診斷都能由登入後的 Web 管理介面操作。
 
-決策追蹤、回饋閉環、Shadow Mode、離線內容 Queue、資料保留與 Canary 發布皆為可選功能，預設不會改變既有配對裝置、正式 Release 或選片。啟用與故障處理請見 [實作計畫](docs/resilience/DECISION_FEEDBACK_RESILIENCE_PLAN_ZH_TW.md)、[決策追蹤](docs/resilience/DECISION_TRACE_ZH_TW.md)、[Shadow Mode](docs/resilience/SHADOW_MODE_ZH_TW.md)、[離線 Queue](docs/resilience/OFFLINE_QUEUE_ZH_TW.md)、[資料保留](docs/resilience/DATA_RETENTION_ZH_TW.md)、[Canary](docs/resilience/CANARY_ROLLOUT_ZH_TW.md)。
+決策追蹤、回饋閉環、Shadow Mode、離線內容 Queue 與 Canary 發布可按需要啟用。資料保留另有自動清理預設，升級前應核對政策；不是所有保留項目都維持 dry-run。啟用與故障處理請見 [實作計畫](docs/resilience/DECISION_FEEDBACK_RESILIENCE_PLAN_ZH_TW.md)、[決策追蹤](docs/resilience/DECISION_TRACE_ZH_TW.md)、[Shadow Mode](docs/resilience/SHADOW_MODE_ZH_TW.md)、[離線 Queue](docs/resilience/OFFLINE_QUEUE_ZH_TW.md)、[資料保留](docs/resilience/DATA_RETENTION_ZH_TW.md)、[Canary](docs/resilience/CANARY_ROLLOUT_ZH_TW.md)。
 
 ![InkTime 繁體中文儀表板](docs/images/dashboard.png)
 
+## 閱讀入口
+
+| 想完成的事情 | 本頁入口 | 詳細文件 |
+|---|---|---|
+| 第一次安裝並顯示照片 | [Docker 快速安裝](#docker-快速安裝)、[首次使用](#首次使用) | [快速開始](docs/getting-started/QUICK_START_ZH_TW.md) |
+| 決定是否使用 AI 與付費 | [分析模式與資料去向](#分析模式與資料去向)、[成本](#token-與成本控制) | [Provider](docs/guides/API_PROVIDER_GUIDE_ZH_TW.md)、[成本指南](docs/reference/TOKEN_COST_GUIDE_ZH_TW.md) |
+| 看懂系統怎麼運作 | [架構](#架構)、[完整流程](#完整程式流程圖從啟動照片分析到電子紙顯示) | [架構責任與流程](docs/architecture/ARCHITECTURE_ZH_TW.md) |
+| 維護既有部署 | [更新與備份](#更新遷移與回滾)、[狀態判讀](#如何確認系統真的完成工作) | [NAS 更新](docs/operations/NAS_TAG_DEPLOYMENT_ZH_TW.md)、[備份還原](docs/operations/BACKUP_RESTORE_ZH_TW.md) |
+| 修改程式且少讀文件 | [AI 修改入口](#ai-修改入口) | [AGENTS.md](AGENTS.md)；已知位置直接處理 |
+
+## 分析模式與資料去向
+
+新安裝可先完成掃描、選片、模擬與電子紙發布，再決定要不要使用 AI。只設定 API Key 不會切換分析模式；模式位於「設定」的 `analysis.execution_mode`。
+
+| 模式 | 一般背景分析 | 手動照片 AI | 費用與資料 |
+|---|---|---|---|
+| `disabled` | 不建立新的分析工作 | 不允許 | 既有照片與 Release 仍可讀 |
+| `local_only`（預設） | 本機 EXIF、品質與選片 | 不允許 | 正常照片流程不讀 Provider，不產生模型 Token |
+| `local_with_manual_ai` | 本機分析與選片 | 明確操作時允許 | 手動送出時才可能傳圖片與產生費用 |
+| `automatic_ai` | 依設定允許 AI 工作 | 允許 | 受 Provider、篩選、照片數與預算限制 |
+
+Provider 連線／合成圖片診斷有自己的操作入口，圖片測試、評分測試台與 live Benchmark 仍可能計費；不要把本機模式解讀為所有診斷按鈕都免費。可先在 `/simulator` 預覽，或用 `/virtual-display` 接收已發布的 Manifest／BIN，無須實體裝置。
+
+原始相簿由 Server 以 `/photos:ro` 讀取；AI 使用伺服器產生的縮圖，Web Preview 使用 JPEG。啟用外部模型才會把請求中的圖片與 Prompt 送到所選 Provider；縮圖仍包含照片內容。`never_upload`、人工排除、內容過濾與預算分別有不同用途，不能互相代替。
+
+### 現行分析與排名
+
+新回應使用 [Schema v5](docs/VISION_SCHEMA.md)，包含 `types`、`memory_score`、`visual_score`、`special_level`、`side_caption`、`content_filter`、`visual_orientation`。不要求新回應提供長描述、人物數、構圖安全區或特殊代碼；既有 v4 資料按原版本讀取，不因升級重新付費。
+
+```text
+基礎分 = round(回憶分 × 0.67 + 視覺分 × 0.33, 2)
+有效特殊程度 = min(4, 原特殊程度 + (最愛 ? 1 : 0))
+特殊加分 = [0, 2, 5, 9, 14][有效特殊程度]
+排名 = round(clamp(基礎分 + 特殊加分, 0, 100), 2)
+```
+
+本機品質負責候選資格；E6 負責電子紙顯示適合度，都不加入上述 AI 排名。最愛不改寫模型的原始回憶分，也不繞過 AI 內容排除；完整規則見[選片契約](docs/analysis/PHOTO_SELECTION_AI_FIRST_ZH_TW.md)。
+
 ## AI 修改入口
 
-修改遵守 [AGENTS.md](AGENTS.md)；已知檔案／符號直接 TARGETED，只有探索任務才用 [AI 修改導航](docs/AI_NAVIGATION.md) 與 [機器可讀任務索引](docs/AI_CONTEXT_INDEX.json)；Agent 規則統一維護於 AGENTS.md。不需要每次載入本 README 的完整流程圖。
+修改遵守 [AGENTS.md](AGENTS.md)；已知檔案／符號直接 TARGETED，只有探索任務才用 [AI 修改導航](docs/AI_NAVIGATION.md) 與 [機器可讀任務索引](docs/AI_CONTEXT_INDEX.json)；Agent 規則統一維護於 AGENTS.md。不需要每次載入本 README 的完整流程圖。首輪最多讀 3 個檔案／300 行，預設不讀歷史報告、資料庫、Log、Secrets、圖片與建置產物。只有實際依賴、錯誤或安全契約才擴大。
+
+`AGENTS.md` 是正確檔名，不另建 `AGENT.md`／`CLAUDE.md` 重複規則。探索工具預設只列路徑，不讀候選程式內容；需要符號才加 `--symbols`。開啟本專案或其 worktree 的 Git 根目錄，避免從包含多個 checkout 的父目錄開始。這能減少不必要讀取，但不能保證固定額度節省比例；詳見[開發與文件維護](docs/getting-started/DEVELOPMENT_GUIDE_ZH_TW.md)。
 
 ## 主要能力
 
-- 以 SHA-256、pHash、dHash、EXIF、亮度、對比、模糊與曝光做本地預處理；相同內容不重複呼叫模型。
+- 以 SHA-256、pHash、dHash、EXIF、亮度、對比、模糊與曝光做本地預處理；符合內容與請求相容性的結果可重用，避免重複呼叫模型。
 - 512／1024／1600px 內容雜湊縮圖快取；預設不傳原始 4K／8K 圖片。
-- 單一分析請求同時回傳描述、類型、回憶與視覺兩項分數、特殊程度、短文案、內容分類與必要方向欄位；JSON 最多純文字修復一次。
+- 單一分析請求回傳 Schema v5：類型、回憶與視覺分數、特殊程度、8–16 字短文案、內容分類與方向；本機抽取 JSON 後嚴格驗證，不追加模型修復或長描述請求。既有 v4 描述與結果保留可讀。
 - 正式 OpenRouter Provider contract：受控 routing／privacy options、reasoning 與 session routing；OpenRouter 不進入 InkTime Batch 路徑。完整設定見 [OpenRouter Provider 文件](docs/providers/OPENROUTER_ZH_TW.md)。
 - 每筆 usage 區分 `provider_reported`／`estimated`／`unknown`；unknown 不會被當作 US$0，預算與新請求採 fail-closed。Token、cache 與 request-size 指標見 [Token 與成本指南](docs/reference/TOKEN_COST_GUIDE_ZH_TW.md)。
 - 提供預設 offline、bounded、可重現的 [模型 Benchmark](docs/providers/MODEL_BENCHMARK_ZH_TW.md)；不會修改 production DB、analysis、release 或 AI cache。
@@ -86,6 +126,10 @@ flowchart TB
 | `inktime/app/domain/` | 不依賴 Flask 的圖片、Schema、日期與多色量化／抖動邏輯 |
 | `inktime/app/workers/` | 背景 Worker、Scheduler 與掃描器 |
 | `inktime/app/web/` | 繁中管理介面的模板與 CSS |
+| `inktime/app/db/` | 共用 SQLite 連線、鎖與 append-only migrations |
+| `scripts/` | NAS 更新、離線還原、診斷與 CI 路由工具 |
+| `tests/` | 對應行為的 unit／integration 契約；依符號查找 |
+| `.github/workflows/` | Hosted CI、容器安全與發布流程 |
 | `esp32/` | 電子紙裝置韌體 |
 | `docs/` | 安裝、架構、管理、成本、安全與維運文件 |
 
@@ -225,50 +269,29 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-    ITEM["⚙️ Worker 取得 analysis item"] --> PATH{"🛡️ 原始檔仍在 Library Root 內且存在？"}
-    PATH -->|否| FAIL_FILE["❌ SCAN-001；不呼叫 Provider"]
-    PATH -->|是| INHERIT{"相同 SHA-256 已有可繼承分析？"}
-    INHERIT -->|是| COPY["♻️ 繼承結果；成本 0"]
-    INHERIT -->|否| STRATEGY{"分析策略"}
-    STRATEGY -->|local| LOCAL["🧮 本機影像品質分析"]
-    STRATEGY -->|low_cost / smart| LOW["512px 第一階段"]
-    STRATEGY -->|high_quality| HIGH["1600px 高品質階段"]
-
-    LOW --> PREFILTER{"照片已被本地安全規則排除？"}
-    HIGH --> PREFILTER
-    PREFILTER -->|是| LOCAL_ONLY["🚫 保存本機品質結果；不送 AI"]
-    PREFILTER -->|否| BUDGET{"💰 每日／每月／工作／單張預算允許？"}
-    BUDGET -->|否| BUDGET_STOP["⏸️ 本機 fallback 或 budget_exceeded"]
-    BUDGET -->|是| KEY["建立 Cache Key：內容 SHA、Provider、Model、Prompt、Schema、Stage"]
-    KEY --> HIT{"🗃️ AI Cache 命中？"}
-    HIT -->|是| CACHE["✅ 回傳 Cache；不重複請求、不重複計費"]
-    HIT -->|否| RESERVE{"取得 ai_cache_reservations lease？"}
-    RESERVE -->|其他 Worker 持有| WAIT["⏳ 有界等待並重查 Cache／Lease"]
-    WAIT --> HIT
-    RESERVE -->|成功或過期後安全接手| CALL["🧠 唯一 Owner 呼叫 Provider"]
-    CALL --> TIMEOUT{"Connect／Read Timeout 或 Provider 錯誤？"}
-    TIMEOUT -->|是| RELEASE_RESERVATION["標記 reservation failed；允許後續安全接手"]
-    TIMEOUT -->|否| JSON["驗證 JSON Schema"]
-    JSON --> VALID{"格式有效？"}
-    VALID -->|否| REPAIR["最多一次純文字 JSON 修復"]
-    REPAIR --> VALID2{"修復後有效？"}
-    VALID2 -->|否| MODEL_FAIL["❌ 穩定錯誤；不無限重試修復"]
-    VALID2 -->|是| PUT_CACHE["保存 AI Cache 與一次用量"]
-    VALID -->|是| PUT_CACHE
-    PUT_CACHE --> SCORE["保存 v4 memory／visual、ranking_score、規則版本"]
-    LOW --> GATE{"smart：回憶分達門檻，或人物／最愛？"}
-    GATE -->|是| HIGH
-    GATE -->|否| SCORE
-    LOCAL --> LOCAL_QUALITY["保存 local_score；semantic ranking=NULL"]
-    LOCAL_ONLY --> LOCAL_QUALITY
-    BUDGET_STOP --> LOCAL_QUALITY
-    LOCAL_QUALITY --> DONE
-    COPY --> DONE["✅ Item 完成"]
-    CACHE --> SCORE
+    ITEM["Worker 取得照片"] --> MODE{"執行模式與策略允許？"}
+    MODE -->|本機| LOCAL["本機特徵與品質；不讀 Provider"]
+    MODE -->|single| SOURCE["驗證來源、預篩與相容繼承"]
+    SOURCE --> CACHE{"內容與請求指紋有相容快取？"}
+    CACHE -->|是| REUSE["繼承或快取；不新增 API 請求"]
+    CACHE -->|否| OWNER["取得有界快取租約；確認預算與未知付費狀態"]
+    OWNER --> CHECK{"允許送出？"}
+    CHECK -->|否| STOP["停止或等待；不把未知費用當零"]
+    CHECK -->|是| STARTED["先保存 billable_operations started"]
+    STARTED --> VISION["一次圖片 Vision；預設 1024px"]
+    VISION --> OUTCOME{"回應狀態"}
+    OUTCOME -->|不確定是否收費| UNKNOWN["保存未知狀態與保留額；阻擋自動重送"]
+    OUTCOME -->|收到| SAVE["保存原始回應與 usage；可恢復解析"]
+    SAVE --> JSON["本機 JSON 抽取與嚴格 v5 驗證"]
+    JSON --> VALID{"有效？"}
+    VALID -->|否| FAILED["記錄 Schema 錯誤；不呼叫模型修復"]
+    VALID -->|是| SCORE["保存快取、semantic 結果與固定排名"]
+    REUSE --> SCORE
+    LOCAL --> DONE["Item 完成；不等於有 API 請求"]
     SCORE --> DONE
 ```
 
-程式入口：`services/analysis.py` → `repositories/photos.py` → `providers/router.py`、`openai_compatible.py` → `domain/analysis/schema.py`、`scoring.py`。同一 Cache Key 的並行請求只有 Reservation Owner 能呼叫 Provider。
+入口：`services/analysis.py` → `repositories/photos.py`／`repositories/usage.py` → `providers/router.py` → `domain/analysis/schema.py`、`scoring.py`。新策略只有 `local`／`single`；舊名稱正規化為 `single`，解析度不是第二階段。快取租約到期不能證明遠端未收費；重啟後仍須核對持久化操作狀態。Provider 診斷、評分測試台與 Benchmark 的受控 repair 是另外的功能，不能拿來推定正常照片工作會追加請求。
 
 ### 4. 統一候選照片資格判斷
 
@@ -704,16 +727,16 @@ docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build
 
 管理介面的「設定」與「評分」頁提供：
 
-- `model.low_model`、`model.high_model`：第一、第二階段使用哪個模型。
-- 「評分」頁：Schema v4 評分規則、固定排名公式、版本歷史與單張測試台。
+- `model.analysis_model`：全域單次分析模型；Provider 專屬 `model` 非空時優先。`model.low_model`／`model.high_model` 僅保留舊資料相容。
+- 「評分」頁：現行 Schema v5 評分規則、固定排名公式、版本歷史與單張測試台。
 - `analysis.stage_two_threshold`：舊版兩階段設定的讀取相容欄位，不會恢復第二次圖片請求。
-- `render.memory_threshold`：電子紙歷史今日選片的最低回憶分門檻。
+- `render.memory_threshold`：舊設定相容欄位，自動 AI 選片不使用它。
 
-真正完成 Vision v4 分析的資料列以 `score_kind=semantic` 標記，模型只輸出 `memory_score`、`visual_score` 與特殊程度；Server 以 `ranking-v5-ai-first` 的固定回憶 67%、視覺 33%、本機品質 0% 計算基礎分，再套用特殊程度與最愛提升。本機品質是 candidate qualification／quality gate，不是 ranking weight；本機影像分析以 `score_kind=local_quality` 標記，只保存 `local_score` 與本機特徵，正式語意排名欄位為 `NULL`。`automatic_ai` 要求本機特徵與有效的 v4 semantic 分析都完成，不以 local quality 分數補位或與 semantic 分數混比。無法可靠辨識的歷史列標為 `legacy`；舊 schema 不會轉成 v4 排名。測試台照片只在暫存目錄停留，但模型 Token 與費用仍會記入成本頁。完整資料流見 [專案架構與評分流程](docs/architecture/ARCHITECTURE_ZH_TW.md)。
+完成現行 v5 或相容 v4 分析的資料列以 `score_kind=semantic` 標記，模型只輸出 `memory_score`、`visual_score` 與特殊程度；Server 以 `ranking-v5-ai-first` 的固定回憶 67%、視覺 33%、本機品質 0% 計算基礎分，再套用特殊程度與最愛提升。本機品質是 candidate qualification／quality gate，不是 ranking weight；本機影像分析以 `score_kind=local_quality` 標記，只保存 `local_score` 與本機特徵，正式語意排名欄位為 `NULL`。`automatic_ai` 要求本機特徵與有效的 v5／v4 semantic 分析都完成，不以 local quality 分數補位或與 semantic 分數混比。無法可靠辨識的歷史列標為 `legacy`；v1–v3 歷史分數不直接轉成現行 semantic 排名。測試台照片只在暫存目錄停留，但模型 Token 與費用仍會記入成本頁。完整資料流見 [專案架構與評分流程](docs/architecture/ARCHITECTURE_ZH_TW.md)。
 
 ## Token 與成本控制
 
-新工作使用「單次完整分析」：本機預篩後只送一次圖片 Vision，必要時最多一次純文字 JSON 修復。相同 SHA-256 的可相容結果可繼承；短文案與所有分數在同一次圖片請求輸出。管理介面提供每日、每月、單工作與單張照片停止值。詳見 [Token 成本指南](docs/reference/TOKEN_COST_GUIDE_ZH_TW.md)。
+新工作使用「單次完整分析」：本機預篩後只送一次圖片 Vision，只在本機抽取 JSON 並驗證，不追加模型 JSON 修復。相同 SHA-256 的可相容結果可繼承；短文案與所有分數在同一次圖片請求輸出；不另生成長描述。管理介面提供每日、每月、單工作與單張照片停止值。詳見 [Token 成本指南](docs/reference/TOKEN_COST_GUIDE_ZH_TW.md)。
 
 ## ESP32 配對與可靠性
 
@@ -752,6 +775,37 @@ python -m inktime.app.workers.scheduler
 ## 更新、遷移與回滾
 
 更新前先從介面建立備份；NAS 依 [Tag 指南](docs/operations/NAS_TAG_DEPLOYMENT_ZH_TW.md)執行更新器，開發環境才依其 Compose 流程重建。Migration 使用版本、狀態歷史、單一交易、升級前備份與完整 `integrity_check`；任何失敗或未完成狀態都會停止啟動。回滾時停止三個服務，使用離線還原工具驗證並原子恢復舊資料庫與映像。詳細步驟見 [遷移指南](docs/operations/MIGRATION_GUIDE_ZH_TW.md)與[備份還原](docs/operations/BACKUP_RESTORE_ZH_TW.md)。
+
+## 如何確認系統真的完成工作
+
+| 看到的狀態 | 可以確認 | 接著核對 |
+|---|---|---|
+| `/health/ready` 正常 | Web 啟動依賴已就緒 | Worker／Scheduler 心跳與待處理工作 |
+| 工作 `completed` | 該策略已結束 | `local`、預篩、繼承、cache 或實際 Provider attempt |
+| AI Trace 有請求 | 有模型嘗試的紀錄 | usage、served model、時間戳與完整回應；Trace 可能已過保留期 |
+| usage 為 `unknown` | 費用仍無法確定 | Provider 對帳與保留額；不可當作免費或直接重送 |
+| Release `published` | Server 已產生並發布可下載版本 | 裝置取得的 Release／SHA、下載與顯示 ACK |
+| 設定 ACK 成功 | 裝置確認某一設定版本 | 不是照片已刷新或電池功耗已驗收 |
+| 裝置能耗頁空白 | 尚無可呈現樣本 | 實際配對與 `device_power_samples` 遙測，不補造量測 |
+
+管理員常用路徑：`/photos` 照片、`/jobs` 工作、`/providers` 模型、`/settings` 設定、`/rendering` 渲染、`/activity` 活動、`/ai/traces` 分析追蹤、`/help/controls` 功能說明。完整問題分流見[Activity 指南](docs/guides/ACTIVITY_AI_TRACE_ZH_TW.md)。
+
+## 升級後的資料保護
+
+- **付費狀態**：Migration 61 保存請求檢查點、回應、用量與共享預算。未知請求重啟後仍禁止自動重送；未對帳保留額不因逾 24 小時自動失效。
+- **密鑰身分**：Migration 62 加入 `runtime_identity`。已記錄指紋的資料庫與錯誤 `session.key` 組合會以 `SESSION-003` 停止；應找回匹配密鑰，不刪指紋繞過保護。舊備份無指紋時仍須另外核實身分。
+- **歷史修復**：Migration 63 僅修已知分析 JSON 包裝中的 `types` enum；不把相同文字一律替換到短句、其他欄位或原始 Provider 回應。
+- **自動保留**：未自訂的 Decision Trace 180 天、候選 60 天、裝置事件 180 天、Queue Event 90 天、Job Log 30 天政策會由 Scheduler 清理。Shadow 仍為觀察模式，沒有已實作的清理 handler。AI Trace 30 天與 usage 400 天屬各自政策；詳見[資料生命週期](docs/resilience/DATA_RETENTION_ZH_TW.md)。
+
+### 備份範圍不能互換
+
+| 類型 | 包含 | 不代表 |
+|---|---|---|
+| Web metadata ZIP | 經移除 Secrets 的 DB、非敏感設定、Manifest／雜湊 | 原圖、Release payload 與 session key 已備份 |
+| NAS updater recovery point | 更新前 DB、受保護密鑰與映像身分等復原資訊 | 相簿的獨立異地備份 |
+| 原圖／Release 檔案備份 | 由部署者以 NAS snapshot 等保存實體檔 | 可在線上覆蓋 SQLite WAL 資料庫 |
+
+還原需停止三個程序、取得 exclusive runtime lock 並驗證 Manifest。一般還原可向前 Migration；`--exact-snapshot` 保留舊 Schema，必須搭配相容舊映像。精確步驟與密鑰復原見[備份還原](docs/operations/BACKUP_RESTORE_ZH_TW.md)、[Secret Recovery](docs/operations/SECRET_RECOVERY_ZH_TW.md)。
 
 ## 常見問題
 
