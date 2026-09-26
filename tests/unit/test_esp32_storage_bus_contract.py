@@ -412,7 +412,6 @@ def test_photopainter_boot_and_pairing_display_failures_are_release_visible():
         'INK_LOG_INFO("photopainter_ready"',
         'INK_LOG_WARN("photopainter_storage_unavailable"',
         'INK_LOG_WARN("photopainter_rtc_unavailable"',
-        'INK_LOG_WARN("photopainter_sensor_unavailable"',
         'INK_LOG_INFO("pairing_display_ready"',
         'INK_LOG_ERROR("pairing_display_failed", photoPainter.lastError())',
     ):

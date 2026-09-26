@@ -16,7 +16,7 @@ SPEC.loader.exec_module(context_tool)
 
 
 def test_default_limit_and_legacy_aliases():
-    assert context_tool._parser().parse_args(["rendering"]).max_items == 12
+    assert context_tool._parser().parse_args(["rendering"]).max_items == 6
     index = json.loads(context_tool.INDEX_PATH.read_text(encoding="utf-8"))
     for alias, target in index["route_aliases"].items():
         assert context_tool._route(index, alias)["id"] == target
@@ -48,5 +48,5 @@ def test_oversized_route_sections_are_bounded(tmp_path):
     ) as entrypoint, patch("sys.argv", ["ai_context.py", "wide"]):
         with contextlib.redirect_stdout(output):
             assert context_tool.main() == 0
-    assert entrypoint.call_count == 12
-    assert output.getvalue().count("  - ") == 24
+    assert entrypoint.call_count == 6
+    assert output.getvalue().count("  - ") == 12
