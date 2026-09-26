@@ -1,6 +1,6 @@
 # InkTime 文件地圖
 
-核對日期：2026-09-13；目前 checkout。先讀[現行版本與功能基線](reference/CURRENT_STATE_ZH_TW.md)，了解 Migration 60、AI Schema v4、韌體 2.8.7、local-only 預設與本次驗證範圍。
+核對日期：2026-09-22。版本、預設值與驗收邊界集中於[現行版本與功能基線](reference/CURRENT_STATE_ZH_TW.md)；本頁只負責分類與路由，不另維護版本副本。依任務選一份文件即可，不必按表全部閱讀。
 
 這是 InkTime 文件的單一入口。根目錄的 [`USER_MANUAL.html`](../USER_MANUAL.html) 保留可瀏覽的說明與完整文件連結；現行操作契約以本次校對的 Markdown 為準；本頁則提供適合 GitHub、純文字閱讀器與程式碼審查的 Markdown 索引。
 
@@ -25,6 +25,19 @@
 | 使用 Decision Trace、Queue 或 Canary | [決策與韌性總覽](resilience/DECISION_FEEDBACK_RESILIENCE_PLAN_ZH_TW.md) |
 | 交接 PR #53 的修復與證據 | [Final One-Shot Hardening Audit](archive/reports/FINAL_ONE_SHOT_HARDENING_AUDIT.md) → [Production Readiness Handoff](archive/reports/PRODUCTION_READINESS_SECURITY_HANDOFF_ZH_TW.md) |
 
+## 文件分層與權威來源
+
+| 層級 | 文件 | 維護責任／何時閱讀 |
+|---|---|---|
+| 專案介紹 | 根目錄中英文 README | 功能、安裝、使用及高層流程；不作 agent 啟動必讀 |
+| 代理規則 | `AGENTS.md` | 唯一規則入口；維持精簡，不加入交付日誌 |
+| 版本基線 | `reference/CURRENT_STATE_ZH_TW.md` | 版本／預設值集中表，逐項附原始碼來源 |
+| 現行契約 | `VISION_SCHEMA.md`、`analysis/`、`architecture/`、`devices/` | 只讀本次改動涉及的行為／相容性／安全條款 |
+| 操作指南 | `getting-started/`、`guides/`、`operations/`、`resilience/` | 對應安裝、功能、維運與恢復操作 |
+| 歷史證據 | `archive/`、日期命名修復紀錄、審查／量測報告 | 僅在具體回歸、來源或驗收問題需要時讀；不代表現況 |
+
+程式決定目前實作，現行契約界定應保留的行為；兩者不符時須指出差異。README 和 HTML 是操作入口，不能用舊範例覆蓋目前契約。文件核對日期不等於 Hosted CI、NAS 或實板驗收日期。
+
 ## 文件規則
 
 - `getting-started/`：安裝、首次啟動與開發環境。
@@ -41,13 +54,13 @@
 
 ### 根目錄與入口
 
-- [`../AGENTS.md`](../AGENTS.md)：Hosted CI、Draft 交付與硬體安全規則；本次保留原規則。
+- [`../AGENTS.md`](../AGENTS.md)：Hosted CI、Draft 交付與硬體安全規則；首輪 3 檔／300 行、按需擴讀與原有安全界線。
 - [`AI_CONTEXT_INDEX.json`](AI_CONTEXT_INDEX.json)：任務入口、契約、測試 glob、讀取預算與預設排除路徑；由 CI 驗證。
 - [`CI_POLICY.md`](CI_POLICY.md)：CI 路由、source HEAD／merge-ref 與檢查結果判讀。
 - [`README.md`](README.md)：本文件地圖。
 
 - [`../README.md`](../README.md)：中文專案首頁、完整資料流與快速入口。
-- [`../README.en.md`](../README.en.md)：英文專案概覽與 Modern 啟動方式。
+- [`../README.en.md`](../README.en.md)：英文功能、模式、架構、部署、成本、備份與硬體入口。
 - [`../USER_MANUAL.html`](../USER_MANUAL.html)：HTML 手冊與所有 Markdown 文件索引；舊章節請配合現行基線閱讀。
 
 - [`VISION_SCHEMA.md`](VISION_SCHEMA.md)：現行 v5 欄位與 v4 讀取相容性。
@@ -77,6 +90,8 @@
 - [`guides/LOCAL_ONLY_SELECTION_ZH_TW.md`](guides/LOCAL_ONLY_SELECTION_ZH_TW.md)：`analysis.execution_mode`、本機選片、雙照片與文案來源。
 
 ### 架構與設計
+
+- [現行選片契約](analysis/PHOTO_SELECTION_AI_FIRST_ZH_TW.md)：資格、固定排名、最愛與內容排除。
 
 - [圖片格式與 HEIC/48MP 安全 contract](architecture/IMAGE_FORMAT_CONTRACT_ZH_TW.md)：來源格式、DNG/GIF、JPEG preview、解碼記憶體與 diagnostics。
 
@@ -132,6 +147,10 @@
 
 ### 參考資料與歷史紀錄
 
+- [`CODE_REVIEW_REPORT.md`](CODE_REVIEW_REPORT.md)：2026-09-21 原審查快照，不能作最新驗收。
+- [`operations/REVIEW_REMEDIATION_20260916.md`](operations/REVIEW_REMEDIATION_20260916.md)：付費狀態與恢復修復的歷史範圍。
+- [`operations/CODE_REVIEW_FOLLOWUP_20260921.md`](operations/CODE_REVIEW_FOLLOWUP_20260921.md)：PR #139 補修內容及當時的驗證界線。
+
 - [`reference/CURRENT_STATE_ZH_TW.md`](reference/CURRENT_STATE_ZH_TW.md)：現行原始碼版本、預設與驗收界線。
 
 - [`reference/TOKEN_COST_GUIDE_ZH_TW.md`](reference/TOKEN_COST_GUIDE_ZH_TW.md)：Token、預篩選、預算與成本邊界。
@@ -159,6 +178,8 @@
 
 ## 維護這份索引
 
+不要把所有 `.md` 改成今日日期；歷史實驗、稽核和驗收必須保留原日期、版本與限制。只更新目前有差異的指南與契約。詳細同步責任、輕量驗證及低 Token 工作方式見[開發指南](getting-started/DEVELOPMENT_GUIDE_ZH_TW.md)。
+
 新增、移動或刪除任何 `.md` 時，必須同步更新本頁與根目錄 `USER_MANUAL.html` 的「完整文件索引」，並重新檢查 Markdown／HTML 相對連結。新增或搬移程式入口時同步更新 `AI_CONTEXT_INDEX.json`，再執行 `python scripts/ci/validate_ai_navigation.py`。
 
 ## 硬體安全入口
@@ -166,6 +187,9 @@
 - [PhotoPainter 精簡安全契約](devices/PHOTOPAINTER_SAFETY_CONTRACT.md)：硬體安全任務先讀。
 
 ## 歷史文件（按需查證，非現行契約）
+
+- [歷史 v4 Schema](archive/contracts/VISION_SCHEMA_V4.md)：舊資料／Migration 查證用；新回應以 v5 為準。
+- [2026-09-05 選片歷史](archive/analysis/PHOTO_SELECTION_AI_FIRST_20260905.md)：當時設計與評分背景。
 
 - [`PRODUCTION_READINESS_SECURITY_HANDOFF_ZH_TW.md`](archive/reports/PRODUCTION_READINESS_SECURITY_HANDOFF_ZH_TW.md)：歷史安全交接，非現行部署契約。
 - [`architecture/LEGACY_RETIREMENT_PLAN.md`](archive/architecture/LEGACY_RETIREMENT_PLAN.md)：Legacy runtime 已退休的資料保留紀錄。

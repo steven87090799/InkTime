@@ -24,6 +24,16 @@ from inktime.app.workers.scanner import SCAN_MODES
 
 bp = Blueprint("operations", __name__)
 PHOTO_ANALYSIS_RETENTION_CONFIRMATION = "DELETE_UNREFERENCED_PHOTO_ANALYSIS"
+# Per-mode walk budgets for API-triggered scans, mirroring the equivalent
+# scheduled tasks in repositories/schedules.py so the two entry points cannot
+# diverge.  Without an explicit value the worker falls back to 900 seconds.
+SCAN_TIMEOUT_SECONDS = {
+    "incremental": 14400,
+    "full": 28800,
+    "metadata-only": 14400,
+    "local-features-only": 14400,
+    "manual": 14400,
+}
 
 
 class ActivityFilter(TypedDict):
@@ -649,6 +659,12 @@ def enqueue_scan():
         "build_thumbnails": build_thumbnails,
         "mode": mode,
         "trigger_source": "api",
+        # An API scan must get the same walk budget as the equivalent scheduled
+        # task (schedules.py: incremental 14400s, full_reconcile 28800s).  The
+        # process boundary otherwise falls back to 900s (workers/runner.py), and
+        # JOB-LOCAL-TIMEOUT is TERMINAL_NO_RETRY, so a large first-time library
+        # scan is hard-killed mid-walk and dead-lettered with no retry.
+        "timeout_seconds": SCAN_TIMEOUT_SECONDS[mode],
     }
     scan_name = str(payload.get("name", "增量照片資料庫掃描"))
     idempotency_key = scoped_idempotency_key("scan", str(g.user["id"]), request.headers.get("Idempotency-Key"))

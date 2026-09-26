@@ -60,14 +60,14 @@ def _symbols(path: Path, limit: int) -> list[tuple[int, str]]:
     return locations
 
 
-def _print_entrypoint(path_value: str, limit: int) -> None:
+def _print_entrypoint(path_value: str, limit: int, *, symbols: bool = False) -> None:
     path = _relative(path_value)
     print(f"  candidate: {path_value}")
     if path.is_dir():
         print("    directory hint only; locate the requested symbol before reading")
         print(f"    next: rg -n --max-count 1 -- '<exact symbol or error>' {shlex.quote(path_value)}")
         return
-    for line_number, label in _symbols(path, limit):
+    for line_number, label in (_symbols(path, limit) if symbols else []):
         print(f"    {line_number}: {label[:160]}")
     print(f"    next: rg -n -- '<exact symbol or term>' {shlex.quote(path_value)}")
 
@@ -87,9 +87,10 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--max-items",
         type=int,
-        default=12,
-        help="maximum hints per section and symbols per entrypoint (default: 12)",
+        default=6,
+        help="maximum hints per section and symbols per entrypoint (default: 6)",
     )
+    parser.add_argument("--symbols", action="store_true", help="read candidate source for bounded symbol hints")
     return parser
 
 
@@ -109,9 +110,9 @@ def main() -> int:
     print(f"task: {route['id']}")
     if route.get("purpose"):
         print(f"purpose: {route['purpose']}")
-    print("entrypoints (candidates, not required reads):")
+    print("entrypoints (paths only by default; --symbols reads source):")
     for entrypoint in route["entrypoints"][:args.max_items]:
-        _print_entrypoint(entrypoint, args.max_items)
+        _print_entrypoint(entrypoint, args.max_items, symbols=args.symbols)
     print("contracts (on demand):")
     for contract in route["contracts"][:args.max_items]:
         print(f"  - {contract}")
