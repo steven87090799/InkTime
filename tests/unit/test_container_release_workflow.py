@@ -132,8 +132,9 @@ def test_nas_compose_is_pull_only_and_keeps_data_and_photos_external():
 
     compose_text = COMPOSE_PATH.read_text(encoding="utf-8")
     env_example = (ROOT / ".env.nas.example").read_text(encoding="utf-8")
-    assert "INKTIME_IMAGE_TAG:-latest" not in compose_text
-    assert "INKTIME_IMAGE_TAG=latest" not in env_example
+    assert "INKTIME_IMAGE_TAG:-latest" in compose_text
+    assert "pull_policy: always" in compose_text
+    assert "INKTIME_IMAGE_TAG=latest" in env_example
     assert "INKTIME_ALLOW_MUTABLE_IMAGE_TAG=0" in env_example
 
 

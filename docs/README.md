@@ -108,7 +108,7 @@
 - [`operations/PHOTO_ANALYSIS_RETENTION_ZH_TW.md`](operations/PHOTO_ANALYSIS_RETENTION_ZH_TW.md)：分析歷史保護、dry-run digest 與逐批明確確認。
 
 - [`operations/DOCKER_GUIDE_ZH_TW.md`](operations/DOCKER_GUIDE_ZH_TW.md)：N100 Docker 部署、資源、健康檢查、更新與回滾。
-- [`operations/NAS_TAG_DEPLOYMENT_ZH_TW.md`](operations/NAS_TAG_DEPLOYMENT_ZH_TW.md)：Git Tag 發布 GHCR 映像、NAS 初次設定、單一 Tag 更新與固定版本回復。
+- [`operations/NAS_TAG_DEPLOYMENT_ZH_TW.md`](operations/NAS_TAG_DEPLOYMENT_ZH_TW.md)：GHCR 穩定版發布、UGREEN 一鍵追蹤 `latest`、recovery-protected 更新與固定版本回復。
 - [`operations/N100_RESOURCE_GUIDE_ZH_TW.md`](operations/N100_RESOURCE_GUIDE_ZH_TW.md)：N100 容量與低功耗調校。
 - [`operations/LOGGING_GUIDE_ZH_TW.md`](operations/LOGGING_GUIDE_ZH_TW.md)：Log 層級、遮罩與判讀方法。
 - [`operations/TROUBLESHOOTING_ZH_TW.md`](operations/TROUBLESHOOTING_ZH_TW.md)：常見故障與處理順序。

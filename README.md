@@ -674,7 +674,9 @@ flowchart TD
 
 需求：Docker Engine 24+ 與 Compose v2。先選擇正式 NAS 或本機開發流程。
 
-NAS 正式部署依[NAS Tag 指南](docs/operations/NAS_TAG_DEPLOYMENT_ZH_TW.md)準備同版部署檔、`.env.nas`、已存在且互不巢狀的 canonical 資料／照片目錄與實際 URL；確認 GHCR 版本已發布後執行：
+UGREEN Compose 專案可使用預設的 `latest` 與 `pull_policy: always`：完成一次 `.env`、私有 GHCR 憑證與資料／照片路徑設定後，每次穩定版發布只要按「重新部署」即可追上新版。這條簡便路徑不會執行下方更新器的前置檢查或建立更新前 recovery point；完整說明見[NAS 更新指南](docs/operations/NAS_TAG_DEPLOYMENT_ZH_TW.md)。
+
+若要使用更新器的前置驗證與 recovery point，準備同版部署檔、`.env.nas`、已存在且互不巢狀的 canonical 資料／照片目錄與實際 URL，再確認 GHCR 版本已發布後執行：
 
 ```bash
 # vX.Y.Z 必須換成實際已發布版本；首次納管才加 --initialize。
@@ -682,7 +684,7 @@ sudo ./scripts/update_nas.sh --initialize vX.Y.Z
 # 日後更新：sudo ./scripts/update_nas.sh vX.Y.Z
 ```
 
-更新器會檢查 marker、lock、部署契約與 recovery point，再以 `--no-build` 重建。NAS 不使用原始碼 Build，也不以手動 Compose up 繞過更新器。可信任 LAN HTTP 要一併設定 `INKTIME_COOKIE_SECURE=0`、`INKTIME_ALLOW_INSECURE_HTTP=1`、`INKTIME_PROXY_TRUST=0`，並使用實際 LAN IP；此模式會標示 degraded，不能公開至 Internet。HTTPS 使用 Secure Cookie 與正確反向代理。
+更新器會檢查 marker、lock、部署契約與 recovery point，再以 `--no-build` 重建。這個 CLI 路徑不要用手動 Compose up 繞過更新器；UGREEN 一鍵路徑則依 NAS 更新指南設定。兩種方式都不在 NAS 使用原始碼 Build。可信任 LAN HTTP 要一併設定 `INKTIME_COOKIE_SECURE=0`、`INKTIME_ALLOW_INSECURE_HTTP=1`、`INKTIME_PROXY_TRUST=0`，並使用實際 LAN IP；此模式會標示 degraded，不能公開至 Internet。HTTPS 使用 Secure Cookie 與正確反向代理。
 
 本機開發／模擬使用：
 

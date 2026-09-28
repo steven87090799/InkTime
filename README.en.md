@@ -115,7 +115,9 @@ Docker Engine 24+ and Compose v2 are the documented container baseline. Native P
 
 ### Production NAS
 
-Prepare matching deployment files, `.env.nas`, existing canonical data/photo directories, UID/GID `10001:10001` permissions and a real public/LAN URL following the [NAS deployment guide](docs/operations/NAS_TAG_DEPLOYMENT_ZH_TW.md).
+For a UGREEN Compose Project, the default image is `latest` with `pull_policy: always`. After the one-time `.env`, private GHCR credential, and data/photo path setup, click **Redeploy** after each stable release. This convenient path does not run the updater's preflight checks or create its pre-update recovery point; see the [NAS deployment guide](docs/operations/NAS_TAG_DEPLOYMENT_ZH_TW.md).
+
+To use the updater's preflight checks and recovery point, prepare matching deployment files, `.env.nas`, existing canonical data/photo directories, UID/GID `10001:10001` permissions and a real public/LAN URL:
 
 ```bash
 # Replace vX.Y.Z with an already published image tag.

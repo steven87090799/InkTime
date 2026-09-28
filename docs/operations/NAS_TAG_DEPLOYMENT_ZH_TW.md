@@ -1,15 +1,17 @@
-# NAS 以 Git Tag 更新 InkTime Docker
+# NAS 一鍵追蹤 latest 與安全更新 InkTime Docker
 
 從 NAS 初次部署、Web 首張 Release 到 ESP32 配對與顯示驗收，請先看[完整上線指南](PRODUCTION_DEPLOYMENT_GUIDE_ZH_TW.md)。
 
-這條部署路徑讓 NAS 不需要每次複製原始碼，也不需要在低功耗主機重新 Build。維護者把已合併到 `main` 的版本建立 `vMAJOR.MINOR.PATCH` Git Tag 後，GitHub Actions 會建置並發布 GHCR 映像；NAS 只要指定同一個 Tag 執行更新工具。
+**UGREEN Compose 專案的一鍵更新是正式需求。** 首次設定時把映像設為 `ghcr.io/steven87090799/inktime:latest`（本 Compose 檔預設如此），並保留 [`pull_policy: always`](https://docs.docker.com/reference/compose-file/services/#pull_policy)。每次 InkTime 穩定版成功發布後，只要在 UGREEN 按「重新部署」，Compose 就會重新檢查並拉取 `latest`；之後不需改 Tag 或重新輸入登入資訊。預發布版不會移動 `latest`。
+
+若選擇主機端 `scripts/update_nas.sh`，則仍可用明確 SemVer Tag 執行有前置驗證與更新前 recovery point 的流程。兩種更新方式都拉 GHCR 預建映像，不在 NAS Build。
 
 ```text
 main 上的程式碼
   → git tag v1.2.3
   → GitHub Actions 建置 amd64／arm64 映像
-  → ghcr.io/steven87090799/inktime:v1.2.3
-  → NAS 執行 sudo ./scripts/update_nas.sh v1.2.3
+  → ghcr.io/steven87090799/inktime:v1.2.3 與 :latest
+  → UGREEN 按「重新部署」拉取 :latest
 ```
 
 映像只包含程式。SQLite、Session Key、縮圖、備份與 Release 全部保留在 NAS 的 `/data`；原始相簿由另一個既有 host 目錄掛到 `/photos`。Compose 使用 long bind syntax、`create_host_path: false` 與 `read_only: true`，路徑不存在時必須失敗，不會悄悄建立空目錄。應用程式啟動時會從實際 mount 狀態確認 `/photos` 是精確的唯讀 mount；只改 YAML 文字但實際可寫會以 `DEPLOY-PHOTO-RO-001` 拒絕啟動，照片樹下任何可寫 nested mount 則會以 `DEPLOY-PHOTO-RO-002` 拒絕啟動。
@@ -44,7 +46,7 @@ git push origin v1.2.3
 第一次發布後，請在 GitHub Package 設定確認映像可見性：
 
 - 公開 Package：NAS 可直接 `pull`。
-- 私有 Package：NAS 必須先登入 GHCR；Token 只需 `read:packages`，不要寫進 `.env.nas` 或 Commit。
+- 私有 Package：在 [UGREEN Docker 的 Image Repository 設定](https://support.ugnas.com/detail/article/en-US/297)中一次加入 `ghcr.io` 憑證。帳號使用 GitHub 使用者名稱，密碼使用 [classic PAT](https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry#authenticating-with-a-personal-access-token-classic)，範圍只給 `read:packages`。UGREEN 將憑證保存在 NAS 的 Docker 設定；不要把 PAT 放進 Compose、`.env`、文件或 Git。UGREEN 介面名稱依 UGOS 版本可能不同；設定後先完成一次私有映像拉取，確認該 NAS 的 Compose 專案能沿用已儲存憑證。
 
 互動式登入可避免 Token 出現在命令列歷史：
 
@@ -54,17 +56,17 @@ docker login ghcr.io -u YOUR_GITHUB_USERNAME
 
 ## 3. NAS 首次設定（只做一次）
 
-NAS 需要 Docker Engine 24+、Compose v2、`realpath` 與 `flock`。最簡單的首次設定是取得本專案一次；之後的一般程式版本更新不需要在 NAS Build：
+UGREEN Compose 專案的一鍵方式需要準備 Compose 設定與它使用的 `.env`；`scripts/update_nas.sh` 路徑另外需要 Docker Engine 24+、Compose v2、`realpath` 與 `flock`。首次取得本專案只需一次：
 
 ```bash
 git clone https://github.com/steven87090799/InkTime.git
 cd InkTime
-cp .env.nas.example .env.nas
+cp .env.nas.example .env
 ```
 
-NAS 主機端實際依賴 `docker-compose.nas.yml`、`.env.nas`、`scripts/update_nas.sh` 與 `nas-deployment-contract.version`。這四份檔案必須來自同一版本；Release notes 若標示部署契約有變，應一起更新後再執行。一般 Python／Web 功能仍包含在映像內。
+UGREEN 專案使用 `docker-compose.nas.yml` 與同目錄 `.env`。範例中的 `INKTIME_IMAGE_TAG=latest` 只需設定一次；更新流程共用同一份 `latest`，不再逐版修改。已存在 `.env.nas` 的 CLI 使用者可沿用原檔，更新器會以命令列指定的 Tag 覆蓋 `INKTIME_IMAGE_TAG`。
 
-編輯 `.env.nas`，至少替換：
+編輯 UGREEN 專案旁的 `.env`（CLI 路徑則編輯 `.env.nas`），至少替換：
 
 - `INKTIME_DATA_PATH`：本機 ext4／xfs／btrfs 上已存在、可寫、非 symlink 的 canonical 絕對路徑，供 SQLite 與 `/data` 使用。
 - `INKTIME_PHOTO_PATH`：已存在、可讀、非 symlink 的 canonical NAS 相簿絕對路徑；Compose 固定以唯讀 `/photos` 掛載。
@@ -96,7 +98,15 @@ INKTIME_PROXY_TRUST=0
 
 這是明確降級模式，只能放在可信任 LAN／IoT VLAN，不可公開到 Internet。
 
-## 4. 第一次啟動與日後更新
+## 4. UGREEN 一鍵更新與 recovery-protected 更新器
+
+### UGREEN Compose 專案（推薦的一鍵更新路徑）
+
+把 `docker-compose.nas.yml` 貼入或匯入 UGREEN Docker 的 [Project](https://support.ugnas.com/detail/article/en-US/411)，並在專案設定中使用已填妥的 `.env`。確認映像解析為 `ghcr.io/steven87090799/inktime:latest`、`pull_policy: always`、資料路徑與照片唯讀掛載正確；初次部署成功後，以後有穩定版就按「重新部署」。Compose 每次部署都會向 Registry 檢查 `latest`，服務設定與 NAS 資料目錄不需逐版更動。
+
+GitHub Actions 只有在穩定版 Tag（例如 `v1.2.3`）的映像發布成功後才會移動 `latest`；RC 預發布不影響它。更新前請維持獨立、可還原的 NAS 備份。直接從 UGREEN 按「重新部署」不會執行 `update_nas.sh` 的 marker／路徑／映像 contract 檢查，也不會自動建立該更新器的更新前 recovery point。
+
+### 主機端 `scripts/update_nas.sh`（保留 recovery point 的路徑）
 
 第一次啟動必須明確建立 deployment-root marker：
 
@@ -120,7 +130,7 @@ sudo ./scripts/update_nas.sh --accept-path-change v1.2.4
 
 `.env.nas` 與命令列指定的 release Tag 是部署唯一來源。更新器會在隔離的 Compose 子程序中移除父 shell 繼承的所有 `INKTIME_*`，再明確注入本次 Tag；即使操作者的 shell 曾 export 另一組 data、photos、repository 或 `latest`，也不能覆寫已驗證的部署。重建前還會核對 Compose resolved environment 與 image identity，確保 updater 驗證、Compose 模型及執行容器使用同一組 `/data`、`/photos` 與 repository:tag。
 
-`latest` 是可移動別名，預設拒絕。只有已接受不可重現風險時，才在 `.env.nas` 明確設定後使用：
+這個更新器預設仍拒絕可移動的 `latest`，以明確版本 Tag 為主。若要透過更新器追蹤 `latest`，才在 `.env.nas` 明確開啟：
 
 ```dotenv
 # 寫入 .env.nas，不是只 export 到父 shell。
@@ -131,7 +141,7 @@ INKTIME_ALLOW_MUTABLE_IMAGE_TAG=1
 sudo ./scripts/update_nas.sh latest
 ```
 
-不要以手動 `docker compose up` 取代更新器；那會繞過 marker、鎖、契約檢查與 recovery point。
+此 opt-in 更新方式仍保留更新器的 marker、鎖、契約檢查與 recovery point。UGREEN「重新部署」則是上方說明的簡便路徑，會略過這些更新器檢查與 recovery point。
 
 ## 5. 更新前後檢查
 
@@ -150,13 +160,13 @@ INKTIME_IMAGE_TAG=vX.Y.Z docker compose --env-file .env.nas -f docker-compose.na
 
 ## 6. 固定版本與回復
 
-健康檢查失敗時，更新器不刪除 `/data` 或 recovery point，也不自動做可能不相容的降版。先保留診斷資料。若新版尚未執行不可逆資料 Migration，可在確認 Schema 相容後用上一個 Tag 重建：
+健康檢查失敗時，更新器不刪除 `/data` 或 recovery point，也不自動做可能不相容的降版。UGREEN 一鍵更新使用 `latest`，該別名會移動；如需固定版本回復，請切換到更新器並指定上一個 Tag。若新版尚未執行不可逆資料 Migration，可在確認 Schema 相容後用上一個 Tag 重建：
 
 ```bash
 sudo ./scripts/update_nas.sh v1.2.2
 ```
 
-若已發生 Schema 變更，不可只換舊映像硬降版。請先停止三個服務，再依[備份還原指南](BACKUP_RESTORE_ZH_TW.md)把資料庫與 Release 一起還原。`latest` 會隨下一個穩定版移動，因此正式環境若重視可重現性，應記錄並使用明確的 `vX.Y.Z`。
+若已發生 Schema 變更，不可只換舊映像硬降版。請先停止三個服務，再依[備份還原指南](BACKUP_RESTORE_ZH_TW.md)把資料庫與 Release 一起還原。要回復到固定版本時，記錄並使用明確的 `vX.Y.Z`。
 
 ## 7. 常見失敗
 
