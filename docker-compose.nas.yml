@@ -2,7 +2,8 @@ name: inktime
 
 # NAS 正式部署只拉取 GitHub Container Registry 映像，不在 NAS 上建置原始碼。
 x-common: &common
-  image: ${INKTIME_IMAGE_REPOSITORY:-ghcr.io/steven87090799/inktime}:${INKTIME_IMAGE_TAG:?請以 scripts/update_nas.sh 指定 immutable SemVer tag}
+  # UGREEN Project redeploy follows stable latest by default. The guarded updater injects its requested tag.
+  image: ${INKTIME_IMAGE_REPOSITORY:-ghcr.io/steven87090799/inktime}:${INKTIME_IMAGE_TAG:-latest}
   pull_policy: always
   restart: unless-stopped
   init: true
@@ -23,7 +24,7 @@ x-common: &common
     INKTIME_SCHEDULER_IDENTITY: ${INKTIME_SCHEDULER_IDENTITY:-inktime-scheduler}
     TZ: ${TZ:-Asia/Taipei}
     INKTIME_COOKIE_SECURE: ${INKTIME_COOKIE_SECURE:-1}
-    INKTIME_PUBLIC_URL: ${INKTIME_PUBLIC_URL:?請在 .env.nas 設定實際 INKTIME_PUBLIC_URL}
+    INKTIME_PUBLIC_URL: ${INKTIME_PUBLIC_URL:?請在 NAS Compose 環境檔設定實際 INKTIME_PUBLIC_URL}
     INKTIME_ALLOW_INSECURE_HTTP: ${INKTIME_ALLOW_INSECURE_HTTP:-0}
     INKTIME_ALLOW_UNSAFE_NETWORK_DATABASE: ${INKTIME_ALLOW_UNSAFE_NETWORK_DATABASE:-0}
     INKTIME_LOG_FORMAT: ${INKTIME_LOG_FORMAT:-json}
@@ -33,13 +34,13 @@ x-common: &common
   volumes:
     # SQLite、Session Key、快取、備份與 Release 必須持久保存。
     - type: bind
-      source: ${INKTIME_DATA_PATH:?請在 .env.nas 設定 INKTIME_DATA_PATH}
+      source: ${INKTIME_DATA_PATH:?請在 NAS Compose 環境檔設定 INKTIME_DATA_PATH}
       target: /data
       bind:
         create_host_path: false
     # 原始照片固定唯讀，容器更新不會修改 NAS 相簿。
     - type: bind
-      source: ${INKTIME_PHOTO_PATH:?請在 .env.nas 設定 INKTIME_PHOTO_PATH}
+      source: ${INKTIME_PHOTO_PATH:?請在 NAS Compose 環境檔設定 INKTIME_PHOTO_PATH}
       target: /photos
       read_only: true
       bind:

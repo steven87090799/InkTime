@@ -8,6 +8,8 @@
 
 NAS 需要 Docker Engine 24+、Docker Compose v2、`realpath`、`flock` 與 Docker 操作權限。GHCR 映像支援 `linux/amd64`、`linux/arm64`；NAS 使用已發布的映像，不需要在 NAS 編譯專案。
 
+UGREEN Compose 專案的一鍵更新是優先路徑：使用 `latest` 與 `pull_policy: always`，完成一次設定後，每次穩定版發布按「重新部署」即可。這不會建立更新器專屬的更新前 recovery point；需要該復原點時，使用 `scripts/update_nas.sh`。完整差異與私有 GHCR 一次性登入設定見 [NAS 更新指南](NAS_TAG_DEPLOYMENT_ZH_TW.md)。
+
 | 服務 | 工作 | 共用資料 |
 |---|---|---|
 | `inktime-web` | 管理介面、登入、裝置 API、Release 下載 | `/data` 可寫、`/photos` 唯讀 |
@@ -47,7 +49,7 @@ cp .env.nas.example .env.nas
 
 主機需要 `docker-compose.nas.yml`、`scripts/update_nas.sh`、`nas-deployment-contract.version` 與依同版 `.env.nas.example` 設定的 `.env.nas`。契約變更時一起同步，保留實際主機路徑與設定。不要直接以範例覆蓋已有的 `.env.nas`。
 
-若 GHCR Package 是私有，先互動式登入；Token 只需讀取 Package，不能寫入文件或 `.env.nas`：
+若選擇更新器且 GHCR Package 是私有，先互動式登入；Token 只需讀取 Package，不能寫入文件或 `.env.nas`。UGREEN Compose 專案則在 NAS Docker 的 Image Repository 設定中保存該憑證一次：
 
 ```bash
 docker login ghcr.io -u YOUR_GITHUB_USERNAME
@@ -74,7 +76,7 @@ INKTIME_PROXY_TRUST=1
 INKTIME_ALLOW_UNSAFE_NETWORK_DATABASE=0
 ```
 
-`INKTIME_IMAGE_TAG` 由更新器依命令列注入。`latest` 是可移動別名，預設拒絕；本指南使用明確版本 Tag。
+UGREEN Compose 專案將 `INKTIME_IMAGE_TAG=latest` 設定一次即可持續追蹤穩定版。此處其餘步驟說明的是 recovery-protected 更新器：`INKTIME_IMAGE_TAG` 由命令列注入，預設使用明確版本 Tag；如需此路徑追蹤 `latest`，依[NAS 更新指南](NAS_TAG_DEPLOYMENT_ZH_TW.md)設定 opt-in。
 
 同機 HTTPS 反向代理對外監聽 443，轉送至 `127.0.0.1:8765`，正確設定 Host 與 Forwarded headers。`INKTIME_PROXY_TRUST` 必須等於實際可信任代理 hop 數；沒有代理時使用 0。不要公開 Docker socket、資料庫或 `/data` 目錄。
 

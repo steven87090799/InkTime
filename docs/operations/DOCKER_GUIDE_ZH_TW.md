@@ -1,6 +1,6 @@
 # InkTime Docker 部署規格（Intel N100）
 
-> NAS 正式部署以[Git Tag／GHCR 更新指南](NAS_TAG_DEPLOYMENT_ZH_TW.md)為準：`.env.nas`＋`docker-compose.nas.yml`＋更新器，不在 NAS Build。以下原始碼建置指令只供受控建置／開發環境說明；一般開發仍遵守 [AGENTS.md](../../AGENTS.md) 的 Hosted CI 政策。
+> UGREEN NAS 可用 `docker-compose.nas.yml` 預設追蹤穩定版 `latest`，設定一次後按「重新部署」更新；若需要更新前 recovery point，改用 `.env.nas` 與 `scripts/update_nas.sh`。兩條路徑都使用 GHCR 預建映像、不在 NAS Build。完整步驟見[NAS 更新指南](NAS_TAG_DEPLOYMENT_ZH_TW.md)；以下原始碼建置指令只供受控建置／開發環境說明，一般開發仍遵守 [AGENTS.md](../../AGENTS.md) 的 Hosted CI 政策。
 
 OpenAI Batch 正式操作與故障排除另見 [OpenAI Batch 照片分析指南](../OPENAI_BATCH_ANALYSIS_ZH_TW.md)。`/data/batches` 必須與 SQLite 一起掛載持久化；Batch JSONL 不使用 `/tmp`，照片掛載仍保持唯讀。
 
@@ -210,7 +210,7 @@ Nginx 負責 TLS 與公開入口限流；InkTime 負責 Session／CSRF／CSP／H
 
 ## 8. 更新、備份與回滾
 
-NAS 若要避免每次 `git pull` 與本機 Build，可改用 `docker-compose.nas.yml`。版本合併到 `main` 後建立 `vX.Y.Z` Git Tag，GitHub Actions 會發布 GHCR 多架構映像；首次部署執行 `sudo ./scripts/update_nas.sh --initialize vX.Y.Z`，日後才執行 `sudo ./scripts/update_nas.sh vX.Y.Z`。更新器會在重建前驗證 host 路徑、marker、lock、映像 deployment contract 與 Compose resolved identity，並以唯讀 production source／單一 bounded RW destination 建立 recovery point；不要用手動 Compose 指令繞過。完整 `latest` opt-in、私有 Package 登入、照片 nested mount 唯讀、資料保全與 Schema 回復邊界見 [NAS 以 Git Tag 更新 InkTime Docker](NAS_TAG_DEPLOYMENT_ZH_TW.md)。
+NAS 可用 `docker-compose.nas.yml` 免去每次 `git pull` 與本機 Build。UGREEN 專案預設用 `latest` 加 `pull_policy: always`；穩定版發布後按「重新部署」即可拉取更新。私有 GHCR 登入只需在 NAS Docker 的 Image Repository 設定一次，PAT 不放 Compose。若需要更新器的路徑／marker／lock／映像 contract 驗證及更新前 recovery point，首次執行 `sudo ./scripts/update_nas.sh --initialize vX.Y.Z`，日後指定 SemVer Tag；不要把兩種流程的復原保證混為一談。照片 nested mount 唯讀、資料保全與 Schema 回復邊界見 [NAS 更新指南](NAS_TAG_DEPLOYMENT_ZH_TW.md)。
 
 保留原始碼並在部署主機 Build 的既有流程如下。
 
