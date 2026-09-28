@@ -112,13 +112,13 @@ def test_nas_compose_is_pull_only_and_keeps_data_and_photos_external():
         volumes = {mount["target"]: mount for mount in service["volumes"]}
         assert volumes["/data"] == {
             "type": "bind",
-            "source": "${INKTIME_DATA_PATH:?請在 .env.nas 設定 INKTIME_DATA_PATH}",
+            "source": "${INKTIME_DATA_PATH:?請在 NAS Compose 環境檔設定 INKTIME_DATA_PATH}",
             "target": "/data",
             "bind": {"create_host_path": False},
         }
         assert volumes["/photos"] == {
             "type": "bind",
-            "source": "${INKTIME_PHOTO_PATH:?請在 .env.nas 設定 INKTIME_PHOTO_PATH}",
+            "source": "${INKTIME_PHOTO_PATH:?請在 NAS Compose 環境檔設定 INKTIME_PHOTO_PATH}",
             "target": "/photos",
             "read_only": True,
             "bind": {"create_host_path": False},
