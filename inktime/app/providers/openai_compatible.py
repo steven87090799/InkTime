@@ -10,7 +10,7 @@ import os
 from pathlib import Path
 import re
 import time
-from typing import Any
+from typing import Any, cast
 from uuid import uuid4
 from datetime import datetime, timezone
 
@@ -1044,7 +1044,9 @@ class OpenAICompatibleProvider(VisionProvider):
                 provider_request_context_id=provider_request_context_id,
             )
         except Exception as error:
-            setattr(error, "not_sent", True)
+            # Request provenance is attached to the original exception so callers
+            # retain its type while distinguishing failures before transport.
+            cast(Any, error).not_sent = True
             raise
         return self._post_completion(body, vision_attempt=vision_attempt, upload_guard=upload_guard)
 
