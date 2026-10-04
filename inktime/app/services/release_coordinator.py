@@ -92,81 +92,82 @@ class ReleaseCoordinator:
             )
             raise
 
-        snapshot = (
-            self.publisher.pointer_snapshot([str(item["render_profile"]) for item in verified])
-            if activate_pointers
-            else None
-        )
-        try:
-            if activate_pointers and not device_assignments:
-                self.publisher.activate_manifests(verified)
-            with self.database.transaction() as connection:
-                for manifest in verified:
-                    connection.execute(
-                        "UPDATE releases SET status='published',published_at=?,failure_reason=NULL WHERE id=?",
-                        (now, manifest["release_id"]),
-                    )
-                if device_assignments:
-                    connection.executemany(
-                        """
-                        INSERT INTO device_render_releases(device_id,release_id,assigned_at)
-                        VALUES (?,?,?)
-                        ON CONFLICT(device_id) DO UPDATE SET
-                            release_id=excluded.release_id,assigned_at=excluded.assigned_at
-                        """,
-                        [
-                            (device_id, release_id, now)
-                            for device_id, release_id in device_assignments.items()
-                        ],
-                    )
-                if history and photo_ids:
-                    history_date = str(history.get("history_date") or now[:10])
-                    method = str(history.get("selection_method") or "scheduled")
-                    rows: list[tuple[str, str, str, str, str, str]] = []
-                    for manifest in verified:
-                        rows.extend(
-                            (
-                                photo_id,
-                                history_date,
-                                method,
-                                manifest["release_id"],
-                                now,
-                                json.dumps(
-                                    {"render_profile": manifest["render_profile"]},
-                                    ensure_ascii=False,
-                                ),
-                            )
-                            for photo_id in photo_ids
-                        )
-                    connection.executemany(
-                        """
-                        INSERT INTO display_history(
-                            photo_id,history_date,selection_method,release_id,displayed_at,metadata_json
-                        ) VALUES (?,?,?,?,?,?)
-                        """,
-                        rows,
-                    )
-        except Exception as exc:
-            log_event(
-                LOGGER,
-                logging.ERROR,
-                "Release activation failed; compensation started",
-                event="release_compensation_started",
-                error_code="RENDER-RELEASE-ACTIVATE",
-                operation="release_publish",
-                duration_ms=int((time.monotonic() - started) * 1000),
-                failure_class=type(exc).__name__,
-                retryable=False,
-                details={"release_count": len(verified)},
+        with release_metadata_guard(self.publisher.root):
+            snapshot = (
+                self.publisher.pointer_snapshot([str(item["render_profile"]) for item in verified])
+                if activate_pointers
+                else None
             )
-            if activate_pointers and snapshot is not None:
-                self.publisher.restore_pointers(snapshot)
-            with self.database.transaction() as connection:
-                connection.executemany(
-                    "UPDATE releases SET status='staged_failed',failure_reason=? WHERE id=?",
-                    [(str(exc)[:500], item["release_id"]) for item in verified],
+            try:
+                if activate_pointers and not device_assignments:
+                    self.publisher.activate_manifests(verified)
+                with self.database.transaction() as connection:
+                    for manifest in verified:
+                        connection.execute(
+                            "UPDATE releases SET status='published',published_at=?,failure_reason=NULL WHERE id=?",
+                            (now, manifest["release_id"]),
+                        )
+                    if device_assignments:
+                        connection.executemany(
+                            """
+                            INSERT INTO device_render_releases(device_id,release_id,assigned_at)
+                            VALUES (?,?,?)
+                            ON CONFLICT(device_id) DO UPDATE SET
+                                release_id=excluded.release_id,assigned_at=excluded.assigned_at
+                            """,
+                            [
+                                (device_id, release_id, now)
+                                for device_id, release_id in device_assignments.items()
+                            ],
+                        )
+                    if history and photo_ids:
+                        history_date = str(history.get("history_date") or now[:10])
+                        method = str(history.get("selection_method") or "scheduled")
+                        rows: list[tuple[str, str, str, str, str, str]] = []
+                        for manifest in verified:
+                            rows.extend(
+                                (
+                                    photo_id,
+                                    history_date,
+                                    method,
+                                    manifest["release_id"],
+                                    now,
+                                    json.dumps(
+                                        {"render_profile": manifest["render_profile"]},
+                                        ensure_ascii=False,
+                                    ),
+                                )
+                                for photo_id in photo_ids
+                            )
+                        connection.executemany(
+                            """
+                            INSERT INTO display_history(
+                                photo_id,history_date,selection_method,release_id,displayed_at,metadata_json
+                            ) VALUES (?,?,?,?,?,?)
+                            """,
+                            rows,
+                        )
+            except Exception as exc:
+                log_event(
+                    LOGGER,
+                    logging.ERROR,
+                    "Release activation failed; compensation started",
+                    event="release_compensation_started",
+                    error_code="RENDER-RELEASE-ACTIVATE",
+                    operation="release_publish",
+                    duration_ms=int((time.monotonic() - started) * 1000),
+                    failure_class=type(exc).__name__,
+                    retryable=False,
+                    details={"release_count": len(verified)},
                 )
-            raise
+                if activate_pointers and snapshot is not None:
+                    self.publisher.restore_pointers(snapshot)
+                with self.database.transaction() as connection:
+                    connection.executemany(
+                        "UPDATE releases SET status='staged_failed',failure_reason=? WHERE id=?",
+                        [(str(exc)[:500], item["release_id"]) for item in verified],
+                    )
+                raise
         log_event(
             LOGGER,
             logging.INFO,

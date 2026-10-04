@@ -108,10 +108,11 @@ def _provider_child(specification: dict[str, Any], method: str, kwargs: dict[str
                 "error",
                 {
                     "type": type(exc).__name__,
+                    "not_sent": bool(getattr(exc, "not_sent", False)),
                     "code": getattr(exc, "code", None),
-                    "ambiguous": bool(getattr(exc, "ambiguous", False)),
-                    "vision_started": bool(getattr(exc, "vision_started", False)),
-                    "request_started": bool(getattr(exc, "request_started", False)),
+                    "ambiguous": getattr(exc, "ambiguous", None),
+                    "vision_started": getattr(exc, "vision_started", None),
+                    "request_started": getattr(exc, "request_started", None),
                     "call_trace": getattr(exc, "call_trace", None),
                 },
             )
@@ -261,9 +262,10 @@ class KillableProcessBoundary:
                     child_code = value.get("code")
                     if isinstance(child_code, str) and child_code:
                         error.code = child_code
-                    error.ambiguous = bool(value.get("ambiguous", False))
-                    error.vision_started = bool(value.get("vision_started", False))
-                    error.request_started = bool(value.get("request_started", False))
+                    error.not_sent = bool(value.get("not_sent", False))
+                    error.ambiguous = value.get("ambiguous")
+                    error.vision_started = value.get("vision_started")
+                    error.request_started = value.get("request_started")
                     child_trace = value.get("call_trace")
                     if isinstance(child_trace, ProviderCallTrace):
                         error.call_trace = child_trace
@@ -372,7 +374,7 @@ class KillableProcessBoundary:
                 # to the transport.  A killed/EOF child has no such metadata;
                 # once that child started, fail closed because its request
                 # state is unknowable.
-                child_metadata = any(
+                child_metadata = bool(getattr(exc, "not_sent", False)) or any(
                     value is not None
                     for value in (exc.vision_started, exc.request_started, exc.ambiguous)
                 )

@@ -389,8 +389,8 @@ def test_pairing_portal_polls_active_low_key_without_driving_reserved_pins():
     assert "pairing_key_refresh_started" in portal
     assert "pairing_key_refresh_ready" in portal
     assert '"KEY REFRESH %lu"' in portal
-    assert "photoPainter.displayPairingScreen(" in portal
-    assert "photoPainter.displayPowerStatusScreen()" in portal
+    assert "displayPairingScreenSafely(" in portal
+    assert "displayPowerStatusScreenSafely()" in portal
     assert "power_status_refresh_ready" in portal
     assert "enterMs = millis()" not in portal[portal.index("for (;;)") :]
     assert "pinMode(kBoardConfig.buttons.user, OUTPUT)" not in portal
@@ -419,7 +419,7 @@ def test_key_double_click_power_page_is_read_only_and_keeps_boot_reserved():
     assert "waitForSecondUserButtonClick(board_.buttons.user)" in begin
     assert "batteryStatusRequested_" in begin
     assert "photoPainter.batteryStatusRequested()" in setup
-    assert "photoPainter.displayPowerStatusScreen()" in setup
+    assert "displayPowerStatusScreenSafely()" in setup
     assert "delay(kPowerStatusDwellMs);" in setup
     assert "restoreLastSuccessfulPhoto()" in setup
     assert "power_status_restore_ready" in setup

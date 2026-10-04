@@ -43,7 +43,7 @@ from inktime.app.domain.photos.quality_policy import (
     is_confirmed_screenshot,
     local_candidate_score,
 )
-from inktime.app.providers.base import ProviderResponse, Usage, VisionAttemptState, VisionProvider
+from inktime.app.providers.base import ProviderResponse, Usage, VisionAttemptState, VisionProvider, request_definitely_not_sent
 from inktime.app.providers.base import assert_complete_response
 from inktime.app.providers.openai_compatible import ProviderHTTPError
 from inktime.app.repositories.photos import PhotoRepository
@@ -1086,7 +1086,8 @@ class PhotoAnalysisService:
             requested_model=model,
         )
         operations = BillableOperationRepository(self.photos.database)
-        operation_id, checkpoint = operations.begin(content_sha256, vision_request_fingerprint)
+        operation_id, checkpoint = operations.begin(content_sha256, vision_request_fingerprint,
+            context={"provider": actual_call_provider.name, "model": model, "photo_id": photo_id, "job_id": job_id})
         if checkpoint is None and self.budgets:
             try:
                 self.budgets.reserve(
@@ -1116,6 +1117,11 @@ class PhotoAnalysisService:
             if checkpoint is not None:
                 response = checkpoint
             else:
+                from inktime.app.core.model_upload_guard import assert_upload_allowed
+                guard = {"database_path": str(self.photos.database.path), "photo_id": photo_id, "job_id": job_id}
+                assert_upload_allowed(**guard)
+                if getattr(actual_call_provider, "supports_upload_guard", False):
+                    call["upload_guard"] = guard
                 if selected_channel is not None and hasattr(provider, "_execute_sticky"):
                     response = provider._execute_sticky(
                         selected_channel,
@@ -1158,12 +1164,17 @@ class PhotoAnalysisService:
                         caption_controls=caption_controls,
                         vision_attempt=vision_attempt,
                         provider_request_context_id=provider_request_context_id,
+                        **({"upload_guard": guard} if getattr(provider, "supports_upload_guard", False) else {}),
                     )
             vision_attempt.vision_started = True
             vision_attempt.vision_completed = True
             if checkpoint is None:
                 operations.save_response(operation_id, response)
         except TimeoutError as timeout_error:
+            if request_definitely_not_sent(timeout_error) and not vision_attempt.vision_started:
+                operations.finish(operation_id, not_sent=True)
+                if self.budgets:
+                    self.budgets.release("vision:" + operation_id)
             self._trace_write(
                 "update_attempt_from_call",
                 vision_attempt_id,
@@ -1223,7 +1234,7 @@ class PhotoAnalysisService:
             )
             raise
         except Exception as error:
-            if isinstance(error, ProviderHTTPError) and not error.ambiguous and not vision_attempt.vision_completed:
+            if request_definitely_not_sent(error) and not vision_attempt.vision_started:
                 operations.finish(operation_id, not_sent=True)
                 if self.budgets:
                     self.budgets.release("vision:" + operation_id)
@@ -1486,7 +1497,7 @@ class PhotoAnalysisService:
         )
         # Reuse identical bytes and semantic inputs across local ranking/version
         # changes, while retaining the current full plan for result provenance.
-        inherited = self.photos.inherit_existing_analysis(
+        inherited = None if force_recompute else self.photos.inherit_existing_analysis(
             photo_id,
             job_id,
             analysis_context={

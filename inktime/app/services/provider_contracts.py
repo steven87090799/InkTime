@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import json
+import secrets
 from pathlib import Path
 import tempfile
 from typing import Any
 from uuid import uuid4
 
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw
 
 from inktime.app.core.ai_trace_payloads import bounded_text
 from inktime.app.domain.analysis import REPAIR_TOKEN_CAP
@@ -25,18 +26,26 @@ CONTRACT_LEVELS = (1, 2, 3)
 LEVEL2_STAGE = "provider_contract_level2"
 
 
-def _synthetic_contract_image(path: Path) -> Path:
-    """Create the deterministic fixture used by Level 2 and Level 3 only."""
+SHAPE_NAMES = ("rectangle", "circle", "triangle")
 
+
+def _synthetic_contract_image(path: Path, shapes=None) -> Path:
+    """The answer stays in the test runner; labels never enter the image."""
+    shapes = SHAPE_NAMES[:2] if shapes is None else tuple(shapes)
     image = Image.new("RGB", (256, 256), "white")
     draw = ImageDraw.Draw(image)
-    draw.rectangle((24, 32, 116, 178), fill=(220, 40, 40), outline=(100, 0, 0), width=3)
-    draw.ellipse((138, 42, 226, 130), fill=(30, 80, 220), outline=(0, 20, 100), width=3)
-    try:
-        font = ImageFont.load_default()
-    except (OSError, ValueError):
-        font = None
-    draw.text((34, 208), "INKTIME TEST", fill=(0, 0, 0), font=font)
+    for index, shape in enumerate(shapes):
+        x = 12 + index * 80
+        box = (x, 60, x + 64, 150)
+        color = ((220, 40, 40), (30, 80, 220), (30, 160, 60))[index]
+        if shape == "rectangle":
+            draw.rectangle(box, fill=color)
+        elif shape == "circle":
+            draw.ellipse((x, 60, x + 64, 124), fill=color)
+        elif shape == "triangle":
+            draw.polygon(((x + 32, 60), (x, 150), (x + 64, 150)), fill=color)
+        else:
+            raise ValueError("unsupported challenge shape")
     image.save(path, format="PNG", optimize=False)
     return path
 
@@ -142,7 +151,8 @@ def _provider_failure_message(prefix: str, exc: Exception) -> tuple[str, dict[st
 def _checks(provider: Any, *, level: int, ok: bool, schema_valid: bool | None, usage: dict[str, Any] | None) -> dict[str, Any]:
     return {
         "connectivity": "pass" if (level == 1 and ok) or level >= 2 and usage is not None else "fail",
-        "vision": "not_run" if level == 1 else "pass" if usage is not None else "fail",
+        "vision": "not_run" if level == 1 else "not_verified" if level == 3 else "pass" if ok and schema_valid else "fail",
+        "visual_accuracy": "not_run" if level == 1 else "not_verified" if level == 3 else "pass" if ok else "fail",
         "json_schema": "not_run" if level < 2 else "pass" if schema_valid else "fail",
         "usage": "not_run" if usage is None else "pass",
         "cost_source": usage.get("cost_source") if usage is not None else None,
@@ -193,26 +203,30 @@ def _safe_failure(
     return result
 
 
-def _valid_level2_response(content: str) -> bool:
+def _level2_format_valid(content: str) -> bool:
     try:
         value = json.loads(content)
-    except (TypeError, ValueError, json.JSONDecodeError):
+        shapes = value.get("detected_shapes") if isinstance(value, dict) else None
+        return (isinstance(value, dict) and set(value) == {"vision_ok", "detected_shapes"}
+                and type(value["vision_ok"]) is bool and isinstance(shapes, list)
+                and len(shapes) <= 3 and all(isinstance(shape, str) and shape in SHAPE_NAMES for shape in shapes)
+                and len(set(shapes)) == len(shapes))
+    except (TypeError, ValueError):
         return False
-    return (
-        isinstance(value, dict)
-        and value.get("vision_ok") is True
-        and isinstance(value.get("detected_shapes"), list)
-        and len(value["detected_shapes"]) == 2
-        and all(isinstance(item, str) for item in value["detected_shapes"])
-        and set(value["detected_shapes"]) == {"rectangle", "circle"}
-    )
+
+
+def _valid_level2_response(content: str, expected_shapes=("rectangle", "circle")) -> bool:
+    if not _level2_format_valid(content):
+        return False
+    value = json.loads(content)
+    return value["vision_ok"] is True and set(value["detected_shapes"]) == set(expected_shapes)
 
 
 def run_provider_contract(provider: Any, *, level: int, model: str, budgets=None) -> dict[str, Any]:
     """Run one explicitly selected contract without touching production photos.
 
     Level 1 performs only the bounded `/models` connection check.  Level 2
-    sends one deterministic 256px synthetic image with a small output cap and
+    sends one randomized 256px synthetic image with a small output cap and
     never repairs.  Level 3 sends one synthetic image using the full schema and
     permits at most one text-only repair when validation fails.
     """
@@ -269,7 +283,8 @@ def run_provider_contract(provider: Any, *, level: int, model: str, budgets=None
     repair_completed = False
     provider_request_context_id = f"provider-contract|{uuid4()}"
     with tempfile.TemporaryDirectory(prefix="inktime-provider-contract-") as directory:
-        image_path = _synthetic_contract_image(Path(directory) / "inktime-test.png")
+        expected_shapes = tuple(secrets.SystemRandom().sample(SHAPE_NAMES, secrets.randbelow(3) + 1))
+        image_path = _synthetic_contract_image(Path(directory) / "inktime-test.png", expected_shapes)
         vision_requests = 1
         network_request_attempts = 1
         vision_started = True
@@ -316,8 +331,8 @@ def run_provider_contract(provider: Any, *, level: int, model: str, budgets=None
             )
         schema_valid = False
         if level == 2:
-            schema_valid = _valid_level2_response(response.content)
-            if not schema_valid:
+            schema_valid = _level2_format_valid(response.content)
+            if not _valid_level2_response(response.content, expected_shapes):
                 result = {
                     "level": level,
                     "ok": False,
@@ -334,11 +349,11 @@ def run_provider_contract(provider: Any, *, level: int, model: str, budgets=None
                     "vision_completed": vision_completed,
                     "repair_attempted": repair_attempted,
                     "repair_completed": repair_completed,
-                    "schema_valid": False,
+                    "schema_valid": schema_valid,
                     "usage": usage,
                 }
                 result["checks"] = _checks(
-                    provider, level=level, ok=False, schema_valid=False, usage=usage
+                    provider, level=level, ok=False, schema_valid=schema_valid, usage=usage
                 )
                 return result
         else:
