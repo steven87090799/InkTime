@@ -780,6 +780,42 @@ jobs:
                 ;;
             esac
           done
+      - name: Prepare app-only PhotoPainter artifact
+        if: ${{ contains(needs.changes.outputs.firmware_execution_profiles, 'photopainter_release') }}
+        env:
+          SOURCE_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+          BUILD_TREE: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          mapfile -t app_candidates < <(
+            find /tmp/build-photopainter-release -maxdepth 1 -type f -name '*.bin' -size +1048576c -print
+          )
+          test "${#app_candidates[@]}" -eq 1
+          app="${app_candidates[0]}"
+          test -s "${app}"
+          size="$(stat -c '%s' "${app}")"
+          test "${size}" -le 3145728
+          output="${RUNNER_TEMP}/photopainter-app-only"
+          mkdir -p "${output}"
+          cp "${app}" "${output}/app.bin"
+          sha256sum "${output}/app.bin" > "${output}/SHA256SUMS"
+          {
+            printf 'source_head=%s\n' "${SOURCE_HEAD}"
+            printf 'build_tree=%s\n' "${BUILD_TREE}"
+            printf 'board=esp32:esp32:esp32s3:FlashSize=16M,PSRAM=opi,CDCOnBoot=cdc\n'
+            printf 'partition=inktime_photopainter_3M_16MB.csv\n'
+            printf 'write_offset=0x10000\n'
+            printf 'app_bytes=%s\n' "${size}"
+            printf 'arduino_cli=1.5.1\nesp32_core=3.3.10\nGxEPD2=1.6.9\nArduinoJson=7.4.3\n'
+          } > "${output}/manifest.txt"
+      - name: Upload app-only PhotoPainter artifact
+        if: ${{ contains(needs.changes.outputs.firmware_execution_profiles, 'photopainter_release') }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1 (Node 24)
+        with:
+          name: photopainter-app-only-${{ github.event.pull_request.head.sha || github.sha }}
+          path: ${{ runner.temp }}/photopainter-app-only/
+          if-no-files-found: error
+          retention-days: 3
 
   repository-gate:
     name: Repository gate
