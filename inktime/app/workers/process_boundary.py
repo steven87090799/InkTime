@@ -28,6 +28,7 @@ class ProcessCallTimeout(TimeoutError):
 
 class ProcessCallError(RuntimeError):
     code = "AI-PROVIDER-UNAVAILABLE"
+    not_sent: bool = False
     # True only when the caller's cancel_requested() asked us to stop (graceful
     # shutdown).  The child is terminated before it can report, so the work did
     # not complete and the item must go back on the queue rather than be

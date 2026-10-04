@@ -552,6 +552,8 @@ def latest_release():
         manifest = dict(authorization.manifest)
         manifest["download_base_url"] = f"/api/device/v1/releases/{release_id}/files/"
     else:
+        if authorization.release_id or authorization.reason != "invalid_release_id":
+            abort(404, description="沒有可下載的 Release")
         # Configuration is an authenticated control plane even with an empty library.
         manifest = {"schema_version": 3, "pixel_format": "indexed4", "no_content": True,
                     "files": [], "width": 0, "height": 0}

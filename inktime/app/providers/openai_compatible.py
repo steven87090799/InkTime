@@ -1044,7 +1044,7 @@ class OpenAICompatibleProvider(VisionProvider):
                 provider_request_context_id=provider_request_context_id,
             )
         except Exception as error:
-            error.not_sent = True
+            setattr(error, "not_sent", True)
             raise
         return self._post_completion(body, vision_attempt=vision_attempt, upload_guard=upload_guard)
 
