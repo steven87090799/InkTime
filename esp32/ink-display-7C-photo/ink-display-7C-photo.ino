@@ -33,10 +33,10 @@ struct AckJournalActivePointer;
 struct Config;
 
 #include "device_http_transport.h"
+#include "power_policy.h"
 #if INKTIME_PHOTOPAINTER_ENABLED
 #include "photopainter_support.h"
 #include "power_manager.h"
-#include "power_policy.h"
 #else
 #include <GxEPD2_7C.h>
 #endif

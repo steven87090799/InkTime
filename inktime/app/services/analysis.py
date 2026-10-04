@@ -45,7 +45,6 @@ from inktime.app.domain.photos.quality_policy import (
 )
 from inktime.app.providers.base import ProviderResponse, Usage, VisionAttemptState, VisionProvider, request_definitely_not_sent
 from inktime.app.providers.base import assert_complete_response
-from inktime.app.providers.openai_compatible import ProviderHTTPError
 from inktime.app.repositories.photos import PhotoRepository
 from inktime.app.repositories.settings import SettingsRepository
 from inktime.app.repositories.usage import UsageRepository

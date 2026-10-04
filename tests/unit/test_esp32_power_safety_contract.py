@@ -19,6 +19,12 @@ def _between(text: str, start: str, end: str) -> str:
     return text[start_index : text.index(end, start_index)]
 
 
+def test_wifi_hint_policy_is_available_to_legacy_and_photopainter_builds():
+    firmware = FIRMWARE.read_text(encoding="utf-8")
+    includes = _between(firmware, '#include "device_http_transport.h"', '#include "esp_wifi.h"')
+    assert includes.index('#include "power_policy.h"') < includes.index("#if INKTIME_PHOTOPAINTER_ENABLED")
+
+
 def test_photopainter_runtime_key_and_reserved_pin_contracts_are_unchanged():
     hardware = HARDWARE.read_text(encoding="utf-8")
     assert "{kNoPin, 0, 4, 5, true, true}" in hardware
