@@ -788,10 +788,11 @@ jobs:
         run: |
           set -euo pipefail
           mapfile -t app_candidates < <(
-            find /tmp/build-photopainter-release -type f -name '*.bin' -size +1048576c -print | sort
+            find /tmp/build-photopainter-release -type f \
+              -name 'ink-display-7C-photo.ino.bin' -size +1048576c -print | sort
           )
           if [ "${#app_candidates[@]}" -ne 1 ]; then
-            printf 'Expected exactly one PhotoPainter app binary larger than 1 MiB; found %s candidate(s):\n' "${#app_candidates[@]}" >&2
+            printf 'Expected exactly one PhotoPainter sketch app binary larger than 1 MiB; found %s candidate(s):\n' "${#app_candidates[@]}" >&2
             printf '  %s\n' "${app_candidates[@]}" >&2
             exit 1
           fi
