@@ -803,7 +803,20 @@ jobs:
           output="${RUNNER_TEMP}/photopainter-app-only"
           mkdir -p "${output}"
           cp "${app}" "${output}/app.bin"
-          sha256sum "${output}/app.bin" > "${output}/SHA256SUMS"
+          # Retain the exact symbols from this build for physical panic decoding.
+          # ELF/map are diagnostic files; app.bin remains the only flash payload.
+          elf="${app%.bin}.elf"
+          test -s "${elf}"
+          cp "${elf}" "${output}/app.elf"
+          map="${app%.bin}.map"
+          if [ -s "${map}" ]; then
+            cp "${map}" "${output}/app.map"
+          fi
+          (
+            cd "${output}"
+            sha256sum app.bin app.elf > SHA256SUMS
+            if [ -s app.map ]; then sha256sum app.map >> SHA256SUMS; fi
+          )
           {
             printf 'source_head=%s\n' "${SOURCE_HEAD}"
             printf 'build_tree=%s\n' "${BUILD_TREE}"
@@ -811,6 +824,7 @@ jobs:
             printf 'partition=inktime_photopainter_3M_16MB.csv\n'
             printf 'write_offset=0x10000\n'
             printf 'app_bytes=%s\n' "${size}"
+            printf 'symbols=app.elf\n'
             printf 'arduino_cli=1.5.1\nesp32_core=3.3.10\nGxEPD2=1.6.9\nArduinoJson=7.4.3\n'
           } > "${output}/manifest.txt"
       - name: Upload app-only PhotoPainter artifact
