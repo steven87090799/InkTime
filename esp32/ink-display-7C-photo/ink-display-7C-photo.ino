@@ -3277,12 +3277,8 @@ static bool persistPairingExpired(Config &cfg) {
   candidate.pairing_id = "";
   candidate.pairing_nonce = "";
   candidate.pairing_expires_at_epoch = 0U;
-  const uint8_t previousAttempt = candidate.pairing_retry_attempt;
-  candidate.pairing_retry_attempt = previousAttempt < 8U
-    ? static_cast<uint8_t>(previousAttempt + 1U) : 8U;
-  const uint64_t now = pairingNowEpoch();
-  candidate.pairing_retry_at_epoch = now == 0U
-    ? 0U : now + pairingBackoffForAttempt(previousAttempt);
+  applyRetryStateToConfig(
+    inktime::pairing::expiredRequestRetryState(pairingNowEpoch()), candidate);
   return savePairingCandidate(cfg, candidate);
 }
 

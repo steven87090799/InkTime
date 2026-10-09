@@ -89,6 +89,15 @@ void test_retry_cap_does_not_rewrite_unchanged_no_clock_state() {
   assert(state.attempt == inktime::pairing::kMaximumRetryAttempt);
 }
 
+void test_expiry_starts_fresh_request_without_an_hour_long_penalty() {
+  const RetryState timed = inktime::pairing::expiredRequestRetryState(1700000000U);
+  assert(timed.attempt == 0U);
+  assert(timed.retry_at_epoch == 1700000060U);
+  const RetryState no_clock = inktime::pairing::expiredRequestRetryState(0U);
+  assert(no_clock == RetryState{});
+  assert(inktime::pairing::sleepSeconds(no_clock, 0U) == 60U);
+}
+
 void test_active_enrollment_never_sleeps_past_claim_ttl() {
   for (uint8_t attempt = 0; attempt <= inktime::pairing::kMaximumRetryAttempt; ++attempt) {
     assert(inktime::pairing::enrollmentRetrySeconds(attempt, true) == 60U);
@@ -100,6 +109,7 @@ void test_active_enrollment_never_sleeps_past_claim_ttl() {
 }  // namespace
 
 int main() {
+  test_expiry_starts_fresh_request_without_an_hour_long_penalty();
   test_active_enrollment_never_sleeps_past_claim_ttl();
   test_invalid_origin_and_ca_failures_persist_bounded_retry();
   test_persistence_failure_is_reported_without_advancing_unwritten_state();

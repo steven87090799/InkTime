@@ -4,7 +4,8 @@
 
 1. 配對請求五分鐘到期，而 pending 的持久化 backoff 會升到五分鐘、十五分鐘、
    一小時。核准後裝置可能根本來不及領取。已有 request 的 claim／confirm 改為
-   一分鐘重試；沒有 request 的連線錯誤維持有界 backoff，避免失敗時持續耗電。
+   一分鐘重試；request 正常到期後也在一分鐘內重新建立，不再懲罰到一小時。
+   沒有 request 的連線錯誤維持有界 backoff，避免失敗時持續耗電。
 2. KEY1 喚醒後仍受 pending 的舊 retry deadline 限制，可能立即再睡。
    KEY1 可以立即領取既有 enrollment；升級後也不等待舊版的一小時 deadline。
    加入 KEY1 wake armed／failed／held 與實際 GPIO4 wake 紀錄，不能以 HTTP 請求
