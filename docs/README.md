@@ -120,6 +120,7 @@
 - [`operations/MIGRATION_GUIDE_ZH_TW.md`](operations/MIGRATION_GUIDE_ZH_TW.md)：舊資料庫升級與相容性界線。
 - [`operations/MIGRATION_PLAN.md`](operations/MIGRATION_PLAN.md)：升級、回滾與資料相容原則。
 - [`operations/OPERATIONS_ZH_TW.md`](operations/OPERATIONS_ZH_TW.md)：Decision、Queue、保留與發布日常操作。
+- [家用內網流程簡化檢查](operations/HOME_LAN_SIMPLIFICATION_AUDIT_ZH_TW.md)：配對、KEY1、Wi-Fi recovery 與流程檢查結果。
 
 ### 裝置與電子紙
 
