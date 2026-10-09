@@ -549,7 +549,36 @@ def latest_release():
     )
     release_id = authorization.release_id if authorization.allowed else None
     if authorization.allowed and authorization.manifest is not None:
-        manifest = dict(authorization.manifest)
+        release_manifest = dict(authorization.manifest)
+        # Firmware only consumes display metadata and the checked binary
+        # payload descriptor. Keep analysis/render plans in the stored release
+        # manifest instead of sending that unrelated, deeply nested document
+        # to a memory-constrained device.
+        manifest = {
+            key: release_manifest[key]
+            for key in (
+                "schema_version",
+                "release_id",
+                "display_type",
+                "render_profile",
+                "panel_profile",
+                "width",
+                "height",
+                "pixel_format",
+                "orientation",
+            )
+            if key in release_manifest
+        }
+        release_files = release_manifest.get("files")
+        manifest["files"] = (
+            [
+                {key: entry[key] for key in ("name", "size", "sha256") if key in entry}
+                for entry in release_files
+                if isinstance(entry, dict)
+            ]
+            if isinstance(release_files, list)
+            else release_files
+        )
         manifest["download_base_url"] = f"/api/device/v1/releases/{release_id}/files/"
     else:
         if authorization.release_id or authorization.reason != "invalid_release_id":
