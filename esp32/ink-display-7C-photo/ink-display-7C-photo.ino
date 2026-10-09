@@ -3184,14 +3184,22 @@ static uint32_t pairingBackoffForAttempt(uint8_t attempt) {
   return inktime::pairing::backoffSeconds(attempt);
 }
 
-static bool pairingRetryDue(const Config &cfg) {
-  return inktime::pairing::retryDue(
-    retryStateFromConfig(cfg), pairingRetryNowEpoch());
-}
-
 static bool hasActiveEnrollmentRequest(const Config &cfg) {
   return cfg.pairing_id.length() > 0U
     && (cfg.auth_state == "pairing_pending" || cfg.auth_state == "credential_issued");
+}
+
+static bool pairingRetryDue(const Config &cfg) {
+  const uint64_t now = pairingRetryNowEpoch();
+  if (hasActiveEnrollmentRequest(cfg)) {
+#if INKTIME_PHOTOPAINTER_ENABLED
+    if (photoPainter.wokeFromUserButton()) return true;
+#endif
+    // Adopt the one-minute policy for retry deadlines persisted by older
+    // firmware, instead of waiting out their hour-long backoff after upgrade.
+    if (now != 0U && cfg.pairing_retry_at_epoch > now + 60U) return true;
+  }
+  return inktime::pairing::retryDue(retryStateFromConfig(cfg), now);
 }
 
 static uint32_t pairingBackoffSeconds(const Config &cfg) {
