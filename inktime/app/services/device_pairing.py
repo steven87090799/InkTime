@@ -740,10 +740,9 @@ class DevicePairingService:
             if row is None:
                 raise DevicePairingError("配對請求不存在或已失效", status_code=404, error_code="PAIR-003")
             code_required = not self._lan_request(row)
-            if code_required:
-                pairing_code = self._validate_text(pairing_code, "pairing_code", 6, required=True)
-                if not PAIRING_CODE_PATTERN.fullmatch(pairing_code):
-                    raise DevicePairingError("配對碼格式不合法", error_code="PAIR-005")
+            pairing_code = self._validate_text(pairing_code, "pairing_code", 6, required=code_required)
+            if code_required and not PAIRING_CODE_PATTERN.fullmatch(pairing_code):
+                raise DevicePairingError("配對碼格式不合法", error_code="PAIR-005")
             status = str(row["status"])
             if status in {"approved", "credential_issued", "confirmed"}:
                 return {"status": status, "pairing_id": pairing_id}

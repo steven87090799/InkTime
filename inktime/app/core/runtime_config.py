@@ -3,9 +3,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 import os
 from ipaddress import IPv4Address, IPv4Network
-from urllib.parse import urlsplit
 from pathlib import Path
 from typing import Mapping
+from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 

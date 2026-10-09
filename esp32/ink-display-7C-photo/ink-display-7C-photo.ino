@@ -3180,10 +3180,6 @@ static uint64_t pairingRetryNowEpoch() {
     ? static_cast<uint64_t>(now) : 0U;
 }
 
-static uint32_t pairingBackoffForAttempt(uint8_t attempt) {
-  return inktime::pairing::backoffSeconds(attempt);
-}
-
 static bool hasActiveEnrollmentRequest(const Config &cfg) {
   return cfg.pairing_id.length() > 0U
     && (cfg.auth_state == "pairing_pending" || cfg.auth_state == "credential_issued");
