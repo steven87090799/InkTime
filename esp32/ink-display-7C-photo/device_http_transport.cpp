@@ -90,8 +90,6 @@ bool validCa(const String &ca) {
       || ca.indexOf("-----BEGIN RSA PRIVATE KEY-----") >= 0) {
     return false;
   }
-  // Preserve this parser's code while obtaining matching PhotoPainter panic
-  // symbols; investigate the observed post-Wi-Fi crash before changing TLS.
   mbedtls_x509_crt certificate;
   mbedtls_x509_crt_init(&certificate);
   const int result = mbedtls_x509_crt_parse(

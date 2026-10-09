@@ -66,6 +66,20 @@ using inktime::kBoardConfig;
 
 #if INKTIME_PHOTOPAINTER_ENABLED
 inktime::PhotoPainterSupport photoPainter(kBoardConfig);
+
+// setup(), pairing candidates and the transactional ConfigStore share the
+// Arduino loop task. The observed release frames consume over 6 KiB before
+// NVS/Flash IPC or TLS call frames; the core's 8 KiB default has no safe margin.
+static constexpr size_t kPhotoPainterLoopStackBytes = 16U * 1024U;
+SET_LOOP_TASK_STACK_SIZE(kPhotoPainterLoopStackBytes);
+
+static void logPhotoPainterStackMargin(const char* phase) {
+  char message[112];
+  snprintf(message, sizeof(message), "phase=%s allocated_bytes=%u min_free_bytes=%u",
+    phase, static_cast<unsigned>(kPhotoPainterLoopStackBytes),
+    static_cast<unsigned>(uxTaskGetStackHighWaterMark(nullptr)));
+  INK_LOG_INFO("photopainter_stack_margin", message);
+}
 #endif
 
 #if DEBUG_LOG
@@ -2122,6 +2136,9 @@ bool saveConfig(const Config &cfg, String *errorCodeOut = nullptr) {
   // its internal A/B key writes; this metric intentionally counts transactions
   // rather than pretending to expose driver-level flash operations.
   recordNvsWrite();
+#if INKTIME_PHOTOPAINTER_ENABLED
+  logPhotoPainterStackMargin("config_saved");
+#endif
   // cfgstore has already completed the formal A/B commit and full read-back.
   // Old dashcfg formal keys are migration-only; stale legacy values must not
   // turn a committed config into a reported failure.
@@ -3506,6 +3523,9 @@ static bool performAutomaticPairing(Config &cfg) {
   if (!automaticPairingAllowed(cfg)) {
     return cfg.auth_state == "paired" && deviceCredential(cfg).length() > 0U && !deviceAuthInvalid;
   }
+#if INKTIME_PHOTOPAINTER_ENABLED
+  logPhotoPainterStackMargin("pairing_begin");
+#endif
   String base;
   if (!normalizedBackendBase(cfg, base)) return false;
 
@@ -3570,6 +3590,9 @@ static bool performAutomaticPairing(Config &cfg) {
   requestHttp.collectHeaders(pairingHeaders, 1);
   requestHttp.addHeader("Content-Type", "application/json");
   const int requestStatus = countedHttpPost(requestHttp, requestBody);
+#if INKTIME_PHOTOPAINTER_ENABLED
+  logPhotoPainterStackMargin("pairing_request_return");
+#endif
   const int requestLength = requestHttp.getSize();
   const String requestContentType = requestHttp.header("Content-Type");
   if ((requestStatus != HTTP_CODE_CREATED && requestStatus != HTTP_CODE_OK)
@@ -6795,6 +6818,9 @@ void setup() {
   DBG_BEGIN();
   delay(200);
   INK_LOG_INFO("firmware_boot", "InkTime firmware boot started");
+#if INKTIME_PHOTOPAINTER_ENABLED
+  logPhotoPainterStackMargin("boot");
+#endif
 
 #if INKTIME_PHOTOPAINTER_ENABLED
   const bool maxAwakeSupervisorReady = startMaxAwakeSupervisor();
