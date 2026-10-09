@@ -562,6 +562,7 @@ def latest_release():
                 "display_type",
                 "render_profile",
                 "panel_profile",
+                "release_kind",
                 "width",
                 "height",
                 "pixel_format",
