@@ -3189,9 +3189,15 @@ static bool pairingRetryDue(const Config &cfg) {
     retryStateFromConfig(cfg), pairingRetryNowEpoch());
 }
 
+static bool hasActiveEnrollmentRequest(const Config &cfg) {
+  return cfg.pairing_id.length() > 0U
+    && (cfg.auth_state == "pairing_pending" || cfg.auth_state == "credential_issued");
+}
+
 static uint32_t pairingBackoffSeconds(const Config &cfg) {
-  return inktime::pairing::sleepSeconds(
+  const uint32_t seconds = inktime::pairing::sleepSeconds(
     retryStateFromConfig(cfg), pairingRetryNowEpoch());
+  return hasActiveEnrollmentRequest(cfg) && seconds > 60U ? 60U : seconds;
 }
 
 static bool pairingExpiryPassed(const Config &cfg) {
@@ -3219,8 +3225,8 @@ static bool persistPairingRetry(Config &cfg, const String &state) {
     ? static_cast<uint8_t>(previousAttempt + 1U) : 8U;
   const uint64_t now = pairingNowEpoch();
   candidate.pairing_retry_at_epoch = now == 0U
-    ? 0U : now + ((state == "pairing_pending" && candidate.pairing_id.length() > 0U)
-      ? 60U : pairingBackoffForAttempt(previousAttempt));
+    ? 0U : now + inktime::pairing::enrollmentRetrySeconds(
+      previousAttempt, hasActiveEnrollmentRequest(candidate));
   return savePairingCandidate(cfg, candidate);
 }
 
@@ -7025,6 +7031,9 @@ void setup() {
 #endif
 
   if ((g_cfg.auth_state == "auth_invalid" || g_cfg.auth_state == "revoked")
+#if INKTIME_PHOTOPAINTER_ENABLED
+      && !explicitRecoveryRequested
+#endif
       && !pairingRetryDue(g_cfg)) {
     goDeepSleepSeconds(pairingBackoffSeconds(g_cfg));
     return;

@@ -89,9 +89,18 @@ void test_retry_cap_does_not_rewrite_unchanged_no_clock_state() {
   assert(state.attempt == inktime::pairing::kMaximumRetryAttempt);
 }
 
+void test_active_enrollment_never_sleeps_past_claim_ttl() {
+  for (uint8_t attempt = 0; attempt <= inktime::pairing::kMaximumRetryAttempt; ++attempt) {
+    assert(inktime::pairing::enrollmentRetrySeconds(attempt, true) == 60U);
+    assert(inktime::pairing::enrollmentRetrySeconds(attempt, false)
+           == inktime::pairing::backoffSeconds(attempt));
+  }
+}
+
 }  // namespace
 
 int main() {
+  test_active_enrollment_never_sleeps_past_claim_ttl();
   test_invalid_origin_and_ca_failures_persist_bounded_retry();
   test_persistence_failure_is_reported_without_advancing_unwritten_state();
   test_clear_failure_is_reported_without_clearing_state();
