@@ -1064,7 +1064,9 @@ def test_switching_lan_to_public_invalidates_unconfirmed_requests(client, app):
     body = client.post(PAIRING_PATH, json=_pairing_payload(
         "esp32-lan-public", capabilities={"trusted_lan_pairing": True},
     )).get_json()
-    service.approve(body["pairing_id"], None, administrator_id="admin")
+    create_admin(app)
+    login(client)
+    assert _approve(client, body["pairing_id"], "").status_code == 200
     service.trusted_lan = False
     assert service.pending_for_admin() == []
     claim = client.post(CLAIM_PATH, json={
