@@ -1005,6 +1005,10 @@ def test_lan_pairing_can_be_approved_without_code_but_requires_admin_csrf(client
     assert client.post(url, json={}).status_code in {302, 401, 403}
     create_admin(app)
     login(client)
+    page = client.get("/devices")
+    assert page.status_code == 200
+    assert b'data-code-required="false"' in page.data
+    assert b'class="pairing-code-input"' not in page.data
     assert client.post(url, json={}).status_code == 403
     approved = client.post(url, json={}, headers={"X-CSRF-Token": csrf(client)})
     assert approved.status_code == 200
