@@ -990,3 +990,80 @@ def test_stock_compatibility_never_enters_automatic_pairing(client, app):
     assert device["auth_mode"] == "stock"
     assert device["pairing_state"] == "paired"
     assert request_count == 0
+
+
+def test_lan_pairing_can_be_approved_without_code_but_requires_admin_csrf(client, app):
+    service = app.extensions["inktime_device_pairing_service"]
+    service.trusted_lan = True
+    body = client.post(PAIRING_PATH, json=_pairing_payload(
+        "esp32-lan", capabilities={"trusted_lan_pairing": True},
+    )).get_json()
+    assert body["pairing_mode"] == "trusted_lan"
+    assert body["expires_in_seconds"] == 86400
+    assert service.pending_for_admin()[0]["code_required"] is False
+    url = f"/api/v1/device-pairing/{body['pairing_id']}/approve"
+    assert client.post(url, json={}).status_code in {302, 401, 403}
+    create_admin(app)
+    login(client)
+    assert client.post(url, json={}).status_code == 403
+    approved = client.post(url, json={}, headers={"X-CSRF-Token": csrf(client)})
+    assert approved.status_code == 200
+    claimed = client.post(CLAIM_PATH, json={
+        "pairing_id": body["pairing_id"], "pairing_nonce": "nonce-for-contract-test-0123456789",
+    })
+    assert claimed.status_code == 200
+    with app.extensions["inktime_database"].session() as connection:
+        assert connection.execute("SELECT COUNT(*) FROM devices WHERE id='esp32-lan'").fetchone()[0] == 0
+
+
+@pytest.mark.parametrize("lan", [False, True])
+def test_public_and_legacy_requests_keep_physical_code_policy(client, app, lan):
+    service = app.extensions["inktime_device_pairing_service"]
+    service.trusted_lan = lan
+    capabilities = {"_enrollment_mode": "trusted_lan"}
+    if not lan:
+        capabilities["trusted_lan_pairing"] = True
+    body = client.post(PAIRING_PATH, json=_pairing_payload(
+        "esp32-strict", capabilities=capabilities,
+    )).get_json()
+    assert body["pairing_mode"] == "physical_code"
+    assert body["expires_in_seconds"] == 300
+    assert service.pending_for_admin()[0]["code_required"] is True
+    create_admin(app)
+    login(client)
+    assert _approve(client, body["pairing_id"], "").status_code == 400
+
+
+def test_lan_request_survives_five_minutes_and_expires_after_a_day(client, app, monkeypatch):
+    from datetime import timedelta
+    service = app.extensions["inktime_device_pairing_service"]
+    service.trusted_lan = True
+    now = service._now()
+    body = client.post(PAIRING_PATH, json=_pairing_payload(
+        "esp32-lan-ttl", capabilities={"trusted_lan_pairing": True},
+    )).get_json()
+    monkeypatch.setattr(service, "_now", lambda: now + timedelta(minutes=10))
+    assert service.pending_for_admin()[0]["pairing_id"] == body["pairing_id"]
+    replay = client.post(PAIRING_PATH, json=_pairing_payload(
+        "esp32-lan-ttl", capabilities={"trusted_lan_pairing": True},
+    )).get_json()
+    assert replay["pairing_id"] == body["pairing_id"]
+    assert replay["pairing_mode"] == "trusted_lan"
+    assert replay["expires_in_seconds"] > 300
+    monkeypatch.setattr(service, "_now", lambda: now + timedelta(days=2))
+    assert service.pending_for_admin() == []
+
+
+def test_switching_lan_to_public_invalidates_unconfirmed_requests(client, app):
+    service = app.extensions["inktime_device_pairing_service"]
+    service.trusted_lan = True
+    body = client.post(PAIRING_PATH, json=_pairing_payload(
+        "esp32-lan-public", capabilities={"trusted_lan_pairing": True},
+    )).get_json()
+    service.approve(body["pairing_id"], None, administrator_id="admin")
+    service.trusted_lan = False
+    assert service.pending_for_admin() == []
+    claim = client.post(CLAIM_PATH, json={
+        "pairing_id": body["pairing_id"], "pairing_nonce": "nonce-for-contract-test-0123456789",
+    })
+    assert claim.status_code == 410

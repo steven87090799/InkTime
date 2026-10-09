@@ -3219,7 +3219,8 @@ static bool persistPairingRetry(Config &cfg, const String &state) {
     ? static_cast<uint8_t>(previousAttempt + 1U) : 8U;
   const uint64_t now = pairingNowEpoch();
   candidate.pairing_retry_at_epoch = now == 0U
-    ? 0U : now + pairingBackoffForAttempt(previousAttempt);
+    ? 0U : now + ((state == "pairing_pending" && candidate.pairing_id.length() > 0U)
+      ? 60U : pairingBackoffForAttempt(previousAttempt));
   return savePairingCandidate(cfg, candidate);
 }
 
@@ -3563,6 +3564,7 @@ static bool performAutomaticPairing(Config &cfg) {
   pairingRequest["panel_profile"] = INKTIME_PANEL_PROFILE;
   JsonObject capabilities = pairingRequest["capabilities"].to<JsonObject>();
   capabilities["automatic_pairing"] = true;
+  capabilities["trusted_lan_pairing"] = true;
   capabilities["ab_credential_store"] = true;
 #if INKTIME_PHOTOPAINTER_ENABLED
   capabilities["offline_schedule_max_slots"] = 16;
@@ -3611,6 +3613,7 @@ static bool performAutomaticPairing(Config &cfg) {
   const String pairingCode = requestResponse["pairing_code"] | "";
   const String requestState = requestResponse["status"] | "pending";
   const bool requestReused = requestResponse["request_reused"] | false;
+  const bool trustedLanPairing = String(requestResponse["pairing_mode"] | "physical_code") == "trusted_lan";
   const JsonVariantConst expiresValue = requestResponse["expires_in_seconds"];
   const JsonVariantConst serverEpochValue = requestResponse["server_epoch"];
   uint64_t serverEpoch = serverEpochValue.is<uint64_t>()
@@ -3627,7 +3630,7 @@ static bool performAutomaticPairing(Config &cfg) {
   const bool requestClaimable = requestState == "approved" || requestState == "credential_issued";
   if (requestJsonError || requestResponse.overflowed() || pairingId.length() == 0U
       || !expiresValue.is<int32_t>() || expiresValue.is<bool>()
-      || expiresValue.as<int32_t>() < 1 || expiresValue.as<int32_t>() > 300
+      || expiresValue.as<int32_t>() < 1 || expiresValue.as<int32_t>() > (trustedLanPairing ? 86400 : 300)
       || serverEpoch < kPairingMinimumEpoch
       || (!requestPending && !requestClaimable)
       || (requestPending && !validCode)
@@ -3640,7 +3643,8 @@ static bool performAutomaticPairing(Config &cfg) {
   Config candidate = cfg;
   candidate.pairing_id = pairingId;
   candidate.pairing_nonce = requestReused ? cfg.pairing_nonce : pairingNonce;
-  candidate.pairing_expires_at_epoch = serverEpoch + static_cast<uint64_t>(expiresValue.as<int32_t>());
+  candidate.pairing_expires_at_epoch = trustedLanPairing ? 0U
+    : serverEpoch + static_cast<uint64_t>(expiresValue.as<int32_t>());
   candidate.pairing_retry_at_epoch = 0U;
   candidate.pairing_retry_attempt = 0U;
   candidate.auth_state = "pairing_pending";
@@ -3648,7 +3652,9 @@ static bool performAutomaticPairing(Config &cfg) {
 #if INKTIME_PHOTOPAINTER_ENABLED
   if (requestPending && validCode) {
     (void)displayPairingScreenSafely(
-      cfg.wifi_ssid.c_str(), "", base.c_str(), pairingCode.c_str());
+      cfg.wifi_ssid.c_str(), "", base.c_str(),
+      trustedLanPairing ? nullptr : pairingCode.c_str(),
+      trustedLanPairing ? "APPROVE IN INKTIME" : "VALID 5 MIN");
   }
 #else
   if (requestPending && validCode) (void)displayPairingCode(cfg, pairingCode);
@@ -7064,11 +7070,23 @@ void setup() {
     startConfigPortal();
   }
 
+  // Explicit physical recovery must remain reachable before enrollment.
+#if INKTIME_PHOTOPAINTER_ENABLED
+  if (explicitRecoveryRequested) {
+    (void)runUsbServiceMode(explicitRecoveryRequested);
+    struct tm recoveryTime = {};
+    bool hasRecoveryTime = getLocalTime(&recoveryTime, 1000);
+    if (!hasRecoveryTime) hasRecoveryTime = syncTime(g_cfg, recoveryTime);
+    sleepUntilNextSchedule(g_cfg, hasRecoveryTime, recoveryTime);
+    return;
+  }
+#endif
+
   // Pairing is a one-time authorization flow, never part of an ordinary
   // credentialed wake.  A revoked/invalid credential may re-enter this flow
   // only after a dedicated authenticated permission probe confirms that the
   // backend has enabled repair; the backend still requires a fresh
-  // short-lived pairing code and administrator approval.
+  // deployment-appropriate enrollment policy and administrator approval.
   bool repairPermission = false;
   if ((g_cfg.auth_state == "auth_invalid" || g_cfg.auth_state == "revoked")
       && pairingRetryDue(g_cfg)) {
@@ -7092,17 +7110,6 @@ void setup() {
     goDeepSleepSeconds(pairingBackoffSeconds(g_cfg));
     return;
   }
-
-#if INKTIME_PHOTOPAINTER_ENABLED
-  if (explicitRecoveryRequested) {
-    (void)runUsbServiceMode(explicitRecoveryRequested);
-    struct tm recoveryTime = {};
-    bool hasRecoveryTime = getLocalTime(&recoveryTime, 1000);
-    if (!hasRecoveryTime) hasRecoveryTime = syncTime(g_cfg, recoveryTime);
-    sleepUntilNextSchedule(g_cfg, hasRecoveryTime, recoveryTime);
-    return;
-  }
-#endif
 
   struct tm timeinfo;
   String wakeOrigin;

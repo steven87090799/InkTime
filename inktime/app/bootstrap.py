@@ -283,7 +283,9 @@ def bootstrap_services(
         }
     )
 
-    device_pairing_service = DevicePairingService(database, secret, secret)
+    device_pairing_service = DevicePairingService(
+        database, secret, secret, trusted_lan=config.trusted_lan_pairing
+    )
     photo_repository = PhotoRepository(database)
     provider_repository = ProviderRepository(database, secret_store)
     scoring_repository = ScoringProfileRepository(database, settings_repository)

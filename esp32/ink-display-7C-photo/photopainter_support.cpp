@@ -801,6 +801,7 @@ bool PhotoPainterSupport::begin() {
     if (pin != kNoPin) pinMode(pin, INPUT);
   }
   if (userButtonWake) {
+    INK_LOG_INFO("key1_woke", "Wake source confirmed as KEY1 GPIO4");
     wokeFromUserButton_ = true;
     delay(30);
     const uint32_t pressedAt = millis();
@@ -1795,12 +1796,20 @@ void PhotoPainterSupport::enableWakeSources() {
   if (board_.buttons.user == kNoPin || !board_.buttons.userActiveLow) return;
   const uint32_t releaseStarted = millis();
   while (digitalRead(board_.buttons.user) == LOW && millis() - releaseStarted < 2000) delay(20);
-  if (digitalRead(board_.buttons.user) == LOW) return;
+  if (digitalRead(board_.buttons.user) == LOW) {
+    INK_LOG_WARN("key1_wake_disabled", "KEY1 remained pressed; timer recovery stays enabled");
+    return;
+  }
   pinMode(board_.buttons.user, INPUT_PULLUP);
-  esp_sleep_enable_ext1_wakeup_io(
+  const esp_err_t wakeResult = esp_sleep_enable_ext1_wakeup_io(
     gpioWakeMask(board_.buttons.user),
     ESP_EXT1_WAKEUP_ANY_LOW
   );
+  if (wakeResult == ESP_OK) {
+    INK_LOG_INFO("key1_wake_ready", "KEY1 EXT1 wake armed");
+  } else {
+    INK_LOG_WARN("key1_wake_failed", "KEY1 EXT1 setup failed; timer recovery stays enabled");
+  }
 }
 
 }  // namespace inktime
