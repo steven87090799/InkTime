@@ -123,7 +123,7 @@ def test_unselected_skipped_is_allowed_in_impact_mode():
     plan = _plan()
     needs = _needs(plan, "ci")
 
-    assert needs["python-compatibility"]["result"] == "skipped"
+    assert "python-compatibility" not in needs
     assert verify_execution(plan, needs, "ci") == []
 
 
