@@ -111,7 +111,7 @@ For ownership boundaries and exact call sites, see the [architecture guide](docs
 
 ## Installation
 
-Docker Engine 24+ and Compose v2 are the documented container baseline. Native Python requires 3.10+; the production image uses Python 3.12. Keep the writable SQLite data directory separate from the read-only photo library. The N100 defaults use one Web worker and bounded analysis concurrency.
+Docker Engine 24+ and Compose v2 are the documented container baseline. Native Python requires 3.12 (`>=3.12,<3.13`), matching the production image. Keep the writable SQLite data directory separate from the read-only photo library. The N100 defaults use one Web worker and bounded analysis concurrency.
 
 ### Production NAS
 
