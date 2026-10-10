@@ -423,7 +423,7 @@ def test_ci_mode_semantics_cover_ready_label_main_and_manual_events():
         resolve_ci_mode(
             {"event_name": "push", "ref": "refs/heads/main", "draft": True}
         )
-        == FULL_MODE
+        == IMPACT_MODE
     )
     assert (
         resolve_ci_mode(

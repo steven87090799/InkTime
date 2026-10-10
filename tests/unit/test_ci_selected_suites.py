@@ -1,10 +1,16 @@
 from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+
+from scripts.ci import run_selected_suites as runner
 
 from scripts.ci.run_selected_suites import (
     RUNNER_SUITE_TEST_PATHS,
     validate_runner_suite_test_paths,
     selected_runner_suites,
     selected_test_paths,
+    shard_test_paths,
 )
 from scripts.ci.test_plan import (
     FULL_EXECUTION_OWNERS,
@@ -69,6 +75,72 @@ def test_directory_mapping_covers_explicit_files_without_repeating_them():
 
     assert suites == ["ci_planner_contracts", "python_application_owner"]
     assert paths == ["tests/unit", "tests/integration/test_application_factory.py"]
+
+
+def test_shards_cover_every_selected_file_exactly_once():
+    _, paths = selected_test_paths(["python_application_owner", "auth_security_owner"])
+    expected = set(shard_test_paths(paths, 1)[0])
+    shards = shard_test_paths(paths, 4)
+    flattened = [path for shard in shards for path in shard]
+
+    assert set(flattened) == expected
+    assert len(flattened) == len(expected)
+    assert all(Path(path).is_file() for path in flattened)
+    assert shard_test_paths(reversed(paths), 4) == shards
+
+
+def test_shards_deduplicate_directory_and_explicit_file_overlap():
+    paths = ["tests/unit", "tests/unit/test_ci_test_plan.py"]
+    flattened = [path for shard in shard_test_paths(paths, 4) for path in shard]
+    assert flattened.count("tests/unit/test_ci_test_plan.py") == 1
+
+
+def test_empty_shard_does_not_fall_back_to_running_all_tests(monkeypatch):
+    monkeypatch.setattr(runner.sys, "argv", [
+        "runner", "--suites-json", '["ci_planner_contracts"]',
+        "--shard-count", "100", "--shard-index", "99",
+    ])
+
+    def unexpected_pytest(*args, **kwargs):
+        raise AssertionError("Empty shard must not invoke pytest without paths")
+
+    monkeypatch.setattr(runner.subprocess, "run", unexpected_pytest)
+    assert runner.main() == 0
+
+
+@pytest.mark.parametrize("count,index", [(0, 0), (-1, 0), (4, -1), (4, 4)])
+def test_invalid_shard_coordinates_fail_closed(monkeypatch, count, index):
+    monkeypatch.setattr(runner.sys, "argv", [
+        "runner", "--suites-json", '["ci_planner_contracts"]',
+        "--shard-count", str(count), "--shard-index", str(index),
+    ])
+    assert runner.main() == 2
+
+
+def test_shard_runner_propagates_test_failure_and_requests_timings(monkeypatch):
+    monkeypatch.setattr(runner.sys, "argv", [
+        "runner", "--suites-json", '["ci_planner_contracts"]',
+        "--junit-xml", "artifacts/test.xml",
+    ])
+    observed = []
+
+    def failed_pytest(command, *, check):
+        observed.extend(command)
+        assert check is False
+        return SimpleNamespace(returncode=1)
+
+    monkeypatch.setattr(runner.subprocess, "run", failed_pytest)
+    assert runner.main() == 1
+    assert "--durations=30" in observed
+    assert "--junitxml=artifacts/test.xml" in observed
+
+
+def test_small_suite_matrix_uses_one_runner(monkeypatch, capsys):
+    monkeypatch.setattr(runner.sys, "argv", [
+        "runner", "--suites-json", '["ci_planner_contracts"]', "--shard-matrix",
+    ])
+    assert runner.main() == 0
+    assert capsys.readouterr().out.strip() == "[0]"
 
 
 def test_unknown_suite_fails_closed():

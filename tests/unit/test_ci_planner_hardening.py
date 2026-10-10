@@ -120,7 +120,7 @@ def _pr_context(*, draft: bool = True, labels: list[str] | None = None) -> dict[
             {"repository_gate", "container_security_gate", "actionlint"},
         ),
         (
-            "main push full",
+            "main push impact",
             ["inktime/app/api/photos.py"],
             {
                 "event_name": "push",
@@ -128,9 +128,9 @@ def _pr_context(*, draft: bool = True, labels: list[str] | None = None) -> dict[
                 "base_sha": "a" * 40,
                 "head_sha": "b" * 40,
             },
-            FULL_MODE,
-            {"python312_unit_security_integration_coverage"},
-            {"repository_gate", "container_security_gate", "actionlint"},
+            IMPACT_MODE,
+            {"python_application_owner", "ruff", "mypy"},
+            {"secret_scan"},
         ),
         (
             "workflow_dispatch full",
