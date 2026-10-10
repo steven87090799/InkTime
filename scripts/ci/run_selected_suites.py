@@ -8,6 +8,7 @@ never silently discard an unknown suite.
 from __future__ import annotations
 
 import argparse
+import ast
 from collections.abc import Iterable, Mapping
 import json
 import subprocess
@@ -309,13 +310,58 @@ def _parse_suites(raw: str) -> list[str]:
     return value
 
 
+def shard_test_paths(test_paths: Iterable[str], shard_count: int) -> list[list[str]]:
+    """Partition whole test files once, preserving module fixture isolation.
+
+    Test counts are a stable workload estimate, not measured runtime. Integration
+    and security tests get extra weight because they commonly create an app/DB.
+    Hosted duration reports allow subsequent tuning without importing tests here.
+    """
+    if shard_count < 1:
+        raise ValueError("shard-count must be positive")
+    files: set[str] = set()
+    for raw_path in test_paths:
+        target = REPOSITORY_ROOT / raw_path
+        candidates = target.rglob("*.py") if target.is_dir() else [target]
+        for candidate in candidates:
+            if candidate.name.startswith("test_") or candidate.name.endswith("_test.py"):
+                files.add(candidate.relative_to(REPOSITORY_ROOT).as_posix())
+    if not files:
+        raise ValueError("Selected test paths contain no test files")
+
+    weighted: list[tuple[int, str]] = []
+    for path in sorted(files):
+        tree = ast.parse((REPOSITORY_ROOT / path).read_text(encoding="utf-8"))
+        tests = sum(
+            isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name.startswith("test_")
+            for node in ast.walk(tree)
+        )
+        multiplier = 10 if path.startswith(("tests/integration/", "tests/security/")) else 1
+        weighted.append((max(1, tests) * multiplier, path))
+
+    shards: list[list[str]] = [[] for _ in range(shard_count)]
+    loads = [0] * shard_count
+    for weight, path in sorted(weighted, key=lambda item: (-item[0], item[1])):
+        index = min(range(shard_count), key=lambda slot: (loads[slot], slot))
+        shards[index].append(path)
+        loads[index] += weight
+    return shards
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--suites-json", required=True)
+    parser.add_argument("--shard-index", type=int, default=0)
+    parser.add_argument("--shard-count", type=int, default=1)
+    parser.add_argument("--junit-xml")
+    parser.add_argument("--shard-matrix", action="store_true")
     args = parser.parse_args()
 
     try:
         selected_suites = _parse_suites(args.suites_json)
+        if not 0 <= args.shard_index < args.shard_count:
+            raise ValueError("shard-index must be in [0, shard-count)")
         runner_suites, test_paths = selected_test_paths(selected_suites)
     except ValueError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
@@ -330,6 +376,9 @@ def main() -> int:
         return 2
 
     if not runner_suites:
+        if args.shard_matrix:
+            print("[0]")
+            return 0
         print("No Tier 1/2 owner regression suites selected; dedicated gates own the rest.")
         return 0
 
@@ -342,11 +391,28 @@ def main() -> int:
         )
         return 2
 
-    print(f"Selected owner suites: {', '.join(runner_suites)}")
-    print(f"Selected pytest paths: {', '.join(test_paths)}")
+    if args.shard_matrix:
+        files = shard_test_paths(test_paths, 1)[0]
+        # Small owner selections stay on one runner; broad diffs use at most four.
+        count = min(4, max(1, (len(files) + 19) // 20))
+        print(json.dumps(list(range(count))))
+        return 0
+    if args.shard_count > 1:
+        test_paths = shard_test_paths(test_paths, args.shard_count)[args.shard_index]
+    print(f"Selected owner suites: {', '.join(runner_suites)}", flush=True)
+    print(f"Shard: {args.shard_index + 1}/{args.shard_count}", flush=True)
+    print(f"Selected pytest paths: {', '.join(test_paths)}", flush=True)
+    if not test_paths:
+        print("Empty shard: selected files are owned by the other shards.")
+        return 0
+    report_args = [f"--junitxml={args.junit_xml}"] if args.junit_xml else []
     # Every pytest path comes from the source-owned mapping and was validated above.
     return subprocess.run(  # noqa: S603
-        [sys.executable, "-m", "pytest", "-m", "not performance", *test_paths], check=False
+        [
+            sys.executable, "-m", "pytest", "-m", "not performance",
+            "--durations=30", *report_args, *test_paths,
+        ],
+        check=False,
     ).returncode
 
 

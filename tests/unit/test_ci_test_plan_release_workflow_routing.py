@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from scripts.ci.canonical_plan import build_canonical_plan
-from scripts.ci.test_plan import FULL_MODE, IMPACT_MODE
+from scripts.ci.test_plan import IMPACT_MODE
 
 
 def _pr_context() -> dict[str, object]:
@@ -55,7 +55,7 @@ def test_release_workflow_alias_is_disabled_for_mixed_runtime_changes():
     assert {"nas_update_e2e", "container_security"} <= set(plan["selected_gates"])
 
 
-def test_release_workflow_main_push_keeps_full_validation():
+def test_release_workflow_main_push_uses_affected_validation():
     plan = build_canonical_plan(
         [".github/workflows/publish-container.yml"],
         {
@@ -66,8 +66,9 @@ def test_release_workflow_main_push_keeps_full_validation():
         },
     )
 
-    assert plan["ci_mode"] == FULL_MODE
-    assert {"nas_update_e2e", "container_security", "repository_gate"} <= set(
+    assert plan["ci_mode"] == IMPACT_MODE
+    assert {"secret_scan", "actionlint"} <= set(
         plan["selected_gates"]
     )
-    assert plan["full_plan_complete"] is True
+    assert "nas_update_e2e" not in plan["selected_gates"]
+    assert plan["full_plan_complete"] is False

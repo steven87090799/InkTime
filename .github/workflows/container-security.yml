@@ -14,7 +14,7 @@ name: InkTime Container Security and Benchmark Contracts
       full_suite:
         description: Run every hosted validation tier
         required: false
-        default: true
+        default: false
         type: boolean
       base_sha:
         description: Optional base commit SHA for manual provenance and diff planning

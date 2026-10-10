@@ -14,7 +14,7 @@ name: InkTime CI
       full_suite:
         description: Run every hosted validation tier
         required: false
-        default: true
+        default: false
         type: boolean
       base_sha:
         description: Optional base commit SHA for manual provenance and diff planning
@@ -45,8 +45,8 @@ jobs:
       run_python_quality: ${{ steps.route.outputs.run_python_quality }}
       run_dependency_policy: ${{ steps.route.outputs.run_dependency_policy }}
       selected_owner_suites: ${{ steps.route.outputs.selected_owner_suites }}
+      owner_shards: ${{ steps.route.outputs.owner_shards }}
       run_python312_full: ${{ steps.route.outputs.run_python312_full }}
-      run_python310: ${{ steps.route.outputs.run_python310 }}
       run_dependency_audit: ${{ steps.route.outputs.run_dependency_audit }}
       run_migration: ${{ steps.route.outputs.run_migration }}
       run_secret_scan: ${{ steps.route.outputs.run_secret_scan }}
@@ -209,7 +209,6 @@ jobs:
             echo "run_dependency_policy=$(has_suite dependency_policy)"
             echo "selected_owner_suites=$(jq -c .selected_owner_suites <<<"${plan_json}")"
             echo "run_python312_full=$(has_gate python312_full)"
-            echo "run_python310=$(has_gate python310_compatibility)"
             echo "run_dependency_audit=$(has_gate dependency_audit)"
             echo "run_migration=$(has_suite migration_owner)"
             echo "run_secret_scan=$(has_gate secret_scan)"
@@ -225,6 +224,7 @@ jobs:
             echo "run_container_security=$(has_gate container_security)"
             echo "run_source_head_contract=$(jq -r .requires_source_head_contract <<<"${plan_json}")"
             echo "firmware_execution_profiles=$(jq -c .firmware_execution_profiles <<<"${plan_json}")"
+            echo "owner_shards=$(python scripts/ci/run_selected_suites.py --suites-json "$(jq -c .selected_test_suites <<<"${plan_json}")" --shard-matrix)"
             echo "full_plan_complete=$(jq -r .full_plan_complete <<<"${plan_json}")"
             echo "no_heavy_impact_duplicates=$(jq -r .no_heavy_impact_duplicates <<<"${plan_json}")"
           } >> "${GITHUB_OUTPUT}"
@@ -338,22 +338,6 @@ jobs:
           --ignore=tests/unit/test_migrations.py
           tests/unit tests/security tests/integration
 
-  python-compatibility:
-    name: Python 3.10 compatibility
-    if: ${{ needs.changes.outputs.full_validation == 'true' && needs.changes.outputs.run_python310 == 'true' }}
-    needs: changes
-    runs-on: ubuntu-latest
-    timeout-minutes: 120
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (Node 24)
-        with: {fetch-depth: 0}
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0 (Node 24)
-        with: {python-version: "3.10", cache: pip}
-      - run: pip install -r requirements-dev.txt
-      - run: >-
-          pytest -m "not performance"
-          tests/unit tests/security tests/integration
-
   dependency-audit:
     name: Dependency policy and audit
     if: ${{ needs.changes.outputs.full_validation == 'true' && needs.changes.outputs.run_dependency_audit == 'true' }}
@@ -410,11 +394,15 @@ jobs:
             rhysd/actionlint@sha256:1d74bfc9fd1963af8f89a7c22afaaafd42f49aad711a09951d02cb996398f61d
 
   selected-owner-suites:
-    name: Selected owner suites
+    name: Selected owner suites (${{ matrix.shard }})
     if: ${{ needs.changes.outputs.full_validation == 'true' && needs.changes.outputs.ci_mode == 'impact' && needs.changes.outputs.selected_owner_suites != '[]' }}
     needs: changes
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON(needs.changes.outputs.owner_shards || '[0]') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (Node 24)
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0 (Node 24)
@@ -423,7 +411,20 @@ jobs:
       - name: Run planner-selected owner regressions
         env:
           SELECTED_TEST_SUITES: ${{ needs.changes.outputs.selected_test_suites }}
-        run: python scripts/ci/run_selected_suites.py --suites-json "${SELECTED_TEST_SUITES}"
+          SHARD_INDEX: ${{ matrix.shard }}
+          SHARD_COUNT: ${{ strategy.job-total }}
+        run: >-
+          python scripts/ci/run_selected_suites.py --suites-json "${SELECTED_TEST_SUITES}"
+          --shard-index "${SHARD_INDEX}" --shard-count "${SHARD_COUNT}"
+          --junit-xml "artifacts/owner-shard-${SHARD_INDEX}.xml"
+      - name: Upload owner timings and results
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: owner-results-${{ github.run_id }}-${{ matrix.shard }}
+          path: artifacts/owner-shard-*.xml
+          if-no-files-found: ignore
+          retention-days: 14
 
   compose-lan-production-persistence:
     if: ${{ needs.changes.outputs.full_validation == 'true' && needs.changes.outputs.run_lan_persistence == 'true' }}
@@ -678,11 +679,6 @@ jobs:
             -o /tmp/inktime-pairing-recovery-core
           /tmp/inktime-pairing-recovery-core
           c++ -std=c++17 -Wall -Wextra -Werror -pedantic \
-            -Iesp32/ink-display-7C-photo \
-            tests/firmware/test_photopainter_core.cpp \
-            -o /tmp/inktime-photopainter-core-default
-          /tmp/inktime-photopainter-core-default
-          c++ -std=c++17 -Wall -Wextra -Werror -pedantic \
             -DDEVICE_PROFILE=DEVICE_PROFILE_WAVESHARE_PHOTOPAINTER \
             -Iesp32/ink-display-7C-photo \
             tests/firmware/test_photopainter_core.cpp \
@@ -705,10 +701,11 @@ jobs:
           /tmp/inktime-ack-journal-storage-budget
 
   esp32-compile:
+    name: PhotoPainter ESP32-S3 release
     if: ${{ needs.changes.outputs.full_validation == 'true' && needs.changes.outputs.run_firmware_compile == 'true' }}
     needs: changes
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (Node 24)
       - name: Install pinned Arduino CLI
@@ -728,58 +725,17 @@ jobs:
       - run: arduino-cli config init
       - run: arduino-cli core update-index && arduino-cli core install esp32:esp32@3.3.10
       - run: arduino-cli lib install GxEPD2@1.6.9 ArduinoJson@7.4.3
-      - name: Compile planner-selected firmware profiles
-        env:
-          FIRMWARE_EXECUTION_PROFILES: ${{ needs.changes.outputs.firmware_execution_profiles }}
+      - name: Compile deployed PhotoPainter release
         run: |
           set -euo pipefail
           sketch_dir="esp32/ink-display-7C-photo"
           trap 'rm -f "${sketch_dir}/partitions.csv"' EXIT
-          select_partition() {
-            cp "${sketch_dir}/$1" "${sketch_dir}/partitions.csv"
-          }
-          mapfile -t profiles < <(jq -r '.quick[], .affected[], .full_matrix[]' <<<"${FIRMWARE_EXECUTION_PROFILES}")
-          test "${#profiles[@]}" -gt 0
-          for profile in "${profiles[@]}"; do
-            case "${profile}" in
-              gdey_release)
-                select_partition inktime_default_4M.csv
-                arduino-cli compile --fqbn 'esp32:esp32:esp32s3:FlashSize=4M' --build-property 'upload.maximum_size=1441792' --build-path /tmp/build-gdey-release esp32/ink-display-7C-photo
-                ;;
-              gdep_release)
-                select_partition inktime_default_4M.csv
-                arduino-cli compile --fqbn 'esp32:esp32:esp32s3:FlashSize=4M' --build-property 'upload.maximum_size=1441792' --build-property 'compiler.cpp.extra_flags=-DINKTIME_PANEL_GDEP073E01=1' --build-path /tmp/build-gdep-release esp32/ink-display-7C-photo
-                ;;
-              photopainter_release)
-                select_partition inktime_photopainter_3M_16MB.csv
-                arduino-cli compile --fqbn 'esp32:esp32:esp32s3:FlashSize=16M,PSRAM=opi,CDCOnBoot=cdc' --build-property 'upload.maximum_size=3145728' --build-property 'compiler.cpp.extra_flags=-DDEVICE_PROFILE=DEVICE_PROFILE_WAVESHARE_PHOTOPAINTER' --build-path /tmp/build-photopainter-release esp32/ink-display-7C-photo
-                ;;
-              trusted_lan_gdey)
-                select_partition inktime_default_4M.csv
-                arduino-cli compile --fqbn 'esp32:esp32:esp32s3:FlashSize=4M' --build-property 'upload.maximum_size=1441792' --build-property 'compiler.cpp.extra_flags=-DINKTIME_ALLOW_INSECURE_DEVICE_HTTP=1' --build-path /tmp/build-trusted-lan-gdey esp32/ink-display-7C-photo
-                ;;
-              trusted_lan_gdep)
-                select_partition inktime_default_4M.csv
-                arduino-cli compile --fqbn 'esp32:esp32:esp32s3:FlashSize=4M' --build-property 'upload.maximum_size=1441792' --build-property 'compiler.cpp.extra_flags=-DINKTIME_PANEL_GDEP073E01=1 -DINKTIME_ALLOW_INSECURE_DEVICE_HTTP=1' --build-path /tmp/build-trusted-lan-gdep esp32/ink-display-7C-photo
-                ;;
-              trusted_lan_photopainter)
-                select_partition inktime_photopainter_3M_16MB.csv
-                arduino-cli compile --fqbn 'esp32:esp32:esp32s3:FlashSize=16M,PSRAM=opi,CDCOnBoot=cdc' --build-property 'upload.maximum_size=3145728' --build-property 'compiler.cpp.extra_flags=-DDEVICE_PROFILE=DEVICE_PROFILE_WAVESHARE_PHOTOPAINTER -DINKTIME_ALLOW_INSECURE_DEVICE_HTTP=1' --build-path /tmp/build-trusted-lan-photopainter esp32/ink-display-7C-photo
-                ;;
-              default_debug)
-                select_partition inktime_default_4M.csv
-                arduino-cli compile --fqbn 'esp32:esp32:esp32s3:FlashSize=4M,DebugLevel=debug' --build-property 'upload.maximum_size=1441792' --build-property 'compiler.cpp.extra_flags=-DINKTIME_DEBUG_LOG=1' --build-path /tmp/build-default-debug esp32/ink-display-7C-photo
-                ;;
-              photopainter_debug)
-                select_partition inktime_photopainter_3M_16MB.csv
-                arduino-cli compile --fqbn 'esp32:esp32:esp32s3:FlashSize=16M,PSRAM=opi,CDCOnBoot=cdc,DebugLevel=debug' --build-property 'upload.maximum_size=3145728' --build-property 'compiler.cpp.extra_flags=-DDEVICE_PROFILE=DEVICE_PROFILE_WAVESHARE_PHOTOPAINTER -DINKTIME_DEBUG_LOG=1' --build-path /tmp/build-photopainter-debug esp32/ink-display-7C-photo
-                ;;
-              *)
-                echo "Unknown planner firmware profile: ${profile}" >&2
-                exit 1
-                ;;
-            esac
-          done
+          cp "${sketch_dir}/inktime_photopainter_3M_16MB.csv" "${sketch_dir}/partitions.csv"
+          arduino-cli compile \
+            --fqbn 'esp32:esp32:esp32s3:FlashSize=16M,PSRAM=opi,CDCOnBoot=cdc' \
+            --build-property 'upload.maximum_size=3145728' \
+            --build-property 'compiler.cpp.extra_flags=-DDEVICE_PROFILE=DEVICE_PROFILE_WAVESHARE_PHOTOPAINTER' \
+            --build-path /tmp/build-photopainter-release "${sketch_dir}"
       - name: Prepare app-only PhotoPainter artifact
         if: ${{ contains(needs.changes.outputs.firmware_execution_profiles, 'photopainter_release') }}
         env:
@@ -803,15 +759,11 @@ jobs:
           output="${RUNNER_TEMP}/photopainter-app-only"
           mkdir -p "${output}"
           cp "${app}" "${output}/app.bin"
-          # Retain the exact symbols from this build for physical panic decoding.
-          # ELF/map are diagnostic files; app.bin remains the only flash payload.
           elf="${app%.bin}.elf"
           test -s "${elf}"
           cp "${elf}" "${output}/app.elf"
           map="${app%.bin}.map"
-          if [ -s "${map}" ]; then
-            cp "${map}" "${output}/app.map"
-          fi
+          if [ -s "${map}" ]; then cp "${map}" "${output}/app.map"; fi
           (
             cd "${output}"
             sha256sum app.bin app.elf > SHA256SUMS
@@ -846,7 +798,6 @@ jobs:
       - actionlint
       - selected-owner-suites
       - python-quality
-      - python-compatibility
       - dependency-audit
       - migration-contract
       - compose-lan-production-persistence

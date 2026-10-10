@@ -122,7 +122,7 @@ def test_device_api_is_also_a_server_firmware_host_contract():
     assert "firmware_host_contract_tests" in plan["selected_test_suites"]
     assert "firmware_host_contract" in plan["expensive_gates"]
     assert "firmware_quick" in plan["expensive_gates"]
-    assert "firmware_affected" in plan["expensive_gates"]
+    assert "firmware_affected" not in plan["expensive_gates"]
     assert plan["firmware_execution_profiles"] == {
         "quick": ["photopainter_release"],
         "affected": [
@@ -207,12 +207,12 @@ def test_production_tls_smoke_remains_tls_only():
     assert plan["expensive_gates"] == ["tls_smoke"]
 
 
-def test_pyproject_routes_python310_compatibility_without_container_security():
+def test_pyproject_routes_deployed_python_policy_without_compatibility_rerun():
     plan = build_test_plan(["pyproject.toml"], draft_context())
 
     assert plan["changed_domains"] == ["dev_dependencies"]
     assert {"dependency_policy", "ruff", "mypy"} <= set(plan["selected_test_suites"])
-    assert "python310_compatibility" in plan["expensive_gates"]
+    assert "python310_compatibility" not in plan["expensive_gates"]
     assert "container_security" not in plan["expensive_gates"]
 
 
@@ -423,7 +423,7 @@ def test_ci_mode_semantics_cover_ready_label_main_and_manual_events():
         resolve_ci_mode(
             {"event_name": "push", "ref": "refs/heads/main", "draft": True}
         )
-        == FULL_MODE
+        == IMPACT_MODE
     )
     assert (
         resolve_ci_mode(
@@ -482,16 +482,12 @@ def test_firmware_impact_reports_profile_specific_selection_and_shared_surface()
         ["esp32/ink-display-7C-photo/hardware_profile.h"], draft_context()
     )
 
-    assert photopainter["affected_firmware_profiles"] == [
-        "photopainter_release",
-        "trusted_lan_photopainter",
-        "photopainter_debug",
-    ]
+    assert photopainter["affected_firmware_profiles"] == ["photopainter_release"]
     assert "firmware_quick" in photopainter["expensive_gates"]
-    assert "firmware_affected" in photopainter["expensive_gates"]
+    assert "firmware_affected" not in photopainter["expensive_gates"]
     assert photopainter["firmware_execution_profiles"] == {
         "quick": ["photopainter_release"],
-        "affected": ["trusted_lan_photopainter", "photopainter_debug"],
+        "affected": [],
         "full_matrix": [],
     }
     assert shared["affected_firmware_profiles"] == list(FULL_FIRMWARE_PROFILES)
@@ -499,6 +495,7 @@ def test_firmware_impact_reports_profile_specific_selection_and_shared_surface()
 
 
 def test_full_mode_selects_all_supported_firmware_profiles_and_tier_zero():
+    assert FULL_FIRMWARE_PROFILES == ("photopainter_release",)
     plan = build_test_plan(["README.md"], draft_context(labels=["full-ci"]))
 
     assert plan["firmware_profile_mode"] == "full"

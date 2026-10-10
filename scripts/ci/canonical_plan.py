@@ -63,7 +63,7 @@ def _planning_paths(paths: Iterable[str]) -> tuple[list[str], list[str]]:
     The alias is intentionally exact: any additional changed path disables it,
     so mixed release-workflow + runtime/container/NAS changes retain the full
     source-owned impact routing from ``test_plan.py``. Full-mode events such as
-    main pushes and ``full-ci`` requests remain full because mode selection is
+    manual full-suite and ``full-ci`` requests remain full because mode selection is
     driven by event context after the alias is applied.
     """
 

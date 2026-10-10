@@ -746,7 +746,7 @@ docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build
 
 ## 原生安裝與相容 CLI
 
-需求為 Python 3.10+（正式映像使用 Python 3.12）：
+需求為 Python 3.12（套件支援 `>=3.12,<3.13`，與正式映像一致）：
 
 ```bash
 python3 -m venv .venv

@@ -5,7 +5,6 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 FIRMWARE = ROOT / "esp32/ink-display-7C-photo/ink-display-7C-photo.ino"
-PARTITION_DEFAULT = ROOT / "esp32/ink-display-7C-photo/inktime_default_4M.csv"
 PARTITION_PHOTOPAINTER = ROOT / "esp32/ink-display-7C-photo/inktime_photopainter_3M_16MB.csv"
 SUPPORT = ROOT / "esp32/ink-display-7C-photo/photopainter_support.cpp"
 SUPPORT_HEADER = ROOT / "esp32/ink-display-7C-photo/photopainter_support.h"
@@ -345,9 +344,8 @@ def test_queue_ack_journal_partition_budget_is_source_owned_and_selected_by_ci()
     def partition_offset(path: Path, name: str) -> int:
         return int(partition_row(path, name)[3], 16)
 
-    assert partition_size(PARTITION_DEFAULT, "nvs") == 0x80000
     assert partition_size(PARTITION_PHOTOPAINTER, "nvs") == 0x80000
-    for path in (PARTITION_DEFAULT, PARTITION_PHOTOPAINTER):
+    for path in (PARTITION_PHOTOPAINTER,):
         assert partition_offset(path, "otadata") == 0xE000
         assert partition_size(path, "otadata") == 0x2000
         assert partition_offset(path, "app0") == 0x10000
@@ -357,33 +355,23 @@ def test_queue_ack_journal_partition_budget_is_source_owned_and_selected_by_ci()
         assert partition_offset(path, "nvs") == (
             partition_offset(path, "app1") + partition_size(path, "app1")
         )
-    assert partition_size(PARTITION_DEFAULT, "app0") == 0x160000
-    assert partition_offset(PARTITION_DEFAULT, "app1") == 0x170000
-    assert partition_size(PARTITION_DEFAULT, "app1") == 0x160000
-    assert partition_offset(PARTITION_DEFAULT, "nvs") == 0x2D0000
-    assert partition_offset(PARTITION_DEFAULT, "spiffs") == 0x350000
-    assert partition_size(PARTITION_DEFAULT, "spiffs") == 0xB0000
+    assert partition_size(PARTITION_PHOTOPAINTER, "app0") == 0x300000
+    assert partition_size(PARTITION_PHOTOPAINTER, "app1") == 0x300000
     assert partition_offset(PARTITION_PHOTOPAINTER, "app1") == 0x310000
     assert partition_offset(PARTITION_PHOTOPAINTER, "nvs") == 0x610000
     assert partition_offset(PARTITION_PHOTOPAINTER, "fat") == 0x690000
     workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
     docs = (ROOT / "docs/devices/WAVESHARE_PHOTOPAINTER_ZH_TW.md").read_text(encoding="utf-8")
-    guide = (ROOT / "docs/devices/ESP32_GUIDE_ZH_TW.md").read_text(encoding="utf-8")
     for marker in (
-        "inktime_default_4M.csv",
         "inktime_photopainter_3M_16MB.csv",
         "partitions.csv",
     ):
-        assert marker in workflow or marker in docs
-    assert "select_partition()" in workflow
-    assert "automatically selects `partitions.csv`" in guide
-    assert "FlashSize=4M" in workflow
+        assert marker in workflow
+    assert 'cp "${sketch_dir}/inktime_photopainter_3M_16MB.csv" "${sketch_dir}/partitions.csv"' in workflow
+    assert "FlashSize=4M" not in workflow
     assert "FlashSize=16M,PSRAM=opi,CDCOnBoot=cdc" in workflow
-    assert workflow.count("upload.maximum_size=1441792") == 5
-    assert workflow.count("upload.maximum_size=3145728") == 3
-    assert guide.count("upload.maximum_size=1441792") == 3
-    assert docs.count("upload.maximum_size=1441792") == 1
-    assert docs.count("upload.maximum_size=3145728") == 2
+    assert "upload.maximum_size=1441792" not in workflow
+    assert workflow.count("upload.maximum_size=3145728") == 1
     assert "PartitionScheme=app3M_fat9M_16MB" not in workflow
     assert "PartitionScheme=app3M_fat9M_16MB" not in docs
     assert "PartitionScheme=inktime_default_4M" not in workflow

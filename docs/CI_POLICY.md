@@ -6,15 +6,21 @@ InkTime CI uses the existing source-owned path/domain planner in [`scripts/ci/te
 
 ## Impact mode and full mode
 
-Pull request validation uses impact mode by default, including Ready pull requests. The planner classifies changed paths into production domains, owner suites, and expensive gates, then selects the smallest affected validation set. Unknown repository paths fail open to full mode, and a production domain without an owner suite also fails open.
+Pull requests (including Ready pull requests) and main pushes use impact mode by default. Main pushes classify the actual pushed diff using the event's before SHA. The planner selects affected production domains, owner suites, and expensive gates. Unknown repository paths and a production domain without an owner suite still escalate to full mode.
 
 Full mode is selected when any of these are true:
 
 - the pull request has the `full-ci` label;
-- `workflow_dispatch` uses `full_suite=true`;
-- a push targets `refs/heads/main`.
+- `workflow_dispatch` uses `full_suite=true` (the default is false).
 
-Full mode includes Tier 0, the complete owner-suite plan, Python 3.12 coverage at 80%, Python 3.10 compatibility, dependency policy and audit, migrations, secret scan, actionlint, Docker LAN production persistence, TLS production smoke, bounded runtime soak, Playwright, firmware host contracts and the complete firmware profile matrix, container security, offline benchmark, and both aggregate gates. Equivalent impact-only heavy jobs are not run again in full mode. Actionlint is a full-mode invariant even when the diff itself is not a workflow/configuration change.
+Use the `full-ci` label before release or select `full_suite=true` in **both**
+the CI and Container Security workflows when manually requesting complete
+validation. The global Python 3.12 coverage threshold remains in full mode.
+There is no separate Python 3.10 compatibility run. Routine main pushes no longer repeat
+that complete plan automatically. Unknown-path, owner-gap and explicit
+full-only regression fallbacks remain conservative.
+
+Full mode includes Tier 0, the complete owner-suite plan, Python 3.12 coverage at 80%, dependency policy and audit, migrations, secret scan, actionlint, Docker LAN production persistence, TLS production smoke, bounded runtime soak, Playwright, firmware host contracts and the deployed PhotoPainter release, container security, offline benchmark, and both aggregate gates. Equivalent impact-only heavy jobs are not run again in full mode. Actionlint is a full-mode invariant even when the diff itself is not a workflow/configuration change.
 
 The planner's full-mode execution registry maps every `FULL_PLAN_SUITES` entry to a real full-mode job. `docs_contract` remains a documentation classification marker for routing, while each full-validation `changes` job runs [`scripts/ci/validate_ai_navigation.py`](../scripts/ci/validate_ai_navigation.py) after checkout. That contract validates the machine-readable AI index, its paths and test globs, the large-file policy, and the required navigation links.
 
@@ -59,7 +65,7 @@ That job proves the checked-out commit equals `SOURCE_HEAD_SHA`. It does not dup
 
 - **Tier 0:** changed-path classification, planner contracts, secret scan, and patch-format validation. Ruff and mypy are added for Python/configuration changes and always run in full mode. Dependency policy is required for dependency changes and full mode. Actionlint runs for CI/workflow configuration in impact mode and for every full run.
 - **Tier 1/2:** source-owned Python, web, authentication, runtime, queue, persistence, migration, backup/restore, device, rendering, scanner, notification, settings, provider, Docker, TLS, firmware, and benchmark owner suites.
-- **Tier 3:** only affected expensive gates run in impact mode. Firmware uses the PhotoPainter release as the quick profile and expands to affected profiles for shared firmware surfaces.
+- **Tier 3:** only affected expensive gates run in impact mode. Firmware compiles only the deployed PhotoPainter release, including when shared firmware surfaces change.
 - **Tier 4:** full mode runs the complete pre-merge validation set and preserves the existing global coverage threshold.
 
 The 100,000-row cases marked `performance` are excluded from the ordinary
@@ -77,7 +83,14 @@ The deployment preflight script is a cross-boundary surface: `scripts/production
 
 ## Python support policy
 
-`pyproject.toml` is a Python 3.10/package-metadata contract in addition to a development-tooling surface. Dependency policy parses `[project].requires-python` with `packaging.specifiers.SpecifierSet` and verifies that `packaging.version.Version("3.10")` is actually accepted. Text-prefix checks such as `startswith(">=3.10")` are not sufficient because exclusions and contradictory upper bounds can invalidate Python 3.10 support. `packaging` is an exact-pinned development dependency under the repository dependency policy.
+The deployed Docker images use Python 3.12. Package metadata now targets
+`>=3.12,<3.13`, and Ruff/mypy also target 3.12. Dependency policy checks the
+PEP 440 specifier semantically: it must accept 3.12 while excluding 3.11 and
+3.13. There is no second complete test run for Python 3.10, even in full mode.
+This narrows supported package installations to the deployed minor version;
+other Python versions are no longer advertised or validated. Python 3.12
+owner regressions and optional full coverage still protect deployed behavior.
+
 
 ## Routing and debugging
 
@@ -92,6 +105,69 @@ python3 scripts/ci/canonical_plan.py --event-name pull_request --ref refs/pull/1
 
 Check `ci_mode`, `unknown_paths`, `owner_suite_gaps`, `full_only_test_paths`, `selected_test_suites`, `selected_owner_suites`, `selected_gates`, `skipped_gates`, `suite_execution_gaps`, `full_suite_execution_gaps`, `full_plan_complete`, `no_heavy_impact_duplicates`, `requires_source_head_contract`, and provenance. A selected job that is skipped, failed, cancelled, missing, or unknown fails its aggregate gate with the execution ID and job name; only unselected skipped jobs are accepted. A full PR run is merge-ref validation and must be judged from the current PR event and its reported provenance, not described as direct source-head execution.
 
-The full suite is not run on every pull-request event because impact validation is intended to give fast, affected feedback while retaining secret, routing, static checks for changed Python surfaces, and relevant production-boundary checks. Full mode remains available through the explicit label, manual dispatch, unknown/owner-gap fail-open rules, and main push. Routine agents must still follow `AGENTS.md` and must not dispatch, rerun or poll to manufacture a green result.
+The full suite is not run on every pull-request event or main push because impact validation is intended to give fast, affected feedback while retaining secret, routing, static checks for changed Python surfaces, and relevant production-boundary checks. Full mode remains available through the explicit label, manual dispatch, and conservative fallback rules. Routine agents must still follow `AGENTS.md` and must not dispatch, rerun or poll to manufacture a green result.
+
+## Execution time and optional long checks
+
+In successful PR run [37963174961](https://github.com/steven87090799/InkTime/actions/runs/37963174961),
+selected owner regressions ran 2,591 tests in 38m11s on a single runner.
+The eight selected firmware profiles compiled sequentially in 14m31s, plus
+about one minute of toolchain setup. These jobs ran concurrently; the Python
+job determined the approximately 39-minute elapsed time. NAS update E2E,
+TLS, Playwright and bounded soak each finished in roughly one to two minutes.
+The log did not report individual test durations, so it does not identify
+which fixtures or test cases consumed those 38 minutes.
+
+The latest successful main run
+[36381532512](https://github.com/steven87090799/InkTime/actions/runs/36381532512)
+took 76m15s overall. Its Python 3.12 full-test/coverage job took 75m54s,
+and Python 3.10 compatibility took 40m59s concurrently. These execute the
+complete unit/security/integration set; coverage adds instrumentation. Their
+per-test costs were not reported. Keeping this complete plan behind explicit
+full validation removes substantial repeated work from routine main pushes;
+an explicitly requested full run can still take this long.
+
+The selected-suite runner now partitions whole test files across up to four
+isolated runners. At most 20 selected files use one runner; broader selections
+use up to four. Greedy balancing estimates workload from test-function counts,
+with extra weight for integration/security files. It does not execute/import
+tests while planning and is not a measured-runtime guarantee. A file belongs
+to exactly one shard, so module fixtures retain their original scope. Every
+shard reports its slowest 30 test phases and uploads JUnit timing/results.
+Very large individual files can still dominate and should be tuned using
+those hosted measurements.
+
+Firmware CI now compiles exactly `photopainter_release`: Waveshare
+PhotoPainter Rev2.0, ESP32-S3, 16 MiB Flash, 8 MiB OPI PSRAM, USB CDC, and the
+repository's `inktime_photopainter_3M_16MB.csv` partition table. Both impact and
+full planning have the same singleton profile inventory. GDEY/GDEP 4 MiB,
+separate trusted-LAN builds and Debug builds are no longer compiled. The
+PhotoPainter release already supports strictly checked private-IPv4 LAN HTTP
+as well as trusted HTTPS, so its extra trusted-LAN variant was redundant.
+The host Config/ACK/queue tests remain relevant; the duplicate default-board
+PhotoPainter core run is removed. Source for other boards remains intact.
+
+Selected owner tests still use a bounded matrix and fail-closed aggregate
+attestation. Parallelism reduces elapsed time rather than computation;
+removing seven unrelated firmware builds and the Python 3.10 full run also
+reduces total runner work. The old full-run measurements above describe the
+previous eight-profile/two-Python configuration, not the narrowed plan.
+
+
+Long-duration runtime soak is already isolated in `runtime-soak.yml` and is
+manual-only: 30 minutes, two hours (default), or five hours. It is not part of
+ordinary PR CI. `nightly-performance.yml` runs the 100,000-row scale checks
+on its weekly schedule or by manual dispatch; its 60-minute timeout is a
+ceiling, not evidence that every run takes an hour. The short bounded soak
+and small regressions remain selected when their owning production paths
+change. Keep authentication, persistence, update preservation and affected
+firmware compatibility checks rather than skipping them solely to show green.
+
+The latest scheduled performance run
+[37236630074](https://github.com/steven87090799/InkTime/actions/runs/37236630074)
+failed in about a minute: the unchanged-scan regression observed zero cached
+photos instead of 10,000/100,000. It is separate from the PR wait and does not
+currently establish successful scale acceptance. Scanner/fixture diagnosis
+is a separate repair from this CI scheduling change.
 
 Every source commit pushed to a pull request branch triggers validation through `synchronize`. Changing a Draft pull request to Ready for review triggers both workflows through `ready_for_review`; the planner keeps the unchanged source HEAD on impact mode and refreshes both required aggregate gates without starting the full suite. A full pre-merge run can be requested with the `full-ci` label or `workflow_dispatch` with `full_suite=true`. Base retargets and title/body edits are covered by `edited` and run the same planner-selected impact validation. Every run publishes the fixed `Repository gate` and `Container security gate` identities after execution attestation. Metadata-only runs with alternate gate names left the required checks Expected on PR #132 despite earlier successful runs, so they are no longer emitted. The `full_validation` event output enables planning and attestation; it does not force the full test suite. Required aggregate gates, strict branch protection, and fail-closed revalidation remain unchanged.
