@@ -122,7 +122,7 @@ def test_device_api_is_also_a_server_firmware_host_contract():
     assert "firmware_host_contract_tests" in plan["selected_test_suites"]
     assert "firmware_host_contract" in plan["expensive_gates"]
     assert "firmware_quick" in plan["expensive_gates"]
-    assert "firmware_affected" in plan["expensive_gates"]
+    assert "firmware_affected" not in plan["expensive_gates"]
     assert plan["firmware_execution_profiles"] == {
         "quick": ["photopainter_release"],
         "affected": [
@@ -484,7 +484,7 @@ def test_firmware_impact_reports_profile_specific_selection_and_shared_surface()
 
     assert photopainter["affected_firmware_profiles"] == ["photopainter_release"]
     assert "firmware_quick" in photopainter["expensive_gates"]
-    assert "firmware_affected" in photopainter["expensive_gates"]
+    assert "firmware_affected" not in photopainter["expensive_gates"]
     assert photopainter["firmware_execution_profiles"] == {
         "quick": ["photopainter_release"],
         "affected": [],

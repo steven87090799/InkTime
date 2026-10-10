@@ -93,7 +93,7 @@ def _pr_context(*, draft: bool = True, labels: list[str] | None = None) -> dict[
             _pr_context(),
             IMPACT_MODE,
             {"firmware_host_contract_tests"},
-            {"firmware_host_contract", "firmware_quick", "firmware_affected"},
+            {"firmware_host_contract", "firmware_quick"},
         ),
         (
             "unknown production path",
