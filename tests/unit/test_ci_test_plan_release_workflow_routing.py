@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from scripts.ci.canonical_plan import build_canonical_plan
-from scripts.ci.test_plan import FULL_MODE, IMPACT_MODE
+from scripts.ci.test_plan import IMPACT_MODE
 
 
 def _pr_context() -> dict[str, object]:
