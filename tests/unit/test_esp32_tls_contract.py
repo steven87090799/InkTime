@@ -134,7 +134,7 @@ def test_ap_password_is_eight_random_digits_and_shared_by_every_surface():
     assert "String apPassword = randomApPassword();" in portal
     assert "portalApPassword = apPassword;" in portal
     assert "WiFi.softAP(apSsid.c_str(), apPassword.c_str())" in portal
-    assert "displayPairingScreen(\n      apSsid.c_str(), apPassword.c_str()" in portal
+    assert "displayPairingScreenSafely(\n      apSsid.c_str(), apPassword.c_str()" in portal
     assert "htmlEscape(portalApPassword)" in firmware
     assert "INK_LOG_INFO(\"pairing_display_ready\", apPassword" not in firmware
     assert "INK_LOG_ERROR(\"pairing_display_failed\", apPassword" not in firmware
@@ -220,8 +220,13 @@ def test_display_record_is_atomic_and_interrupted_refresh_cannot_skip():
     assert "blob.crc != inktime::crc32" in load
     assert "return canonical;" in load
     draw = firmware[firmware.index("bool drawFromFrameData(") :]
-    assert draw.index('prefs.putBool("disp_pending", true)') < draw.index("photoPainter.displayFrame(")
-    assert "if (!protectedAttempt)" in draw
+    marker = firmware[firmware.index("static bool beginPanelMutation()") : firmware.index("static void saveDisplayRecord(")]
+    assert 'prefs.putBool("disp_pending", true)' in marker
+    assert 'const bool verified = written > 0U && prefs.getBool("disp_pending", false);' in marker
+    assert "return verified;" in marker
+    assert draw.index("if (!beginPanelMutation()) return false;") < draw.index("photoPainter.displayFrame(")
+    pairing = marker[marker.index("static bool displayPairingScreenSafely(") :]
+    assert "return beginPanelMutation() && photoPainter.displayPairingScreen(" in pairing
     skip = firmware[firmware.index("static bool shouldSkipCurrentDisplay(") :]
     assert skip.index("if (pending) return false;") < skip.index("loadDisplayRecord()")
 

@@ -425,6 +425,20 @@ class BackupService:
             safety_copy = self._snapshot_current()
             for suffix in ("-wal", "-shm"):
                 Path(f"{self.database.path}{suffix}").unlink(missing_ok=True)
+            # Fence new paid work before the database swap, including exact snapshots.
+            guard = self.database.path.with_suffix(self.database.path.suffix + ".paid-reconciliation-required")
+            with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=guard.parent,
+                                             prefix=".paid-restore-", delete=False) as handle:
+                guard_temporary = Path(handle.name)
+                json.dump({"restored_at": datetime.now(timezone.utc).isoformat(),
+                           "requires_external_billing_reconciliation": True}, handle)
+                handle.flush()
+                os.fsync(handle.fileno())
+            try:
+                os.replace(guard_temporary, guard)
+                _fsync_directory(guard.parent)
+            finally:
+                guard_temporary.unlink(missing_ok=True)
             os.replace(staged, self.database.path)
             replaced = True
             _fsync_directory(self.database.path.parent)

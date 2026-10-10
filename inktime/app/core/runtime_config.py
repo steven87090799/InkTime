@@ -2,8 +2,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import os
+from ipaddress import IPv4Address, IPv4Network
 from pathlib import Path
 from typing import Mapping
+from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 
@@ -72,6 +74,25 @@ class RuntimeConfig:
     public_url: str = "http://127.0.0.1"
     allow_insecure_http: bool = False
     allow_unsafe_network_database: bool = False
+
+    @property
+    def trusted_lan_pairing(self) -> bool:
+        """Only an explicit RFC1918 origin without a trusted proxy relaxes enrollment."""
+        if self.proxy_trust != 0:
+            return False
+        try:
+            origin = urlsplit(self.public_url)
+            address = IPv4Address(origin.hostname or "")
+        except ValueError:
+            return False
+        return (
+            origin.scheme in {"http", "https"}
+            and origin.username is None and origin.password is None
+            and not origin.query and not origin.fragment
+            and origin.path in {"", "/"}
+            and any(address in IPv4Network(network) for network in
+                    ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"))
+        )
 
     def __post_init__(self) -> None:
         environment = self.environment.strip().casefold()

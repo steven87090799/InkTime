@@ -2886,20 +2886,22 @@ class RenderService:
             )
 
     def rollback(self, release_id: str) -> None:
-        with self.database.session() as connection:
-            row = connection.execute(
-                "SELECT render_profile,reconciliation_status FROM releases WHERE id=?", (release_id,)
-            ).fetchone()
-        if row is None:
-            raise KeyError(release_id)
-        if str(row["reconciliation_status"]) == "payload_pruned":
-            raise ValueError("RENDER-012 Release Payload 已依保留政策移除，不能回滾")
-        self.publisher.rollback(release_id)
-        with self.database.session() as connection:
-            connection.execute(
-                """
-                UPDATE releases SET status=CASE WHEN id=? THEN 'published' ELSE 'superseded' END
-                WHERE render_profile=?
-                """,
-                (release_id, row["render_profile"]),
-            )
+        from inktime.app.domain.rendering.release import release_metadata_guard
+        with release_metadata_guard(self.publisher.root):
+            with self.database.session() as connection:
+                row = connection.execute(
+                    "SELECT render_profile,reconciliation_status FROM releases WHERE id=?", (release_id,)
+                ).fetchone()
+            if row is None:
+                raise KeyError(release_id)
+            if str(row["reconciliation_status"]) == "payload_pruned":
+                raise ValueError("RENDER-012 Release Payload 已依保留政策移除，不能回滾")
+            self.publisher.rollback(release_id)
+            with self.database.session() as connection:
+                connection.execute(
+                    """
+                    UPDATE releases SET status=CASE WHEN id=? THEN 'published' ELSE 'superseded' END
+                    WHERE render_profile=?
+                    """,
+                    (release_id, row["render_profile"]),
+                )

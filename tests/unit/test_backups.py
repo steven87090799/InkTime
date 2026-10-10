@@ -162,6 +162,7 @@ def test_backup_excludes_secrets_and_restores_analysis_and_photo_state(tmp_path)
         )
     seed(database, extra_photo=True)
     restored = service.restore(archive)
+    assert database.path.with_suffix(database.path.suffix + ".paid-reconciliation-required").exists()
 
     assert restored["schema_version"] == CURRENT_SCHEMA_VERSION
     assert Path(restored["safety_copy"]).is_file()

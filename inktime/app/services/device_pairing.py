@@ -34,6 +34,7 @@ from inktime.app.domain.photopainter.offline_schedule import (
 
 
 PAIRING_TTL = timedelta(minutes=5)
+LAN_PAIRING_TTL = timedelta(days=1)
 PAIRING_POLL_SECONDS = 3
 PAIRING_POLL_WINDOW = timedelta(seconds=30)
 PAIRING_CODE_ATTEMPT_LIMIT = 5
@@ -71,11 +72,23 @@ class DevicePairingService:
     authenticated the explicit confirm call.
     """
 
-    def __init__(self, database: Database, pepper: str, master_secret: str) -> None:
+    def __init__(self, database: Database, pepper: str, master_secret: str, *, trusted_lan: bool = False) -> None:
         self.database = database
+        self.trusted_lan = trusted_lan
         self.pepper = pepper
         key = urlsafe_b64encode(hashlib.sha256(master_secret.encode("utf-8")).digest())
         self._credential_envelope_cipher = Fernet(key)
+
+    @staticmethod
+    def _stored_lan_request(row) -> bool:
+        try:
+            capabilities = json.loads(str(row["capabilities_json"] or "{}"))
+        except (TypeError, ValueError):
+            return False
+        return isinstance(capabilities, dict) and capabilities.get("_enrollment_mode") == "trusted_lan"
+
+    def _lan_request(self, row) -> bool:
+        return self.trusted_lan and self._stored_lan_request(row)
 
     @staticmethod
     def _now() -> datetime:
@@ -385,12 +398,22 @@ class DevicePairingService:
         now_iso = self._iso(now)
         rows = connection.execute(
             """
-            SELECT id,device_id,status FROM device_pairing_requests
+            SELECT id,device_id,status,capabilities_json FROM device_pairing_requests
             WHERE status IN ('pending','approved','credential_issued')
               AND (expires_at<=? OR (status='credential_issued' AND credential_envelope_expires_at<=?))
             """,
             (now_iso, now_iso),
         ).fetchall()
+        if not self.trusted_lan:
+            # Moving a LAN installation behind a public origin must invalidate
+            # unconfirmed requests created under the relaxed policy.
+            active = connection.execute(
+                "SELECT id,device_id,status,capabilities_json FROM device_pairing_requests "
+                "WHERE status IN ('pending','approved','credential_issued')"
+            ).fetchall()
+            expired_ids = {row["id"] for row in rows}
+            rows = list(rows) + [row for row in active
+                                 if row["id"] not in expired_ids and self._stored_lan_request(row)]
         for row in rows:
             connection.execute(
                 """
@@ -437,9 +460,15 @@ class DevicePairingService:
         panel_profile = self._validate_text(payload.get("panel_profile"), "panel_profile", 128)
         device_name = self._validate_text(payload.get("device_name"), "device_name", 100)
         capabilities_json = self._capabilities(payload.get("capabilities", {}))
+        capabilities = json.loads(capabilities_json)
+        lan_request = self.trusted_lan and capabilities.get("trusted_lan_pairing") is True
+        # This marker belongs to the server; never trust a client-supplied value.
+        capabilities["_enrollment_mode"] = "trusted_lan" if lan_request else "physical_code"
+        capabilities_json = json.dumps(capabilities, separators=(",", ":"))
         maximum_slots = self._capability_max_slots(capabilities_json)
+        ttl = LAN_PAIRING_TTL if lan_request else PAIRING_TTL
         now = self._now()
-        expires = now + PAIRING_TTL
+        expires = now + ttl
         nonce_hash = self._nonce_hash(pairing_nonce)
         with self.database.transaction() as connection:
             self._expire_requests(connection, now)
@@ -453,7 +482,8 @@ class DevicePairingService:
                         "pairing_id": str(existing_request["id"]),
                         "device_id": device_id,
                         "pairing_code": self._pairing_display_code(pairing_nonce),
-                        "expires_in_seconds": min(remaining, int(PAIRING_TTL.total_seconds())),
+                        "expires_in_seconds": min(remaining, int((LAN_PAIRING_TTL if self._lan_request(existing_request) else PAIRING_TTL).total_seconds())),
+                        "pairing_mode": "trusted_lan" if self._lan_request(existing_request) else "physical_code",
                         "server_epoch": int(now.timestamp()),
                         "poll_after_seconds": PAIRING_POLL_SECONDS,
                         "request_reused": True,
@@ -578,7 +608,8 @@ class DevicePairingService:
                     "pairing_id": pairing_id,
                     "device_id": device_id,
                     "pairing_code": pairing_code,
-                    "expires_in_seconds": int(PAIRING_TTL.total_seconds()),
+                    "expires_in_seconds": int(ttl.total_seconds()),
+                    "pairing_mode": "trusted_lan" if lan_request else "physical_code",
                     "server_epoch": int(now.timestamp()),
                     "poll_after_seconds": PAIRING_POLL_SECONDS,
                 }
@@ -623,7 +654,7 @@ class DevicePairingService:
                 device_id=device_id if device is not None else None,
                 source_id=f"{pairing_id}:requested",
                 event="pairing_requested",
-                message="裝置已提出短效自動配對請求",
+                message="裝置已提出自動配對請求",
             )
         # The code is returned only to the requesting device.  It is never
         # persisted reversibly, included in audit data, or sent to the admin UI.
@@ -632,7 +663,8 @@ class DevicePairingService:
             "pairing_id": pairing_id,
             "device_id": device_id,
             "pairing_code": pairing_code,
-            "expires_in_seconds": int(PAIRING_TTL.total_seconds()),
+            "expires_in_seconds": int(ttl.total_seconds()),
+            "pairing_mode": "trusted_lan" if lan_request else "physical_code",
             "server_epoch": int(now.timestamp()),
             "poll_after_seconds": PAIRING_POLL_SECONDS,
         }
@@ -668,6 +700,7 @@ class DevicePairingService:
             result.append(
                 {
                     "pairing_id": str(row["id"]),
+                    "code_required": not self._lan_request(row),
                     "device_id": device_id,
                     "device_id_display": f"{device_id[:8]}…{device_id[-6:]}" if len(device_id) > 16 else device_id,
                     "device_name": str(config.get("name") or row["device_name"] or ""),
@@ -693,15 +726,12 @@ class DevicePairingService:
     def approve(
         self,
         pairing_id: str,
-        pairing_code: str,
+        pairing_code: str | None,
         *,
         administrator_id: str,
         device_config: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         pairing_id = self._validate_text(pairing_id, "pairing_id", 128, required=True)
-        pairing_code = self._validate_text(pairing_code, "pairing_code", 6, required=True)
-        if not PAIRING_CODE_PATTERN.fullmatch(pairing_code):
-            raise DevicePairingError("配對碼格式不合法", error_code="PAIR-005")
         now = self._now()
         deferred_error: DevicePairingError | None = None
         with self.database.transaction() as connection:
@@ -709,6 +739,10 @@ class DevicePairingService:
             row = connection.execute("SELECT * FROM device_pairing_requests WHERE id=?", (pairing_id,)).fetchone()
             if row is None:
                 raise DevicePairingError("配對請求不存在或已失效", status_code=404, error_code="PAIR-003")
+            code_required = not self._lan_request(row)
+            pairing_code = self._validate_text(pairing_code, "pairing_code", 6, required=code_required)
+            if code_required and not PAIRING_CODE_PATTERN.fullmatch(pairing_code):
+                raise DevicePairingError("配對碼格式不合法", error_code="PAIR-005")
             status = str(row["status"])
             if status in {"approved", "credential_issued", "confirmed"}:
                 return {"status": status, "pairing_id": pairing_id}
@@ -718,7 +752,7 @@ class DevicePairingService:
             if attempts >= PAIRING_CODE_ATTEMPT_LIMIT:
                 connection.execute("UPDATE device_pairing_requests SET status='rejected' WHERE id=?", (pairing_id,))
                 deferred_error = DevicePairingError("配對碼嘗試次數已用盡", status_code=429, error_code="PAIR-006")
-            elif not hmac.compare_digest(str(row["pairing_code_hash"]), self._code_hash(pairing_code)):
+            elif code_required and not hmac.compare_digest(str(row["pairing_code_hash"]), self._code_hash(pairing_code)):
                 attempts += 1
                 next_status = "rejected" if attempts >= PAIRING_CODE_ATTEMPT_LIMIT else "pending"
                 connection.execute(
@@ -861,7 +895,7 @@ class DevicePairingService:
                     "firmware_identity": str(row["firmware_identity"] or ""),
                     "offline_schedule_max_slots": maximum_slots,
                 }
-                envelope_expires = min(datetime.fromisoformat(str(row["expires_at"])), now + PAIRING_TTL)
+                envelope_expires = min(datetime.fromisoformat(str(row["expires_at"])), now + (LAN_PAIRING_TTL if self._lan_request(row) else PAIRING_TTL))
                 encrypted = self._credential_envelope_cipher.encrypt(json.dumps(envelope, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
                 connection.execute(
                     """

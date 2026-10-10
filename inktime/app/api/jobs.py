@@ -339,6 +339,28 @@ def _analysis_plan(strategy: str) -> tuple[dict, str]:
     return plan, canonical_json(plan)
 
 
+def _estimate_plan(count: int, strategy: str, plan: dict) -> dict:
+    route = plan.get("provider_route") or []
+    model = str((route[0].get("model") if route else None) or plan.get("model") or "")
+    pricing = (current_app.extensions["inktime_provider_repository"].pricing(str(route[0]["provider_id"])).get(model)
+               if route else None)
+    settings = current_app.extensions["inktime_settings_repository"]
+    cap = max(256, min(1200, int(settings.get("budget.max_tokens", 8000)),
+                       int(settings.get("budget.full_analysis_max_tokens", 1200))))
+    estimate = _service().estimate(count, strategy, pricing=pricing, output_tokens=cap)
+    alternatives = []
+    for channel in route:
+        routed_model = str(channel.get("model") or plan.get("model") or "")
+        routed_price = current_app.extensions["inktime_provider_repository"].pricing(str(channel["provider_id"])).get(routed_model)
+        alternative = _service().estimate(count, strategy, pricing=routed_price, output_tokens=cap)
+        alternatives.append({"provider_id": channel["provider_id"], "model": routed_model,
+                             "price_known": alternative["price_known"], "maximum_cost": alternative["maximum_cost"]})
+    if alternatives:
+        estimate["maximum_cost"] = max(item["maximum_cost"] for item in alternatives) if all(item["price_known"] for item in alternatives) else None
+    return {**estimate, "route_estimates": alternatives,
+            "model": model, "provider_id": route[0]["provider_id"] if route else None}
+
+
 def _job_or_404(job_id: str):
     repository = _repository()
     job = repository.get(job_id)
@@ -575,13 +597,14 @@ def selection_preview():
         selection_mode=mode,
         limit=limit,
     )
-    estimate = _service().estimate(int(preview["limited_to"]), strategy)
+    estimate = _estimate_plan(int(preview["limited_to"]), strategy, _plan)
     return {
         **preview,
         "image_calls": estimate["image_calls"],
         "estimated_stage_one": estimate["stage_one_photos"],
         "estimated_stage_two": estimate["stage_two_photos"],
         "estimated_cost": estimate["average_cost"],
+        "cost_estimate": estimate,
     }
 
 
@@ -682,7 +705,11 @@ def estimate_job():
         strategy = normalize_analysis_strategy(payload.get("strategy", "single"))
     except ValueError as exc:
         return {"message": str(exc)}, 400
-    return _service().estimate(photo_count, strategy)
+    try:
+        plan, _ = _analysis_plan(strategy)
+    except ValueError as exc:
+        return {"message": str(exc)}, 409
+    return _estimate_plan(photo_count, strategy, plan)
 
 
 @bp.get("/api/v1/jobs/<job_id>/export")
