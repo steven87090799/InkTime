@@ -901,6 +901,21 @@ class BatchAnalysisService:
             batch_ids.append(current_id)
         return batch_ids
 
+    def _assert_submission_allowed(self, batch_id):
+        self.budgets.assert_restore_reconciled()
+        # One indexed EXISTS-style query, not one new DB connection per photo.
+        with self.database.session() as connection:
+            blocked = connection.execute(
+                "SELECT 1 FROM analysis_batch_items i LEFT JOIN photos p ON p.id=i.photo_id "
+                "WHERE i.batch_id=? AND (p.id IS NULL OR p.never_upload<>0 OR p.lifecycle_status<>'active') LIMIT 1",
+                (batch_id,),
+            ).fetchone()
+            batch = connection.execute("SELECT job_id FROM analysis_batches WHERE id=?", (batch_id,)).fetchone()
+            job = connection.execute("SELECT status FROM jobs WHERE id=?", (batch["job_id"],)).fetchone() if batch and batch["job_id"] else None
+            if blocked or (batch and batch["job_id"] and (job is None or job["status"] in
+                    {"cancelled", "paused", "pausing", "failed", "budget_exceeded"})):
+                raise BatchLifecycleError("Batch 照片已禁止上傳、移除或工作已停止；本次請求未送出", "BATCH-INPUT-002")
+
     def _submit_one(self, batch_id: str, plan: dict[str, Any]) -> None:
         batch = self.batches.get(batch_id)
         if batch is None:
@@ -916,6 +931,7 @@ class BatchAnalysisService:
         submission_attempt: str | None = None
         remote_created = False
         try:
+            self._assert_submission_allowed(batch_id)
             current = self.batches.get(batch_id)
             if current is None:
                 raise KeyError(batch_id)
@@ -967,6 +983,7 @@ class BatchAnalysisService:
                 provider, str(current["model"]), output_tokens=FULL_ANALYSIS_TOKEN_CAP, batch=True
             ) * len(self.batches.items(batch_id))
             self.budgets.reserve("batch:" + batch_id, reserved_cost, job_id=str(current["job_id"]) if current["job_id"] else None)
+            self._assert_submission_allowed(batch_id)
             remote = provider.create_batch(
                 str(current["input_file_id"]),
                 completion_window="24h",

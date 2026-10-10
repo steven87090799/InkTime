@@ -2310,11 +2310,12 @@ class SecretStore:
         key = base64.urlsafe_b64encode(sha256(master_secret.encode("utf-8")).digest())
         self.cipher = Fernet(key)
 
-    def set(self, key: str, value: str, updated_by: str) -> None:
+    def set(self, key: str, value: str, updated_by: str, *, connection=None) -> None:
         now = datetime.now(timezone.utc).isoformat()
         register_secret(value)
         encrypted = self.cipher.encrypt(value.encode("utf-8"))
-        with self.database.session() as connection:
+        context = nullcontext(connection) if connection is not None else self.database.session()
+        with context as connection:
             connection.execute(
                 """
                 INSERT INTO secrets(key,encrypted_value,updated_by,updated_at) VALUES (?,?,?,?)

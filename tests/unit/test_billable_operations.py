@@ -55,3 +55,44 @@ def test_resend_requires_explicit_audited_approval(tmp_path):
         row = connection.execute("SELECT state,resolution_note FROM billable_operations WHERE id=?", (operation_id,)).fetchone()
         assert row["state"] == "approved"
         assert row["resolution_note"]
+
+
+def test_response_resend_keeps_original_evidence_and_requires_new_attempt(tmp_path):
+    database = Database(tmp_path / "resend.sqlite3")
+    migrate(database)
+    repository = BillableOperationRepository(database)
+    original, _ = repository.begin("sha", "plan")
+    repository.save_response(original, ProviderResponse("bad JSON", Usage(25, 8)))
+    assert repository.begin("sha", "plan")[0] == original
+    repository.approve_resend(original, reason="administrator explicitly accepts additional cost")
+    replacement, checkpoint = repository.begin("sha", "plan")
+    assert replacement != original and checkpoint is None
+    with database.session() as connection:
+        row = connection.execute("SELECT state,response_json,resolution_note FROM billable_operations WHERE id=?", (original,)).fetchone()
+    assert row["state"] == "approved" and "bad JSON" in row["response_json"]
+    assert row["resolution_note"]
+
+
+def test_same_key_with_changed_diagnostic_content_is_rejected(tmp_path):
+    database = Database(tmp_path / "same-key.sqlite3")
+    migrate(database)
+    repository = BillableOperationRepository(database)
+    operation, _ = repository.begin("diagnostic:provider-a", "key")
+    repository.save_response(operation, ProviderResponse("{}", Usage()))
+    with pytest.raises(ValueError, match="IDEMPOTENCY_CONFLICT"):
+        repository.begin("diagnostic:provider-b", "key")
+
+
+def test_only_explicit_pre_transport_evidence_authorizes_retry():
+    from inktime.app.providers.base import request_definitely_not_sent
+    from inktime.app.workers.process_boundary import ProcessCallError, ProcessCallTimeout
+    assert not request_definitely_not_sent(ValueError("unknown provenance"))
+    local = ValueError("builder failed")
+    local.not_sent = True
+    assert request_definitely_not_sent(local)
+    local.request_started = True
+    assert not request_definitely_not_sent(local)
+    assert request_definitely_not_sent(ProcessCallTimeout("capacity wait"))
+    exited = ProcessCallError("unexpected exit")
+    exited.child_started = True
+    assert not request_definitely_not_sent(exited)

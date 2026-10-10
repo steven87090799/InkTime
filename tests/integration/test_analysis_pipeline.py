@@ -636,6 +636,11 @@ def test_spawned_vision_capacity_timeout_is_pre_execution_and_retryable(app, tmp
                 (photo_id,),
             ).fetchone()
         assert failed_count == 0
+        with app.extensions["inktime_database"].session() as connection:
+            assert connection.execute("SELECT state FROM billable_operations ORDER BY created_at DESC LIMIT 1").fetchone()[0] == "not_sent"
+            assert connection.execute("SELECT COUNT(*) FROM budget_reservations WHERE state='active'").fetchone()[0] == 0
+        from inktime.app.repositories.billable_operations import BillableOperationRepository
+        assert not BillableOperationRepository(app.extensions["inktime_database"]).check_retry("unused-sha", "unused-plan")
         assert tuple(trace_attempt) == ("TIMEOUT", None)
     finally:
         boundary._slots.release()
@@ -1451,3 +1456,48 @@ def test_prefilter_snapshot_requires_two_quality_defects(app, tmp_path):
     assert snapshot["decision"] == "auto_excluded"
     assert snapshot["primary_reason"] == "severe_blur"
     assert "severe_blur" in snapshot["matched_checks"]
+
+
+def test_invalid_checkpoint_requires_approval_before_a_new_paid_attempt(app, tmp_path):
+    from inktime.app.repositories.billable_operations import BillableOperationRepository
+    _, ids, service = prepare(app, tmp_path)
+    provider = MockProvider(["bad JSON", valid_result()])
+    kwargs = dict(photo_id=ids[0], job_id=None, provider=provider, strategy="high_quality", high_model="mock")
+    for force in (False, True):
+        with pytest.raises(AnalysisValidationError):
+            service.analyze_photo(**kwargs, force_recompute=force)
+    assert provider.analyze_calls == 1
+    with app.extensions["inktime_database"].session() as connection:
+        operation = connection.execute("SELECT id FROM billable_operations WHERE state='response'").fetchone()[0]
+    BillableOperationRepository(app.extensions["inktime_database"]).approve_resend(operation, reason="fixture explicit new paid request")
+    result = service.analyze_photo(**kwargs, force_recompute=True)
+    assert result["analysis"] and provider.analyze_calls == 2
+    with app.extensions["inktime_database"].session() as connection:
+        assert connection.execute("SELECT COUNT(*) FROM api_usage WHERE photo_id=?", (ids[0],)).fetchone()[0] == 2
+
+
+def test_force_recompute_skips_inherited_analysis(app, tmp_path):
+    _, ids, service = prepare(app, tmp_path, duplicate=True)
+    provider = MockProvider([valid_result(), valid_result()])
+    service.analyze_photo(photo_id=ids[0], job_id=None, provider=provider, strategy="high_quality", high_model="mock")
+    service.analyze_photo(photo_id=ids[1], job_id=None, provider=provider, strategy="high_quality", high_model="mock", force_recompute=True)
+    assert provider.analyze_calls == 2
+
+
+def test_local_request_builder_error_releases_operation_and_budget(app, tmp_path, monkeypatch):
+    photo, service = _isolated_service(app, tmp_path, None)
+    provider = OpenAICompatibleProvider(name="builder", base_url="https://provider.invalid/v1", api_key="fixture", pricing={"mock": {"input_per_million": 1, "cached_input_per_million": 0, "output_per_million": 2}})
+    original_builder = provider.build_analysis_request_body
+    def fail_before_transport(**kwargs):
+        raise ValueError("fixture local request construction failure")
+    monkeypatch.setattr(provider, "build_analysis_request_body", fail_before_transport)
+    with pytest.raises(ValueError, match="construction failure"):
+        service.analyze_photo(photo_id=photo, job_id=None, provider=provider, strategy="high_quality", high_model="mock", force_ai=True)
+    with app.extensions["inktime_database"].session() as connection:
+        assert connection.execute("SELECT state FROM billable_operations ORDER BY created_at DESC LIMIT 1").fetchone()[0] == "not_sent"
+        assert connection.execute("SELECT COUNT(*) FROM budget_reservations WHERE state='active'").fetchone()[0] == 0
+    monkeypatch.setattr(provider, "build_analysis_request_body", original_builder)
+    monkeypatch.setattr(provider, "_post_completion", lambda *args, **kwargs: ProviderResponse(json.dumps(valid_result(), ensure_ascii=False), Usage(100, 20)))
+    result = service.analyze_photo(photo_id=photo, job_id=None, provider=provider, strategy="high_quality", high_model="mock", force_ai=True)
+    assert result["analysis"]
+    provider.close()

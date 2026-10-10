@@ -6,8 +6,7 @@ import time
 from uuid import uuid4
 
 from inktime.app.db import Database
-from inktime.app.providers.base import Usage
-from inktime.app.providers.openai_compatible import ProviderHTTPError
+from inktime.app.providers.base import Usage, request_definitely_not_sent
 from inktime.app.repositories.usage import UsageRepository
 from inktime.app.repositories.settings import SettingsRepository
 from inktime.app.services.usage_periods import usage_periods
@@ -52,7 +51,7 @@ class BudgetService:
                         SELECT 1 FROM billable_operations o
                         WHERE o.id=substr(budget_reservations.id,8)
                           AND (o.state='not_sent' OR (
-                              o.state IN ('response','completed') AND EXISTS (
+                              o.state IN ('response','completed','approved') AND EXISTS (
                                   SELECT 1 FROM api_usage u WHERE u.operation_id=o.id
                                     AND u.cost_source<>'unknown'
                                     AND COALESCE(u.actual_cost,u.estimated_cost) IS NOT NULL
@@ -152,7 +151,13 @@ class BudgetService:
         )
         return snapshot
 
+    def assert_restore_reconciled(self) -> None:
+        guard = self.database.path.with_suffix(self.database.path.suffix + ".paid-reconciliation-required")
+        if guard.exists():
+            raise BudgetExceeded("資料庫還原後須先核對供應商帳務與未完成 Batch，請至付費操作對帳頁解除暫停")
+
     def reserve(self, reservation_id: str, amount: float, *, job_id=None, photo_id=None) -> None:
+        self.assert_restore_reconciled()
         """Serialize projected-budget checks with every new paid reservation."""
         if not math.isfinite(amount) or amount < 0:
             raise ValueError("Invalid budget reservation")
@@ -191,6 +196,9 @@ class BudgetService:
 
     def call(self, provider, method: str, **kwargs):
         """Shared paid-call gate for diagnostics and live benchmark subrequests."""
+        function = getattr(provider, method)
+        if not callable(function):
+            raise ValueError("diagnostic provider method must be callable")
         reservation_id = str(uuid4())
         model = str(kwargs["model"])
         self.reserve(reservation_id, self.estimate_reserve(
@@ -198,9 +206,9 @@ class BudgetService:
         started_at = datetime.now(timezone.utc).isoformat()
         started = time.monotonic()
         try:
-            response = getattr(provider, method)(**kwargs)
-        except ProviderHTTPError as error:
-            if not error.ambiguous:
+            response = function(**kwargs)
+        except Exception as error:
+            if request_definitely_not_sent(error):
                 self.release(reservation_id)
             raise
         usage = response.usage
@@ -221,6 +229,7 @@ class BudgetService:
         return response
 
     def assert_request_allowed(self, job_id: str | None, photo_id: str | None) -> None:
+        self.assert_restore_reconciled()
         usage = self.snapshot(job_id, photo_id)
         checks = (
             (

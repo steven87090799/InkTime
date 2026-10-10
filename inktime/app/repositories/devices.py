@@ -384,6 +384,8 @@ class DeviceRepository:
         layout_mode: str | None | object = _UNSET,
         fit_mode: str | None | object = _UNSET,
         connection=None,
+        expected_config_version: int | None = None,
+        expected_updated_at: str | None = None,
     ) -> bool:
         now = datetime.now(timezone.utc).isoformat()
         context = nullcontext(connection) if connection is not None else self.database.session()
@@ -402,13 +404,17 @@ class DeviceRepository:
                            next_offline_prepare_at,
                            button_wake_action,minimum_schedule_gap_minutes,sync_strategy,sync_time,
                            stock_endpoint_host,frame_orientation,layout_mode,fit_mode,
-                           auth_mode,pairing_state,config_version,name
+                           auth_mode,pairing_state,config_version,name,updated_at
                     FROM devices WHERE id=?
                     """,
                     (device_id,),
                 ).fetchone()
                 if current is None:
                     raise KeyError(device_id)
+                if expected_config_version is not None and int(current["config_version"]) != expected_config_version:
+                    raise ValueError("DEVICE-008 設定已被其他管理員修改，請重新載入")
+                if expected_updated_at is not None and current["updated_at"] != expected_updated_at:
+                    raise ValueError("DEVICE-008 設定已更新，請重新載入")
                 selected_orientation = (
                     current["frame_orientation"] if frame_orientation is _UNSET else frame_orientation
                 )

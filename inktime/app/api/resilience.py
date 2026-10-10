@@ -600,3 +600,89 @@ def resume_rollout(rollout_id: str):
 @administrator_required
 def rollback_rollout(rollout_id: str):
     return _transition(rollout_id, "ROLLING_BACK")
+
+
+@bp.get("/paid-operations")
+@administrator_required
+def paid_operations_page():
+    database = current_app.extensions["inktime_database"]
+    page = request.args.get("page", 1, type=int)
+    if page < 1 or page > 100000:
+        abort(400, description="page 超出範圍")
+    with database.session() as connection:
+        rows = connection.execute(
+            "SELECT o.id,o.content_sha256,o.state,o.created_at,o.response_json,o.resolution_note,"
+            "u.provider,u.model,u.request_id,COALESCE(u.actual_cost,u.estimated_cost) AS cost "
+            "FROM billable_operations o LEFT JOIN api_usage u ON u.operation_id=o.id "
+            "WHERE o.state IN ('started','response') ORDER BY o.created_at DESC,o.id DESC LIMIT 101 OFFSET ?",
+            ((page - 1) * 100,),
+        ).fetchall()
+    import json
+    operations = []
+    for row in rows[:100]:
+        item = dict(row)
+        try:
+            context = json.loads(str(item.get("resolution_note") or "").splitlines()[0])
+        except (ValueError, IndexError):
+            context = {}
+        if not isinstance(context, dict):
+            context = {}
+        item["provider"] = item["provider"] or context.get("provider") or "舊操作，請參考 AI Trace"
+        item["model"] = item["model"] or context.get("model") or "未知"
+        if item["response_json"]:
+            saved = json.loads(item["response_json"])
+            item["request_id"] = item["request_id"] or saved.get("request_id")
+            if item["cost"] is None:
+                item["cost"] = (saved.get("usage") or {}).get("provider_reported_cost")
+        operations.append(item)
+    return render_template("paid_operations.html", operations=operations, page=page, has_more=len(rows)>100,
+                           restore_guard=database.path.with_suffix(database.path.suffix + ".paid-reconciliation-required").exists())
+
+
+@bp.post("/api/v1/paid-operations/<operation_id>/approve-resend")
+@administrator_required
+def approve_paid_resend(operation_id):
+    from inktime.app.repositories.billable_operations import BillableOperationRepository
+    payload = _payload()
+    if payload.get("accept_additional_cost") is not True:
+        return {"message": "必須明確同意再次請求可能產生費用"}, 400
+    reason = payload.get("reason")
+    if not isinstance(reason, str) or not reason.strip():
+        return {"message": "請填寫對帳與重送原因"}, 400
+    try:
+        BillableOperationRepository(current_app.extensions["inktime_database"]).approve_resend(
+            operation_id, reason=f"administrator:{g.user['id']}: {reason}")
+    except ValueError as exc:
+        return {"message": str(exc)}, 409
+    return {"status": "approved", "message": "批准已記錄；請重新建立分析工作或再次測試。原回應與費用紀錄保留。"}
+
+
+@bp.post("/api/v1/paid-operations/restore-reconciled")
+@administrator_required
+def restore_paid_reconciled():
+    from datetime import datetime, timezone
+    import json
+    import os
+    payload = _payload()
+    reason = payload.get("reason")
+    if payload.get("accept_additional_cost") is not True or not isinstance(reason, str) or not reason.strip():
+        return {"message": "請記錄對帳原因並明確確認恢復付費操作"}, 400
+    database = current_app.extensions["inktime_database"]
+    guard = database.path.with_suffix(database.path.suffix + ".paid-reconciliation-required")
+    if not guard.exists():
+        return {"message": "目前沒有還原暫停標記"}, 409
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%f")
+    # Preserve an on-disk approval record outside the restored snapshot.
+    approval = guard.with_name(guard.name + ".approved-" + stamp)
+    with approval.open("x", encoding="utf-8") as handle:
+        json.dump({"approved_by": str(g.user["id"]), "reason": reason.strip()[:2000],
+                   "approved_at": stamp}, handle, ensure_ascii=False)
+        handle.flush()
+        os.fsync(handle.fileno())
+    guard.unlink()
+    directory = os.open(guard.parent, os.O_RDONLY)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+    return {"message": "對帳批准已保存，新的付費操作已恢復；未知請求仍需逐筆處理"}

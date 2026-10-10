@@ -101,3 +101,24 @@ def test_runtime_config_is_immutable_and_never_contains_secret(tmp_path: Path):
     assert secret not in summary
     assert str(config.data_dir) not in summary
     assert str(config.database_path) not in summary
+
+
+@pytest.mark.parametrize(("origin", "proxy", "expected"), [
+    ("https://192.168.0.23:8765", 0, True),
+    ("http://10.0.0.2", 0, True),
+    ("https://172.16.0.2", 0, True),
+    ("https://172.32.0.2", 0, False),
+    ("https://192.168.0.23", 1, False),
+    ("https://photos.example.com", 0, False),
+    ("https://127.0.0.1", 0, False),
+    ("https://169.254.1.2", 0, False),
+    ("https://192.168.0.23.example.com", 0, False),
+    ("https://user@192.168.0.23", 0, False),
+    ("https://192.168.0.23/path", 0, False),
+])
+def test_trusted_lan_pairing_requires_explicit_private_origin(tmp_path, origin, proxy, expected):
+    config = RuntimeConfig.from_sources(
+        environ={}, base_dir=tmp_path, environment="test", testing=True,
+        development=False, public_url=origin, proxy_trust=proxy,
+    )
+    assert config.trusted_lan_pairing is expected

@@ -79,6 +79,7 @@
       {% for row in rows %}
       <article class="setting-card" id="setting-{{ row.key|replace('.', '-') }}"
         data-key="{{ row.key }}"
+        data-revision="{{ row.updated_at }}"
         data-label="{{ row.definition.label_zh_tw }}"
         data-description="{{ row.definition.description }}"
         data-category="{{ row.category }}"
@@ -362,7 +363,7 @@
     validation('');
     const data = await request('/api/v1/settings',{
       method:'POST',
-      headers:{'Content-Type':'application/json','X-InkTime-Change-Reason':document.getElementById('change-reason').value,'X-InkTime-Confirm-Risk':confirmRisk?'true':'false'},
+      headers:{'Content-Type':'application/json','X-InkTime-Change-Reason':document.getElementById('change-reason').value,'X-InkTime-Confirm-Risk':confirmRisk?'true':'false','X-InkTime-Setting-Revisions':JSON.stringify(Object.fromEntries(cards.filter(card=>dirty.has(card.dataset.key)).map(card=>[card.dataset.key,card.dataset.revision])))},
       body:JSON.stringify(Object.fromEntries(dirty))
     });
     dirty.forEach((_value,key) => baseline.set(key,read(key)));

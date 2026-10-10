@@ -499,6 +499,13 @@ def update_device(device_id: str):
         preserve_quarantined_schedule=preserve_quarantined_schedule,
     )
     fields["explicit_schedule_replacement"] = explicit_schedule_replacement
+    if request.headers.get("If-Match") is not None:
+        try:
+            fields["expected_config_version"] = int(request.headers["If-Match"])
+        except ValueError:
+            abort(400, description="DEVICE-008 If-Match 必須是設定版本")
+    if request.headers.get("If-Unmodified-Since") is not None:
+        fields["expected_updated_at"] = request.headers["If-Unmodified-Since"]
     try:
         _repository().update(device_id, **fields)
     except KeyError:
@@ -511,7 +518,7 @@ def update_device(device_id: str):
     applied = int(updated["acked_config_version"]) >= int(updated["config_version"])
     recommended_action = None
     if str(updated["delivery_mode"] or "legacy_online") != "stock_compat" and not applied:
-        recommended_action = "press_key1"
+        recommended_action = "hold_key1_for_sync"
     return {
         "status": "ok",
         "config_version": int(updated["config_version"]),
@@ -540,11 +547,46 @@ def latest_release():
         device_id=str(device["id"]),
         profile_key=profile_key,
     )
-    if not authorization.allowed or authorization.manifest is None:
-        abort(404, description="目前沒有可用的發布版本")
-    release_id = authorization.release_id
-    manifest = dict(authorization.manifest)
-    manifest["download_base_url"] = f"/api/device/v1/releases/{release_id}/files/"
+    release_id = authorization.release_id if authorization.allowed else None
+    if authorization.allowed and authorization.manifest is not None:
+        release_manifest = dict(authorization.manifest)
+        # Firmware only consumes display metadata and the checked binary
+        # payload descriptor. Keep analysis/render plans in the stored release
+        # manifest instead of sending that unrelated, deeply nested document
+        # to a memory-constrained device.
+        manifest = {
+            key: release_manifest[key]
+            for key in (
+                "schema_version",
+                "release_id",
+                "display_type",
+                "render_profile",
+                "panel_profile",
+                "release_kind",
+                "width",
+                "height",
+                "pixel_format",
+                "orientation",
+            )
+            if key in release_manifest
+        }
+        release_files = release_manifest.get("files")
+        manifest["files"] = (
+            [
+                {key: entry[key] for key in ("name", "size", "sha256") if key in entry}
+                for entry in release_files
+                if isinstance(entry, dict)
+            ]
+            if isinstance(release_files, list)
+            else release_files
+        )
+        manifest["download_base_url"] = f"/api/device/v1/releases/{release_id}/files/"
+    else:
+        if authorization.release_id or authorization.reason != "invalid_release_id":
+            abort(404, description="沒有可下載的 Release")
+        # Configuration is an authenticated control plane even with an empty library.
+        manifest = {"schema_version": 3, "pixel_format": "indexed4", "no_content": True,
+                    "files": [], "width": 0, "height": 0}
     zone = ZoneInfo(str(device["timezone"]))
     offset = datetime.now(zone).utcoffset()
     manifest["device_config"] = {

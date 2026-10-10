@@ -55,7 +55,7 @@
     </div>
   </header>
   <main class="shell">
-    {% if critical_alerts %}<div class="notice error" role="alert"><strong>需要優先處理{% if critical_alerts|length > 1 %}（{{ critical_alerts|length }}）{% endif %}</strong>{{ error_notice(critical_alerts[0].error_code, critical_alerts[0].message) }}<small>{{ critical_alerts[0].last_seen_at }}</small> · <a href="/activity?severity=CRITICAL">查看相關事件</a></div>{% endif %}
+    {% if g.user and g.user.role == 'administrator' and critical_alerts %}<div class="notice error" role="alert"><strong>需要優先處理{% if critical_alerts|length > 1 %}（{{ critical_alerts|length }}）{% endif %}</strong>{{ error_notice(critical_alerts[0].error_code, critical_alerts[0].message) }}<small>{{ critical_alerts[0].last_seen_at }}</small> · <a href="/activity?severity=CRITICAL">查看相關事件</a></div>{% endif %}
     {% for category, message in get_flashed_messages(with_categories=true) %}
       {% set flash_error_code = category[6:] if category.startswith('error:') else '' %}
       <div class="notice {{ 'error' if flash_error_code else category }}" role="alert">{% if category == 'error' or flash_error_code %}{{ error_notice(message.code, message.message) if message is mapping else error_notice(flash_error_code, message) }}{% else %}{{ message }}{% endif %}</div>
@@ -100,6 +100,24 @@
       options.headers = Object.assign({'X-CSRF-Token': document.querySelector('meta[name="csrf-token"]').content}, options.headers || {});
       return fetch(url, options);
     };
+    window.inktimeRunAction = async (control, action) => {
+      if (control.dataset.busy === 'true') return;
+      control.dataset.busy = 'true';
+      const buttons = control.matches('button') ? [control] : [...control.querySelectorAll('button')];
+      const disabled = buttons.map(button => button.disabled);
+      buttons.forEach(button => button.disabled = true);
+      try { return await action(); }
+      catch (error) { window.inktimeSetStatus(document.querySelector('[role="status"]') || control.parentElement, '連線中斷；請重試同一操作以查詢結果。', 'error'); }
+      finally { buttons.forEach((button, index) => button.disabled = disabled[index]); control.dataset.busy = 'false'; }
+    };
+    window.inktimeOperationKey = (scope, payload) => {
+      const slot = 'inktime-operation:' + scope, serialized = JSON.stringify(payload);
+      let saved;
+      try { saved = JSON.parse(sessionStorage.getItem(slot)); } catch (error) { saved = null; }
+      if (saved?.payload === serialized) return saved.key;
+      const key = crypto.randomUUID(); sessionStorage.setItem(slot, JSON.stringify({key, payload: serialized})); return key;
+    };
+    window.inktimeOperationDone = scope => sessionStorage.removeItem('inktime-operation:' + scope);
     window.inktimeFetchPreview = async (url, options = {}, retry = {}) => {
       const maxRetries = Number.isInteger(retry.maxRetries) ? Math.max(0, retry.maxRetries) : 2;
       const signal = options.signal;

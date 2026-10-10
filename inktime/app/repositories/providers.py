@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from contextlib import nullcontext
+
 from datetime import datetime, timezone
 import json
 import math
@@ -86,10 +88,13 @@ class ProviderRepository:
         requested_batch = bool(json_bool(payload, "supports_batch", default=False))
         if requested_batch and not capabilities.batch:
             raise ValueError(f"PROVIDER-020 {kind} 不支援 Batch")
-        if api_key:
-            self.secrets.set(secret_key, api_key, user_id)
         with self.database.transaction(operation="provider_save") as connection:
             previous_row = connection.execute("SELECT * FROM providers WHERE id=?", (provider_id,)).fetchone()
+            expected = payload.get("expected_updated_at")
+            if expected is not None and (previous_row is None or previous_row["updated_at"] != expected):
+                raise ValueError("CONFIG_CONFLICT 設定已被其他管理員修改，請重新載入")
+            if api_key:
+                self.secrets.set(secret_key, api_key, user_id, connection=connection)
             if not model_provided:
                 existing = connection.execute("SELECT model FROM providers WHERE id=?", (provider_id,)).fetchone()
                 if existing is not None:
@@ -157,8 +162,8 @@ class ProviderRepository:
             value = {}
         return value if isinstance(value, dict) else {}
 
-    def pricing(self, provider_id: str) -> dict[str, dict[str, float]]:
-        with self.database.session() as connection:
+    def pricing(self, provider_id: str, *, connection=None) -> dict[str, dict[str, float]]:
+        with (nullcontext(connection) if connection is not None else self.database.session()) as connection:
             rows = connection.execute(
                 "SELECT * FROM model_pricing WHERE provider_id=? AND enabled=1", (provider_id,)
             ).fetchall()
@@ -205,7 +210,12 @@ class ProviderRepository:
         enabled = payload.get("enabled", True)
         if type(enabled) is not bool:
             raise ValueError("enabled 必須是 JSON Boolean")
-        with self.database.session() as connection:
+        with self.database.transaction() as connection:
+            expected = payload.get("expected_pricing")
+            if expected is not None:
+                current = self.pricing(provider_id, connection=connection)
+                if current != expected:
+                    raise ValueError("CONFIG_CONFLICT 模型價格已修改，請重新載入")
             provider = connection.execute("SELECT id FROM providers WHERE id=?", (provider_id,)).fetchone()
             if provider is None:
                 raise KeyError(provider_id)

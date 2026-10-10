@@ -166,7 +166,9 @@ def test_device_bearer_authentication_and_revocation(client, app):
         "/api/device/v1/releases/latest",
         headers={"Authorization": f"Bearer {old_token}"},
     )
-    assert response.status_code == 404
+    assert response.status_code == 200
+    assert response.get_json()["no_content"] is True
+    assert response.get_json()["files"] == []
     repository.regenerate(device_id)
     response = client.get(
         "/api/device/v1/releases/latest",

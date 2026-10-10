@@ -23,6 +23,17 @@ inline uint32_t backoffSeconds(uint8_t attempt) {
   return 60U * 60U;
 }
 
+inline uint32_t enrollmentRetrySeconds(uint8_t attempt, bool active_request) {
+  // Active claims/confirms must retry before the public five-minute TTL.
+  // Request creation/network failures keep their existing bounded backoff.
+  return active_request ? 60U : backoffSeconds(attempt);
+}
+
+inline RetryState expiredRequestRetryState(uint64_t now_epoch) {
+  // Expiry is a normal enrollment transition, not another network failure.
+  return RetryState{now_epoch == 0U ? 0U : now_epoch + 60U, 0U};
+}
+
 inline RetryState nextRetryState(const RetryState& current, uint64_t now_epoch) {
   RetryState next = current;
   const uint8_t previous_attempt = current.attempt;

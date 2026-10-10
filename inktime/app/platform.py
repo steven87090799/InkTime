@@ -146,7 +146,7 @@ def configure_web_application(
                     "SELECT component,error_code,message,last_seen_at FROM job_errors "
                     "WHERE resolved_at IS NULL AND lower(severity)='critical' "
                     "ORDER BY last_seen_at DESC LIMIT 3"
-                ).fetchall()
+                ).fetchall() if getattr(g, "user", None) and g.user["role"] == "administrator" else []
                 migration_row = connection.execute(
                     "SELECT MAX(version) FROM schema_migrations"
                 ).fetchone()

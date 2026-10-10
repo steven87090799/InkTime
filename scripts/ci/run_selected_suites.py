@@ -151,6 +151,7 @@ RUNNER_SUITE_TEST_PATHS: dict[str, tuple[str, ...]] = {
         "tests/unit/test_scoring_rules.py",
         "tests/integration/test_ai_cache_singleflight.py",
         "tests/integration/test_analysis_pipeline.py",
+        "tests/integration/test_audit_remediation.py",
         "tests/integration/test_budget_calendar.py",
         "tests/integration/test_local_only_mode.py",
         "tests/integration/test_local_scoring_semantics.py",

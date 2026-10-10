@@ -1,3 +1,4 @@
+#include "portal_config_core.h"
 #include "device_config_store_core.h"
 
 #include <cassert>
@@ -270,6 +271,9 @@ class FakeAbStore {
 
 void test_payload_roundtrip_and_empty_overwrite() {
   ConfigPayload original = payload("roundtrip");
+  original.refresh_minute = 17U;
+  original.schedule_slots[1].minute = 17U;
+  original.tz_offset_minutes = 345;
   std::string encoded;
   std::string error;
   assert(inktime::configstore::serialize_payload(original, encoded, error));
@@ -493,6 +497,16 @@ void test_pointer_and_journal_roundtrip() {
 }  // namespace
 
 int main() {
+  int portalValue = 99;
+  assert(inktime::parsePortalInteger("3", 0, 59, portalValue) && portalValue == 3);
+  assert(inktime::parsePortalInteger("17", 0, 59, portalValue) && portalValue == 17);
+  assert(inktime::parsePortalInteger("345", -720, 840, portalValue) && portalValue == 345);
+  assert(inktime::parsePortalInteger("-330", -720, 840, portalValue) && portalValue == -330);
+  assert(!inktime::parsePortalInteger("17x", 0, 59, portalValue));
+  assert(!inktime::parsePortalInteger("", 0, 59, portalValue));
+  assert(!inktime::parsePortalInteger("60", 0, 59, portalValue));
+  assert(!inktime::parsePortalInteger("9999999999999", -720, 840, portalValue));
+
   test_payload_roundtrip_and_empty_overwrite();
   test_legacy_schema_defaults_new_sync_policy_fields();
   test_schema4_12_slot_fixture_migrates_to_schema5();
