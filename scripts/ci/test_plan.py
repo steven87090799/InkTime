@@ -1157,12 +1157,9 @@ def classify_paths(paths: Iterable[str]) -> dict[str, Any]:
 def _mode_reasons(context: Mapping[str, object]) -> list[str]:
     reasons: list[str] = []
     event_name = str(context.get("event_name", "")).strip()
-    ref = str(context.get("ref", context.get("github_ref", ""))).strip()
     labels = {label.casefold() for label in _labels(context)}
     draft = _optional_bool(context, "pull_request_draft", "draft", "is_draft")
 
-    if event_name == "push" and ref == "refs/heads/main":
-        reasons.append("main_push")
     if event_name == "workflow_dispatch" and _is_truthy(context.get("full_suite")):
         reasons.append("manual_full_suite")
     if _is_truthy(context.get("force_full")) or _is_truthy(context.get("force_full_suite")):

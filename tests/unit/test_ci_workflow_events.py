@@ -171,6 +171,35 @@ def test_main_canonical_planner_and_provenance_contracts_are_preserved():
 
 
 @pytest.mark.parametrize("workflow_path", WORKFLOW_PATHS)
+def test_manual_full_suite_is_an_explicit_opt_in(workflow_path):
+    inputs = _load_workflow(workflow_path)["on"]["workflow_dispatch"]["inputs"]
+    assert inputs["full_suite"]["type"] == "boolean"
+    assert inputs["full_suite"]["default"] is False
+
+
+def test_matrix_jobs_preserve_all_selected_validation_and_aggregate_owners():
+    workflow = _load_workflow(WORKFLOW_PATHS[0])
+    jobs = workflow["jobs"]
+    owner = jobs["selected-owner-suites"]
+    firmware = jobs["esp32-compile"]
+    for job in (owner, firmware):
+        assert job["strategy"]["fail-fast"] is False
+    assert "owner_shards" in owner["strategy"]["matrix"]["shard"]
+    regressions = _step_by_name(owner, "Run planner-selected owner regressions")
+    assert regressions["env"]["SHARD_COUNT"] == "${{ strategy.job-total }}"
+    assert "--shard-index" in regressions["run"]
+    assert "--shard-count" in regressions["run"]
+    assert "--junit-xml" in regressions["run"]
+    assert firmware["strategy"]["max-parallel"] == 4
+    assert "firmware_compile_profiles" in firmware["strategy"]["matrix"]["profile"]
+    compile_step = _step_by_name(firmware, "Compile planner-selected firmware profiles")
+    assert compile_step["env"]["FIRMWARE_PROFILE"] == "${{ matrix.profile }}"
+    assert 'profiles=("${FIRMWARE_PROFILE}")' in compile_step["run"]
+    gate = jobs["repository-gate"]
+    assert {"selected-owner-suites", "esp32-compile"} <= set(gate["needs"])
+
+
+@pytest.mark.parametrize("workflow_path", WORKFLOW_PATHS)
 def test_base_provenance_is_event_specific_and_fail_closed(workflow_path):
     workflow = _load_workflow(workflow_path)
     route = _step_by_id(workflow["jobs"]["changes"], "route")

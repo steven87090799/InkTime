@@ -14,7 +14,7 @@ name: InkTime CI
       full_suite:
         description: Run every hosted validation tier
         required: false
-        default: true
+        default: false
         type: boolean
       base_sha:
         description: Optional base commit SHA for manual provenance and diff planning
@@ -45,6 +45,7 @@ jobs:
       run_python_quality: ${{ steps.route.outputs.run_python_quality }}
       run_dependency_policy: ${{ steps.route.outputs.run_dependency_policy }}
       selected_owner_suites: ${{ steps.route.outputs.selected_owner_suites }}
+      owner_shards: ${{ steps.route.outputs.owner_shards }}
       run_python312_full: ${{ steps.route.outputs.run_python312_full }}
       run_python310: ${{ steps.route.outputs.run_python310 }}
       run_dependency_audit: ${{ steps.route.outputs.run_dependency_audit }}
@@ -62,6 +63,7 @@ jobs:
       run_container_security: ${{ steps.route.outputs.run_container_security }}
       run_source_head_contract: ${{ steps.route.outputs.run_source_head_contract }}
       firmware_execution_profiles: ${{ steps.route.outputs.firmware_execution_profiles }}
+      firmware_compile_profiles: ${{ steps.route.outputs.firmware_compile_profiles }}
       full_plan_complete: ${{ steps.route.outputs.full_plan_complete }}
       no_heavy_impact_duplicates: ${{ steps.route.outputs.no_heavy_impact_duplicates }}
       source_head_sha: ${{ steps.route.outputs.source_head_sha }}
@@ -225,6 +227,8 @@ jobs:
             echo "run_container_security=$(has_gate container_security)"
             echo "run_source_head_contract=$(jq -r .requires_source_head_contract <<<"${plan_json}")"
             echo "firmware_execution_profiles=$(jq -c .firmware_execution_profiles <<<"${plan_json}")"
+            echo "firmware_compile_profiles=$(jq -c '[.firmware_execution_profiles | .quick[], .affected[], .full_matrix[]] | unique | if length == 0 then [\"none\"] else . end' <<<"${plan_json}")"
+            echo "owner_shards=$(python scripts/ci/run_selected_suites.py --suites-json "$(jq -c .selected_test_suites <<<"${plan_json}")" --shard-matrix)"
             echo "full_plan_complete=$(jq -r .full_plan_complete <<<"${plan_json}")"
             echo "no_heavy_impact_duplicates=$(jq -r .no_heavy_impact_duplicates <<<"${plan_json}")"
           } >> "${GITHUB_OUTPUT}"
@@ -410,11 +414,15 @@ jobs:
             rhysd/actionlint@sha256:1d74bfc9fd1963af8f89a7c22afaaafd42f49aad711a09951d02cb996398f61d
 
   selected-owner-suites:
-    name: Selected owner suites
+    name: Selected owner suites (${{ matrix.shard }})
     if: ${{ needs.changes.outputs.full_validation == 'true' && needs.changes.outputs.ci_mode == 'impact' && needs.changes.outputs.selected_owner_suites != '[]' }}
     needs: changes
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON(needs.changes.outputs.owner_shards || '[0]') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (Node 24)
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0 (Node 24)
@@ -423,7 +431,20 @@ jobs:
       - name: Run planner-selected owner regressions
         env:
           SELECTED_TEST_SUITES: ${{ needs.changes.outputs.selected_test_suites }}
-        run: python scripts/ci/run_selected_suites.py --suites-json "${SELECTED_TEST_SUITES}"
+          SHARD_INDEX: ${{ matrix.shard }}
+          SHARD_COUNT: ${{ strategy.job-total }}
+        run: >-
+          python scripts/ci/run_selected_suites.py --suites-json "${SELECTED_TEST_SUITES}"
+          --shard-index "${SHARD_INDEX}" --shard-count "${SHARD_COUNT}"
+          --junit-xml "artifacts/owner-shard-${SHARD_INDEX}.xml"
+      - name: Upload owner timings and results
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: owner-results-${{ github.run_id }}-${{ matrix.shard }}
+          path: artifacts/owner-shard-*.xml
+          if-no-files-found: ignore
+          retention-days: 14
 
   compose-lan-production-persistence:
     if: ${{ needs.changes.outputs.full_validation == 'true' && needs.changes.outputs.run_lan_persistence == 'true' }}
@@ -705,10 +726,16 @@ jobs:
           /tmp/inktime-ack-journal-storage-budget
 
   esp32-compile:
+    name: ESP32 compile (${{ matrix.profile }})
     if: ${{ needs.changes.outputs.full_validation == 'true' && needs.changes.outputs.run_firmware_compile == 'true' }}
     needs: changes
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        profile: ${{ fromJSON(needs.changes.outputs.firmware_compile_profiles || '["none"]') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (Node 24)
       - name: Install pinned Arduino CLI
@@ -730,7 +757,7 @@ jobs:
       - run: arduino-cli lib install GxEPD2@1.6.9 ArduinoJson@7.4.3
       - name: Compile planner-selected firmware profiles
         env:
-          FIRMWARE_EXECUTION_PROFILES: ${{ needs.changes.outputs.firmware_execution_profiles }}
+          FIRMWARE_PROFILE: ${{ matrix.profile }}
         run: |
           set -euo pipefail
           sketch_dir="esp32/ink-display-7C-photo"
@@ -738,8 +765,7 @@ jobs:
           select_partition() {
             cp "${sketch_dir}/$1" "${sketch_dir}/partitions.csv"
           }
-          mapfile -t profiles < <(jq -r '.quick[], .affected[], .full_matrix[]' <<<"${FIRMWARE_EXECUTION_PROFILES}")
-          test "${#profiles[@]}" -gt 0
+          profiles=("${FIRMWARE_PROFILE}")
           for profile in "${profiles[@]}"; do
             case "${profile}" in
               gdey_release)
