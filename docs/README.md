@@ -120,6 +120,7 @@
 - [`operations/MIGRATION_GUIDE_ZH_TW.md`](operations/MIGRATION_GUIDE_ZH_TW.md)：舊資料庫升級與相容性界線。
 - [`operations/MIGRATION_PLAN.md`](operations/MIGRATION_PLAN.md)：升級、回滾與資料相容原則。
 - [`operations/OPERATIONS_ZH_TW.md`](operations/OPERATIONS_ZH_TW.md)：Decision、Queue、保留與發布日常操作。
+- [家用內網流程簡化檢查](operations/HOME_LAN_SIMPLIFICATION_AUDIT_ZH_TW.md)：配對、KEY1、Wi-Fi recovery 與流程檢查結果。
 
 ### 裝置與電子紙
 
@@ -164,6 +165,7 @@
 - [`archive/reports/FINAL_IMPLEMENTATION_REPORT_ZH_TW.md`](archive/reports/FINAL_IMPLEMENTATION_REPORT_ZH_TW.md)：2026-07-17 實作與驗收報告。
 - [`archive/reports/FINAL_CROSS_MODULE_HARDENING_REVIEW_ZH_TW.md`](archive/reports/FINAL_CROSS_MODULE_HARDENING_REVIEW_ZH_TW.md)：2026-07-22 跨模組與硬體邊界報告。
 - [`archive/reports/N100_IMPLEMENTATION_REPORT_ZH_TW.md`](archive/reports/N100_IMPLEMENTATION_REPORT_ZH_TW.md)：2026-07-18 N100 實作／量測報告。
+- [`reports/AUDIT_REMEDIATION_20261004.md`](reports/AUDIT_REMEDIATION_20261004.md)：2026-10-04 問題清單逐項核對、修補、回歸驗證與現場驗收邊界。
 - [`reports/PERFORMANCE_REPORT.md`](reports/PERFORMANCE_REPORT.md)：100,000 筆效能測試紀錄；測試腳本會更新此檔。
 - [`archive/reports/FINAL_ONE_SHOT_HARDENING_AUDIT.md`](archive/reports/FINAL_ONE_SHOT_HARDENING_AUDIT.md)：歷史 PR #53 的 P1、Provider、AI、Release、Container 與 hosted CI 交接證據。
 

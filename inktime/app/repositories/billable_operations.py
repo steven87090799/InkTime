@@ -32,9 +32,15 @@ class BillableOperationRepository:
                 (request_fingerprint,),
             ).fetchone() is not None
 
-    def begin(self, content_sha256: str, request_fingerprint: str) -> tuple[str, ProviderResponse | None]:
+    def begin(self, content_sha256: str, request_fingerprint: str, *, reuse_completed: bool = False, context: dict | None = None) -> tuple[str, ProviderResponse | None]:
         now = datetime.now(timezone.utc).isoformat()
         with self.database.transaction() as connection:
+            prior = connection.execute(
+                "SELECT content_sha256 FROM billable_operations WHERE request_fingerprint=? LIMIT 1",
+                (request_fingerprint,),
+            ).fetchone()
+            if prior and str(prior["content_sha256"]) != content_sha256:
+                raise ValueError("IDEMPOTENCY_CONFLICT")
             unknown = connection.execute(
                 "SELECT id FROM billable_operations WHERE content_sha256=? AND state='started' LIMIT 1",
                 (content_sha256,),
@@ -43,7 +49,8 @@ class BillableOperationRepository:
                 raise UnreconciledOperationError("先前 Vision 請求狀態未知；須先對帳，不得自動重新送圖")
             saved = connection.execute(
                 "SELECT id,response_json FROM billable_operations WHERE request_fingerprint=? "
-                "AND state='response' ORDER BY created_at DESC LIMIT 1", (request_fingerprint,),
+                "AND (state='response' OR (? AND state='completed')) ORDER BY created_at DESC LIMIT 1",
+                (request_fingerprint, int(reuse_completed)),
             ).fetchone()
             if saved:
                 payload = json.loads(saved["response_json"])
@@ -53,8 +60,9 @@ class BillableOperationRepository:
                 return str(saved["id"]), ProviderResponse(**payload)
             operation_id = str(uuid4())
             connection.execute(
-                "INSERT INTO billable_operations(id,content_sha256,request_fingerprint,state,created_at,updated_at) "
-                "VALUES (?,?,?,'started',?,?)", (operation_id, content_sha256, request_fingerprint, now, now),
+                "INSERT INTO billable_operations(id,content_sha256,request_fingerprint,state,created_at,updated_at,resolution_note) "
+                "VALUES (?,?,?,'started',?,?,?)", (operation_id, content_sha256, request_fingerprint, now, now,
+                                                      json.dumps(context, ensure_ascii=False) if context else None),
             )
             return operation_id, None
 
@@ -78,9 +86,9 @@ class BillableOperationRepository:
             raise ValueError("重送批准必須記錄原因")
         with self.database.transaction() as connection:
             cursor = connection.execute(
-                "UPDATE billable_operations SET state='approved',resolution_note=?,updated_at=? "
-                "WHERE id=? AND state='started'",
+                "UPDATE billable_operations SET state='approved',resolution_note=COALESCE(resolution_note || char(10),'') || ?,updated_at=? "
+                "WHERE id=? AND state IN ('started','response')",
                 (reason.strip()[:2000], datetime.now(timezone.utc).isoformat(), operation_id),
             )
             if cursor.rowcount != 1:
-                raise ValueError("找不到待對帳操作，或該操作已處理")
+                raise ValueError("找不到待對帳或回應待處理操作，或該操作已處理")

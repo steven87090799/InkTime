@@ -6,6 +6,19 @@ from pathlib import Path
 from typing import Any
 
 
+def request_definitely_not_sent(error: Exception) -> bool:
+    """Only explicit boundary evidence can authorize releasing paid work."""
+    if any(bool(getattr(error, key, False)) for key in
+           ("ambiguous", "vision_started", "request_started")):
+        return False
+    if getattr(error, "not_sent", False):
+        return True
+    if hasattr(error, "child_started") and not error.child_started:
+        return True
+    return all(getattr(error, key, None) is False for key in
+               ("ambiguous", "vision_started", "request_started"))
+
+
 MAX_BATCH_RESULT_BYTES = 256 * 1024 * 1024
 
 

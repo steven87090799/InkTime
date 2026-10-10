@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from PIL import Image
+
 from inktime.app.providers.base import ProviderResponse, Usage
 from inktime.app.providers.openai_compatible import ProviderHTTPError
 from inktime.app.services.provider_contracts import run_provider_contract
@@ -26,7 +28,17 @@ class FakeContractProvider:
         assert image.name == "inktime-test.png"
         assert image.stat().st_size > 0
         if kwargs["stage"] == "provider_contract_level2" and self.valid:
-            value = {"vision_ok": True, "detected_shapes": ["rectangle", "circle"]}
+            # Inspect pixels rather than knowing the test runner's random answer.
+            shapes = []
+            with Image.open(image) as fixture:
+                for x in (12, 92, 172):
+                    if fixture.getpixel((x, 60)) != (255, 255, 255):
+                        shapes.append("rectangle")
+                    elif fixture.getpixel((x + 32, 150)) != (255, 255, 255):
+                        shapes.append("triangle")
+                    elif fixture.getpixel((x + 32, 124)) != (255, 255, 255):
+                        shapes.append("circle")
+            value = {"vision_ok": True, "detected_shapes": shapes}
         elif self.valid:
             value = valid_result()
         else:
@@ -197,3 +209,34 @@ def test_terminal_provider_metadata_never_triggers_paid_repair():
         assert result["provider_error"]["error_code"] == "VLM-INCOMPLETE"
         assert len(provider.analyze_calls) == 1
         assert provider.repair_calls == []
+
+
+def test_blind_shape_guess_fails_even_with_usage_and_valid_format(monkeypatch):
+    from inktime.app.services import provider_contracts
+    class RandomChallenge:
+        def sample(self, _population, _count):
+            return ["triangle"]
+    monkeypatch.setattr(provider_contracts.secrets, "SystemRandom", RandomChallenge)
+    monkeypatch.setattr(provider_contracts.secrets, "randbelow", lambda _: 0)
+    class BlindProvider(FakeContractProvider):
+        def analyze(self, **kwargs):
+            return ProviderResponse('{"vision_ok":true,"detected_shapes":["rectangle","circle"]}', Usage(20, 10))
+    result = run_provider_contract(BlindProvider(), level=2, model="test")
+    assert result["ok"] is False
+    assert result["checks"]["json_schema"] == "pass"
+    assert result["checks"]["visual_accuracy"] == "fail"
+    assert result["checks"]["vision"] == "fail"
+
+
+def test_blank_and_changed_shape_controls():
+    from inktime.app.services.provider_contracts import _valid_level2_response
+    assert _valid_level2_response('{"vision_ok":true,"detected_shapes":[]}', ())
+    assert not _valid_level2_response('{"vision_ok":true,"detected_shapes":["rectangle","circle"]}', ())
+    assert not _valid_level2_response('{"vision_ok":true,"detected_shapes":["rectangle"]}', ("triangle",))
+    assert not _valid_level2_response('{"vision_ok":true,"detected_shapes":["circle","circle"]}', ("circle",))
+
+
+def test_full_schema_does_not_claim_visual_accuracy():
+    result = run_provider_contract(FakeContractProvider(), level=3, model="test")
+    assert result["checks"]["vision"] == "not_verified"
+    assert result["checks"]["visual_accuracy"] == "not_verified"

@@ -95,23 +95,29 @@ class JobService:
         photo_count: int,
         strategy: str,
         *,
-        low_cost_per_photo: float = 0.001,
-        high_cost_per_photo: float = 0.01,
-        second_stage_ratio: float = 0.35,
+        pricing: dict | None = None,
+        input_tokens: int = 8000,
+        output_tokens: int = 1200,
     ) -> dict:
         normalized = normalize_analysis_strategy(strategy)
         image_calls = 0 if normalized == "local" else photo_count
-        average = image_calls * high_cost_per_photo
+        from inktime.app.providers.base import Usage
+        from inktime.app.providers.openai_compatible import calculate_usage_cost
+        unit = calculate_usage_cost(pricing, Usage(input_tokens, output_tokens))
+        average = 0.0 if image_calls == 0 else None if unit is None else image_calls * unit
         return {
+            "price_known": average is not None,
+            "estimate_basis": "Token 假設；快取沿用可降低費用，實際帳單依供應商回報",
+            "cache_savings_included": False,
             "photos": photo_count,
             "image_calls": image_calls,
             # These names remain in the response for old dashboards; the
             # second-stage count is permanently zero under the new contract.
             "stage_one_photos": image_calls,
             "stage_two_photos": 0,
-            "estimated_input_tokens": image_calls * 2500,
-            "estimated_output_tokens": image_calls * 500,
-            "minimum_cost": round(average * 0.7, 4),
-            "average_cost": round(average, 4),
-            "maximum_cost": round(average * 1.5, 4),
+            "estimated_input_tokens": image_calls * input_tokens,
+            "estimated_output_tokens": image_calls * output_tokens,
+            "minimum_cost": 0.0 if image_calls == 0 else None if average is None else round(average * 0.5, 4),
+            "average_cost": None if average is None else round(average, 4),
+            "maximum_cost": None if average is None else round(average * 2, 4),
         }

@@ -50,6 +50,7 @@ class SettingsMutationService:
         reason: str | None = None,
         rollback_source_snapshot_id: str | None = None,
         reject_control_center: bool = False,
+        expected_revisions: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         changed, _current, _merged = self.settings.prepare_updates(
             updates,
@@ -64,6 +65,11 @@ class SettingsMutationService:
             }
         effects: dict[str, int] = {}
         with self.database.transaction() as connection:
+            if expected_revisions is not None:
+                for key in updates:
+                    row = connection.execute("SELECT updated_at FROM settings WHERE key=?", (key,)).fetchone()
+                    if row is None or expected_revisions.get(key) != row["updated_at"]:
+                        raise ValueError("CONFIG_CONFLICT 設定已被其他管理員修改，請重新載入")
             result, effects = self.update_many_in_transaction(
                 connection,
                 changed,

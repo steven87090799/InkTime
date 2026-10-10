@@ -24,6 +24,18 @@
 
 管理介面新增自製裝置時不再回傳手動 Token，也不顯示 Token 輸入框。Stock 裝置仍由伺服器主動送到設定的 Stock Host；不要把 Stock 裝置改刷自製 InkTime 自動配對韌體，兩條路徑不可混用。
 
+## 家用內網與對外服務
+
+當 `INKTIME_PUBLIC_URL` 明確使用 RFC1918 IPv4（10/8、172.16/12、192.168/16），
+且 `INKTIME_PROXY_TRUST=0`，支援 `trusted_lan_pairing=true` 的韌體採內網配對：
+管理員直接核准，不需抄六位碼，請求保留一天。裝置每分鐘自動領取核准，
+不用再按 KEY1。HTTPS 仍可使用；登入、CSRF、nonce、credential confirm 保留。
+公開網域、公開 IP、代理部署與舊韌體維持下述五分鐘實體碼流程。
+從內網模式切換成公開服務時，未完成的內網請求立即失效。
+請勿把已宣告為內網的服務透過路由器轉發、隧道或反向代理公開；
+對外部署必須設定真正的公開 origin 與代理政策。
+PhotoPainter 的實體長按 KEY1 recovery 先於配對執行，未配對也可修改 Wi-Fi。
+
 ## 2. 首次設定與配對流程
 
 1. 新自製裝置不必先按「新增裝置」：第一次 pairing request 只建立待處理 enrollment，不建立或啟用 `devices` 正式資料列。管理員可在 `/devices` 的待處理列輸入實體相框顯示的配對碼，並設定名稱、面板 Profile、交付模式、時區與排程；頁面不回傳 Secret 或配對碼。
@@ -56,7 +68,7 @@
 }
 ```
 
-成功回 `201`，只在這個 ESP32 request response 包含 `pairing_id`、`device_id`、`pairing_code`、`expires_in_seconds=300` 與 `poll_after_seconds=3`。不包含 Device Secret；重試同一 request 只回相同 enrollment metadata，不再回配對碼。未知欄位、非 object JSON、非 JSON Content-Type、過大 Body、非法 ID／型別都拒絕。
+成功回 `201`，只在這個 ESP32 request response 包含 `pairing_id`、`device_id`、`pairing_code`、`expires_in_seconds=300` 與 `poll_after_seconds=3`。不包含 Device Secret；重試同一 nonce 會回相同 enrollment metadata 與相同配對碼。內網新韌體另回 `pairing_mode=trusted_lan` 與最多 `expires_in_seconds=86400`。未知欄位、非 object JSON、非 JSON Content-Type、過大 Body、非法 ID／型別都拒絕。
 
 `POST /api/device/v1/pairing/claim`
 
@@ -129,7 +141,7 @@ Automatic credential 缺少版本、版本不符、裝置未處於 `paired`、�
 
 | 現象／錯誤碼 | 處理 |
 |---|---|
-| `DEVICE-PAIRING-TIMEOUT`、`DEVICE-PAIRING-EXPIRED` | 保留或清除正確的 pairing state，進入 1 分鐘、5 分鐘、15 分鐘、1 小時 bounded deep-sleep backoff；只有未配對裝置或明確 repair permission 才建立新 request。 |
+| `DEVICE-PAIRING-TIMEOUT`、`DEVICE-PAIRING-EXPIRED` | 保留或清除正確的 pairing state，已有待處理請求時每分鐘重試；建立請求失敗則進入 1 分鐘、5 分鐘、15 分鐘、1 小時 bounded deep-sleep backoff；只有未配對裝置或明確 repair permission 才建立新 request。 |
 | `PAIR-002` | pairing request 受到 IP／Device bounded rate limit，等待 `Retry-After`。 |
 | `PAIR-006` | 配對碼錯誤次數用盡；拒絕該 request，再建立新的 request。 |
 | `PAIR-009` | claim 已消費；不可要求 Server 再顯示同一 Secret。 |

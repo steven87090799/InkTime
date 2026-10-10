@@ -19,6 +19,12 @@ def _between(text: str, start: str, end: str) -> str:
     return text[start_index : text.index(end, start_index)]
 
 
+def test_wifi_hint_policy_is_available_to_legacy_and_photopainter_builds():
+    firmware = FIRMWARE.read_text(encoding="utf-8")
+    includes = _between(firmware, '#include "device_http_transport.h"', '#include "esp_wifi.h"')
+    assert includes.index('#include "power_policy.h"') < includes.index("#if INKTIME_PHOTOPAINTER_ENABLED")
+
+
 def test_photopainter_runtime_key_and_reserved_pin_contracts_are_unchanged():
     hardware = HARDWARE.read_text(encoding="utf-8")
     assert "{kNoPin, 0, 4, 5, true, true}" in hardware
@@ -389,8 +395,8 @@ def test_pairing_portal_polls_active_low_key_without_driving_reserved_pins():
     assert "pairing_key_refresh_started" in portal
     assert "pairing_key_refresh_ready" in portal
     assert '"KEY REFRESH %lu"' in portal
-    assert "photoPainter.displayPairingScreen(" in portal
-    assert "photoPainter.displayPowerStatusScreen()" in portal
+    assert "displayPairingScreenSafely(" in portal
+    assert "displayPowerStatusScreenSafely()" in portal
     assert "power_status_refresh_ready" in portal
     assert "enterMs = millis()" not in portal[portal.index("for (;;)") :]
     assert "pinMode(kBoardConfig.buttons.user, OUTPUT)" not in portal
@@ -419,7 +425,7 @@ def test_key_double_click_power_page_is_read_only_and_keeps_boot_reserved():
     assert "waitForSecondUserButtonClick(board_.buttons.user)" in begin
     assert "batteryStatusRequested_" in begin
     assert "photoPainter.batteryStatusRequested()" in setup
-    assert "photoPainter.displayPowerStatusScreen()" in setup
+    assert "displayPowerStatusScreenSafely()" in setup
     assert "delay(kPowerStatusDwellMs);" in setup
     assert "restoreLastSuccessfulPhoto()" in setup
     assert "power_status_restore_ready" in setup

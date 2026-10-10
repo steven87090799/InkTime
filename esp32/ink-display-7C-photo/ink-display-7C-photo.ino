@@ -18,6 +18,7 @@
 #include "photopainter_wake_core.h"
 #include "offline_schedule_core.h"
 #include "device_config_store.h"
+#include "portal_config_core.h"
 #include "pairing_recovery_core.h"
 #include "max_awake_recovery_core.h"
 #include "queue_client_core.h"
@@ -32,10 +33,10 @@ struct AckJournalActivePointer;
 struct Config;
 
 #include "device_http_transport.h"
+#include "power_policy.h"
 #if INKTIME_PHOTOPAINTER_ENABLED
 #include "photopainter_support.h"
 #include "power_manager.h"
-#include "power_policy.h"
 #else
 #include <GxEPD2_7C.h>
 #endif
@@ -65,6 +66,20 @@ using inktime::kBoardConfig;
 
 #if INKTIME_PHOTOPAINTER_ENABLED
 inktime::PhotoPainterSupport photoPainter(kBoardConfig);
+
+// setup(), pairing candidates and the transactional ConfigStore share the
+// Arduino loop task. The observed release frames consume over 6 KiB before
+// NVS/Flash IPC or TLS call frames; the core's 8 KiB default has no safe margin.
+static constexpr size_t kPhotoPainterLoopStackBytes = 16U * 1024U;
+SET_LOOP_TASK_STACK_SIZE(kPhotoPainterLoopStackBytes);
+
+static void logPhotoPainterStackMargin(const char* phase) {
+  char message[112];
+  snprintf(message, sizeof(message), "phase=%s allocated_bytes=%u min_free_bytes=%u",
+    phase, static_cast<unsigned>(kPhotoPainterLoopStackBytes),
+    static_cast<unsigned>(uxTaskGetStackHighWaterMark(nullptr)));
+  INK_LOG_INFO("photopainter_stack_margin", message);
+}
 #endif
 
 #if DEBUG_LOG
@@ -898,6 +913,32 @@ static bool runFormalFrameGcForWake(
 }
 #endif
 
+static bool beginPanelMutation() {
+  if (!prefs.begin("dashcfg", false)) return false;
+  // One marker covers temporary screens and interrupted photo restoration.
+  const bool alreadyPending = prefs.getBool("disp_pending", false);
+  const size_t written = alreadyPending ? 1U : prefs.putBool("disp_pending", true);
+  if (!alreadyPending && written > 0U) recordNvsWrite();
+  const bool verified = written > 0U && prefs.getBool("disp_pending", false);
+  prefs.end();
+  if (!verified) {
+    lastDeviceErrorCode = "DEVICE-DISPLAY-RECORD";
+    lastDeviceErrorMessage = "無法持久化刷新進行中旗標";
+  }
+  return verified;
+}
+
+#if INKTIME_PHOTOPAINTER_ENABLED
+static bool displayPowerStatusScreenSafely() {
+  return beginPanelMutation() && photoPainter.displayPowerStatusScreen();
+}
+static bool displayPairingScreenSafely(const char* ssid, const char* password,
+                                      const char* url, const char* code = nullptr,
+                                      const char* footer = "VALID 5 MIN") {
+  return beginPanelMutation() && photoPainter.displayPairingScreen(ssid, password, url, code, footer);
+}
+#endif
+
 static void saveDisplayRecord(const Config &cfg, bool succeeded) {
   if (!inktime::isSha256HexValue(currentPayloadSha256.c_str())
       || currentReleaseId.length() == 0U || currentReleaseId.length() > 128U
@@ -951,7 +992,7 @@ static bool restoreLastSuccessfulPhoto() {
     lastDeviceErrorMessage = "最後成功照片的本地 Frame 不存在或完整性驗證失敗";
     return false;
   }
-  const bool displayed = photoPainter.displayFrame(
+  const bool displayed = beginPanelMutation() && photoPainter.displayFrame(
     restoredFrame,
     inktime::kPhotoPainterFrameBytes
   );
@@ -960,7 +1001,15 @@ static bool restoreLastSuccessfulPhoto() {
     lastDeviceErrorCode = photoPainter.lastError();
     lastDeviceErrorMessage = "電量頁結束後恢復最後成功照片失敗";
   }
-  return displayed;
+  if (displayed) {
+    if (!prefs.begin("dashcfg", false)) return false;
+    const size_t written = prefs.putBool("disp_pending", false);
+    const bool verified = written > 0U && !prefs.getBool("disp_pending", true);
+    if (written > 0U) recordNvsWrite();
+    prefs.end();
+    return verified;
+  }
+  return false;
 }
 #endif
 
@@ -2087,6 +2136,9 @@ bool saveConfig(const Config &cfg, String *errorCodeOut = nullptr) {
   // its internal A/B key writes; this metric intentionally counts transactions
   // rather than pretending to expose driver-level flash operations.
   recordNvsWrite();
+#if INKTIME_PHOTOPAINTER_ENABLED
+  logPhotoPainterStackMargin("config_saved");
+#endif
   // cfgstore has already completed the formal A/B commit and full read-back.
   // Old dashcfg formal keys are migration-only; stale legacy values must not
   // turn a committed config into a reported failure.
@@ -2190,8 +2242,8 @@ String buildConfigPage() {
   if (displayedHost.startsWith("http://")) displayedHost.remove(0, 7U);
   String host    = htmlEscape(displayedHost);
   String caPem   = htmlEscape(g_cfg.ca_pem);
-  int32_t tz     = g_cfg.tz_offset_minutes / 60;
-  if (tz < -12 || tz > 14) tz = DEFAULT_TZ_MINUTES / 60;
+  int32_t tz = g_cfg.tz_offset_minutes;
+  if (tz < -720 || tz > 840) tz = DEFAULT_TZ_MINUTES;
   uint8_t hour   = g_cfg.refresh_hour;
   if (hour > 23) hour = DEFAULT_HOUR;
   uint8_t minute = g_cfg.refresh_minute;
@@ -2247,7 +2299,7 @@ String buildConfigPage() {
   html += htmlEscape(curSsid);
   html += F("'>");
 
-  html += F("<label for='wifi_pass'>密碼</label><input id='wifi_pass' name='pass' type='password' autocomplete='current-password'></section>");
+  html += F("<label for='wifi_pass'>密碼</label><input id='wifi_pass' name='pass' type='password' autocomplete='new-password'><label for='pass_mode'>密碼操作</label><select id='pass_mode' name='pass_mode'><option value='keep'>保留目前密碼</option><option value='replace'>更換密碼</option><option value='clear'>清空密碼（開放網路）</option></select></section>");
 
   html += F("<section><h2>InkTime 伺服器</h2><label for='server_input'>伺服器位址</label><input id='server_input' name='hostport' inputmode='url' autocapitalize='none' spellcheck='false' placeholder='192.168.0.50:8765' value='");
   html += host;
@@ -2270,7 +2322,7 @@ String buildConfigPage() {
     html += F(" 時</option>");
   }
   html += F("</select></div><div><label for='refresh_minute'>分鐘</label><select id='refresh_minute' name='minute'>");
-  for (int m = 0; m < 60; m += 5) {
+  for (int m = 0; m < 60; ++m) {
     html += "<option value='";
     html += String(m);
     html += "'";
@@ -2282,16 +2334,18 @@ String buildConfigPage() {
   }
   html += F("</select></div></div>");
 
-  html += F("<label for='timezone'>UTC 時區偏移</label><select id='timezone' name='tz'>");
-  for (int t = -12; t <= 14; ++t) {
-    html += "<option value='";
-    html += String(t);
-    html += "'";
+  html += F("<label for='timezone'>UTC 時區偏移</label><select id='timezone' name='tz_minutes'>");
+  for (int t = -720; t <= 840; ++t) {
+    if (t % 15 != 0 && t != tz) continue;
+    html += "<option value='" + String(t) + "'";
     if (t == tz) html += " selected";
+    const int magnitude = t < 0 ? -t : t;
     html += ">";
-    if (t >= 0) html += "+";
-    html += String(t);
-    html += F("</option>");
+    html += t < 0 ? "-" : "+";
+    if (magnitude / 60 < 10) html += "0";
+    html += String(magnitude / 60) + ":";
+    if (magnitude % 60 < 10) html += "0";
+    html += String(magnitude % 60) + "</option>";
   }
   html += F("</select><div id='tls_fields'");
   if (!g_cfg.backend_hostport.startsWith("https://")) html += F(" hidden");
@@ -2378,24 +2432,36 @@ void handleSave() {
   Config newCfg = g_cfg;
 
   if (ssid.length() > 0) newCfg.wifi_ssid = ssid;
-  if (pass.length() > 0) newCfg.wifi_pass = pass;
+  const String passMode = server.hasArg("pass_mode") ? server.arg("pass_mode")
+      : (pass.length() > 0U ? String("replace") : String("keep"));
+  if (passMode == "clear") newCfg.wifi_pass = "";
+  else if (passMode == "replace" && pass.length() > 0U) newCfg.wifi_pass = pass;
+  else if (passMode != "keep" || pass.length() > 0U) {
+    server.send(400, "text/plain; charset=utf-8", "請選擇更換密碼並輸入新密碼，或明確選擇清空");
+    return;
+  }
 
   newCfg.backend_hostport = host;
   if (caProvided) newCfg.ca_pem = caPem;
 
-  int32_t tz = tzStr.toInt();
-  if (tz < -12) tz = -12;
-  if (tz > 14)  tz = 14;
-  newCfg.tz_offset_minutes = tz * 60;
-
-  int hour = hourStr.toInt();
-  if (hour < 0)  hour = 0;
-  if (hour > 23) hour = 23;
-  newCfg.refresh_hour = (uint8_t)hour;
-  int minute = minuteStr.toInt();
-  if (minute < 0) minute = 0;
-  if (minute > 59) minute = 59;
-  newCfg.refresh_minute = (uint8_t)minute;
+  // Missing fields preserve the durable value; retain full UTC offset minutes.
+  int offset = newCfg.tz_offset_minutes, hour = newCfg.refresh_hour, minute = newCfg.refresh_minute;
+  bool validSchedule = true;
+  if (server.hasArg("tz_minutes")) validSchedule = inktime::parsePortalInteger(server.arg("tz_minutes").c_str(), -720, 840, offset);
+  else if (server.hasArg("tz")) {
+    int hours = 0;
+    validSchedule = inktime::parsePortalInteger(tzStr.c_str(), -12, 14, hours);
+    offset = hours * 60;
+  }
+  if (server.hasArg("hour")) validSchedule = inktime::parsePortalInteger(hourStr.c_str(), 0, 23, hour) && validSchedule;
+  if (server.hasArg("minute")) validSchedule = inktime::parsePortalInteger(minuteStr.c_str(), 0, 59, minute) && validSchedule;
+  if (!validSchedule) {
+    server.send(400, "text/plain; charset=utf-8", "排程時間或 UTC 偏移格式不合法");
+    return;
+  }
+  newCfg.tz_offset_minutes = offset;
+  newCfg.refresh_hour = static_cast<uint8_t>(hour);
+  newCfg.refresh_minute = static_cast<uint8_t>(minute);
 
   newCfg.rotate180 = rot180Req;
   newCfg.valid     = (newCfg.wifi_ssid.length() > 0);
@@ -2567,7 +2633,7 @@ void startConfigPortal() {
   chipHex.toUpperCase();
   while (chipHex.length() < 8) chipHex = "0" + chipHex;
   String shortId = chipHex.substring(chipHex.length() - 6);
-  String apSsid = "InkTime-" + shortId;
+  String apSsid = "INKTIME-" + shortId;
   String apPassword = randomApPassword(); // hardware-random decimal value per AP session
   portalApSsid = apSsid;
   portalApPassword = apPassword;
@@ -2584,7 +2650,7 @@ void startConfigPortal() {
 #if INKTIME_PHOTOPAINTER_ENABLED
   uint32_t portalKeyRefreshCount = 0U;
   if (apOk) {
-    const bool pairingScreenReady = photoPainter.displayPairingScreen(
+    const bool pairingScreenReady = displayPairingScreenSafely(
       apSsid.c_str(), apPassword.c_str(), "http://192.168.4.1");
     if (pairingScreenReady) {
       const String refreshMessage = String("Pairing screen refresh completed in ")
@@ -2642,7 +2708,7 @@ void startConfigPortal() {
             "power_status_refresh_started",
             "Debounced KEY1 double click requested the read-only power page"
           );
-          const bool powerScreenReady = photoPainter.displayPowerStatusScreen();
+          const bool powerScreenReady = displayPowerStatusScreenSafely();
           if (powerScreenReady) {
             const String refreshMessage = String("Power status refresh completed in ")
                 + String(photoPainter.lastRefreshDurationMs()) + String(" ms");
@@ -2674,7 +2740,7 @@ void startConfigPortal() {
           "pairing_key_refresh_started",
           "Debounced KEY1 click requested a pairing screen refresh"
         );
-        const bool pairingScreenReady = photoPainter.displayPairingScreen(
+        const bool pairingScreenReady = displayPairingScreenSafely(
           apSsid.c_str(),
           apPassword.c_str(),
           "http://192.168.4.1",
@@ -2699,7 +2765,7 @@ void startConfigPortal() {
         "power_status_restore_started",
         "Power page dwell completed; restoring the pairing page"
       );
-      const bool pairingScreenReady = photoPainter.displayPairingScreen(
+      const bool pairingScreenReady = displayPairingScreenSafely(
         apSsid.c_str(),
         apPassword.c_str(),
         "http://192.168.4.1",
@@ -2740,7 +2806,7 @@ void startConfigPortal() {
 #endif
 #if INKTIME_PHOTOPAINTER_ENABLED
       if (portalPowerPageVisible && apOk) {
-        (void)photoPainter.displayPairingScreen(
+        (void)displayPairingScreenSafely(
           apSsid.c_str(),
           apPassword.c_str(),
           "http://192.168.4.1",
@@ -2847,7 +2913,11 @@ static void saveWiFiFastPathHint() {
   const uint8_t* bssid = WiFi.BSSID();
   const uint8_t channel = WiFi.channel();
   if (!validBssid(bssid) || channel == 0U || channel > kWiFiFastPathMaxChannel) return;
-  prefs.begin("dashcfg", false);
+  uint8_t oldBssid[6] = {};
+  uint8_t oldChannel = 0U;
+  const bool oldValid = loadWiFiFastPathHint(oldBssid, oldChannel);
+  if (!inktime::connectionHintChanged(oldValid, oldChannel, channel, oldBssid, bssid)) return;
+  if (!prefs.begin("dashcfg", false)) return;
   const size_t written = prefs.putBytes("wifi_bssid", bssid, 6U);
   const size_t channelWritten = prefs.putUChar("wifi_channel", channel);
   prefs.end();
@@ -3110,18 +3180,28 @@ static uint64_t pairingRetryNowEpoch() {
     ? static_cast<uint64_t>(now) : 0U;
 }
 
-static uint32_t pairingBackoffForAttempt(uint8_t attempt) {
-  return inktime::pairing::backoffSeconds(attempt);
+static bool hasActiveEnrollmentRequest(const Config &cfg) {
+  return cfg.pairing_id.length() > 0U
+    && (cfg.auth_state == "pairing_pending" || cfg.auth_state == "credential_issued");
 }
 
 static bool pairingRetryDue(const Config &cfg) {
-  return inktime::pairing::retryDue(
-    retryStateFromConfig(cfg), pairingRetryNowEpoch());
+  const uint64_t now = pairingRetryNowEpoch();
+  if (hasActiveEnrollmentRequest(cfg)) {
+#if INKTIME_PHOTOPAINTER_ENABLED
+    if (photoPainter.wokeFromUserButton()) return true;
+#endif
+    // Adopt the one-minute policy for retry deadlines persisted by older
+    // firmware, instead of waiting out their hour-long backoff after upgrade.
+    if (now != 0U && cfg.pairing_retry_at_epoch > now + 60U) return true;
+  }
+  return inktime::pairing::retryDue(retryStateFromConfig(cfg), now);
 }
 
 static uint32_t pairingBackoffSeconds(const Config &cfg) {
-  return inktime::pairing::sleepSeconds(
+  const uint32_t seconds = inktime::pairing::sleepSeconds(
     retryStateFromConfig(cfg), pairingRetryNowEpoch());
+  return hasActiveEnrollmentRequest(cfg) && seconds > 60U ? 60U : seconds;
 }
 
 static bool pairingExpiryPassed(const Config &cfg) {
@@ -3149,7 +3229,8 @@ static bool persistPairingRetry(Config &cfg, const String &state) {
     ? static_cast<uint8_t>(previousAttempt + 1U) : 8U;
   const uint64_t now = pairingNowEpoch();
   candidate.pairing_retry_at_epoch = now == 0U
-    ? 0U : now + pairingBackoffForAttempt(previousAttempt);
+    ? 0U : now + inktime::pairing::enrollmentRetrySeconds(
+      previousAttempt, hasActiveEnrollmentRequest(candidate));
   return savePairingCandidate(cfg, candidate);
 }
 
@@ -3192,12 +3273,8 @@ static bool persistPairingExpired(Config &cfg) {
   candidate.pairing_id = "";
   candidate.pairing_nonce = "";
   candidate.pairing_expires_at_epoch = 0U;
-  const uint8_t previousAttempt = candidate.pairing_retry_attempt;
-  candidate.pairing_retry_attempt = previousAttempt < 8U
-    ? static_cast<uint8_t>(previousAttempt + 1U) : 8U;
-  const uint64_t now = pairingNowEpoch();
-  candidate.pairing_retry_at_epoch = now == 0U
-    ? 0U : now + pairingBackoffForAttempt(previousAttempt);
+  applyRetryStateToConfig(
+    inktime::pairing::expiredRequestRetryState(pairingNowEpoch()), candidate);
   return savePairingCandidate(cfg, candidate);
 }
 
@@ -3453,6 +3530,9 @@ static bool performAutomaticPairing(Config &cfg) {
   if (!automaticPairingAllowed(cfg)) {
     return cfg.auth_state == "paired" && deviceCredential(cfg).length() > 0U && !deviceAuthInvalid;
   }
+#if INKTIME_PHOTOPAINTER_ENABLED
+  logPhotoPainterStackMargin("pairing_begin");
+#endif
   String base;
   if (!normalizedBackendBase(cfg, base)) return false;
 
@@ -3490,6 +3570,7 @@ static bool performAutomaticPairing(Config &cfg) {
   pairingRequest["panel_profile"] = INKTIME_PANEL_PROFILE;
   JsonObject capabilities = pairingRequest["capabilities"].to<JsonObject>();
   capabilities["automatic_pairing"] = true;
+  capabilities["trusted_lan_pairing"] = true;
   capabilities["ab_credential_store"] = true;
 #if INKTIME_PHOTOPAINTER_ENABLED
   capabilities["offline_schedule_max_slots"] = 16;
@@ -3517,6 +3598,9 @@ static bool performAutomaticPairing(Config &cfg) {
   requestHttp.collectHeaders(pairingHeaders, 1);
   requestHttp.addHeader("Content-Type", "application/json");
   const int requestStatus = countedHttpPost(requestHttp, requestBody);
+#if INKTIME_PHOTOPAINTER_ENABLED
+  logPhotoPainterStackMargin("pairing_request_return");
+#endif
   const int requestLength = requestHttp.getSize();
   const String requestContentType = requestHttp.header("Content-Type");
   if ((requestStatus != HTTP_CODE_CREATED && requestStatus != HTTP_CODE_OK)
@@ -3535,6 +3619,7 @@ static bool performAutomaticPairing(Config &cfg) {
   const String pairingCode = requestResponse["pairing_code"] | "";
   const String requestState = requestResponse["status"] | "pending";
   const bool requestReused = requestResponse["request_reused"] | false;
+  const bool trustedLanPairing = String(requestResponse["pairing_mode"] | "physical_code") == "trusted_lan";
   const JsonVariantConst expiresValue = requestResponse["expires_in_seconds"];
   const JsonVariantConst serverEpochValue = requestResponse["server_epoch"];
   uint64_t serverEpoch = serverEpochValue.is<uint64_t>()
@@ -3551,7 +3636,7 @@ static bool performAutomaticPairing(Config &cfg) {
   const bool requestClaimable = requestState == "approved" || requestState == "credential_issued";
   if (requestJsonError || requestResponse.overflowed() || pairingId.length() == 0U
       || !expiresValue.is<int32_t>() || expiresValue.is<bool>()
-      || expiresValue.as<int32_t>() < 1 || expiresValue.as<int32_t>() > 300
+      || expiresValue.as<int32_t>() < 1 || expiresValue.as<int32_t>() > (trustedLanPairing ? 86400 : 300)
       || serverEpoch < kPairingMinimumEpoch
       || (!requestPending && !requestClaimable)
       || (requestPending && !validCode)
@@ -3564,15 +3649,18 @@ static bool performAutomaticPairing(Config &cfg) {
   Config candidate = cfg;
   candidate.pairing_id = pairingId;
   candidate.pairing_nonce = requestReused ? cfg.pairing_nonce : pairingNonce;
-  candidate.pairing_expires_at_epoch = serverEpoch + static_cast<uint64_t>(expiresValue.as<int32_t>());
+  candidate.pairing_expires_at_epoch = trustedLanPairing ? 0U
+    : serverEpoch + static_cast<uint64_t>(expiresValue.as<int32_t>());
   candidate.pairing_retry_at_epoch = 0U;
   candidate.pairing_retry_attempt = 0U;
   candidate.auth_state = "pairing_pending";
   if (!savePairingCandidate(cfg, candidate)) return false;
 #if INKTIME_PHOTOPAINTER_ENABLED
   if (requestPending && validCode) {
-    (void)photoPainter.displayPairingScreen(
-      cfg.wifi_ssid.c_str(), "", base.c_str(), pairingCode.c_str());
+    (void)displayPairingScreenSafely(
+      cfg.wifi_ssid.c_str(), "", base.c_str(),
+      trustedLanPairing ? nullptr : pairingCode.c_str(),
+      trustedLanPairing ? "APPROVE IN INKTIME" : "VALID 5 MIN");
   }
 #else
   if (requestPending && validCode) (void)displayPairingCode(cfg, pairingCode);
@@ -4127,6 +4215,11 @@ bool downloadLatestPhotoBin(Config &cfg) {
     }
   }
 
+  if (manifest["no_content"] | false) {
+    lastDeviceWarningCode = "DEVICE-NO-CONTENT";
+    lastDeviceWarningMessage = "設定已同步；目前沒有可用照片，保留面板畫面";
+    return false;
+  }
   int width = manifest["width"] | 0;
   int height = manifest["height"] | 0;
   JsonArray files = manifest["files"].as<JsonArray>();
@@ -6223,16 +6316,7 @@ static bool displayPairingCode(const Config &cfg, const String &pairingCode) {
 
 bool drawFromFrameData(const Config &cfg) {
   (void)cfg;
-  if (!prefs.begin("dashcfg", false)) return false;
-  const size_t written = prefs.putBool("disp_pending", true);
-  if (written > 0U) recordNvsWrite();
-  const bool protectedAttempt = written > 0U && prefs.getBool("disp_pending", false);
-  prefs.end();
-  if (!protectedAttempt) {
-    lastDeviceErrorCode = "DEVICE-DISPLAY-RECORD";
-    lastDeviceErrorMessage = "無法持久化刷新進行中旗標";
-    return false;
-  }
+  if (!beginPanelMutation()) return false;
 
 #if INKTIME_PHOTOPAINTER_ENABLED
   if (!frameNativePalette || frameDataSize != inktime::kPhotoPainterFrameBytes) return false;
@@ -6746,6 +6830,9 @@ void setup() {
   DBG_BEGIN();
   delay(200);
   INK_LOG_INFO("firmware_boot", "InkTime firmware boot started");
+#if INKTIME_PHOTOPAINTER_ENABLED
+  logPhotoPainterStackMargin("boot");
+#endif
 
 #if INKTIME_PHOTOPAINTER_ENABLED
   const bool maxAwakeSupervisorReady = startMaxAwakeSupervisor();
@@ -6841,7 +6928,7 @@ void setup() {
       "power_status_refresh_started",
       "KEY1 double click wake requested the read-only power page"
     );
-    const bool powerScreenReady = photoPainter.displayPowerStatusScreen();
+    const bool powerScreenReady = displayPowerStatusScreenSafely();
     if (powerScreenReady) {
       const String refreshMessage = String("Power status refresh completed in ")
           + String(photoPainter.lastRefreshDurationMs()) + String(" ms");
@@ -6944,6 +7031,9 @@ void setup() {
 #endif
 
   if ((g_cfg.auth_state == "auth_invalid" || g_cfg.auth_state == "revoked")
+#if INKTIME_PHOTOPAINTER_ENABLED
+      && !explicitRecoveryRequested
+#endif
       && !pairingRetryDue(g_cfg)) {
     goDeepSleepSeconds(pairingBackoffSeconds(g_cfg));
     return;
@@ -6989,11 +7079,23 @@ void setup() {
     startConfigPortal();
   }
 
+  // Explicit physical recovery must remain reachable before enrollment.
+#if INKTIME_PHOTOPAINTER_ENABLED
+  if (explicitRecoveryRequested) {
+    (void)runUsbServiceMode(explicitRecoveryRequested);
+    struct tm recoveryTime = {};
+    bool hasRecoveryTime = getLocalTime(&recoveryTime, 1000);
+    if (!hasRecoveryTime) hasRecoveryTime = syncTime(g_cfg, recoveryTime);
+    sleepUntilNextSchedule(g_cfg, hasRecoveryTime, recoveryTime);
+    return;
+  }
+#endif
+
   // Pairing is a one-time authorization flow, never part of an ordinary
   // credentialed wake.  A revoked/invalid credential may re-enter this flow
   // only after a dedicated authenticated permission probe confirms that the
   // backend has enabled repair; the backend still requires a fresh
-  // short-lived pairing code and administrator approval.
+  // deployment-appropriate enrollment policy and administrator approval.
   bool repairPermission = false;
   if ((g_cfg.auth_state == "auth_invalid" || g_cfg.auth_state == "revoked")
       && pairingRetryDue(g_cfg)) {
@@ -7017,17 +7119,6 @@ void setup() {
     goDeepSleepSeconds(pairingBackoffSeconds(g_cfg));
     return;
   }
-
-#if INKTIME_PHOTOPAINTER_ENABLED
-  if (explicitRecoveryRequested) {
-    (void)runUsbServiceMode(explicitRecoveryRequested);
-    struct tm recoveryTime = {};
-    bool hasRecoveryTime = getLocalTime(&recoveryTime, 1000);
-    if (!hasRecoveryTime) hasRecoveryTime = syncTime(g_cfg, recoveryTime);
-    sleepUntilNextSchedule(g_cfg, hasRecoveryTime, recoveryTime);
-    return;
-  }
-#endif
 
   struct tm timeinfo;
   String wakeOrigin;

@@ -7,6 +7,8 @@ import os
 from pathlib import Path
 from typing import Any, cast
 
+from uuid import uuid4
+
 from flask import Blueprint, abort, current_app, g, make_response, render_template, request
 
 from inktime.app.core.json_values import (
@@ -40,6 +42,10 @@ from inktime.app.web.access import administrator_required, login_required
 from inktime.app.web.control_glossary import action_entries, setting_entries
 from inktime.app.domain.rendering.system_presets import SYSTEM_PRESETS
 from inktime.app.services.provider_contracts import run_provider_contract
+from inktime.app.core.idempotency import scoped_idempotency_key, request_fingerprint
+from inktime.app.providers.base import ProviderResponse, Usage
+from inktime.app.repositories.billable_operations import BillableOperationRepository, UnreconciledOperationError
+
 
 bp = Blueprint("settings", __name__)
 
@@ -177,6 +183,9 @@ def update_settings():
     payload = _payload()
     repository = current_app.extensions["inktime_settings_repository"]
     try:
+        expected = json.loads(request.headers["X-InkTime-Setting-Revisions"]) if request.headers.get("X-InkTime-Setting-Revisions") else None
+        if expected is not None and (not isinstance(expected, dict) or any(not isinstance(v, str) for v in expected.values())):
+            raise ValueError("設定版本格式不合法")
         changed, current, _merged = repository.prepare_updates(payload, reject_control_center=True)
         impact = _impact(changed)
         high_risk = _confirmation_reasons(changed, current, impact)
@@ -191,13 +200,14 @@ def update_settings():
             source_ip=request.remote_addr or "unknown",
             reason=request.headers.get("X-InkTime-Change-Reason"),
             reject_control_center=True,
+            expected_revisions=expected,
         )
     except PermissionError as exc:
         abort(400, description=f"SET-001 {_permission_error_message(exc)}")
     except KeyError as exc:
         abort(400, description=f"SET-001 未知設定：{exc.args[0]}")
     except (TypeError, ValueError) as exc:
-        abort(400, description=f"SET-002 {exc}")
+        abort(409 if str(exc).startswith("CONFIG_CONFLICT") else 400, description=f"SET-002 {exc}")
     configure_logging(settings_repository=repository)
     current_app.config["PERMANENT_SESSION_LIFETIME"] = timedelta(
         minutes=int(repository.get("security.session_minutes", 30))
@@ -610,6 +620,7 @@ def save_provider():
                 "timeout_seconds",
                 "cooldown_seconds",
                 "options",
+                "expected_updated_at",
             },
             error_prefix="SET-003",
         )
@@ -643,7 +654,7 @@ def save_provider():
             payload, "supports_json_schema", default=True, error_prefix="SET-003"
         )
     except (ValueError, JsonScalarError) as exc:
-        abort(400, description=f"SET-003 {exc}")
+        abort(409 if str(exc).startswith("CONFIG_CONFLICT") else 400, description=f"SET-003 {exc}")
     try:
         for field, default, minimum, maximum in (
             ("priority", 100, 1, 10_000),
@@ -672,7 +683,7 @@ def save_provider():
     try:
         provider_id = current_app.extensions["inktime_provider_repository"].save(payload, g.user["id"])
     except (ValueError, KeyError) as exc:
-        abort(400, description=f"SET-003 {exc}")
+        abort(409 if str(exc).startswith("CONFIG_CONFLICT") else 400, description=f"SET-003 {exc}")
     return {"id": provider_id}, 201
 
 
@@ -718,11 +729,26 @@ def test_provider(provider_id: str):
             base_url=str(config.get("base_url") or ""),
             required=True,
         )
-        result = run_provider_contract(
-            provider, level=level, model=model, budgets=current_app.extensions["inktime_budget_service"]
-        )
+        operations = BillableOperationRepository(current_app.extensions["inktime_database"])
+        key = scoped_idempotency_key("provider-test", str(g.user["id"]),
+                                     request.headers.get("Idempotency-Key") or str(uuid4()))
+        resource = request_fingerprint({"provider_id": provider_id, "level": level,
+                                        "model": model, "revision": config["updated_at"]})
+        operation_id, checkpoint = operations.begin("diagnostic:" + resource, str(key), reuse_completed=True,
+                                                    context={"provider": provider.name, "model": model, "level": level})
+        if checkpoint is not None:
+            result = json.loads(checkpoint.content)
+        else:
+            result = run_provider_contract(
+                provider, level=level, model=model, budgets=current_app.extensions["inktime_budget_service"]
+            )
+            operations.save_response(operation_id, ProviderResponse(json.dumps(result), Usage(tokens_reported=False)))
+            if result["ok"]:
+                operations.finish(operation_id)
+    except UnreconciledOperationError as exc:
+        return {"message": str(exc), "error_code": exc.code}, 409
     except (ValueError, KeyError) as exc:
-        abort(400, description=f"SET-005 {exc}")
+        abort(409 if str(exc) == "IDEMPOTENCY_CONFLICT" else 400, description=f"SET-005 {exc}")
     finally:
         provider.close()
     return result, 200 if result["ok"] else 502
@@ -745,6 +771,7 @@ def save_provider_pricing(provider_id: str):
                 "batch_cached_input_per_million",
                 "batch_output_per_million",
                 "enabled",
+                "expected_pricing",
             },
             error_prefix="SET-004",
         )
@@ -787,7 +814,7 @@ def save_provider_pricing(provider_id: str):
         payload["enabled"] = json_bool(payload, "enabled", default=True, error_prefix="SET-004")
         reconciliation = current_app.extensions["inktime_provider_repository"].save_pricing(provider_id, payload)
     except (JsonScalarError, ValueError) as exc:
-        abort(400, description=f"SET-004 {exc}")
+        abort(409 if str(exc).startswith("CONFIG_CONFLICT") else 400, description=f"SET-004 {exc}")
     except KeyError:
         abort(404)
     return {"status": "ok", "provider_id": provider_id, "model": payload["model"], **reconciliation}

@@ -82,6 +82,7 @@ def main() -> None:
     process = psutil.Process()
     benchmark_started = time.perf_counter()
     cpu_started = time.process_time()
+    fd_before = process.num_fds() if hasattr(process, "num_fds") else None
     rss_before = process.memory_info().rss
     rss_peak = rss_before
     now = datetime.now(timezone.utc).isoformat()
@@ -124,6 +125,10 @@ def main() -> None:
     jobs.cancel(job_id)
     no_new_after_cancel = len(jobs.claim(job_id, "worker", 8)) == 0
 
+    fd_after = process.num_fds() if hasattr(process, "num_fds") else None
+    children_after = len(process.children(recursive=True))
+    wal_path = Path(str(database.path) + "-wal")
+    wal_bytes = wal_path.stat().st_size if wal_path.exists() else 0
     rss_after = process.memory_info().rss
     rss_peak = max(rss_peak, rss_after)
     db_size = database.path.stat().st_size
@@ -157,6 +162,9 @@ def main() -> None:
 | 量測期間最大 RSS | {rss_peak / 1024 / 1024:.2f} MiB |
 | 最大 RSS 相對基線增量 | {(rss_peak - rss_before) / 1024 / 1024:.2f} MiB |
 | 測試程序 CPU 時間 | {cpu_seconds:.2f} 秒／牆鐘 {benchmark_seconds:.2f} 秒（單核心等效 {cpu_seconds / benchmark_seconds * 100:.1f}%） |
+| FD（基線／結束） | {fd_before}／{fd_after} |
+| 結束時子程序 | {children_after} |
+| 結束時 WAL | {wal_bytes:,} bytes（非峰值） |
 | 照片索引 | {", ".join(indexes)} |
 | SQLite 完整性 | {database.integrity_check()} |
 

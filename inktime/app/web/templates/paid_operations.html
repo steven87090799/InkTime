@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+{% block title %}付費操作對帳｜InkTime{% endblock %}
+{% block content %}
+<h1>付費操作對帳</h1><p>一般重試會沿用已收到的回應。若回應不合格或請求結果不明，先核對供應商帳務，再批准新的請求；批准不會撤回先前的費用或上傳。</p>
+{% if restore_guard %}<p class="notice error">資料庫還原後已暫停新的付費請求。請核對快照後帳務、未完成 Batch、照片掛載及 Release，再解除暫停。</p><form id="restore-approval"><label>對帳紀錄<input name="reason" required></label><button>確認已完成對帳，恢復付費操作</button></form>{% endif %}
+<p id="paid-operation-status" role="status"></p>
+<table><thead><tr><th>操作</th><th>Provider／模型／帳務</th><th>狀態</th><th>時間</th><th>批准新的請求</th></tr></thead><tbody>
+{% for operation in operations %}<tr><td><code>{{ operation.id }}</code></td><td>{{ operation.provider }}<br>{{ operation.model }}<br>Request ID：{{ operation.request_id or '未知' }}<br>費用：{{ operation.cost if operation.cost is not none else '未知，需對帳' }}</td><td>{{ '請求結果不明' if operation.state == 'started' else '已收到回應，尚待處理' }}</td><td>{{ operation.created_at }}</td><td><form class="resend" data-id="{{ operation.id }}"><input name="reason" required placeholder="對帳與重送原因"><button>同意再次請求與可能費用</button></form></td></tr>{% endfor %}
+</tbody></table><p>第 {{ page }} 頁，每頁最多 100 筆待處理操作。{% if page > 1 %}<a href="?page={{ page-1 }}">上一頁</a>{% endif %} {% if has_more %}<a href="?page={{ page+1 }}">下一頁</a>{% endif %}</p>
+{% endblock %}
+{% block scripts %}<script nonce="{{ csp_nonce }}">
+document.querySelectorAll('.resend').forEach(form=>form.onsubmit=async event=>{event.preventDefault();await window.inktimeRunAction(form,async()=>{if(!await window.inktimeConfirm('再次請求可能產生額外費用。已核對先前請求並同意重送？',{title:'批准付費重送'}))return;const response=await window.inktimeFetch(`/api/v1/paid-operations/${form.dataset.id}/approve-resend`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({reason:form.reason.value,accept_additional_cost:true})}),data=await window.inktimeDecodeJson(response);window.inktimeSetStatus('#paid-operation-status',data.message,response.ok?'success':'error');if(response.ok)form.remove();});});
+const restoreForm=document.getElementById('restore-approval');if(restoreForm)restoreForm.onsubmit=async event=>{event.preventDefault();await window.inktimeRunAction(restoreForm,async()=>{if(!await window.inktimeConfirm('確認已核對快照後帳務、未完成 Batch、照片與 Release，並恢復付費操作？'))return;const response=await window.inktimeFetch('/api/v1/paid-operations/restore-reconciled',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({reason:restoreForm.reason.value,accept_additional_cost:true})}),data=await window.inktimeDecodeJson(response);window.inktimeSetStatus('#paid-operation-status',data.message,response.ok?'success':'error');if(response.ok)location.reload();});};
+</script>{% endblock %}

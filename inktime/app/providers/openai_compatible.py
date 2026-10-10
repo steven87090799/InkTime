@@ -10,7 +10,7 @@ import os
 from pathlib import Path
 import re
 import time
-from typing import Any
+from typing import Any, cast
 from uuid import uuid4
 from datetime import datetime, timezone
 
@@ -110,7 +110,7 @@ content_filter 分別判斷 sexualized_content、explicit_nudity、female_glamou
 
 visual_orientation 判斷完成 EXIF transpose 後是否仍需順時針旋轉 0/90/180/270 度；依人臉、文字、水平線、重力物件或建築判斷。無可靠線索時 rotation_cw=null、ambiguous=true、evidence=["insufficient_visual_cues"]、confidence<=0.5。"""
 SYSTEM_PROMPT = COMMON_PROMPT
-PROVIDER_CONTRACT_PROMPT = """這是 Provider Vision capability contract。只輸出 JSON：vision_ok 必須是 true，detected_shapes 必須包含 rectangle 與 circle；不要輸出照片分析 Schema 的其他欄位。"""
+PROVIDER_CONTRACT_PROMPT = """觀察所附圖片，只輸出 JSON。vision_ok 表示是否能讀取圖片。detected_shapes 列出實際看見的幾何圖形，使用 rectangle、circle、triangle 名稱；每個圖形列一次，沒有圖形時回傳空陣列。圖形數量與答案只能由圖片判斷，不可猜測。不要輸出照片分析 Schema 的其他欄位。"""
 SCORING_CONTRACT_PROMPT = "評分參考只補充分數判斷，不得改寫 Schema、固定範圍、安全分類或方向規則。"
 ANALYSIS_USER_PROMPT = "分析這張照片。"
 JSON_REPAIR_PROMPT = """只修復 JSON 表示方式，不重新分析照片。允許修正 JSON syntax、移除 Markdown fence、明確且安全的非語意型別轉換，以及刪除多餘欄位。不得新增、猜測或改寫任何照片語意。immutable_semantic_values 中每個值必須逐字逐型別保留；若無法在不改變語意的前提下修復，回傳原內容，不可補值。只輸出 JSON，不輸出 Markdown。"""
@@ -265,6 +265,7 @@ def calculate_usage_cost(
 
 
 class OpenAICompatibleProvider(VisionProvider):
+    supports_upload_guard = True
     def __init__(
         self,
         *,
@@ -655,6 +656,7 @@ class OpenAICompatibleProvider(VisionProvider):
         *,
         vision_attempt: VisionAttemptState | None = None,
         retry_policy: str = AMBIGUOUS_VISION_ANALYSIS,
+        upload_guard: dict | None = None,
     ) -> ProviderResponse:
         request_built_at = datetime.now(timezone.utc).isoformat()
         try:
@@ -733,6 +735,9 @@ class OpenAICompatibleProvider(VisionProvider):
             operation="chat_completion",
         )
         try:
+            if upload_guard is not None:
+                from inktime.app.core.model_upload_guard import assert_upload_allowed
+                assert_upload_allowed(**upload_guard)
             response = self._send(
                 "POST",
                 "/chat/completions",
@@ -1025,18 +1030,25 @@ class OpenAICompatibleProvider(VisionProvider):
         reasoning_effort: str | None = None,
         vision_attempt: VisionAttemptState | None = None,
         provider_request_context_id: str | None = None,
+        upload_guard: dict | None = None,
     ) -> ProviderResponse:
-        body = self.build_analysis_request_body(
-            image_path=image_path,
-            model=model,
-            detail=detail,
-            stage=stage,
-            max_tokens=max_tokens,
-            caption_controls=caption_controls,
-            reasoning_effort=reasoning_effort,
-            provider_request_context_id=provider_request_context_id,
-        )
-        return self._post_completion(body, vision_attempt=vision_attempt)
+        try:
+            body = self.build_analysis_request_body(
+                image_path=image_path,
+                model=model,
+                detail=detail,
+                stage=stage,
+                max_tokens=max_tokens,
+                caption_controls=caption_controls,
+                reasoning_effort=reasoning_effort,
+                provider_request_context_id=provider_request_context_id,
+            )
+        except Exception as error:
+            # Request provenance is attached to the original exception so callers
+            # retain its type while distinguishing failures before transport.
+            cast(Any, error).not_sent = True
+            raise
+        return self._post_completion(body, vision_attempt=vision_attempt, upload_guard=upload_guard)
 
     def repair_json(
         self,

@@ -28,14 +28,15 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 # currently postpones the SQLite FTS5 fix, so take only that runtime library
 # from Debian forky, where the fixed package is available. The base image's
 # systemd/udev libraries are not needed by InkTime and are removed below.
-# Advance this reviewed snapshot with every dependency/security refresh.
+# Keep the reviewed forky SQLite dependency set while refreshing security fixes.
 ARG DEBIAN_SNAPSHOT=20260915T000000Z
+ARG DEBIAN_SECURITY_SNAPSHOT=20261003T000000Z
 RUN set -eux; \
     rm -f /etc/apt/sources.list.d/debian.sources; \
     printf '%s\n' \
         "deb [check-valid-until=no] https://snapshot.debian.org/archive/debian/${DEBIAN_SNAPSHOT}/ trixie main" \
         "deb [check-valid-until=no] https://snapshot.debian.org/archive/debian/${DEBIAN_SNAPSHOT}/ trixie-updates main" \
-        "deb [check-valid-until=no] https://snapshot.debian.org/archive/debian-security/${DEBIAN_SNAPSHOT}/ trixie-security main" \
+        "deb [check-valid-until=no] https://snapshot.debian.org/archive/debian-security/${DEBIAN_SECURITY_SNAPSHOT}/ trixie-security main" \
         > /etc/apt/sources.list; \
     printf '%s\n' "deb [check-valid-until=no] https://snapshot.debian.org/archive/debian/${DEBIAN_SNAPSHOT}/ forky main" \
         > /etc/apt/sources.list.d/inktime-runtime-fixes.list; \
@@ -55,12 +56,21 @@ RUN set -eux; \
         liblastlog2-2 \
         libmount1 \
         libpcre2-8-0 \
+        libssl3t64 \
         libsqlite3-0 \
         libsmartcols1 \
         libuuid1 \
         login \
         mount \
+        openssl \
+        openssl-provider-legacy \
         util-linux; \
+    pcre2_version="$(dpkg-query -W -f='${Version}' libpcre2-8-0)"; \
+    dpkg --compare-versions "${pcre2_version}" ge '10.46-1~deb13u3'; \
+    for openssl_package in libssl3t64 openssl openssl-provider-legacy; do \
+        openssl_version="$(dpkg-query -W -f='${Version}' "${openssl_package}")"; \
+        dpkg --compare-versions "${openssl_version}" ge '3.5.7-1~deb13u3'; \
+    done; \
     sqlite_version="$(dpkg-query -W -f='${Version}' libsqlite3-0)"; \
     dpkg --compare-versions "${sqlite_version}" ge '3.53.2-1'; \
     dpkg --purge --force-depends \

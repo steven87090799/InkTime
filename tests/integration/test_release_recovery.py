@@ -427,3 +427,47 @@ def test_pruned_payload_download_fails_closed_and_history_query_still_works(
     )
     assert history.status_code == 200
     assert history.json["status"] == "ok"
+
+
+def test_failed_publication_cannot_compensate_over_another_publication(app, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    from contextlib import contextmanager
+    from threading import Event
+    from inktime.app.services import release_coordinator as coordinator_module
+    publisher = app.extensions["inktime_release_publisher"]
+    coordinator = app.extensions["inktime_release_coordinator"]
+    first, second = _stage(publisher, "safe_4c"), _stage(publisher, "safe_4c")
+    activated, second_waiting, release_first = Event(), Event(), Event()
+    original_activate = publisher.activate_manifests
+    original_guard = coordinator_module.release_metadata_guard
+    @contextmanager
+    def observed_guard(root):
+        if activated.is_set():
+            second_waiting.set()
+        with original_guard(root):
+            yield
+    def activation(manifests):
+        original_activate(manifests)
+        if manifests[0]["release_id"] == first["release_id"]:
+            activated.set()
+            assert release_first.wait(5)
+            raise OSError("fixture activation commit failure")
+    monkeypatch.setattr(coordinator_module, "release_metadata_guard", observed_guard)
+    monkeypatch.setattr(publisher, "activate_manifests", activation)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        one = executor.submit(coordinator.publish, [first], created_by="test", photo_ids=[])
+        assert activated.wait(5)
+        two = executor.submit(coordinator.publish, [second], created_by="test", photo_ids=[])
+        try:
+            assert second_waiting.wait(5)
+            assert not two.done()
+        finally:
+            release_first.set()
+        with pytest.raises(OSError, match="commit failure"):
+            one.result(timeout=5)
+        two.result(timeout=5)
+    assert (publisher.root / "latest.safe_4c").read_text().strip() == second["release_id"]
+    with app.extensions["inktime_database"].session() as connection:
+        statuses = dict(connection.execute("SELECT id,status FROM releases WHERE id IN (?,?)", (first["release_id"], second["release_id"])).fetchall())
+    assert statuses[first["release_id"]] == "staged_failed"
+    assert statuses[second["release_id"]] == "published"

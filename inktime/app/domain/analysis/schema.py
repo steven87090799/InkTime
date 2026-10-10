@@ -200,9 +200,9 @@ PROVIDER_CONTRACT_JSON_SCHEMA: dict[str, Any] = {
             "vision_ok": {"type": "boolean"},
             "detected_shapes": {
                 "type": "array",
-                "items": {"type": "string", "enum": ["rectangle", "circle"]},
-                "minItems": 2,
-                "maxItems": 2,
+                "items": {"type": "string", "enum": ["rectangle", "circle", "triangle"]},
+                "minItems": 0,
+                "maxItems": 3,
                 "uniqueItems": True,
             },
         },
