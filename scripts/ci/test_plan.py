@@ -89,7 +89,6 @@ TIER_0_GATES = (
 
 FULL_TEST_SUITES = (
     "python312_unit_security_integration_coverage",
-    "python310_compatibility_tests",
     "ci_routing_contracts",
     "python_application_owner",
     "python_dependency_owner",
@@ -221,7 +220,6 @@ SUITE_EXECUTION_OWNERS = {
     "mypy": "python-quality",
     "dependency_policy": "python-quality",
     "python312_unit_security_integration_coverage": "python-quality",
-    "python310_compatibility_tests": "python-compatibility",
     "ci_routing_contracts": SELECTED_SUITE_RUNNER,
     "python_application_owner": SELECTED_SUITE_RUNNER,
     "python_dependency_owner": "dependency-audit",
@@ -260,7 +258,6 @@ FULL_SUITE_EXECUTION_OWNERS = {
     "mypy": "python-quality",
     "dependency_policy": "python-quality",
     "python312_unit_security_integration_coverage": "python-quality",
-    "python310_compatibility_tests": "python-compatibility",
     "ci_routing_contracts": "python-quality",
     "python_application_owner": "python-quality",
     "python_dependency_owner": "dependency-audit",
@@ -288,7 +285,7 @@ FULL_SUITE_EXECUTION_OWNERS = {
 }
 
 IMPACT_EXECUTION_OWNERS = frozenset(
-    {"changes", "python-quality", "python-compatibility", "dependency-audit"}
+    {"changes", "python-quality", "dependency-audit"}
     | {
         "migration-contract",
         "compose-lan-production-persistence",
@@ -305,7 +302,6 @@ FULL_EXECUTION_OWNERS = frozenset(
     {
         "changes",
         "python-quality",
-        "python-compatibility",
         "dependency-audit",
         "migration-contract",
         "compose-lan-production-persistence",
@@ -321,7 +317,6 @@ FULL_EXECUTION_OWNERS = frozenset(
 
 FULL_EXPENSIVE_GATES = (
     "python312_full",
-    "python310_compatibility",
     "dependency_audit",
     "migration",
     "runtime_soak",
@@ -362,16 +357,7 @@ DOMAIN_OWNER_SUITES = {
     "dependencies": ("python_dependency_owner", "dependency_policy"),
 }
 
-FULL_FIRMWARE_PROFILES = (
-    "gdey_release",
-    "gdep_release",
-    "photopainter_release",
-    "trusted_lan_gdey",
-    "trusted_lan_gdep",
-    "trusted_lan_photopainter",
-    "default_debug",
-    "photopainter_debug",
-)
+FULL_FIRMWARE_PROFILES = ("photopainter_release",)
 PRIMARY_FIRMWARE_PROFILE = "photopainter_release"
 
 GATE_ORDER = TIER_0_GATES + ("actionlint",) + FULL_EXPENSIVE_GATES
@@ -379,7 +365,6 @@ GATE_ORDER = TIER_0_GATES + ("actionlint",) + FULL_EXPENSIVE_GATES
 IMPACT_GATE_EXECUTION = {
     "secret_scan": "impact:secret_scan",
     "actionlint": "impact:actionlint",
-    "python310_compatibility": "impact:python310_compatibility",
     "dependency_audit": "impact:dependency_audit",
     "runtime_soak": "impact:runtime_soak",
     "playwright": "impact:playwright",
@@ -397,7 +382,6 @@ FULL_GATE_EXECUTION = {
     "secret_scan": "full:secret_scan",
     "actionlint": "full:actionlint",
     "python312_full": "full:python312_full",
-    "python310_compatibility": "full:python310_compatibility",
     "dependency_audit": "full:dependency_audit",
     "migration": "full:migration",
     "runtime_soak": "full:runtime_soak",
@@ -419,7 +403,6 @@ GATE_EXECUTION_OWNERS = {
     "secret_scan": "secret-scan",
     "actionlint": "actionlint",
     "python312_full": "python-quality",
-    "python310_compatibility": "python-compatibility",
     "dependency_audit": "dependency-audit",
     "migration": "migration-contract",
     "runtime_soak": "bounded-runtime-soak",
@@ -443,7 +426,6 @@ WORKFLOW_EXECUTION_JOB_IDS = {
             "changes",
             "source-head-contract",
             "python-quality",
-            "python-compatibility",
             "dependency-audit",
             "migration-contract",
             "secret-scan",
@@ -474,7 +456,6 @@ IMPACT_TO_FULL_EXECUTION = {
     for impact_gate, full_gate in {
         "secret_scan": "secret_scan",
         "actionlint": "actionlint",
-        "python310_compatibility": "python310_compatibility",
         "dependency_audit": "dependency_audit",
         "runtime_soak": "runtime_soak",
         "playwright": "playwright",
@@ -554,66 +535,16 @@ def _optional_text(value: object) -> str | None:
 
 
 def _firmware_profiles_for_path(path: str) -> tuple[set[str], str | None]:
-    """Return the supported firmware profiles affected by a firmware surface."""
-
-    lower_path = path.casefold()
+    """Validate only the deployed PhotoPainter release, including shared code."""
     if path.startswith("tests/firmware/"):
-        return set(FULL_FIRMWARE_PROFILES), "firmware_host_contract_tests"
-
-    if path.startswith("inktime/app/api/") or any(
-        token in lower_path for token in ("device_delivery", "device_manifest", "device_token", "/ack")
-    ):
-        return set(FULL_FIRMWARE_PROFILES), "server_device_contract"
-
-    if path.endswith(".ino"):
-        if "gdep" in lower_path:
-            return {"gdep_release", "trusted_lan_gdep"}, "gdep_profile"
-        if "gdey" in lower_path:
-            return {"gdey_release", "trusted_lan_gdey", "default_debug"}, "gdey_profile"
-        if "photopainter" in lower_path:
-            return {
-                "photopainter_release",
-                "trusted_lan_photopainter",
-                "photopainter_debug",
-            }, "photopainter_profile"
-        return set(FULL_FIRMWARE_PROFILES), "shared_profile_or_build_surface"
-
-    if any(
-        token in lower_path
-        for token in (
-            "hardware_profile",
-            "device_config_store",
-            "device_http_transport",
-            "offline_schedule_core",
-            "pairing_recovery_core",
-            "queue_client_core",
-            "queue_runtime_types",
-            "power_policy",
-            "power_manager",
-            "nvs",
-            "panel",
-            "schema",
-            "tls",
-            "build",
-            "compile",
-        )
-    ):
-        return set(FULL_FIRMWARE_PROFILES), "shared_profile_or_build_surface"
-
-    if "photopainter" in lower_path or "photo" in lower_path:
-        return {
-            "photopainter_release",
-            "trusted_lan_photopainter",
-            "photopainter_debug",
-        }, "photopainter_profile"
-
-    if "gdep" in lower_path:
-        return {"gdep_release", "trusted_lan_gdep"}, "gdep_profile"
-
-    if "gdey" in lower_path:
-        return {"gdey_release", "trusted_lan_gdey", "default_debug"}, "gdey_profile"
-
-    return set(FULL_FIRMWARE_PROFILES), "unclassified_firmware_surface"
+        reason = "firmware_host_contract_tests"
+    elif path.startswith("inktime/app/api/"):
+        reason = "server_device_contract"
+    elif "photopainter" in path.casefold():
+        reason = "photopainter_profile"
+    else:
+        reason = "shared_profile_or_build_surface"
+    return set(FULL_FIRMWARE_PROFILES), reason
 
 
 def _test_path_plan(path: str) -> tuple[set[str], set[str], set[str]]:
@@ -791,7 +722,6 @@ def _classify_path(path: str) -> tuple[set[str], set[str], set[str], bool]:
     if path == "pyproject.toml":
         domains.add("dev_dependencies")
         suites.update({"dependency_policy", "ruff", "mypy"})
-        gates.add("python310_compatibility")
         return domains, suites, gates, False
 
     if path in {"Pipfile.lock", "poetry.lock", "uv.lock"}:

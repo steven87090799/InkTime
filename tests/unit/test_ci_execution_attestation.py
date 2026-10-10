@@ -75,7 +75,7 @@ def test_unselected_skipped_job_is_accepted_in_impact_mode():
 def test_full_mode_missing_required_job_fails_closed():
     plan = _plan("README.md", labels=["full-ci"])
     needs = _needs_for(plan, REPOSITORY_WORKFLOW)
-    missing_job = "python-compatibility"
+    missing_job = "python-quality"
     assert missing_job in needs
     del needs[missing_job]
 

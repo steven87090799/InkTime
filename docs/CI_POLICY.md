@@ -15,12 +15,12 @@ Full mode is selected when any of these are true:
 
 Use the `full-ci` label before release or select `full_suite=true` in **both**
 the CI and Container Security workflows when manually requesting complete
-validation. The global Python 3.12 coverage threshold and Python 3.10 full
-compatibility run remain in full mode. Routine main pushes no longer repeat
+validation. The global Python 3.12 coverage threshold remains in full mode.
+There is no separate Python 3.10 compatibility run. Routine main pushes no longer repeat
 that complete plan automatically. Unknown-path, owner-gap and explicit
 full-only regression fallbacks remain conservative.
 
-Full mode includes Tier 0, the complete owner-suite plan, Python 3.12 coverage at 80%, Python 3.10 compatibility, dependency policy and audit, migrations, secret scan, actionlint, Docker LAN production persistence, TLS production smoke, bounded runtime soak, Playwright, firmware host contracts and the complete firmware profile matrix, container security, offline benchmark, and both aggregate gates. Equivalent impact-only heavy jobs are not run again in full mode. Actionlint is a full-mode invariant even when the diff itself is not a workflow/configuration change.
+Full mode includes Tier 0, the complete owner-suite plan, Python 3.12 coverage at 80%, dependency policy and audit, migrations, secret scan, actionlint, Docker LAN production persistence, TLS production smoke, bounded runtime soak, Playwright, firmware host contracts and the deployed PhotoPainter release, container security, offline benchmark, and both aggregate gates. Equivalent impact-only heavy jobs are not run again in full mode. Actionlint is a full-mode invariant even when the diff itself is not a workflow/configuration change.
 
 The planner's full-mode execution registry maps every `FULL_PLAN_SUITES` entry to a real full-mode job. `docs_contract` remains a documentation classification marker for routing, while each full-validation `changes` job runs [`scripts/ci/validate_ai_navigation.py`](../scripts/ci/validate_ai_navigation.py) after checkout. That contract validates the machine-readable AI index, its paths and test globs, the large-file policy, and the required navigation links.
 
@@ -65,7 +65,7 @@ That job proves the checked-out commit equals `SOURCE_HEAD_SHA`. It does not dup
 
 - **Tier 0:** changed-path classification, planner contracts, secret scan, and patch-format validation. Ruff and mypy are added for Python/configuration changes and always run in full mode. Dependency policy is required for dependency changes and full mode. Actionlint runs for CI/workflow configuration in impact mode and for every full run.
 - **Tier 1/2:** source-owned Python, web, authentication, runtime, queue, persistence, migration, backup/restore, device, rendering, scanner, notification, settings, provider, Docker, TLS, firmware, and benchmark owner suites.
-- **Tier 3:** only affected expensive gates run in impact mode. Firmware uses the PhotoPainter release as the quick profile and expands to affected profiles for shared firmware surfaces.
+- **Tier 3:** only affected expensive gates run in impact mode. Firmware compiles only the deployed PhotoPainter release, including when shared firmware surfaces change.
 - **Tier 4:** full mode runs the complete pre-merge validation set and preserves the existing global coverage threshold.
 
 The 100,000-row cases marked `performance` are excluded from the ordinary
@@ -83,7 +83,14 @@ The deployment preflight script is a cross-boundary surface: `scripts/production
 
 ## Python support policy
 
-`pyproject.toml` is a Python 3.10/package-metadata contract in addition to a development-tooling surface. Dependency policy parses `[project].requires-python` with `packaging.specifiers.SpecifierSet` and verifies that `packaging.version.Version("3.10")` is actually accepted. Text-prefix checks such as `startswith(">=3.10")` are not sufficient because exclusions and contradictory upper bounds can invalidate Python 3.10 support. `packaging` is an exact-pinned development dependency under the repository dependency policy.
+The deployed Docker images use Python 3.12. Package metadata now targets
+`>=3.12,<3.13`, and Ruff/mypy also target 3.12. Dependency policy checks the
+PEP 440 specifier semantically: it must accept 3.12 while excluding 3.11 and
+3.13. There is no second complete test run for Python 3.10, even in full mode.
+This narrows supported package installations to the deployed minor version;
+other Python versions are no longer advertised or validated. Python 3.12
+owner regressions and optional full coverage still protect deployed behavior.
+
 
 ## Routing and debugging
 
@@ -130,13 +137,22 @@ shard reports its slowest 30 test phases and uploads JUnit timing/results.
 Very large individual files can still dominate and should be tuned using
 those hosted measurements.
 
-Firmware profiles use a planner-derived matrix with at most four simultaneous
-compiles. The existing board options, build flags and partition choices stay
-the same; all selected profiles must pass. Both matrices keep their existing
-execution-owner job IDs and aggregate attestation, with fail-fast disabled.
-Parallelism shortens elapsed time but does not remove test computation, and
-per-profile toolchain setup adds runner time. Actual savings require hosted
-measurement rather than assuming a fourfold speedup.
+Firmware CI now compiles exactly `photopainter_release`: Waveshare
+PhotoPainter Rev2.0, ESP32-S3, 16 MiB Flash, 8 MiB OPI PSRAM, USB CDC, and the
+repository's `inktime_photopainter_3M_16MB.csv` partition table. Both impact and
+full planning have the same singleton profile inventory. GDEY/GDEP 4 MiB,
+separate trusted-LAN builds and Debug builds are no longer compiled. The
+PhotoPainter release already supports strictly checked private-IPv4 LAN HTTP
+as well as trusted HTTPS, so its extra trusted-LAN variant was redundant.
+The host Config/ACK/queue tests remain relevant; the duplicate default-board
+PhotoPainter core run is removed. Source for other boards remains intact.
+
+Selected owner tests still use a bounded matrix and fail-closed aggregate
+attestation. Parallelism reduces elapsed time rather than computation;
+removing seven unrelated firmware builds and the Python 3.10 full run also
+reduces total runner work. The old full-run measurements above describe the
+previous eight-profile/two-Python configuration, not the narrowed plan.
+
 
 Long-duration runtime soak is already isolated in `runtime-soak.yml` and is
 manual-only: 30 minutes, two hours (default), or five hours. It is not part of

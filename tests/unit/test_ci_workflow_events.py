@@ -25,7 +25,6 @@ FULL_VALIDATION_GUARD = "needs.changes.outputs.full_validation == 'true'"
 CI_HEAVY_JOBS = (
     "source-head-contract",
     "python-quality",
-    "python-compatibility",
     "dependency-audit",
     "migration-contract",
     "secret-scan",
@@ -182,19 +181,27 @@ def test_matrix_jobs_preserve_all_selected_validation_and_aggregate_owners():
     jobs = workflow["jobs"]
     owner = jobs["selected-owner-suites"]
     firmware = jobs["esp32-compile"]
-    for job in (owner, firmware):
-        assert job["strategy"]["fail-fast"] is False
+    assert owner["strategy"]["fail-fast"] is False
     assert "owner_shards" in owner["strategy"]["matrix"]["shard"]
     regressions = _step_by_name(owner, "Run planner-selected owner regressions")
     assert regressions["env"]["SHARD_COUNT"] == "${{ strategy.job-total }}"
     assert "--shard-index" in regressions["run"]
     assert "--shard-count" in regressions["run"]
     assert "--junit-xml" in regressions["run"]
-    assert firmware["strategy"]["max-parallel"] == 4
-    assert "firmware_compile_profiles" in firmware["strategy"]["matrix"]["profile"]
-    compile_step = _step_by_name(firmware, "Compile planner-selected firmware profiles")
-    assert compile_step["env"]["FIRMWARE_PROFILE"] == "${{ matrix.profile }}"
-    assert 'profiles=("${FIRMWARE_PROFILE}")' in compile_step["run"]
+    assert "strategy" not in firmware
+    compile_step = _step_by_name(firmware, "Compile deployed PhotoPainter release")
+    assert "FlashSize=16M,PSRAM=opi,CDCOnBoot=cdc" in compile_step["run"]
+    assert "inktime_photopainter_3M_16MB.csv" in compile_step["run"]
+    assert "DEVICE_PROFILE_WAVESHARE_PHOTOPAINTER" in compile_step["run"]
+    assert "DebugLevel" not in compile_step["run"]
+    assert "python-compatibility" not in jobs
+    versions = {
+        step["with"]["python-version"]
+        for job in jobs.values()
+        for step in job.get("steps", [])
+        if "actions/setup-python@" in step.get("uses", "")
+    }
+    assert versions == {"3.12"}
     gate = jobs["repository-gate"]
     assert {"selected-owner-suites", "esp32-compile"} <= set(gate["needs"])
 
