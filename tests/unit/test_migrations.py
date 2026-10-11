@@ -1749,7 +1749,7 @@ def test_wal_foreign_keys_busy_timeout_and_synchronous_are_applied(tmp_path):
         assert connection.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
         assert connection.execute("PRAGMA foreign_keys").fetchone()[0] == 1
         assert connection.execute("PRAGMA busy_timeout").fetchone()[0] == 12_345
-        assert connection.execute("PRAGMA synchronous").fetchone()[0] == 1  # NORMAL
+        assert connection.execute("PRAGMA synchronous").fetchone()[0] == 2  # FULL
         with pytest.raises(sqlite3.IntegrityError):
             connection.execute(
                 """
