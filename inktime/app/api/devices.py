@@ -532,6 +532,45 @@ def update_device(device_id: str):
     }
 
 
+def _device_configuration(device, profile_key: str) -> dict:
+    zone = ZoneInfo(str(device["timezone"]))
+    offset = datetime.now(zone).utcoffset()
+    config = {
+        "schema_version": 2,
+        "config_version": int(device["config_version"]),
+        "panel_profile": profile_key,
+        "timezone": str(device["timezone"]),
+        "utc_offset_minutes": int(offset.total_seconds() // 60) if offset else 0,
+        "schedule": str(device["schedule"]),
+        "rotation": int(device["rotation"]),
+    }
+    if str(device["delivery_mode"] or "legacy_online") == "inktime_offline_schedule":
+        config.update(
+            {
+                "schema_version": 3,
+                "delivery_mode": "inktime_offline_schedule",
+                "offline_prefetch_allowed": bool(device["offline_prefetch_allowed"]),
+                "offline_schedule_max_slots": int(device["offline_schedule_max_slots"] or LEGACY_MAX_OFFLINE_SLOTS),
+                "offline_schedule_capability_state": str(
+                    device["offline_schedule_capability_state"] or "unknown_12"
+                ),
+                "schedule_times": json.loads(str(device["schedule_times_json"] or "[]")),
+                "prefetch_lead_minutes": int(device["prefetch_lead_minutes"] or 0),
+                "button_wake_action": str(device["button_wake_action"] or "check_new"),
+                "offline_schedule_version": int(device["offline_schedule_version"] or 0),
+                "applied_offline_schedule_version": int(
+                    device["applied_offline_schedule_version"] or 0
+                ),
+                "minimum_schedule_gap_minutes": int(
+                    device["minimum_schedule_gap_minutes"] or MINIMUM_SCHEDULE_GAP_MINUTES
+                ),
+                "sync_strategy": str(device["sync_strategy"] or "first_display_lead"),
+                "sync_time": device["sync_time"],
+            }
+        )
+    return config
+
+
 @bp.get("/api/device/v1/releases/latest")
 def latest_release():
     device = authenticate_device_request()
@@ -587,41 +626,7 @@ def latest_release():
         # Configuration is an authenticated control plane even with an empty library.
         manifest = {"schema_version": 3, "pixel_format": "indexed4", "no_content": True,
                     "files": [], "width": 0, "height": 0}
-    zone = ZoneInfo(str(device["timezone"]))
-    offset = datetime.now(zone).utcoffset()
-    manifest["device_config"] = {
-        "schema_version": 2,
-        "config_version": int(device["config_version"]),
-        "panel_profile": profile_key,
-        "timezone": str(device["timezone"]),
-        "utc_offset_minutes": int(offset.total_seconds() // 60) if offset else 0,
-        "schedule": str(device["schedule"]),
-        "rotation": int(device["rotation"]),
-    }
-    if str(device["delivery_mode"] or "legacy_online") == "inktime_offline_schedule":
-        manifest["device_config"].update(
-            {
-                "schema_version": 3,
-                "delivery_mode": "inktime_offline_schedule",
-                "offline_prefetch_allowed": bool(device["offline_prefetch_allowed"]),
-                "offline_schedule_max_slots": int(device["offline_schedule_max_slots"] or LEGACY_MAX_OFFLINE_SLOTS),
-                "offline_schedule_capability_state": str(
-                    device["offline_schedule_capability_state"] or "unknown_12"
-                ),
-                "schedule_times": json.loads(str(device["schedule_times_json"] or "[]")),
-                "prefetch_lead_minutes": int(device["prefetch_lead_minutes"] or 0),
-                "button_wake_action": str(device["button_wake_action"] or "check_new"),
-                "offline_schedule_version": int(device["offline_schedule_version"] or 0),
-                "applied_offline_schedule_version": int(
-                    device["applied_offline_schedule_version"] or 0
-                ),
-                "minimum_schedule_gap_minutes": int(
-                    device["minimum_schedule_gap_minutes"] or MINIMUM_SCHEDULE_GAP_MINUTES
-                ),
-                "sync_strategy": str(device["sync_strategy"] or "first_display_lead"),
-                "sync_time": device["sync_time"],
-            }
-        )
+    manifest["device_config"] = _device_configuration(device, profile_key)
     if authorization.test_assignment is not None:
         assignment = authorization.test_assignment
         manifest["test_delivery"] = {
@@ -884,8 +889,18 @@ def device_offline_schedule():
             # input; never make the firmware poll at a fixed one-minute rate.
             retry_after_epoch = now_epoch + 15 * 60
             next_slot_epoch = None
+        # Image availability must not block independently persisted configuration.
+        # Corrupt live settings retain the existing bounded-retry response without
+        # offering a configuration that the frame could incorrectly acknowledge.
+        try:
+            device_config = _device_configuration(
+                device, str(device["panel_profile"] or DEFAULT_DEVICE_PANEL_PROFILE)
+            )
+        except (TypeError, ValueError, KeyError, OverflowError):
+            device_config = None
         response = jsonify(
             {
+                **({"device_config": device_config, "no_content": True} if device_config is not None else {}),
                 "error": "schedule_not_ready",
                 "error_code": "DEVICE-008",
                 "message": "schedule_not_ready",

@@ -424,7 +424,9 @@ def test_explicit_slot_capability_survives_pairing_confirm(client, app, maximum)
 
 
 @pytest.mark.parametrize("advertised", [12, 16])
-def test_capability_downgrade_is_pending_and_admin_visible_without_mutating_schedule(client, app, advertised):
+@pytest.mark.parametrize("lan", [False, True])
+def test_capability_downgrade_is_pending_and_admin_visible_without_mutating_schedule(client, app, advertised, lan):
+    app.extensions["inktime_device_pairing_service"].trusted_lan = lan
     schedule_times = [f"{hour:02d}:00" for hour in range(24)]
     device_id, _token = app.extensions["inktime_device_repository"].create(
         "24 Slot Repair",
@@ -486,9 +488,15 @@ def test_capability_downgrade_is_pending_and_admin_visible_without_mutating_sche
     replay = client.post(PAIRING_PATH, json=payload)
     assert replay.status_code == 200
     assert replay.get_json()["error_code"] == "PAIR-CAPABILITY-CONFLICT"
+    claim = client.post(CLAIM_PATH, json={
+        "pairing_id": body["pairing_id"], "pairing_nonce": payload["pairing_nonce"],
+    })
+    assert claim.status_code == (409 if lan else 202)
+    if lan:
+        assert claim.get_json()["error_code"] == "PAIR-CAPABILITY-CONFLICT"
 
 
-def test_pairing_proves_physical_possession_and_confirm_is_recoverable(client, app):
+def test_admin_admission_and_credential_confirm_are_recoverable(client, app):
     payload = _pairing_payload()
     requested = client.post(PAIRING_PATH, json=payload)
     assert requested.status_code == 201
@@ -528,7 +536,7 @@ def test_pairing_proves_physical_possession_and_confirm_is_recoverable(client, a
     device_page = client.get("/devices")
     assert device_page.status_code == 200
     assert pairing_code not in device_page.get_data(as_text=True)
-    assert "pairing-code-input" in device_page.get_data(as_text=True)
+    assert "pairing-code-input" not in device_page.get_data(as_text=True)
 
     approved = _approve(client, pairing_id, pairing_code)
     assert approved.status_code == 200
@@ -740,7 +748,7 @@ def test_admin_can_reject_issued_credential_before_confirm(client, app):
     approved_page = client.get("/devices")
     assert approved_page.status_code == 200
     approved_page_html = approved_page.get_data(as_text=True)
-    assert '已核准，等待裝置領取</span><button class="secondary reject-pairing"' in approved_page_html
+    assert '正在連線</span><button class="secondary reject-pairing"' in approved_page_html
     claimed = client.post(
         CLAIM_PATH,
         json={"pairing_id": pairing_id, "pairing_nonce": payload["pairing_nonce"]},
@@ -753,7 +761,7 @@ def test_admin_can_reject_issued_credential_before_confirm(client, app):
     device_page = client.get("/devices")
     assert device_page.status_code == 200
     device_page_html = device_page.get_data(as_text=True)
-    assert "等待裝置確認" in device_page_html
+    assert "等待相框完成連線" in device_page_html
     assert "reject-pairing" in device_page_html
 
     rejected = client.post(
@@ -863,23 +871,21 @@ def test_pairing_request_replay_recovers_lost_response_with_same_display_code(cl
     assert pairing_code not in pending_html
 
 
-def test_pairing_code_attempt_limit_and_admin_csrf_are_enforced(client, app):
-    requested = client.post(PAIRING_PATH, json=_pairing_payload("esp32-attempt-limit"))
+def test_public_admission_requires_admin_csrf_without_pairing_code(client, app):
+    requested = client.post(PAIRING_PATH, json=_pairing_payload("esp32-admin-admission"))
     assert requested.status_code == 201
     body = requested.get_json()
-    wrong_code = "000000" if body["pairing_code"] != "000000" else "999999"
-
+    url = f"/api/v1/device-pairing/{body['pairing_id']}/approve"
+    assert client.post(url, json={}).status_code in {302, 401, 403}
     create_admin(app)
     login(client)
-    assert _approve(client, body["pairing_id"], wrong_code, include_csrf=False).status_code == 403
-    for _ in range(5):
-        assert _approve(client, body["pairing_id"], wrong_code).status_code == 403
-
-    claim = client.post(
-        CLAIM_PATH,
-        json={"pairing_id": body["pairing_id"], "pairing_nonce": "nonce-for-contract-test-0123456789"},
-    )
-    assert claim.status_code == 410
+    assert client.post(url, json={}).status_code == 403
+    approved = client.post(url, json={}, headers={"X-CSRF-Token": csrf(client)})
+    assert approved.status_code == 200
+    claim = client.post(CLAIM_PATH, json={
+        "pairing_id": body["pairing_id"], "pairing_nonce": "nonce-for-contract-test-0123456789",
+    })
+    assert claim.status_code == 200
 
 
 def test_pairing_claim_attempt_limit_is_persisted(client, app):
@@ -992,50 +998,87 @@ def test_stock_compatibility_never_enters_automatic_pairing(client, app):
     assert request_count == 0
 
 
-def test_lan_pairing_can_be_approved_without_code_but_requires_admin_csrf(client, app):
+@pytest.mark.parametrize("capabilities", [{"trusted_lan_pairing": True}, {}])
+def test_lan_registration_needs_no_code_approval_or_browser_session(client, app, capabilities):
     service = app.extensions["inktime_device_pairing_service"]
     service.trusted_lan = True
-    body = client.post(PAIRING_PATH, json=_pairing_payload(
-        "esp32-lan", capabilities={"trusted_lan_pairing": True},
-    )).get_json()
-    assert body["pairing_mode"] == "trusted_lan"
+    payload = _pairing_payload("esp32-lan", capabilities=capabilities)
+    requested = client.post(PAIRING_PATH, json=payload)
+    assert requested.status_code == 201
+    body = requested.get_json()
+    assert body["status"] == "approved"
+    assert body["enrollment_mode"] == "automatic"
+    with app.extensions["inktime_database"].session() as connection:
+        row = connection.execute("SELECT approved_by FROM device_pairing_requests WHERE id=?", (body["pairing_id"],)).fetchone()
+        assert row["approved_by"] is None
+        assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
     assert body["expires_in_seconds"] == 86400
     assert service.pending_for_admin()[0]["code_required"] is False
-    url = f"/api/v1/device-pairing/{body['pairing_id']}/approve"
-    assert client.post(url, json={}).status_code in {302, 401, 403}
-    create_admin(app)
-    login(client)
-    page = client.get("/devices")
-    assert page.status_code == 200
-    assert b'data-code-required="false"' in page.data
-    assert b'class="pairing-code-input"' not in page.data
-    assert client.post(url, json={}).status_code == 403
-    approved = client.post(url, json={}, headers={"X-CSRF-Token": csrf(client)})
-    assert approved.status_code == 200
+    wrong_nonce = client.post(CLAIM_PATH, json={
+        "pairing_id": body["pairing_id"], "pairing_nonce": "wrong-device-nonce-0123456789",
+    })
+    assert wrong_nonce.status_code == 401
     claimed = client.post(CLAIM_PATH, json={
-        "pairing_id": body["pairing_id"], "pairing_nonce": "nonce-for-contract-test-0123456789",
+        "pairing_id": body["pairing_id"], "pairing_nonce": payload["pairing_nonce"],
     })
     assert claimed.status_code == 200
+    credential = claimed.get_json()
     with app.extensions["inktime_database"].session() as connection:
         assert connection.execute("SELECT COUNT(*) FROM devices WHERE id='esp32-lan'").fetchone()[0] == 0
+    confirmed = _confirm(client, {
+        "pairing_id": body["pairing_id"], "device_id": payload["device_id"],
+        "pairing_nonce": payload["pairing_nonce"],
+    }, credential["device_secret"], credential["credential_version"])
+    assert confirmed.status_code == 200
+    with app.extensions["inktime_database"].session() as connection:
+        row = connection.execute("SELECT pairing_state,enabled FROM devices WHERE id='esp32-lan'").fetchone()
+    assert row["pairing_state"] == "paired" and row["enabled"] == 1
 
 
-@pytest.mark.parametrize("lan", [False, True])
-def test_public_and_legacy_requests_keep_physical_code_policy(client, app, lan):
+@pytest.mark.parametrize("retry", ["request", "claim"])
+@pytest.mark.parametrize("stored_mode", ["trusted_lan", "physical_code"])
+def test_existing_pending_lan_registration_completes_after_upgrade(client, app, retry, stored_mode):
     service = app.extensions["inktime_device_pairing_service"]
-    service.trusted_lan = lan
-    capabilities = {"_enrollment_mode": "trusted_lan"}
-    if not lan:
-        capabilities["trusted_lan_pairing"] = True
+    service.trusted_lan = True
+    payload = _pairing_payload("esp32-upgrade")
+    body = client.post(PAIRING_PATH, json=payload).get_json()
+    with app.extensions["inktime_database"].transaction() as connection:
+        row = connection.execute("SELECT capabilities_json FROM device_pairing_requests WHERE id=?", (body["pairing_id"],)).fetchone()
+        capabilities = json.loads(row["capabilities_json"])
+        capabilities["_enrollment_mode"] = stored_mode
+        connection.execute(
+            "UPDATE device_pairing_requests SET status='pending',approved_at=NULL,approved_by=NULL,capabilities_json=? WHERE id=?",
+            (json.dumps(capabilities), body["pairing_id"]),
+        )
+    if retry == "request":
+        replay = client.post(PAIRING_PATH, json=payload).get_json()
+        assert replay["pairing_id"] == body["pairing_id"] and replay["status"] == "approved"
+    claimed = client.post(CLAIM_PATH, json={
+        "pairing_id": body["pairing_id"], "pairing_nonce": payload["pairing_nonce"],
+    })
+    assert claimed.status_code == 200
+    service.trusted_lan = False
+    expired = client.post(CLAIM_PATH, json={
+        "pairing_id": body["pairing_id"], "pairing_nonce": payload["pairing_nonce"],
+    })
+    assert expired.status_code == 410
+
+
+def test_public_registration_cannot_self_select_automatic_admission(client, app):
+    service = app.extensions["inktime_device_pairing_service"]
+    service.trusted_lan = False
     body = client.post(PAIRING_PATH, json=_pairing_payload(
-        "esp32-strict", capabilities=capabilities,
+        "esp32-public", capabilities={"_enrollment_mode": "trusted_lan", "trusted_lan_pairing": True},
     )).get_json()
-    assert body["pairing_mode"] == "physical_code"
+    assert body["status"] == "pending"
+    assert body["enrollment_mode"] == "administrator"
     assert body["expires_in_seconds"] == 300
-    assert service.pending_for_admin()[0]["code_required"] is True
-    create_admin(app)
-    login(client)
-    assert _approve(client, body["pairing_id"], "").status_code == 400
+    assert service.pending_for_admin()[0]["automatic"] is False
+    assert service.pending_for_admin()[0]["code_required"] is False
+    claim = client.post(CLAIM_PATH, json={
+        "pairing_id": body["pairing_id"], "pairing_nonce": "nonce-for-contract-test-0123456789",
+    })
+    assert claim.status_code == 202
 
 
 def test_lan_request_survives_five_minutes_and_expires_after_a_day(client, app, monkeypatch):

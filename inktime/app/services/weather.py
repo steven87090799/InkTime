@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 import json
+import math
 from threading import Condition, Lock
 from typing import Any
 
@@ -195,16 +196,24 @@ class WeatherService:
             )
             response.raise_for_status()
             payload = response.json()
+            if not isinstance(payload, dict):
+                raise ValueError("weather response must be an object")
             current = payload.get("current") or {}
             daily = payload.get("daily") or {}
+            if not isinstance(current, dict) or not isinstance(daily, dict):
+                raise ValueError("weather observations must be objects")
+            for field in ("temperature_2m_min", "temperature_2m_max"):
+                values = daily.get(field)
+                if not isinstance(values, list) or not values:
+                    raise ValueError("weather daily temperatures are missing")
             code = int(current.get("weather_code", (daily.get("weather_code") or [0])[0]))
-            candidate = {
+            candidate: dict[str, Any] = {
                 "available": True,
                 "temperature_c": float(current["temperature_2m"]),
                 "humidity_percent": float(current["relative_humidity_2m"]),
                 "apparent_temperature_c": float(current["apparent_temperature"]),
-                "minimum_c": float((daily.get("temperature_2m_min") or [0])[0]),
-                "maximum_c": float((daily.get("temperature_2m_max") or [0])[0]),
+                "minimum_c": float(daily["temperature_2m_min"][0]),
+                "maximum_c": float(daily["temperature_2m_max"][0]),
                 "weather_code": code,
                 "condition": WEATHER_LABELS.get(code, "天氣狀況未知"),
                 "observed_at": str(current.get("time", "")),
@@ -212,8 +221,12 @@ class WeatherService:
             # Empty or incomplete responses never replace a usable stale value.
             if not candidate.get("observed_at"):
                 raise ValueError("weather response has no observation time")
+            if not all(math.isfinite(candidate[field]) for field in (
+                "temperature_c", "humidity_percent", "apparent_temperature_c", "minimum_c", "maximum_c"
+            )):
+                raise ValueError("weather response has non-finite observations")
             result = candidate
-        except (requests.RequestException, KeyError, TypeError, ValueError) as exc:
+        except (requests.RequestException, KeyError, TypeError, ValueError, OverflowError) as exc:
             failure = exc
         completed = datetime.now(timezone.utc)
         with self._condition:

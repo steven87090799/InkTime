@@ -293,7 +293,14 @@ class BackupService:
                 if info.file_size > 1024 * 1024:
                     raise ValueError("BACKUP-002 manifest 大小異常")
                 manifest = json.loads(bundle.read("manifest.json"))
-                version = int(manifest.get("backup_format_version", manifest.get("schema_version", 0)))
+                if not isinstance(manifest, dict):
+                    raise ValueError("BACKUP-002 manifest 必須是物件")
+                if not isinstance(manifest.get("important_table_counts", {}), dict):
+                    raise ValueError("BACKUP-002 important_table_counts 必須是物件")
+                raw_version = manifest.get("backup_format_version", manifest.get("schema_version", 0))
+                if raw_version is None:
+                    raise ValueError("BACKUP-002 備份格式版本不可為 null")
+                version = int(raw_version)
                 expected = (
                     {"inktime.sqlite3", "manifest.json"}
                     if version == 1
@@ -305,15 +312,19 @@ class BackupService:
                     raise ValueError("BACKUP-002 SQLite 備份大小異常")
                 if version == BACKUP_FORMAT_VERSION:
                     files = manifest.get("files") or {}
+                    if not isinstance(files, dict):
+                        raise ValueError("BACKUP-002 files 必須是物件")
                     for name in ("inktime.sqlite3", "settings.json"):
                         expected_file = files.get(name) or {}
+                        if not isinstance(expected_file, dict):
+                            raise ValueError("BACKUP-002 檔案 metadata 必須是物件")
                         with bundle.open(name) as stream:
                             digest, size = _stream_sha256(stream)
                         if digest != expected_file.get("sha256") or size != int(
                             expected_file.get("size", -1)
                         ):
                             raise ValueError(f"BACKUP-003 {name} 完整性驗證失敗")
-        except (OSError, zipfile.BadZipFile, json.JSONDecodeError, KeyError, TypeError) as exc:
+        except (OSError, zipfile.BadZipFile, json.JSONDecodeError, KeyError, TypeError, OverflowError) as exc:
             raise ValueError("BACKUP-002 備份格式損壞") from exc
         return manifest
 

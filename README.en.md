@@ -1,6 +1,6 @@
 # InkTime · Photo analysis and e-ink memory frames
 
-> Documentation checked on 2026-09-22 against `main` at `66c8222`. SQLite Migration 63, AI Schema v5, firmware 2.8.7, Config Store v5 and NAS deployment contract 3 are separate versions. Check the deployed Git revision in Diagnostics; see the [source baseline](docs/reference/CURRENT_STATE_ZH_TW.md).
+> Branch documentation updated on 2026-10-11 from `origin/main=7ef3e4f` and the no-code enrollment revision `47dcd51` in Draft PR #150. SQLite Migration 63, AI Schema v5, firmware 2.8.8 (pending merge and validation), Config Store v5 and NAS deployment contract 3 are separate versions. Check the deployed Git revision in Diagnostics; see the [source baseline](docs/reference/CURRENT_STATE_ZH_TW.md).
 
 [繁體中文](README.md) · [Documentation map](docs/README.md) · [HTML manual](USER_MANUAL.html) · [Quick start](docs/getting-started/QUICK_START_ZH_TW.md)
 
@@ -167,7 +167,7 @@ Run `python -m inktime.app.workers.runner` and `python -m inktime.app.workers.sc
 4. If AI is wanted, explicitly enable a suitable mode, configure Provider/model/key/prices, and test a small non-sensitive sample. Synthetic image tests can cost money.
 5. Inspect `/jobs`, `/activity`, `/ai/traces` and usage together; `completed` does not by itself prove a model call.
 6. Preview and publish from Rendering using a profile matching the physical panel.
-7. For a new frame, approve its physical pairing code in Devices; recoverable claim/confirm provisions the per-device secret.
+7. Configure Wi-Fi and the server URL on a new frame. LAN frames register automatically; public deployments need one administrator approval, with no pairing code or manual token. Recoverable claim/confirm provisions the device credential.
 8. Back up metadata and separately protect the matching session key, original photos and release files according to the chosen recovery plan.
 
 ## Rendering and devices
@@ -296,7 +296,7 @@ Example PCB:
 
 ## Build and Flash
 
-The shared 7C/PhotoPainter source currently declares firmware **2.8.7**. Use the exact Hosted CI profile, pinned dependencies and repository-owned partition table described in the [ESP32 guide](docs/devices/ESP32_GUIDE_ZH_TW.md).
+The shared 7C/PhotoPainter source currently declares firmware **2.8.8**. Use the exact Hosted CI profile, pinned dependencies and repository-owned partition table described in the [ESP32 guide](docs/devices/ESP32_GUIDE_ZH_TW.md).
 
 PhotoPainter Rev2.0 requires 16 MiB flash, 8 MiB OPI PSRAM, TG28 ALDO4 power handling and its own GPIO map. Read the [compact safety contract](docs/devices/PHOTOPAINTER_SAFETY_CONTRACT.md) and the exact flashing/recovery sections of the [PhotoPainter guide](docs/devices/WAVESHARE_PHOTOPAINTER_ZH_TW.md) before flashing. Keep ALDO3 / Audio_VCC powered; unpowered audio codecs can clamp the shared I2C bus. Preserve a full local flash backup; an app-only binary belongs at `0x10000`, never `0x0`. GPIO0 remains BOOT and GPIO5 remains the factory PWR button.
 
@@ -313,7 +313,7 @@ On startup, the device tries to read saved Wi-Fi credentials from NVS. If creden
 - The device starts an AP hotspot: `InkTime-xxxx`
 - The current ESP32-S3 PhotoPainter firmware generates a new AP password at runtime when configuration mode starts: an 8-digit random numeric value. It is not a fixed default and is not derived from the SSID, MAC address, or chip ID; the password is shown on the device pairing/configuration screen.
 - Connect to the AP and open the configuration page in a browser: `http://192.168.4.1/`
-- Configure Wi-Fi and the InkTime server address. Approve the short-lived physical pairing code in the Web Devices page; the device completes recoverable claim/confirm before its normal workflow. Configure regular schedules in the Web console.
+- Configure Wi-Fi and the InkTime server address. LAN frames register automatically; public deployments need one approval in Devices with no pairing code; the device completes recoverable claim/confirm before its normal workflow. Configure regular schedules in the Web console.
 
 ## Refresh and Sleep
 

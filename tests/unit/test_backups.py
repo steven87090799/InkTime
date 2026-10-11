@@ -216,6 +216,26 @@ def test_corrupt_backup_never_overwrites_current_database(tmp_path):
         assert connection.execute("SELECT caption FROM photo_analysis WHERE photo_id='photo'").fetchone()[0] == "重要分析"
 
 
+@pytest.mark.parametrize("invalid", [None, [1], {"files": [1]},
+    {"files": {"inktime.sqlite3": [1]}}, {"important_table_counts": [1]}])
+def test_malformed_backup_manifest_fails_before_database_replacement(tmp_path, invalid):
+    database, service = make_service(tmp_path)
+    seed(database)
+    archive = service.create()
+    corrupt = tmp_path / "backups" / "inktime-backup-bad-manifest.zip"
+    with zipfile.ZipFile(archive) as source, zipfile.ZipFile(corrupt, "w") as target:
+        manifest = json.loads(source.read("manifest.json"))
+        malformed = {**manifest, **invalid} if isinstance(invalid, dict) else invalid
+        for name in source.namelist():
+            payload = json.dumps(malformed).encode() if name == "manifest.json" else source.read(name)
+            target.writestr(name, payload)
+    with pytest.raises(ValueError, match="BACKUP-002"):
+        service.restore(corrupt)
+    with database.session() as connection:
+        assert connection.execute("SELECT COUNT(*) FROM photos").fetchone()[0] == 1
+        assert connection.execute("SELECT caption FROM photo_analysis WHERE photo_id='photo'").fetchone()[0] == "重要分析"
+
+
 def test_restore_requires_all_runtime_processes_to_be_stopped(tmp_path):
     database, service = make_service(tmp_path)
     seed(database)

@@ -16,7 +16,7 @@
 | 管理照片、模型、裝置與設定 | [管理員指南](guides/ADMIN_GUIDE_ZH_TW.md) → [使用者指南](guides/USER_GUIDE_ZH_TW.md) |
 | 部署、以 Tag 更新 NAS、備份或故障排除 | [Docker 部署](operations/DOCKER_GUIDE_ZH_TW.md) → [NAS Tag 更新](operations/NAS_TAG_DEPLOYMENT_ZH_TW.md) → [備份還原](operations/BACKUP_RESTORE_ZH_TW.md) → [疑難排解](operations/TROUBLESHOOTING_ZH_TW.md) |
 | 開發或修改系統 | [開發指南](getting-started/DEVELOPMENT_GUIDE_ZH_TW.md) → [架構文件](architecture/ARCHITECTURE_ZH_TW.md) |
-| 接入 ESP32 或 PhotoPainter | [ESP32 指南](devices/ESP32_GUIDE_ZH_TW.md) → [自動配對](devices/ESP32_AUTOMATIC_PAIRING_ZH_TW.md) → [PhotoPainter](devices/WAVESHARE_PHOTOPAINTER_ZH_TW.md) → [Rev2.0 TG28 實板交接](devices/PHOTOPAINTER_REV2_TG28_HARDWARE_HANDOFF_ZH_TW.md) → [交付模式](devices/PHOTOPAINTER_DELIVERY_MODES_ZH_TW.md) |
+| 接入 ESP32 或 PhotoPainter | [ESP32 指南](devices/ESP32_GUIDE_ZH_TW.md) → [自動加入](devices/ESP32_AUTOMATIC_PAIRING_ZH_TW.md) → [PhotoPainter](devices/WAVESHARE_PHOTOPAINTER_ZH_TW.md) → [Rev2.0 TG28 實板交接](devices/PHOTOPAINTER_REV2_TG28_HARDWARE_HANDOFF_ZH_TW.md) → [交付模式](devices/PHOTOPAINTER_DELIVERY_MODES_ZH_TW.md) |
 | 使用本機無 AI 模式 | [Local-only 選片與雙照片](guides/LOCAL_ONLY_SELECTION_ZH_TW.md) |
 | 執行 OpenAI Batch 分析 | [OpenAI Batch 照片分析](OPENAI_BATCH_ANALYSIS_ZH_TW.md) |
 | 設定 OpenRouter 或查看成本來源 | [OpenRouter Provider](providers/OPENROUTER_ZH_TW.md) → [Token 與成本指南](reference/TOKEN_COST_GUIDE_ZH_TW.md) |
@@ -166,6 +166,8 @@
 - [`archive/reports/FINAL_CROSS_MODULE_HARDENING_REVIEW_ZH_TW.md`](archive/reports/FINAL_CROSS_MODULE_HARDENING_REVIEW_ZH_TW.md)：2026-07-22 跨模組與硬體邊界報告。
 - [`archive/reports/N100_IMPLEMENTATION_REPORT_ZH_TW.md`](archive/reports/N100_IMPLEMENTATION_REPORT_ZH_TW.md)：2026-07-18 N100 實作／量測報告。
 - [`reports/AUDIT_REMEDIATION_20261004.md`](reports/AUDIT_REMEDIATION_20261004.md)：2026-10-04 問題清單逐項核對、修補、回歸驗證與現場驗收邊界。
+- [`reports/PROJECT_AUDIT_20261011.md`](reports/PROJECT_AUDIT_20261011.md)：最新主分支的跨子系統重新稽核、非韌體修復與驗證範圍。
+- [`reports/FIRMWARE_REVIEW_20261011.md`](reports/FIRMWARE_REVIEW_20261011.md)：韌體缺口、舊原型限制與待實機驗收項目；本次未修改韌體。
 - [`reports/PERFORMANCE_REPORT.md`](reports/PERFORMANCE_REPORT.md)：100,000 筆效能測試紀錄；測試腳本會更新此檔。
 - [`archive/reports/FINAL_ONE_SHOT_HARDENING_AUDIT.md`](archive/reports/FINAL_ONE_SHOT_HARDENING_AUDIT.md)：歷史 PR #53 的 P1、Provider、AI、Release、Container 與 hosted CI 交接證據。
 

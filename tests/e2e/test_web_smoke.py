@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from uuid import UUID
 
 import pytest
 
@@ -29,6 +30,36 @@ def test_first_setup_login_and_primary_console_pages():
         page.get_by_label("再次輸入密碼").fill("e2e-password-long")
         page.get_by_role("button", name="建立並進入 InkTime").click()
         page.wait_for_url("**/dashboard")
+        operation_keys = page.evaluate("""() => {
+          const descriptor = Object.getOwnPropertyDescriptor(Crypto.prototype, 'randomUUID');
+          Object.defineProperty(Crypto.prototype, 'randomUUID', {value: undefined, configurable: true});
+          try {
+            const first = window.inktimeOperationKey('lan-http-fixture', {value: 1});
+            const retry = window.inktimeOperationKey('lan-http-fixture', {value: 1});
+            return [first, retry, window.inktimeOperationKey('lan-http-fixture', {value: 2})];
+          } finally {
+            window.inktimeOperationDone('lan-http-fixture');
+            if (descriptor) Object.defineProperty(Crypto.prototype, 'randomUUID', descriptor);
+            else delete Crypto.prototype.randomUUID;
+          }
+        }""")
+        assert len(operation_keys[0]) == 36
+        assert UUID(operation_keys[0]).version == 4
+        assert operation_keys[0] == operation_keys[1]
+        assert operation_keys[0] != operation_keys[2]
+        page.evaluate("""() => {
+          const originals = ['getItem', 'setItem', 'removeItem'].map(name => [name, Storage.prototype[name]]);
+          originals.forEach(([name]) => Storage.prototype[name] = () => {throw new DOMException('blocked', 'SecurityError');});
+          try {
+            const first = window.inktimeOperationKey('storage-blocked-fixture', {value: 1});
+            if (window.inktimeOperationKey('storage-blocked-fixture', {value: 1}) !== first) throw Error('retry changed operation');
+            window.inktimeOperationDone('storage-blocked-fixture');
+            if (window.inktimeOperationKey('storage-blocked-fixture', {value: 1}) === first) throw Error('completed operation reused');
+          } finally {
+            window.inktimeOperationDone('storage-blocked-fixture');
+            originals.forEach(([name, method]) => Storage.prototype[name] = method);
+          }
+        }""")
         for label, path in (
             ("照片", "/photos"),
             ("工作", "/jobs"),

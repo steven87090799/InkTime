@@ -110,14 +110,33 @@
       catch (error) { window.inktimeSetStatus(document.querySelector('[role="status"]') || control.parentElement, '連線中斷；請重試同一操作以查詢結果。', 'error'); }
       finally { buttons.forEach((button, index) => button.disabled = disabled[index]); control.dataset.busy = 'false'; }
     };
+    const operationKeys = new Map();
+    const newOperationKey = () => {
+      if (typeof crypto.randomUUID === 'function') return crypto.randomUUID();
+      // LAN HTTP has getRandomValues, but randomUUID requires a secure context.
+      const bytes = crypto.getRandomValues(new Uint8Array(16));
+      bytes[6] = (bytes[6] & 0x0f) | 0x40;
+      bytes[8] = (bytes[8] & 0x3f) | 0x80;
+      const hex = Array.from(bytes, value => value.toString(16).padStart(2, '0')).join('');
+      return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+    };
     window.inktimeOperationKey = (scope, payload) => {
       const slot = 'inktime-operation:' + scope, serialized = JSON.stringify(payload);
-      let saved;
-      try { saved = JSON.parse(sessionStorage.getItem(slot)); } catch (error) { saved = null; }
-      if (saved?.payload === serialized) return saved.key;
-      const key = crypto.randomUUID(); sessionStorage.setItem(slot, JSON.stringify({key, payload: serialized})); return key;
+      let saved = operationKeys.get(slot);
+      if (!operationKeys.has(slot)) {
+        try { saved = JSON.parse(sessionStorage.getItem(slot)); } catch (error) { saved = null; }
+      }
+      if (saved?.payload === serialized && typeof saved.key === 'string' && saved.key) return saved.key;
+      const value = {key: newOperationKey(), payload: serialized};
+      operationKeys.set(slot, value);
+      try { sessionStorage.setItem(slot, JSON.stringify(value)); } catch (error) { /* Keep same-page retries safe when storage is blocked. */ }
+      return value.key;
     };
-    window.inktimeOperationDone = scope => sessionStorage.removeItem('inktime-operation:' + scope);
+    window.inktimeOperationDone = scope => {
+      const slot = 'inktime-operation:' + scope;
+      operationKeys.delete(slot);
+      try { sessionStorage.removeItem(slot); } catch (error) { operationKeys.set(slot, null); }
+    };
     window.inktimeFetchPreview = async (url, options = {}, retry = {}) => {
       const maxRetries = Number.isInteger(retry.maxRetries) ? Math.max(0, retry.maxRetries) : 2;
       const signal = options.signal;

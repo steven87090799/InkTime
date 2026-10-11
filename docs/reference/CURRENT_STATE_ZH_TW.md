@@ -1,6 +1,6 @@
 # InkTime 現行版本與功能基線
 
-核對日期：2026-09-22；來源基底為 GitHub `main` 的 `66c8222`（已合併 PR #139）。這是原始碼基線，不包含尚未合併的分支功能；部署中的版本請從「診斷」核對 Git revision。日後版本變更須同步本表，不能只改日期。
+本分支更新日期：2026-10-11；基底為 `origin/main=7ef3e4f`，接續免配對碼版本 `47dcd51`（Draft PR #150）。下表 PhotoPainter `2.8.8` 是本分支 F01/F02 修復的原碼版本，尚待合併／Hosted 驗證，不表示已部署或刷機；部署中的版本請從「診斷」核對 Git revision。
 
 ## 版本不是同一個數字
 
@@ -9,7 +9,7 @@
 | Python 套件 | `2.0.0.dev0`，部署／CI 支援 Python 3.12（`>=3.12,<3.13`） | [`inktime/_version.py`](../../inktime/_version.py)、[`pyproject.toml`](../../pyproject.toml) |
 | SQLite Migration | 連續 `1–63` | [`migrations.py`](../../inktime/app/db/migrations.py) |
 | AI Analysis Schema | 嚴格 v5；保留 v4 相容閱讀與既有結果，不為精簡欄位重新付費 | [`plan.py`](../../inktime/app/domain/analysis/plan.py)、[`schema.py`](../../inktime/app/domain/analysis/schema.py) |
-| ESP32 7C／PhotoPainter 韌體 | `2.8.7` | [`ink-display-7C-photo.ino`](../../esp32/ink-display-7C-photo/ink-display-7C-photo.ino) |
+| ESP32 7C／PhotoPainter 韌體 | `2.8.8`（本分支） | [`ink-display-7C-photo.ino`](../../esp32/ink-display-7C-photo/ink-display-7C-photo.ino) |
 | ESP32 Config Store payload | v5，讀取 v1–v5；舊容量 12、新 payload 24 slots read compatibility | [`device_config_store_core.h`](../../esp32/ink-display-7C-photo/device_config_store_core.h) |
 | PhotoPainter Enhanced storage | Internal FFat；40 formal frames hard limit；16 offline slots/day capability；microSD not required | [`photopainter_support.cpp`](../../esp32/ink-display-7C-photo/photopainter_support.cpp)、[partition table](../../esp32/ink-display-7C-photo/inktime_photopainter_3M_16MB.csv) |
 | 設定匯出格式 | v1 | [`settings.py`](../../inktime/app/repositories/settings.py) |
@@ -36,8 +36,8 @@ Config Store v5 是裝置本機儲存格式，不是所有 HTTP Manifest 的版�
 - 3 種 480×800 Profile：`safe_4c`（2bpp，96,000 bytes）、`gdep073e01_6c`、`gdey073d46_7c`（indexed4，192,000 bytes）。PhotoPainter 在裝置端轉為原生 800×480。
 - 10 個抖動選項（含別名／無抖動）：`none`、`floyd_steinberg`、`gooddisplay`、`photo_smooth`、`atkinson`、`bayer4`、`bayer8`、`nearest`、`bayer_ordered`、`serpentine_floyd_steinberg`。
 - 新安裝渲染預設為 `gdep073e01_6c`、`gooddisplay`、`photo_info`、`portrait`、`stretch_fill`；新增裝置的預設 Profile 同為 `gdep073e01_6c`，仍必須另外與實板匹配。
-- Enhanced offline schedule 的 PhotoPainter 2.8.7 正式 capability 上限為 16 slots/day；Config Store v5 仍可讀 24-slot payload，能力不明的舊裝置需 repair／重新配對，不直接推定為 16。
-- 2.8.7 PhotoPainter KEY1 雙擊顯示唯讀電源頁，顯示後停留 30 秒，再驗證 Internal Flash 的正式 frame 並恢復原圖；無有效 frame 才回正常網路流程。GPIO0 BOOT、GPIO5 PWR、GPIO21 TG28 IRQ 保持安全邊界。
+- Enhanced offline schedule 的 PhotoPainter 2.8.7 以後正式 capability 上限為 16 slots/day；Config Store v5 仍可讀 24-slot payload，能力不明的舊裝置需 repair／重新配對，不直接推定為 16。
+- 2.8.7 以後 PhotoPainter KEY1 雙擊顯示唯讀電源頁，顯示後停留 30 秒，再驗證 Internal Flash 的正式 frame 並恢復原圖；無有效 frame 才回正常網路流程。GPIO0 BOOT、GPIO5 PWR、GPIO21 TG28 IRQ 保持安全邊界。
 - 13.3 吋程式是保留的 beta 舊協定實作；目前 Web 沒有相應正式 Profile。不能直接使用本版 7.3 吋 Release。
 
 ## 部署、保存與驗收

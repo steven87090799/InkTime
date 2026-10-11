@@ -455,7 +455,7 @@ def test_stock_photopainter_display_controls_are_scoped_and_server_side(client, 
     assert 'data-stock-host="10.23.45.67"' in body
     assert 'placeholder="192.168.1.50"' in body
     assert 'id="device-dialog"' in body
-    assert 'id="token-dialog"' in body
+    assert 'id="token-dialog"' not in body
     assert "Stock Host：未設定" in body
     assert 'disabled title="尚未設定 Stock LAN Host"' in body
     assert "尚未設定 Stock LAN Host" in body
@@ -504,13 +504,13 @@ def test_device_management_preserves_legacy_automatic_and_stock_controls(client,
     )
 
     body = client.get("/devices").get_data(as_text=True)
-    assert f'class="secondary regenerate" data-id="{legacy_id}"' in body
+    assert f'class="secondary regenerate" data-id="{legacy_id}"' not in body
     assert f'class="secondary regenerate" data-id="{automatic_id}"' not in body
     assert f'class="secondary regenerate" data-id="{stock_id}"' not in body
     assert f'class="secondary repair-device" data-id="{automatic_id}"' in body
     assert f'data-stock-display-device="{stock_id}"' in body
     assert 'id="device-dialog"' in body
-    assert 'id="token-dialog"' in body
+    assert 'id="token-dialog"' not in body
 
     app.extensions["inktime_auth_repository"].create_user(
         "device-viewer", "device-viewer-password", "viewer"
@@ -581,7 +581,7 @@ def test_device_management_shows_offline_capability_without_secret_or_viewer_con
     assert "尚未回報離線排程能力（保守上限 12 個時段）" in body
     assert "已確認支援 24 個離線時段（目前上限 24）" in body
     assert "離線排程能力尚未確認（保守上限 12 個時段）" in body
-    assert "請重新配對或執行修復，以確認裝置能力。" in body
+    assert "請重新連線，以確認裝置能力。" in body
     assert ambiguous_token not in body
     assert malformed_token not in body
     assert 'data-offline-capability-state="legacy_ambiguous"' in body

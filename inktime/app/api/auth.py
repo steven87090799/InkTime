@@ -4,6 +4,7 @@ from flask import Blueprint, current_app, flash, g, redirect, render_template, r
 
 from inktime.app.repositories.auth import AuthRepository
 from inktime.app.core.errors import ApplicationError
+from inktime.app.core.redirects import safe_local_redirect_target
 from inktime.app.core.json_values import json_object_payload
 from inktime.app.domain.auth import AuthValidationError, SetupAlreadyCompleted, validate_role
 from inktime.app.web.access import administrator_required, login_required
@@ -68,9 +69,7 @@ def login():
             session["user_id"] = user["id"]
             session["session_version"] = int(user["session_version"])
             session.permanent = True
-            next_path = request.args.get("next", "")
-            if not next_path.startswith("/") or next_path.startswith("//"):
-                next_path = url_for("dashboard.dashboard")
+            next_path = safe_local_redirect_target(request.args.get("next")) or url_for("dashboard.dashboard")
             return redirect(next_path)
     return render_template("login.html")
 
