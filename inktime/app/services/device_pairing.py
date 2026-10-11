@@ -465,7 +465,7 @@ class DevicePairingService:
                     remaining = max(1, int((datetime.fromisoformat(str(existing_request["expires_at"])) - now).total_seconds()))
                     conflict = self._stored_capability_conflict(existing_request["config_json"])
                     if self.trusted_lan and existing_request["status"] == "pending" and conflict is None:
-                        self._approve_request(connection, existing_request, now, administrator_id="system:lan")
+                        self._approve_request(connection, existing_request, now, administrator_id=None)
                         existing_request = connection.execute(
                             "SELECT * FROM device_pairing_requests WHERE id=?", (existing_request["id"],)
                         ).fetchone()
@@ -640,7 +640,7 @@ class DevicePairingService:
             )
             if lan_request:
                 row = connection.execute("SELECT * FROM device_pairing_requests WHERE id=?", (pairing_id,)).fetchone()
-                self._approve_request(connection, row, now, administrator_id="system:lan")
+                self._approve_request(connection, row, now, administrator_id=None)
             if device is not None and str(device["pairing_state"] or "") == "pairing_pending":
                 connection.execute(
                     "UPDATE devices SET repair_allowed_until=NULL,pairing_requested_at=?,firmware_identity=?,firmware_version=COALESCE(NULLIF(?,''),firmware_version),updated_at=? WHERE id=?",
@@ -723,7 +723,7 @@ class DevicePairingService:
             )
         return result
 
-    def _approve_request(self, connection, row, now: datetime, *, administrator_id: str,
+    def _approve_request(self, connection, row, now: datetime, *, administrator_id: str | None,
                          device_config: dict[str, Any] | None = None) -> None:
         """One atomic approval path for LAN registration and administrator admission."""
         device = connection.execute("SELECT * FROM devices WHERE id=?", (row["device_id"],)).fetchone()
@@ -764,7 +764,7 @@ class DevicePairingService:
         capabilities["_enrollment_mode"] = "trusted_lan" if self.trusted_lan else "administrator"
         connection.execute(
             "UPDATE device_pairing_requests SET status='approved',approved_at=?,approved_by=?,config_json=?,capabilities_json=? WHERE id=?",
-            (self._iso(now), administrator_id[:128], json.dumps(config, ensure_ascii=False, separators=(",", ":")),
+            (self._iso(now), administrator_id[:128] if administrator_id is not None else None, json.dumps(config, ensure_ascii=False, separators=(",", ":")),
              json.dumps(capabilities, separators=(",", ":")), str(row["id"])),
         )
         self._activity(
@@ -859,7 +859,7 @@ class DevicePairingService:
                 return 200, self._claim_response(self._decode_envelope(row, now), now), None
             else:
                 if status == "pending":
-                    self._approve_request(connection, row, now, administrator_id="system:lan")
+                    self._approve_request(connection, row, now, administrator_id=None)
                     row = connection.execute("SELECT * FROM device_pairing_requests WHERE id=?", (pairing_id,)).fetchone()
                 device = connection.execute("SELECT * FROM devices WHERE id=?", (row["device_id"],)).fetchone()
                 if device is not None:

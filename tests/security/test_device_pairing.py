@@ -748,7 +748,7 @@ def test_admin_can_reject_issued_credential_before_confirm(client, app):
     approved_page = client.get("/devices")
     assert approved_page.status_code == 200
     approved_page_html = approved_page.get_data(as_text=True)
-    assert '已核准，等待裝置領取</span><button class="secondary reject-pairing"' in approved_page_html
+    assert '正在連線</span><button class="secondary reject-pairing"' in approved_page_html
     claimed = client.post(
         CLAIM_PATH,
         json={"pairing_id": pairing_id, "pairing_nonce": payload["pairing_nonce"]},
@@ -1008,6 +1008,10 @@ def test_lan_registration_needs_no_code_approval_or_browser_session(client, app,
     body = requested.get_json()
     assert body["status"] == "approved"
     assert body["enrollment_mode"] == "automatic"
+    with app.extensions["inktime_database"].session() as connection:
+        row = connection.execute("SELECT approved_by FROM device_pairing_requests WHERE id=?", (body["pairing_id"],)).fetchone()
+        assert row["approved_by"] is None
+        assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
     assert body["expires_in_seconds"] == 86400
     assert service.pending_for_admin()[0]["code_required"] is False
     wrong_nonce = client.post(CLAIM_PATH, json={
