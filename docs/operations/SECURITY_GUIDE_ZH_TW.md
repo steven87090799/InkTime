@@ -1,6 +1,6 @@
 # 安全指南
 
-- Web 使用 scrypt；環境不支援時使用 600,000 次 PBKDF2-SHA256。新密碼需 12–128 字元且保留前後空白。Session 為 HttpOnly／SameSite=Strict，並以 `session_version` 在停用、改密碼或改角色時立即撤銷。User PATCH 會先驗證全部欄位，再於單一 `BEGIN IMMEDIATE` 中更新；no-op 不撤銷 Session，多欄位實際變更只遞增一次版本。
+- Web 使用 scrypt；環境不支援時使用 600,000 次 PBKDF2-SHA256。新密碼需 1–128 字元，可使用純數字，不可全為空白；有內容的密碼保留前後空白。Session 為 HttpOnly／SameSite=Strict，並以 `session_version` 在停用、改密碼或改角色時立即撤銷。User PATCH 會先驗證全部欄位，再於單一 `BEGIN IMMEDIATE` 中更新；no-op 不撤銷 Session，多欄位實際變更只遞增一次版本。
 - 系統永遠保留至少一位 `enabled=1` 且角色為 `administrator` 的管理員。停用、降權或兩者並行時，檢查與寫入使用同一 `BEGIN IMMEDIATE`；最後一位管理員更新會以 `last_administrator_required`／409 拒絕。
 - 所有 mutation 要求 CSRF；administrator／viewer 在伺服器端授權。登入 IP 15 分鐘內五次失敗會暫時封鎖。
 - 路徑使用 `Path.resolve()`／`relative_to()`，拒絕 `..`、URL 重複編碼、絕對路徑、Windows 反斜線、相似前綴與符號連結逃逸。

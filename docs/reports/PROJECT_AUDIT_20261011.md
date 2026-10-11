@@ -20,6 +20,16 @@ BASE_HEAD=`7ef3e4f`；分支：`fix/full-project-audit-20261011`。
 安全修補依據：[Werkzeug 官方 advisory](https://github.com/pallets/werkzeug/security/advisories/GHSA-g6x2-hccm-hh4m)、[3.1.9 release notes](https://werkzeug.palletsprojects.com/en/stable/changes/#version-3-1-9)、[PyPI 3.1.9 metadata](https://pypi.org/pypi/Werkzeug/3.1.9/json)。
 這些是修復後的原碼行為與新增測試要求；尚未以本機 runtime 執行宣稱驗收成功。
 
+## 追加：依使用者要求簡化加入與密碼流程
+
+- 內網相框設定 Wi-Fi／伺服器網址後自動加入；不要求管理員核准或 firmware capability 特別開啟。公開／代理部署只需登入的管理員按一下核准，不要求實體碼。
+- 移除配對碼衍生、雜湊比較、核准碼重試計數與網站輸入；request／claim 共用單一 atomic approval helper。升級前 pending 的內網 request 可在同 nonce request 或有效 claim 自動完成。
+- 移除網站 Legacy Token 複製／重生視窗；裝置基本顯示設定直接顯示，面板／時區／交付／下載策略收在「進階設定」。Stock 新建固定其交付模式，避免使用者選到後端不允許的自製裝置新建流程。
+- 保留原有 API 路徑、DB／NVS schema 與既有 Token 讀取；舊韌體需要的六位欄位改為沒有授權作用的相容常數，詳見[自動加入契約](../devices/ESP32_AUTOMATIC_PAIRING_ZH_TW.md)。不引入第二套註冊或額外部署開關，不改 runtime 資料。
+- 網站新建／變更／重設密碼統一允許 1–128 字元，包括 `1`、`0000`、`1234`；不可空字串或全空白，仍保留長度上限、NUL 拒絕、密碼雜湊與 session 撤銷。
+- 新增 Hosted 案例：免登入內網 request／claim／confirm、nonce 錯誤拒絕、升級 pending request／claim、公開裝置不能由 capability 自行核准；保留管理員／CSRF、憑證保存後 confirm、重試、撤銷、能力衝突與 TTL 契約。
+- F01/F02 仍只在指定觸發狀態適用；F03 改列待量測的 P3 建議，見[重新核對的韌體清單](FIRMWARE_REVIEW_20261011.md)。韌體原碼、編譯、刷機與實機行為均未改動。
+
 ## 子系統稽核覆蓋與結論
 
 | 子系統 | 查核入口／契約 | 結論與限制 |
@@ -32,7 +42,7 @@ BASE_HEAD=`7ef3e4f`；分支：`fix/full-project-audit-20261011`。
 | 照片／掃描／預覽 | scanner census／walk errors、paths、formats／EXIF decode bounds、thumbnail shard lock、photo privacy route | 保留來源唯讀、尺寸／檔案上限、hash 同 FD、變更來源拒絕、取消不完成全量 missing census。未掃描使用者照片，也未改相片排序契約。 |
 | 排序／選片／渲染 | scoring／content filter、local selection、rendering source／caption、font validation、bounded render cache | 保留 v4/v5 可讀、67/33 排名、人工保護、HEIF 方向與不描述畫面的短句契約。字型與圖片品質的代表樣本仍需產品驗收。 |
 | Release／回滾／清理 | AtomicReleasePublisher validate／pointer／metadata guard、coordinator publish/reconcile/GC、rollback | 修 N03；GC 仍保護 active pointer、裝置 assignment、queue、offline schedule。整庫 hash reconciliation 的長期 I/O 成本仍需規模量測，不能宣稱已優化 NAS 性能。 |
-| 配對／裝置／Queue | device auth、pairing transaction／nonce／credential version、latest／offline manifest、resilience ACK／retention | 不放寬裝置驗證或 release 授權；韌體所需的 F01/F02 暫不修改，包括與它們耦合的 backend 行為。 |
+| 配對／裝置／Queue | device auth、pairing transaction／nonce／credential version、latest／offline manifest、resilience ACK／retention | 內網加入改自動、公開網站按一下核准；nonce／憑證驗證與 Release 授權保留。韌體所需的 F01/F02 暫不修改，包括與它們耦合的 backend 行為。 |
 | 備份／Migration／設定 | backup format／offline replacement／safety snapshot／paid fence、released migration transaction、settings mutation／provider CAS | 修 N05；保留 schema downgrade 拒絕、離線 lock 與付費暫停 fence。恢復舊 DB 無法重建快照後的外部供應商帳單或遺失的原圖／Release payload。 |
 | 通知／對外網路／觀測 | webhook DNS pinning／allowlist／timeout、stock transport bounds、offline alerts、diagnostic redaction、weather cache | SSRF 邊界與回應大小上限保留；修 N04。正常深睡不能由「無回報」直接當成故障；未對真實 Webhook／Stock endpoint 傳送資料。 |
 | Web／操作恢復 | shared helpers、jobs／providers／rendering／backups busy/idempotency、API role boundaries、CSP | R08/R11 已有操作保護與管理員 critical 告警邊界；補 N01/N02。HTTP 替代 UUID 不降低隨機來源品質。 |
@@ -61,3 +71,5 @@ BASE_HEAD=`7ef3e4f`；分支：`fix/full-project-audit-20261011`。
 新增 Hosted cases：登入安全輸入與合法返回、Release activation/DB commit 交錯及 hash 期間 snapshot 失效、malformed weather 恢復、malformed backup 不換 DB、UUID／storage browser 相容。
 完整 Hosted CI 由 Draft PR 的 `full-ci` label 請求；推送後只查一次，不輪詢、不手動 dispatch／rerun。
 queued／in_progress 須交付為 `CI_PENDING`，不能寫成測試全綠。未合併、未部署、未刷機。
+
+追加簡化驗證：修改的 Python 檔均通過 AST；裝置頁兩段與 HTML 手冊兩段 JavaScript 通過 Node 語法檢查，裝置表單 18 個資料欄位保持一致；diff whitespace／AI navigation validator 通過。新增測試僅提交 Hosted CI，未在本機執行完整 suite，未宣稱實機驗收。

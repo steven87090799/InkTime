@@ -16,7 +16,7 @@
 | 管理照片、模型、裝置與設定 | [管理員指南](guides/ADMIN_GUIDE_ZH_TW.md) → [使用者指南](guides/USER_GUIDE_ZH_TW.md) |
 | 部署、以 Tag 更新 NAS、備份或故障排除 | [Docker 部署](operations/DOCKER_GUIDE_ZH_TW.md) → [NAS Tag 更新](operations/NAS_TAG_DEPLOYMENT_ZH_TW.md) → [備份還原](operations/BACKUP_RESTORE_ZH_TW.md) → [疑難排解](operations/TROUBLESHOOTING_ZH_TW.md) |
 | 開發或修改系統 | [開發指南](getting-started/DEVELOPMENT_GUIDE_ZH_TW.md) → [架構文件](architecture/ARCHITECTURE_ZH_TW.md) |
-| 接入 ESP32 或 PhotoPainter | [ESP32 指南](devices/ESP32_GUIDE_ZH_TW.md) → [自動配對](devices/ESP32_AUTOMATIC_PAIRING_ZH_TW.md) → [PhotoPainter](devices/WAVESHARE_PHOTOPAINTER_ZH_TW.md) → [Rev2.0 TG28 實板交接](devices/PHOTOPAINTER_REV2_TG28_HARDWARE_HANDOFF_ZH_TW.md) → [交付模式](devices/PHOTOPAINTER_DELIVERY_MODES_ZH_TW.md) |
+| 接入 ESP32 或 PhotoPainter | [ESP32 指南](devices/ESP32_GUIDE_ZH_TW.md) → [自動加入](devices/ESP32_AUTOMATIC_PAIRING_ZH_TW.md) → [PhotoPainter](devices/WAVESHARE_PHOTOPAINTER_ZH_TW.md) → [Rev2.0 TG28 實板交接](devices/PHOTOPAINTER_REV2_TG28_HARDWARE_HANDOFF_ZH_TW.md) → [交付模式](devices/PHOTOPAINTER_DELIVERY_MODES_ZH_TW.md) |
 | 使用本機無 AI 模式 | [Local-only 選片與雙照片](guides/LOCAL_ONLY_SELECTION_ZH_TW.md) |
 | 執行 OpenAI Batch 分析 | [OpenAI Batch 照片分析](OPENAI_BATCH_ANALYSIS_ZH_TW.md) |
 | 設定 OpenRouter 或查看成本來源 | [OpenRouter Provider](providers/OPENROUTER_ZH_TW.md) → [Token 與成本指南](reference/TOKEN_COST_GUIDE_ZH_TW.md) |

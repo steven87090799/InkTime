@@ -124,10 +124,6 @@ def hash_device_secret(secret: str, pepper: str) -> str:
     return _hash_domain(secret, pepper, "device-secret-v1")
 
 
-def hash_pairing_code(code: str, pepper: str) -> str:
-    return _hash_domain(code, pepper, "pairing-code-v1")
-
-
 def hash_pairing_nonce(nonce: str, pepper: str) -> str:
     return _hash_domain(nonce, pepper, "pairing-nonce-v1")
 

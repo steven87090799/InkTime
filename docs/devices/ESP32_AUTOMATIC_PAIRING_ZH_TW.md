@@ -1,6 +1,6 @@
-# ESP32 自動配對與 Device Secret 操作契約
+# ESP32 自動加入與連線憑證操作契約
 
-本文件對應目前 `esp32/ink-display-7C-photo/ink-display-7C-photo.ino`、`device_config_store_core.h`、`DevicePairingService` 與裝置管理頁。它只描述自製 InkTime 韌體的自動配對；既有 Legacy Token 與 Stock PhotoPainter 相容模式仍保留原契約。
+本文件對應目前 `esp32/ink-display-7C-photo/ink-display-7C-photo.ino`、`device_config_store_core.h`、`DevicePairingService` 與裝置管理頁。它描述自製 InkTime 韌體的自動加入；不需要人工配對碼；既有 Legacy Token 與 Stock PhotoPainter 相容模式仍保留原契約。
 
 ## 0. 目前韌體與 Config Store 版本
 
@@ -26,27 +26,30 @@
 
 ## 家用內網與對外服務
 
-當 `INKTIME_PUBLIC_URL` 明確使用 RFC1918 IPv4（10/8、172.16/12、192.168/16），
-且 `INKTIME_PROXY_TRUST=0`，支援 `trusted_lan_pairing=true` 的韌體採內網配對：
-管理員直接核准，不需抄六位碼，請求保留一天。裝置每分鐘自動領取核准，
-不用再按 KEY1。HTTPS 仍可使用；登入、CSRF、nonce、credential confirm 保留。
-公開網域、公開 IP、代理部署與舊韌體維持下述五分鐘實體碼流程。
-從內網模式切換成公開服務時，未完成的內網請求立即失效。
-請勿把已宣告為內網的服務透過路由器轉發、隧道或反向代理公開；
-對外部署必須設定真正的公開 origin 與代理政策。
-PhotoPainter 的實體長按 KEY1 recovery 先於配對執行，未配對也可修改 Wi-Fi。
+設定 Wi-Fi 與伺服器網址後，家用內網相框自動加入；不需要抄碼、網站核准或手動 Token。
+內網判定沿用 `INKTIME_PUBLIC_URL` 的 RFC1918 IPv4（10/8、172.16/12、192.168/16）
+及 `INKTIME_PROXY_TRUST=0`。伺服器自行判定，不信任裝置送來的模式。
+公開網址與代理部署仍需管理員在網站按一下核准，但不需要配對碼。
+使用者不需要調整另一個註冊開關；名稱、排程與顯示選項可在加入後編輯。
+從內網改為公開服務時，尚未完成的內網請求會失效。
 
-## 2. 首次設定與配對流程
+## 2. 首次設定與加入流程
 
-1. 新自製裝置不必先按「新增裝置」：第一次 pairing request 只建立待處理 enrollment，不建立或啟用 `devices` 正式資料列。管理員可在 `/devices` 的待處理列輸入實體相框顯示的配對碼，並設定名稱、面板 Profile、交付模式、時區與排程；頁面不回傳 Secret 或配對碼。
-2. ESP32 進入 AP 設定頁，只填 Wi-Fi、Backend Origin 與 TLS Root CA。既有 `device_token` 若存在會保留為 Legacy 相容資料，但不再提供手動輸入欄位。
-3. ESP32 先把新的高熵 `pairing_nonce` 寫入 A/B Config，再將唯一 `device_id` 與該 nonce POST 到 `/api/device/v1/pairing/request`。若 request 已送達但 response 在掉電中遺失，下一次喚醒會重用同一 nonce 取回原 enrollment metadata；production 預設使用 HTTPS；明確允許的可信任 LAN production 可用 HTTP，Body 必須是精確的 `application/json` object。
-4. Server 只保存 nonce HMAC 與配對碼 HMAC；配對碼短效 5 分鐘，且錯誤核准最多 5 次。Response 的六位數碼只供裝置顯示在 pairing screen（PhotoPainter 或 GxEPD2），不能寫入 Log、URL、DOM、Audit 或可逆欄位。
-5. 管理員在 `/devices` 的待處理表輸入實體相框上的六位數配對碼，再核對裝置名稱、Firmware、Profile、Capabilities 並按「核准」。管理頁永遠不顯示伺服器已知的配對碼；核准 API 是管理員 Session，仍需要 CSRF；Viewer 不可核准、拒絕、撤銷或允許重新配對。
-6. ESP32 每 3 秒 POST `/api/device/v1/pairing/claim`，單次喚醒最多輪詢約 30 秒。未核准回 `202` 並附 `Retry-After: 3`；核准後回傳可重試的短效 credential envelope 內容。ESP32 若在 claim 或 confirm 中斷，下一次喚醒會以同一 `pairing_id`、nonce 取回相同 credential，不建立新的 request。
-7. ESP32 先把 Secret、Device ID、`auth_state=credential_issued` 與 Credential Version 寫入現有 A/B `ConfigPayload`，用 `/api/device/v1/pairing/confirm` 以 Bearer Secret 與版本 Header 完成 confirm；只有 confirm 成功後才清除 pairing state、寫成 `paired`，Server 才建立／啟用正式 device row。Secret 不會由 Server 顯示，也不會從韌體 Log 讀出。
+1. 在相框設定 Wi-Fi 與 InkTime URL。相框的實體 KEY1 recovery 先於註冊執行，尚未加入也可修改 Wi-Fi。
+2. 韌體自動建立持久化 nonce，呼叫原有 request／claim／confirm 協定；使用者不需輸入或複製憑證。
+3. 內網 request 直接回 `approved`，請求有效一天；公開網址回 `pending`，有效五分鐘，由網站按一下核准。HTTP 是否允許仍遵守部署政策；公開 Production 使用 HTTPS。
+4. claim 驗證 nonce，交付可重試的短效 credential envelope。韌體保存 Device Secret 與版本後 confirm；只有成功 confirm 才建立／啟用正式裝置，避免斷電留下不可用裝置。
+5. 升級前的內網 pending 請求可由原有 request 重試或有效 nonce 的 claim 自動完成，不要求重新操作網站。能力衝突仍回明確錯誤，不覆寫既有排程。
+6. 正常喚醒沿用已保存憑證取得照片、設定與回報。已撤銷的裝置不會因自動加入重新啟用。
 
-裝置正常喚醒時不會重新 request 或 claim；只會以 NVS 中的 Secret 加上版本 Header 呼叫既有 Manifest、Queue、檔案、Offline Schedule 與 Status API。
+## 相容層
+
+API 路徑、DB／NVS schema 保持相容。`pairing_code=000000` 與 `pairing_mode=trusted_lan`
+只是讓現有 sketch 通過回應檢查並選擇免抄碼畫面的 wire 常數，沒有授權作用。
+`enrollment_mode` 才說明伺服器決定的 `automatic` 或 `administrator` 政策；nonce、
+實際存於伺服器的模式、管理員權限與 confirm 憑證決定是否准許加入。
+既有 `pairing_code_hash`／attempts 欄位保留供舊資料讀取，新流程不產生配對碼雜湊、
+不驗證人工碼、不累計核准碼錯誤。既有 Legacy Token 仍可連線；網站不再提供複製／重生 Token 的操作。
 
 ## 3. API 摘要
 
@@ -68,7 +71,7 @@ PhotoPainter 的實體長按 KEY1 recovery 先於配對執行，未配對也可�
 }
 ```
 
-成功回 `201`，只在這個 ESP32 request response 包含 `pairing_id`、`device_id`、`pairing_code`、`expires_in_seconds=300` 與 `poll_after_seconds=3`。不包含 Device Secret；重試同一 nonce 會回相同 enrollment metadata 與相同配對碼。內網新韌體另回 `pairing_mode=trusted_lan` 與最多 `expires_in_seconds=86400`。未知欄位、非 object JSON、非 JSON Content-Type、過大 Body、非法 ID／型別都拒絕。
+成功回 `201`；同一 nonce 重試回 `200` 與原有 request ID。Response 含 `status`、`pairing_id`、`device_id`、`enrollment_mode`、`expires_in_seconds`、`server_epoch`、`poll_after_seconds=3` 及上述相容常數，不含 Device Secret。內網回 `approved`，TTL 最多 86400 秒；公開回 `pending`，TTL 最多 300 秒。未知欄位、非 object JSON、非法 ID／型別等仍拒絕。
 
 `POST /api/device/v1/pairing/claim`
 
@@ -93,7 +96,7 @@ PhotoPainter 的實體長按 KEY1 recovery 先於配對執行，未配對也可�
 ### 管理端點
 
 - `GET /api/v1/device-pairing/pending`：只回傳尚未完成的配對請求、設定與嘗試次數；不回傳配對碼、nonce、hash、envelope 或 Device Secret。
-- `POST /api/v1/device-pairing/{pairing_id}/approve`：Body 為管理員輸入的 `{"pairing_code":"六位數","device_config":{...}}`；Server 只做 constant-time HMAC compare，核准後才可 claim。
+- `POST /api/v1/device-pairing/{pairing_id}/approve`：管理員 Session 與 CSRF，Body 可為 `{}`；不需配對碼。舊 Client 的 `pairing_code` 欄位僅為相容而接受。內網不需要使用此端點。
 - `POST /api/v1/device-pairing/{pairing_id}/reject`：拒絕請求並讓裝置回到未配對狀態。
 - `POST /api/v1/devices/{device_id}/revoke-credential`：讓目前 Secret 立即失效；Stock 與 Legacy 不可用這個自動 credential 操作。
 - `POST /api/v1/devices/{device_id}/enable-repair`：管理員允許 automatic 裝置重新配對；下一次裝置喚醒會建立新的短效請求。
@@ -111,13 +114,13 @@ Authorization: Bearer ids_…
 X-InkTime-Credential-Version: 2
 ```
 
-Automatic credential 缺少版本、版本不符、裝置未處於 `paired`、已停用或 hash 不符時都 fail-closed。本 PR 不做 graceful rotation；管理員撤銷後 current Secret 立即失效，只有短效、單次 repair permission 允許「重新配對 → 新 Secret」。撤銷狀態本身仍拒絕所有一般裝置端點。
+Automatic credential 缺少版本、版本不符、裝置未處於 `paired`、已停用或 hash 不符時都 fail-closed。此流程不做 graceful rotation；管理員撤銷後 current Secret 立即失效，只有短效、單次 repair permission 允許「重新配對 → 新 Secret」。撤銷狀態本身仍拒絕所有一般裝置端點。
 
 裝置收到一般 authenticated endpoint 的 `401` 或 `403` 時：
 
 - 不重試同一個 Secret、不繼續下載檔案、不送 Status 造成更多失敗；
 - 將 `auth_state` 寫成 `auth_invalid` 或 `revoked`，保留錯誤碼與 bounded recovery wake；
-- 只有管理員先按「允許重新配對」後，下一輪才會用同一 `device_id` 建立新的配對 request；仍需新的配對碼與人工核准。
+- 由管理員按「重新連線」允許該裝置重新取得憑證。下一輪使用同一 device_id，保留管理員設定；內網自動完成，公開網址按一下核准，均不需配對碼。
 
 ## 5. NVS、清除與既有功能保護
 
@@ -143,9 +146,8 @@ Automatic credential 缺少版本、版本不符、裝置未處於 `paired`、�
 |---|---|
 | `DEVICE-PAIRING-TIMEOUT`、`DEVICE-PAIRING-EXPIRED` | 保留或清除正確的 pairing state，已有待處理請求時每分鐘重試；建立請求失敗則進入 1 分鐘、5 分鐘、15 分鐘、1 小時 bounded deep-sleep backoff；只有未配對裝置或明確 repair permission 才建立新 request。 |
 | `PAIR-002` | pairing request 受到 IP／Device bounded rate limit，等待 `Retry-After`。 |
-| `PAIR-006` | 配對碼錯誤次數用盡；拒絕該 request，再建立新的 request。 |
 | `PAIR-009` | claim 已消費；不可要求 Server 再顯示同一 Secret。 |
 | `DEVICE-AUTH-INVALID`／`DEVICE-AUTH-REVOKED` | 檢查管理員是否已 enable repair；不要在 AP 頁貼入新 Token。 |
 | `PAIRING-NVS-004` 到 `PAIRING-NVS-007` | NVS slot、pointer、journal 或 read-back 失敗；裝置停止網路工作，先保留最後有效設定並依硬體 reset 流程處理。 |
 
-配對碼過期後，裝置會進入 bounded deep sleep，不會保持 Wi-Fi 或永久開啟 AP。正常網路、韌體 compile、PhotoPainter BUSY／面板顏色／orientation／ghosting、PMIC／GPIO5／深度睡眠與真實 NAS／LAN 的驗收必須分開記錄；hosted CI 通過不等於實機通過。
+加入請求過期後，裝置會進入 bounded deep sleep，不會保持 Wi-Fi 或永久開啟 AP。正常網路、韌體 compile、PhotoPainter BUSY／面板顏色／orientation／ghosting、PMIC／GPIO5／深度睡眠與真實 NAS／LAN 的驗收必須分開記錄；hosted CI 通過不等於實機通過。

@@ -36,11 +36,23 @@ def test_first_start_setup_creates_administrator(client, app):
     assert "long-owner-password" not in user["password_hash"]
 
 
-@pytest.mark.parametrize("password", ["", "1", "short-pass"])
-def test_short_password_is_rejected(app, password):
+@pytest.mark.parametrize("password", ["", " ", "\t\n"])
+def test_blank_password_is_rejected(app, password):
     repository = app.extensions["inktime_auth_repository"]
-    with pytest.raises(AuthValidationError, match="至少"):
+    with pytest.raises(AuthValidationError, match="不可空白"):
         repository.create_user("short-password-user", password)
+
+
+@pytest.mark.parametrize("password", ["1", "1234", "0000", "short-pass"])
+def test_simple_password_can_create_authenticate_and_change(app, password):
+    repository = app.extensions["inktime_auth_repository"]
+    user_id = repository.create_user("simple-password-user", password)
+    assert repository.authenticate("simple-password-user", password)["id"] == user_id
+    repository.change_password(user_id, password, "00")
+    assert repository.authenticate("simple-password-user", password) is None
+    assert repository.authenticate("simple-password-user", "00")["id"] == user_id
+    repository.reset_password(user_id, "7")
+    assert repository.authenticate("simple-password-user", "7")["id"] == user_id
 
 
 @pytest.mark.parametrize(
@@ -311,16 +323,16 @@ def test_create_user_api_uses_stable_validation_error(client, app):
     login(client)
     response = client.post(
         "/api/v1/users",
-        json={"username": "new-user", "password": "short", "role": "viewer"},
+        json={"username": "new-user", "password": "", "role": "viewer"},
         headers={"X-CSRF-Token": csrf(client)},
     )
 
     assert response.status_code == 400
     assert response.get_json()["error"] == {
         "code": "password_too_short",
-        "message": "密碼至少需要 12 個字元。",
+        "message": "密碼不可空白。",
     }
-    assert "至少需要 12 個字元" in response.json["user_error"]["detail"]
+    assert "密碼不可空白" in response.json["user_error"]["detail"]
 
 
 def _user_state(app, user_id: str):

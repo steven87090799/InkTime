@@ -167,7 +167,7 @@ Run `python -m inktime.app.workers.runner` and `python -m inktime.app.workers.sc
 4. If AI is wanted, explicitly enable a suitable mode, configure Provider/model/key/prices, and test a small non-sensitive sample. Synthetic image tests can cost money.
 5. Inspect `/jobs`, `/activity`, `/ai/traces` and usage together; `completed` does not by itself prove a model call.
 6. Preview and publish from Rendering using a profile matching the physical panel.
-7. For a new frame, approve its physical pairing code in Devices; recoverable claim/confirm provisions the per-device secret.
+7. Configure Wi-Fi and the server URL on a new frame. LAN frames register automatically; public deployments need one administrator approval, with no pairing code or manual token. Recoverable claim/confirm provisions the device credential.
 8. Back up metadata and separately protect the matching session key, original photos and release files according to the chosen recovery plan.
 
 ## Rendering and devices
@@ -313,7 +313,7 @@ On startup, the device tries to read saved Wi-Fi credentials from NVS. If creden
 - The device starts an AP hotspot: `InkTime-xxxx`
 - The current ESP32-S3 PhotoPainter firmware generates a new AP password at runtime when configuration mode starts: an 8-digit random numeric value. It is not a fixed default and is not derived from the SSID, MAC address, or chip ID; the password is shown on the device pairing/configuration screen.
 - Connect to the AP and open the configuration page in a browser: `http://192.168.4.1/`
-- Configure Wi-Fi and the InkTime server address. Approve the short-lived physical pairing code in the Web Devices page; the device completes recoverable claim/confirm before its normal workflow. Configure regular schedules in the Web console.
+- Configure Wi-Fi and the InkTime server address. LAN frames register automatically; public deployments need one approval in Devices with no pairing code; the device completes recoverable claim/confirm before its normal workflow. Configure regular schedules in the Web console.
 
 ## Refresh and Sleep
 

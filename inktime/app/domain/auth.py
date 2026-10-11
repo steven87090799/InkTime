@@ -8,7 +8,7 @@ from inktime.app.core.errors import ApplicationError
 
 USERNAME_MIN_LENGTH = 3
 USERNAME_MAX_LENGTH = 64
-PASSWORD_MIN_LENGTH = 12
+PASSWORD_MIN_LENGTH = 1
 PASSWORD_MAX_LENGTH = 128
 _USERNAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{2,63}$")
 
@@ -66,9 +66,9 @@ def validate_password(value: object) -> str:
         raise AuthValidationError("密碼必須是文字。", code="password_invalid_type")
     if "\x00" in value:
         raise AuthValidationError("密碼不可包含 NUL 字元。", code="password_contains_nul")
-    if len(value) < PASSWORD_MIN_LENGTH:
+    if len(value) < PASSWORD_MIN_LENGTH or not value.strip():
         raise AuthValidationError(
-            f"密碼至少需要 {PASSWORD_MIN_LENGTH} 個字元。",
+            "密碼不可空白。",
             code="password_too_short",
         )
     if len(value) > PASSWORD_MAX_LENGTH:

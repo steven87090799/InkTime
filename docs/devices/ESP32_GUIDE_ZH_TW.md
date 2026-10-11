@@ -104,7 +104,7 @@ Board 選 ESP32-S3，啟用 OPI PSRAM。正式版 `INKTIME_DEBUG_LOG=0`；短期
 
 新硬體首次驗收可先用原廠 sample／GxEPD2 Example 驗證「面板型號＋adapter＋供電＋引腳」能完整刷新，再燒 InkTime 韌體。不同面板 driver class 不可混用。已完成 A/B 的 PhotoPainter 不重做官方恢復；先讀交接並保留 full-flash 備份，app-only 必須寫入 `0x10000`。
 
-## 5. 首次 AP 配網與自動配對
+## 5. 首次 AP 配網與自動加入
 
 新自製 ESP32 不再要求使用者複製或手動輸入 Device Token。流程如下：
 
@@ -114,13 +114,13 @@ Board 選 ESP32-S3，啟用 OPI PSRAM。正式版 `INKTIME_DEBUG_LOG=0`；短期
 3. 連到 AP，瀏覽 `192.168.4.1`，只填 Wi-Fi SSID／密碼與 InkTime Server（例如
    `192.168.1.20:8765`）；韌體會自動補上 `http://`，不要填 Token。HTTPS 與 Root CA
    留在進階設定。
-4. 儲存後裝置連 Wi-Fi，向 `/api/device/v1/pairing/request` 取得短期配對碼，並只在面板顯示配對碼；伺服器只保存 HMAC hash。
-5. 管理員在 InkTime Web「裝置」頁輸入實體面板上的配對碼，再核對裝置資訊並按「核准配對」。裝置輪詢 claim；核准後把 credential 先寫入 A/B NVS，再以 Bearer Secret／version confirm。只有 confirm 成功才建立並啟用正式裝置，之後開始受保護的 Manifest／Queue／Status 流程。
+4. 儲存後裝置連 Wi-Fi 並自動加入內網網站，不需要抄碼或網站核准。公開網址只需管理員在網站按一下核准，同樣不需配對碼。
+5. 裝置自動完成 request／claim，把連線憑證先寫入 A/B NVS，再以 Bearer Secret／version confirm。只有 confirm 成功才建立並啟用正式裝置，之後開始受保護的 Manifest／Queue／Status 流程。
 6. 裝置重啟或下一次喚醒時不需要登入或 Session；使用 Device Secret 加上 credential version 直接呼叫裝置 API，完成下載、驗證、刷新後 deep sleep。
 
 Wi-Fi、伺服器 URL 與裝置識別是尚未連網前的 bootstrap，無法從 InkTime Web 遠端設定。面板 Profile、時區、每日 HH:MM、0°／180°旋轉與啟停仍在 InkTime「裝置」頁管理；下一次取得 Manifest 時自動套用並寫入 NVS，再以設定版本 ACK 證明已生效。
 
-Device Secret 只在 claim 成功回應中交給裝置，短效 envelope 允許同一 pairing retry 取回相同值；confirm 後 server 只保存雜湊。完整值不進 URL、HTML、序列 Log、Activity 或照片。管理員撤銷或啟用重新配對後，舊 Secret 立即失效，裝置必須完成新的核准流程。既有 Legacy 裝置仍可依相容路徑使用 Bearer Token；PhotoPainter Stock 模式維持 `/dataUP`，不參與自動配對。
+Device Secret 只在 claim 成功回應中交給裝置，短效 envelope 允許同一 pairing retry 取回相同值；confirm 後 server 只保存雜湊。完整值不進 URL、HTML、序列 Log、Activity 或照片。管理員撤銷或啟用重新配對後，舊 Secret 立即失效，裝置必須重新完成註冊；內網自動完成，公開網址按一下核准。既有 Legacy 裝置仍可依相容路徑使用 Bearer Token；PhotoPainter Stock 模式維持 `/dataUP`，不參與自動配對。
 
 ## 6. 網路協定
 

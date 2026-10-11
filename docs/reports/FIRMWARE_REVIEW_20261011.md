@@ -5,13 +5,24 @@
 涵蓋目前部署的 PhotoPainter Rev2.0／7C sketch、其設定／排程／ACK／Frame／Transport／電源 helpers，以及保留的 13.3 吋 sketch 與板型驅動入口。
 這是此次稽核發現與尚未解除的問題全集，不是對未知硬體問題不存在的保證。
 
-## 現行 PhotoPainter：確認的缺口
+## 現行 PhotoPainter：確認缺口與待量測建議
 
 | ID | 優先 | 問題與觸發 | 位置 | 建議與驗證 |
 |---|---|---|---|---|
-| F01 | P2；空庫須改排程時 P1 | **空庫獨立設定下發只修到 latest 路徑。** 已處於 `inktime_offline_schedule` 的裝置呼叫離線排程；伺服器 `schedule_not_ready` 404 不附 `device_config`，韌體只保存 retry，只有明確 delivery-mode mismatch 才轉 latest。因此同模式下沒有可產生的照片排程時，新設定仍不能套用／ACK。 | `ink-display-7C-photo.ino:4603`、`:6037`；`api/devices.py:889` | 獨立且經認證的設定同步，或在明確 no-content 回應附設定；保留最後照片與既有正式排程，不能把所有 404 當成換模式。空庫、發布失敗與模式切換分別驗證。 |
+| F01 | P2／特定空庫狀態 | **空庫獨立設定下發只修到 latest 路徑。** 已處於 `inktime_offline_schedule` 的裝置呼叫離線排程；伺服器 `schedule_not_ready` 404 不附 `device_config`，韌體只保存 retry，只有明確 delivery-mode mismatch 才轉 latest。因此同模式下沒有可產生的照片排程時，新設定仍不能套用／ACK。 | `ink-display-7C-photo.ino:4603`、`:6037`；`api/devices.py:889` | 獨立且經認證的設定同步，或在明確 no-content 回應附設定；保留最後照片與既有正式排程，不能把所有 404 當成換模式。空庫、發布失敗與模式切換分別驗證。 |
 | F02 | P2 | **一次照片刷新失敗會覆寫最後成功照片紀錄。** `saveDisplayRecord(...,false)` 寫入同一個 `disp_record`；`restoreLastSuccessfulPhoto` 要求該紀錄 succeeded，GC 也只用成功紀錄保護 last-good SHA。A 成功、B 刷新失敗後，A 的恢復入口消失，快取也可能失去保護。 | `ink-display-7C-photo.ino:887`、`:942`、`:978`、`:6808`、`:7184` | 將「面板目前是否可證明完整」與「最後可恢復成功照片」分開保存；失敗仍禁止 same-SHA skip，但保護 A。測失敗、NVS 寫入失敗、GC、電量頁與各斷電點。 |
-| F03 | P2／耗電策略缺口 | **NetworkBudget／最低刷新間距不是完整執行政策。** `networkBudget`、`nextConnectAction`、`shouldRefresh` 沒有 runtime caller；例如 Manifest 固定 30 秒，不使用電池策略的 15 秒。現有 12 秒 Wi-Fi、HTTP/TLS deadline 與 max-awake supervisor 仍存在，不能稱為無界重試。 | `power_policy.h:20`、`:31`、`:61`；`ink-display-7C-photo.ino:4091` | 先量測不同供電與失敗情境，再把適合的政策接到 caller；最低刷新間距不能直接套到配對／必要恢復並宣稱已省電。 |
+| F03 | P3／待量測改進建議 | **NetworkBudget／最低刷新間距不是完整執行政策。** `networkBudget`、`nextConnectAction`、`shouldRefresh` 沒有 runtime caller；例如 Manifest 固定 30 秒，不使用電池策略的 15 秒。現有 12 秒 Wi-Fi、HTTP/TLS deadline 與 max-awake supervisor 仍存在，不能稱為無界重試。 | `power_policy.h:20`、`:31`、`:61`；`ink-display-7C-photo.ino:4091` | 先量測不同供電與失敗情境，再把適合的政策接到 caller；最低刷新間距不能直接套到配對／必要恢復並宣稱已省電。 |
+
+## 2026-10-11 重新核對適用性
+
+F01–F03 不依賴人工配對碼或網站核准，因此配對簡化本身不會使它們消失。
+本次以最新 `origin/main=7ef3e4f` 核對，該 7C sketch 也與
+`origin/fix/photopainter-boot-crash-20261009` 相同；沒有沿用附件舊版行號推論。
+
+- F01 只限已使用離線排程、伺服器沒有可提供的正式排程時；正常有排程、latest 路徑，或新裝置從 claim 取得初始設定，不套用此結論。
+- F02 只限新照片刷新失敗後的復原／GC 路徑；正常照片顯示不代表已觸發此問題。
+- F03 降為待電流量測的改善方向。現有連線 timeout 與最大醒著時間仍有效，不能由未使用的 helpers 推定實機耗電異常，也不是必須修復的故障。
+- 新的網站端自動加入／簡單數字密碼改動不修改韌體。F01/F02 仍列為待確認，不藉本次流程簡化一併更動畫面恢復或電源行為。
 
 ## 保留的 13.3 吋 sketch：尚未達現行產品契約
 
@@ -45,5 +56,5 @@
 - U02：legacy/latest 空庫回應已有設定；enhanced offline 空庫仍有 F01。
 - U05、U06、U07、U09：見 F03 與 V04–V06；沒有把待量測方向當成已發生故障。
 
-本次未找到須越過使用者「先不要修韌體」限制的現行硬體 P0；F01/F02/F03 及是否維護 13C 都待使用者選擇。
+本次未找到須越過使用者「先不要修韌體」限制的現行硬體 P0；F01/F02 是否修復，以及是否維護 13C，都待使用者選擇；F03 先量測，再決定是否值得實作。
 任何後續修改仍須保持 ALDO3 / Audio_VCC 供電、EPD ALDO4、GPIO0/5/21 與 recoverable app-only flash 邊界。

@@ -712,7 +712,7 @@ docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build
 4. 到「維護」輸入容器內照片路徑（Compose 預設 `/photos`），建立背景掃描工作。
 5. 到「工作」以少量非敏感照片建立 `single` 分析，確認預算後啟動；從 [Activity／AI Trace](docs/guides/ACTIVITY_AI_TRACE_ZH_TW.md) 與成本核對是否真的呼叫模型。
 6. 到「渲染」預覽並選擇內建的手寫／文青繁中字型，測試渲染後發布與面板一致的四色／六色／七色版本；需要時仍可上傳其他字型。
-7. 新自製板不必先在「裝置」建立資料列：AP 設定頁只填 Wi-Fi／InkTime URL，裝置首次連線會取得短期配對碼並顯示在實體面板，管理員在 Web 輸入該碼核准；裝置以可恢復 claim／confirm 取得 Device Secret，confirm 後才建立正式資料列。既有 Legacy 或 Stock 裝置依相容模式操作。
+7. 新自製板只需在相框設定 Wi-Fi／InkTime URL：內網自動加入，公開網址在網站按一下核准；不需配對碼或手動 Token。韌體透過可恢復 claim／confirm 自動保存連線憑證，confirm 後建立裝置。Stock PhotoPainter 可在網站手動新增。
 8. 到「備份」建立並下載第一份備份。
 
 ## 歷史今日與安全換圖
