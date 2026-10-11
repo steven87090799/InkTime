@@ -5,6 +5,8 @@ import json
 from inktime.app.domain.analysis.schema import FULL_ANALYSIS_JSON_SCHEMA, json_schema_for_stage
 from inktime.app.providers.openai_compatible import (
     ANALYSIS_USER_PROMPT,
+    COMMON_PROMPT,
+    LEGACY_V5_COMMON_PROMPT,
     OpenAICompatibleProvider,
     analysis_system_prompt,
 )
@@ -53,7 +55,7 @@ def test_empty_custom_rule_adds_no_prompt_section_and_nonempty_adds_one_line():
     assert custom == base + "\n\nside_caption 自訂規則：避開雙關語 保持口語"
 
 
-def test_compact_prompt_and_schema_have_no_advanced_caption_contract(tmp_path):
+def test_complete_prompt_and_schema_have_no_advanced_caption_contract(tmp_path):
     controls = _controls()
     provider = OpenAICompatibleProvider(
         name="test", base_url="https://example.invalid", api_key="", caption_controls=controls
@@ -73,7 +75,8 @@ def test_compact_prompt_and_schema_have_no_advanced_caption_contract(tmp_path):
         "文案語感示例",
     ):
         assert removed not in prompt
-    assert len(prompt) < 1600
+    assert prompt.startswith(COMMON_PROMPT + "\n\n")
+    assert COMMON_PROMPT.startswith(LEGACY_V5_COMMON_PROMPT + "\n\n補充要求：")
     assert FULL_ANALYSIS_TOKEN_CAP == 512
     assert PhotoAnalysisService._prompt_version(None) == PROMPT_VERSION
 

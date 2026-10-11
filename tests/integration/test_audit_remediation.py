@@ -15,7 +15,12 @@ def test_estimates_follow_model_prices_and_preserve_unknown():
     expensive = dict(input_per_million=10, cached_input_per_million=0, output_per_million=20)
     a = service.estimate(10, "single", pricing=cheap)
     b = service.estimate(10, "single", pricing=expensive)
-    assert b["average_cost"] == pytest.approx(a["average_cost"] * 10)
+    # Each preview is independently rounded for display. Scaling an already
+    # rounded cheap estimate loses precision and is not the billing contract.
+    assert a["estimated_input_tokens"] == b["estimated_input_tokens"] == 80000
+    assert a["estimated_output_tokens"] == b["estimated_output_tokens"] == 5120
+    assert a["average_cost"] == pytest.approx(0.0902)
+    assert b["average_cost"] == pytest.approx(0.9024)
     assert service.estimate(10, "single")["average_cost"] is None
     assert service.estimate(10, "local")["average_cost"] == 0
     assert service.estimate(0, "single")["image_calls"] == 0
