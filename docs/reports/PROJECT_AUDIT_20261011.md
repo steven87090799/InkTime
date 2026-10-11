@@ -14,8 +14,10 @@ BASE_HEAD=`7ef3e4f`；分支：`fix/full-project-audit-20261011`。
 | N03 | P1／發布一致性 | `ReleaseCoordinator.reconcile` 未持發布共用鎖。發布已換 pointer、DB 尚未 commit 時，修復可讀到 staged／舊資料並把 pointer 改回舊 Release；發布隨後成功也無法補回它。兩次修復也共用同名 temporary pointer。 | snapshot 與修復提交持同一跨程序 metadata guard；大型 Payload hash 在鎖外。提交前重新核對完整 DB snapshot，若 publish／rollback／GC 改變狀態則 deferred，留到下一次維護。Hosted regression 分別暫停 activation/DB commit 與在 hash 中完成新發布，要求 repair 不覆寫新 pointer。 |
 | N04 | P2／降級恢復 | Weather API 的 JSON root／current／daily 若是 list／字串，原碼 AttributeError 未捕捉，跳過 `refreshing=False` 與 notify；之後該 location 持續被視為刷新中。NaN／Infinity 溫度可被當成功；缺少日溫度曾被補成 0。 | 先驗證物件與非空日溫度陣列，拒絕非有限數值；無效回應走既有 stale／unavailable 與 retry，且捕捉整數 overflow。Hosted regression 驗證先成功、再 malformed、再成功，三次都能完成刷新且保留最後可用值。 |
 | N05 | P2／還原錯誤 | 備份 manifest 為 null／list，或 files／file metadata／important_table_counts 型別錯誤時，AttributeError 可逃出驗證邊界。驗證器聲稱檢查格式卻無法以標準備份錯誤拒絕這些內容。 | 在任何 DB 交換前驗證結構，回 `BACKUP-002`；size 整數 overflow 同樣拒絕。Hosted fixtures 修改備份 manifest，要求既有照片／分析完全保留。保留既有 SHA 與筆數檢查、format v1/v2 相容及離線 runtime lock。 |
+| N06 | P2／相依套件安全 | GitHub open Dependabot alerts #3/#4：兩份 Linux runtime lock 都釘選 Werkzeug 3.1.8，位於 GHSA-g6x2-hccm-hh4m 影響範圍。漏洞觸發條件是 Windows／NTFS 特殊 device name；未證實 Linux NAS 可被此方式攻擊。 | requirements 直接釘選修補版 3.1.9，amd64/arm64 lock 同步同一 universal wheel，SHA-256 取自 PyPI exact-version metadata。Python >=3.9 與 MarkupSafe >=2.1.1 契約滿足本專案既有 3.12／3.0.3。未執行本機安裝／build；Hosted hash-enforced build 與 security scan 待驗證。警示需合併後由 GitHub 重評，不自行 dismiss。 |
 
 瀏覽器契約依據：[MDN randomUUID](https://developer.mozilla.org/en-US/docs/Web/API/Crypto/randomUUID)、[MDN getRandomValues](https://developer.mozilla.org/en-US/docs/Web/API/Crypto/getRandomValues)。
+安全修補依據：[Werkzeug 官方 advisory](https://github.com/pallets/werkzeug/security/advisories/GHSA-g6x2-hccm-hh4m)、[3.1.9 release notes](https://werkzeug.palletsprojects.com/en/stable/changes/#version-3-1-9)、[PyPI 3.1.9 metadata](https://pypi.org/pypi/Werkzeug/3.1.9/json)。
 這些是修復後的原碼行為與新增測試要求；尚未以本機 runtime 執行宣稱驗收成功。
 
 ## 子系統稽核覆蓋與結論
@@ -54,7 +56,7 @@ BASE_HEAD=`7ef3e4f`；分支：`fix/full-project-audit-20261011`。
 
 ## 驗證與交付
 
-本機允許範圍：`git diff --check`、325 個 tracked Python 檔的 AST syntax、修改的 JavaScript helper `node --check`、docs/navigation validator。
+本機允許範圍：`git diff --check`、325 個 tracked Python 檔的 AST syntax、修改的 JavaScript helper `node --check`、docs/navigation 與 dependency policy 靜態 validator。
 新增 Hosted cases：登入安全輸入與合法返回、Release activation/DB commit 交錯及 hash 期間 snapshot 失效、malformed weather 恢復、malformed backup 不換 DB、UUID／storage browser 相容。
 完整 Hosted CI 由 Draft PR 的 `full-ci` label 請求；推送後只查一次，不輪詢、不手動 dispatch／rerun。
 queued／in_progress 須交付為 `CI_PENDING`，不能寫成測試全綠。未合併、未部署、未刷機。
