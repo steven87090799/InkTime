@@ -57,6 +57,7 @@ BASE_HEAD=`7ef3e4f`；分支：`fix/full-project-audit-20261011`。
 ## 驗證與交付
 
 本機允許範圍：`git diff --check`、325 個 tracked Python 檔的 AST syntax、修改的 JavaScript helper `node --check`、docs/navigation 與 dependency policy 靜態 validator。
+實際結果：diff、JavaScript、Python 3.12 AST 與 navigation 均通過；完整 dependency policy script 因本機 Python 3.12 缺 `packaging` 未執行完成，未為此安裝套件。以標準函式庫核對兩份 runtime lock 的格式、hash 與全部 direct version 對齊通過；完整 policy 與套件相容性留給 Hosted CI。
 新增 Hosted cases：登入安全輸入與合法返回、Release activation/DB commit 交錯及 hash 期間 snapshot 失效、malformed weather 恢復、malformed backup 不換 DB、UUID／storage browser 相容。
 完整 Hosted CI 由 Draft PR 的 `full-ci` label 請求；推送後只查一次，不輪詢、不手動 dispatch／rerun。
 queued／in_progress 須交付為 `CI_PENDING`，不能寫成測試全綠。未合併、未部署、未刷機。
