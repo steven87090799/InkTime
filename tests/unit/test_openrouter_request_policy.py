@@ -356,16 +356,31 @@ def test_responses_only_model_is_rejected_before_image_access(tmp_path, model):
         )
 
 
-@pytest.mark.parametrize("version, legacy", [
-    ("photo-analysis-v5-compact", True),
-    ("photo-analysis-v5-compact-caption-abc123", True),
-    ("photo-analysis-v5-compact-literary-20261011", False),
+@pytest.mark.parametrize("version, contract_name", [
+    ("photo-analysis-v5-compact", "LEGACY_V5_COMMON_PROMPT"),
+    ("photo-analysis-v5-compact-caption-abc123", "LEGACY_V5_COMMON_PROMPT"),
+    ("photo-analysis-v5-compact-literary-20261011", "COMPACT_V5_COMMON_PROMPT"),
+    ("photo-analysis-v5-compact-literary-20261011-caption-abc123", "COMPACT_V5_COMMON_PROMPT"),
+    ("photo-analysis-v5-complete-literary-20261011", "COMMON_PROMPT"),
+    ("photo-analysis-v5-complete-literary-20261011-caption-abc123", "COMMON_PROMPT"),
+    (None, "COMMON_PROMPT"),
 ])
-def test_frozen_prompt_version_matches_actual_wire_contract(tmp_path, version, legacy):
-    from inktime.app.providers.openai_compatible import COMMON_PROMPT, LEGACY_V5_COMMON_PROMPT
+def test_frozen_prompt_version_matches_actual_wire_contract(tmp_path, version, contract_name):
+    from inktime.app.providers import openai_compatible
     image = tmp_path / "synthetic.jpg"
     image.write_bytes(b"synthetic")
     body = _provider(kind="openai").build_analysis_request_body(
         image_path=image, model="gpt-4o", detail="high", stage="single", prompt_version=version,
     )
-    assert body["messages"][0]["content"].startswith(LEGACY_V5_COMMON_PROMPT if legacy else COMMON_PROMPT)
+    assert body["messages"][0]["content"].startswith(getattr(openai_compatible, contract_name))
+
+
+def test_complete_prompt_retains_original_contract_and_bounds_output():
+    from inktime.app.providers.openai_compatible import COMMON_PROMPT, LEGACY_V5_COMMON_PROMPT
+    from inktime.app.services.analysis import PROMPT_VERSION
+
+    assert COMMON_PROMPT.startswith(LEGACY_V5_COMMON_PROMPT + "\n\n補充要求：")
+    assert PROMPT_VERSION == "photo-analysis-v5-complete-literary-20261011"
+    assert "以文青風格表達" in COMMON_PROMPT
+    assert "不要求加總為 1" in COMMON_PROMPT
+    assert "不為縮短輸出省略欄位或截斷內容" in COMMON_PROMPT
