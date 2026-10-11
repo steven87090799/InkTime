@@ -715,6 +715,72 @@ def test_missing_today_schedule_returns_bounded_server_retry_epoch(client, app):
     )
 
 
+
+@pytest.mark.parametrize("target", ["current", "next"])
+def test_empty_offline_schedule_delivers_updated_config_and_accepts_image_independent_ack(client, app, target):
+    repository = app.extensions["inktime_device_repository"]
+    device_id, token = repository.create(
+        "空庫設定同步", delivery_mode="inktime_offline_schedule",
+        offline_prefetch_allowed=True, schedule_times=["08:00"], panel_profile="safe_4c",
+    )
+    assert repository.update(
+        device_id, name="空庫設定同步", enabled=True, timezone_name="Asia/Kathmandu",
+        schedule="08:17", delivery_mode="inktime_offline_schedule",
+        offline_prefetch_allowed=True, schedule_times=["08:17", "09:17"],
+        rotation=180, panel_profile="safe_4c", sync_strategy="fixed_daily", sync_time="04:17",
+    )
+    before = dict(repository.get(device_id))
+    path = f"/api/device/v1/offline-schedule?target={target}"
+    assert client.get(path).status_code == 401
+    headers = {"Authorization": f"Bearer {token}"}
+    response = client.get(path, headers=headers)
+    assert response.status_code == 404
+    body = response.get_json()
+    assert body["error"] == "schedule_not_ready"
+    assert body["no_content"] is True
+    assert body["target"] == target
+    assert len(response.data) <= 4096
+    config = body["device_config"]
+    assert config["schema_version"] == 3
+    assert config["delivery_mode"] == "inktime_offline_schedule"
+    assert config["config_version"] == before["config_version"]
+    assert config["utc_offset_minutes"] == 345
+    assert config["schedule_times"] == ["08:17", "09:17"]
+    assert config["rotation"] == 180
+    assert config["sync_strategy"] == "fixed_daily"
+    assert config["sync_time"] == "04:17"
+    after_get = repository.get(device_id)
+    assert after_get["acked_config_version"] == before["acked_config_version"]
+    assert after_get["applied_offline_schedule_version"] == before["applied_offline_schedule_version"]
+    ack = client.post(
+        "/api/device/v1/status", headers=headers,
+        json={"firmware_version": "2.8.8", "applied_config_version": config["config_version"],
+              "display_updated": False, "payload_sha256_verified": False,
+              "applied_offline_schedule_version": None},
+    )
+    assert ack.status_code == 200
+    after_ack = repository.get(device_id)
+    assert after_ack["acked_config_version"] == config["config_version"]
+    assert after_ack["applied_offline_schedule_version"] == before["applied_offline_schedule_version"]
+
+
+def test_empty_offline_schedule_with_corrupt_live_config_retains_bounded_retry(client, app):
+    device_id, token = app.extensions["inktime_device_repository"].create(
+        "空庫毀損設定", delivery_mode="inktime_offline_schedule",
+        offline_prefetch_allowed=True, schedule_times=["08:00"],
+    )
+    with app.extensions["inktime_database"].session() as connection:
+        connection.execute("UPDATE devices SET schedule_times_json='not-json' WHERE id=?", (device_id,))
+    before = int(datetime.now().timestamp())
+    response = client.get("/api/device/v1/offline-schedule", headers={"Authorization": f"Bearer {token}"})
+    assert response.status_code == 404
+    body = response.get_json()
+    assert body["error"] == "schedule_not_ready"
+    assert body["retry_after_epoch"] > before
+    assert "device_config" not in body
+    assert "no_content" not in body
+
+
 def test_offline_schedule_repository_fails_closed_on_corrupt_manifest_and_keeps_snapshot_typed(app):
     device_id, _token = app.extensions["inktime_device_repository"].create(
         "離線完整性邊界",

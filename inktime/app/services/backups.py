@@ -297,7 +297,10 @@ class BackupService:
                     raise ValueError("BACKUP-002 manifest 必須是物件")
                 if not isinstance(manifest.get("important_table_counts", {}), dict):
                     raise ValueError("BACKUP-002 important_table_counts 必須是物件")
-                version = int(manifest.get("backup_format_version", manifest.get("schema_version", 0)))
+                raw_version = manifest.get("backup_format_version", manifest.get("schema_version", 0))
+                if raw_version is None:
+                    raise ValueError("BACKUP-002 備份格式版本不可為 null")
+                version = int(raw_version)
                 expected = (
                     {"inktime.sqlite3", "manifest.json"}
                     if version == 1

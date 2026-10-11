@@ -212,7 +212,7 @@ GxEPD2_7C<
 #define DEVICE_PAIRING_CLAIM_PATH "/api/device/v1/pairing/claim"
 #define DEVICE_PAIRING_CONFIRM_PATH "/api/device/v1/pairing/confirm"
 #define DEVICE_PAIRING_REPAIR_PERMISSION_PATH "/api/device/v1/pairing/repair-permission"
-#define INKTIME_FIRMWARE_VERSION "2.8.7"
+#define INKTIME_FIRMWARE_VERSION "2.8.8"
 
 static constexpr uint8_t kQueueAckBatchMaxEvents = 8U;
 static constexpr size_t kQueueAckBatchMaxBodyBytes = 12U * 1024U;
@@ -940,6 +940,13 @@ static bool displayPairingScreenSafely(const char* ssid, const char* password,
 #endif
 
 static void saveDisplayRecord(const Config &cfg, bool succeeded) {
+  if (!succeeded) {
+    // disp_record is the last verified success, also the GC/restore anchor.
+    // A failed refresh only leaves the panel uncertain: never replace that
+    // anchor or clear disp_pending, even when the failed photo has the same SHA.
+    (void)beginPanelMutation();
+    return;
+  }
   if (!inktime::isSha256HexValue(currentPayloadSha256.c_str())
       || currentReleaseId.length() == 0U || currentReleaseId.length() > 128U
       || currentRenderProfile.length() == 0U || currentRenderProfile.length() > 64U) {
@@ -953,7 +960,7 @@ static void saveDisplayRecord(const Config &cfg, bool succeeded) {
   if (strlen(kBoardConfig.name) >= sizeof(blob.boardProfile)) return;
   memcpy(blob.boardProfile, kBoardConfig.name, strlen(kBoardConfig.name));
   blob.rotation = cfg.rotate180 ? 180 : 0;
-  blob.succeeded = succeeded ? 1U : 0U;
+  blob.succeeded = 1U;
   blob.crc = inktime::crc32(reinterpret_cast<const uint8_t*>(&blob),
                            offsetof(DisplayRecordBlob, crc));
   if (!prefs.begin("dashcfg", false)) return;
@@ -4044,6 +4051,100 @@ static bool resumePendingQueueAck(Config &cfg) {
 // =======================
 //  下载每日相册 BIN
 // =======================
+static bool applyRemoteDeviceConfiguration(Config &cfg, JsonObject remoteConfig) {
+  const JsonVariantConst schema = remoteConfig["schema_version"];
+  const JsonVariantConst version = remoteConfig["config_version"];
+  const JsonVariantConst offset = remoteConfig["utc_offset_minutes"];
+  const JsonVariantConst rotationValue = remoteConfig["rotation"];
+  if (remoteConfig.isNull() || !schema.is<int32_t>() || schema.is<bool>()
+      || schema.as<int32_t>() < 1 || schema.as<int32_t>() > 3
+      || (!version.isNull() && (!version.is<uint32_t>() || version.is<bool>()))
+      || (!offset.isNull() && (!offset.is<int32_t>() || offset.is<bool>()))
+      || (!rotationValue.isNull() && (!rotationValue.is<int32_t>() || rotationValue.is<bool>()))) {
+    lastDeviceErrorCode = "DEVICE-CONFIG-SCHEMA";
+    lastDeviceErrorMessage = "遠端設定 schema 或數值型別不合法；保留已保存設定";
+    return false;
+  }
+  int offsetMinutes = remoteConfig["utc_offset_minutes"] | cfg.tz_offset_minutes;
+  String schedule = remoteConfig["schedule"] | "";
+  int separator = schedule.indexOf(':');
+  int remoteHour = separator > 0 ? schedule.substring(0, separator).toInt() : -1;
+  int remoteMinute = separator > 0 ? schedule.substring(separator + 1).toInt() : -1;
+  int rotation = remoteConfig["rotation"] | (cfg.rotate180 ? 180 : 0);
+  uint32_t desiredConfigVersion = remoteConfig["config_version"] | cfg.config_version;
+  String desiredPanelProfile = remoteConfig["panel_profile"] | "safe_4c";
+  bool compatiblePanel = desiredPanelProfile == "safe_4c"
+    || desiredPanelProfile == String(INKTIME_PANEL_PROFILE);
+  Config candidate = cfg;
+#if INKTIME_PHOTOPAINTER_ENABLED
+  if (cfg.delivery_mode == "inktime_offline_schedule"
+      && (remoteConfig["schema_version"] | 0) < 3) {
+    // A legacy/schema-2 latest manifest is the authoritative convergence
+    // response after the server has moved this device out of enhanced
+    // offline mode.  Do not leave the stale offline mode in NVS.
+    candidate.delivery_mode = "legacy_online";
+  }
+  bool validSchedule = applyRemoteSchedule(
+    remoteConfig,
+    remoteConfig["schema_version"] | 0,
+    candidate
+  );
+#else
+  const bool validSchedule = true;
+#endif
+  bool validRemote = offsetMinutes >= -12 * 60 && offsetMinutes <= 14 * 60
+    && remoteHour >= 0 && remoteHour <= 23 && remoteMinute >= 0 && remoteMinute <= 59
+    && (rotation == 0 || rotation == 180) && compatiblePanel
+    && desiredConfigVersion >= cfg.config_version && validSchedule;
+  if (!validRemote) {
+    lastDeviceErrorCode = "DEVICE-CONFIG-PROFILE";
+    lastDeviceErrorMessage = "遠端設定版本或面板 Profile 與韌體不相容";
+    return false;
+  }
+#if INKTIME_PHOTOPAINTER_ENABLED
+  bool scheduleChanged = cfg.schedule_count != candidate.schedule_count;
+  if (!scheduleChanged) {
+    for (uint8_t index = 0; index < candidate.schedule_count; ++index) {
+      if (cfg.schedule_slots[index].hour != candidate.schedule_slots[index].hour
+          || cfg.schedule_slots[index].minute != candidate.schedule_slots[index].minute) {
+        scheduleChanged = true;
+        break;
+      }
+    }
+  }
+#endif
+  if (
+      cfg.tz_offset_minutes != offsetMinutes || cfg.refresh_hour != remoteHour
+      || cfg.refresh_minute != remoteMinute || cfg.rotate180 != (rotation == 180)
+      || cfg.config_version != desiredConfigVersion
+#if INKTIME_PHOTOPAINTER_ENABLED
+      || scheduleChanged
+      || cfg.delivery_mode != candidate.delivery_mode
+      || cfg.schedule_count != candidate.schedule_count
+      || cfg.prefetch_lead_minutes != candidate.prefetch_lead_minutes
+      || cfg.button_wake_action != candidate.button_wake_action) {
+#else
+      ) {
+#endif
+    candidate.tz_offset_minutes = offsetMinutes;
+    candidate.refresh_hour = static_cast<uint8_t>(remoteHour);
+    candidate.refresh_minute = static_cast<uint8_t>(remoteMinute);
+    candidate.rotate180 = rotation == 180;
+    candidate.config_version = desiredConfigVersion;
+    String persistError;
+    if (!saveConfig(candidate, &persistError)) {
+      setConfigPersistenceError(persistError);
+      return false;
+    }
+    cfg = candidate;
+    serverConfigChanged = true;
+#if DEBUG_LOG
+    DBG_PRINTLN("[CFG] 已套用伺服器端裝置設定");
+#endif
+  }
+  return true;
+}
+
 bool downloadLatestPhotoBin(Config &cfg) {
   lastDeviceErrorCode = "";
   lastDeviceErrorMessage = "";
@@ -4130,90 +4231,9 @@ bool downloadLatestPhotoBin(Config &cfg) {
     return false;
   }
 
-  // 伺服器端裝置頁是排程、時區與旋轉的正式來源；AP 值只在首次離線時備援。
+  // Configuration is independent of a downloadable image, including no-content responses.
   JsonObject remoteConfig = manifest["device_config"].as<JsonObject>();
-  if (!remoteConfig.isNull()
-      && (remoteConfig["schema_version"].as<int>() == 1
-          || remoteConfig["schema_version"].as<int>() == 2
-          || remoteConfig["schema_version"].as<int>() == 3)) {
-    int offsetMinutes = remoteConfig["utc_offset_minutes"] | cfg.tz_offset_minutes;
-    String schedule = remoteConfig["schedule"] | "";
-    int separator = schedule.indexOf(':');
-    int remoteHour = separator > 0 ? schedule.substring(0, separator).toInt() : -1;
-    int remoteMinute = separator > 0 ? schedule.substring(separator + 1).toInt() : -1;
-    int rotation = remoteConfig["rotation"] | (cfg.rotate180 ? 180 : 0);
-    uint32_t desiredConfigVersion = remoteConfig["config_version"] | cfg.config_version;
-    String desiredPanelProfile = remoteConfig["panel_profile"] | "safe_4c";
-    bool compatiblePanel = desiredPanelProfile == "safe_4c"
-      || desiredPanelProfile == String(INKTIME_PANEL_PROFILE);
-    Config candidate = cfg;
-#if INKTIME_PHOTOPAINTER_ENABLED
-    if (cfg.delivery_mode == "inktime_offline_schedule"
-        && (remoteConfig["schema_version"] | 0) < 3) {
-      // A legacy/schema-2 latest manifest is the authoritative convergence
-      // response after the server has moved this device out of enhanced
-      // offline mode.  Do not leave the stale offline mode in NVS.
-      candidate.delivery_mode = "legacy_online";
-    }
-    bool validSchedule = applyRemoteSchedule(
-      remoteConfig,
-      remoteConfig["schema_version"] | 0,
-      candidate
-    );
-#else
-    const bool validSchedule = true;
-#endif
-    bool validRemote = offsetMinutes >= -12 * 60 && offsetMinutes <= 14 * 60
-      && remoteHour >= 0 && remoteHour <= 23 && remoteMinute >= 0 && remoteMinute <= 59
-      && (rotation == 0 || rotation == 180) && compatiblePanel
-      && desiredConfigVersion >= cfg.config_version && validSchedule;
-    if (!validRemote) {
-      lastDeviceErrorCode = "DEVICE-CONFIG-PROFILE";
-      lastDeviceErrorMessage = "遠端設定版本或面板 Profile 與韌體不相容";
-      return false;
-    }
-#if INKTIME_PHOTOPAINTER_ENABLED
-    bool scheduleChanged = cfg.schedule_count != candidate.schedule_count;
-    if (!scheduleChanged) {
-      for (uint8_t index = 0; index < candidate.schedule_count; ++index) {
-        if (cfg.schedule_slots[index].hour != candidate.schedule_slots[index].hour
-            || cfg.schedule_slots[index].minute != candidate.schedule_slots[index].minute) {
-          scheduleChanged = true;
-          break;
-        }
-      }
-    }
-#endif
-    if (
-        cfg.tz_offset_minutes != offsetMinutes || cfg.refresh_hour != remoteHour
-        || cfg.refresh_minute != remoteMinute || cfg.rotate180 != (rotation == 180)
-        || cfg.config_version != desiredConfigVersion
-#if INKTIME_PHOTOPAINTER_ENABLED
-        || scheduleChanged
-        || cfg.delivery_mode != candidate.delivery_mode
-        || cfg.schedule_count != candidate.schedule_count
-        || cfg.prefetch_lead_minutes != candidate.prefetch_lead_minutes
-        || cfg.button_wake_action != candidate.button_wake_action) {
-#else
-        ) {
-#endif
-      candidate.tz_offset_minutes = offsetMinutes;
-      candidate.refresh_hour = static_cast<uint8_t>(remoteHour);
-      candidate.refresh_minute = static_cast<uint8_t>(remoteMinute);
-      candidate.rotate180 = rotation == 180;
-      candidate.config_version = desiredConfigVersion;
-      String persistError;
-      if (!saveConfig(candidate, &persistError)) {
-        setConfigPersistenceError(persistError);
-        return false;
-      }
-      cfg = candidate;
-      serverConfigChanged = true;
-#if DEBUG_LOG
-      DBG_PRINTLN("[CFG] 已套用伺服器端裝置設定");
-#endif
-    }
-  }
+  if (!remoteConfig.isNull() && !applyRemoteDeviceConfiguration(cfg, remoteConfig)) return false;
 
   if (manifest["no_content"] | false) {
     lastDeviceWarningCode = "DEVICE-NO-CONTENT";
@@ -4691,6 +4711,25 @@ static bool downloadOfflineScheduleAndFrames(Config &cfg, bool targetNext = fals
     if (errorName == "schedule_not_ready"
         && ((targetNext && notReadyTarget == "next")
             || (!targetNext && (notReadyTarget.length() == 0U || notReadyTarget == "current")))) {
+      // Only a fully parsed, recognized no-content contract can change settings.
+      // Old servers omit device_config and continue through bounded retry below.
+      if (!notReadyError && !notReady.overflowed() && nextSlotFieldValid
+          && !notReady["device_config"].isNull()) {
+        JsonObject remoteConfig = notReady["device_config"].as<JsonObject>();
+        const JsonVariantConst noContent = notReady["no_content"];
+        const JsonVariantConst configVersion = remoteConfig["config_version"];
+        if (!noContent.is<bool>() || !noContent.as<bool>() || remoteConfig.isNull()
+            || (remoteConfig["schema_version"] | 0) != 3
+            || String(remoteConfig["delivery_mode"] | "") != "inktime_offline_schedule"
+            || !configVersion.is<uint32_t>() || configVersion.is<bool>()) {
+          lastDeviceErrorCode = "DEVICE-OFFLINE-CONFIG-SCHEMA";
+          lastDeviceErrorMessage = "空排程回應的設定契約不合法；保留已保存設定與畫面";
+          return false;
+        }
+        if (!applyRemoteDeviceConfiguration(cfg, remoteConfig)) return false;
+        lastDeviceWarningCode = "DEVICE-NO-CONTENT";
+        lastDeviceWarningMessage = "設定已同步；離線照片排程尚未準備，保留面板畫面";
+      }
       const time_t retryEpoch = scheduleOfflineRecovery(
         recoveryNow, serverRetryEpoch, nextSlotEpoch);
       lastDeviceErrorCode = "DEVICE-OFFLINE-SCHEDULE-NOT-READY";
@@ -7095,7 +7134,8 @@ void setup() {
   // credentialed wake.  A revoked/invalid credential may re-enter this flow
   // only after a dedicated authenticated permission probe confirms that the
   // backend has enabled repair; the backend still requires a fresh
-  // deployment-appropriate enrollment policy and administrator approval.
+  // deployment-appropriate enrollment policy: automatic on a trusted LAN,
+  // or one administrator approval for public deployments, without a human code.
   bool repairPermission = false;
   if ((g_cfg.auth_state == "auth_invalid" || g_cfg.auth_state == "revoked")
       && pairingRetryDue(g_cfg)) {

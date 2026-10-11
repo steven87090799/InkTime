@@ -1,4 +1,4 @@
-# InkTime 全專案重新稽核與非韌體修復：2026-10-11
+# InkTime 全專案重新稽核與修復：2026-10-11
 
 BASE_HEAD=`7ef3e4f`；分支：`fix/full-project-audit-20261011`。
 附件以 `bca27aa` 為基準；PR #147 已合併，不能把附件中的問題直接當成最新主分支仍有的問題。
@@ -28,7 +28,15 @@ BASE_HEAD=`7ef3e4f`；分支：`fix/full-project-audit-20261011`。
 - 保留原有 API 路徑、DB／NVS schema 與既有 Token 讀取；舊韌體需要的六位欄位改為沒有授權作用的相容常數，詳見[自動加入契約](../devices/ESP32_AUTOMATIC_PAIRING_ZH_TW.md)。不引入第二套註冊或額外部署開關，不改 runtime 資料。
 - 網站新建／變更／重設密碼統一允許 1–128 字元，包括 `1`、`0000`、`1234`；不可空字串或全空白，仍保留長度上限、NUL 拒絕、密碼雜湊與 session 撤銷。
 - 新增 Hosted 案例：免登入內網 request／claim／confirm、nonce 錯誤拒絕、升級 pending request／claim、公開裝置不能由 capability 自行核准；保留管理員／CSRF、憑證保存後 confirm、重試、撤銷、能力衝突與 TTL 契約。
-- F01/F02 仍只在指定觸發狀態適用；F03 改列待量測的 P3 建議，見[重新核對的韌體清單](FIRMWARE_REVIEW_20261011.md)。韌體原碼、編譯、刷機與實機行為均未改動。
+- F01/F02 仍只在指定觸發狀態適用；F03 改列待量測的 P3 建議，見[重新核對的韌體清單](FIRMWARE_REVIEW_20261011.md)。此流程簡化階段未修改韌體；後續經使用者批准追加 F01/F02，見下節。
+
+## 追加：在免配對碼版本修復 F01/F02
+
+已核對 `origin/main=7ef3e4f` 與現有分支；最新免配對碼／簡化密碼版為 `47dcd51`，位於同一 Draft PR #150。修復直接接續該提交，不回退註冊流程。PhotoPainter 韌體版本為 `2.8.8`。
+
+F01 的空排程回應可下發有效設定，韌體共用設定驗證／保存成功後才更新 applied config version，保留面板照片與 bounded retry，不誤 ACK 正式排程。F02 的失敗刷新不覆寫最後成功 `disp_record`，保留 GC／恢復入口及不確定面板 marker。詳細失敗邊界及 Hosted 回歸見[韌體清單](FIRMWARE_REVIEW_20261011.md)。另修正前次 Hosted Python static job 發現的 backup format version `None` 型別縮窄，維持 `BACKUP-002` 拒絕行為。
+
+此階段僅本機 Python AST、diff whitespace、測試擷取來源邊界與 navigation 靜態驗證；測試／韌體編譯交由 Hosted CI。未合併、部署或刷機，不代表實板驗收通過。
 
 ## 子系統稽核覆蓋與結論
 
@@ -42,12 +50,12 @@ BASE_HEAD=`7ef3e4f`；分支：`fix/full-project-audit-20261011`。
 | 照片／掃描／預覽 | scanner census／walk errors、paths、formats／EXIF decode bounds、thumbnail shard lock、photo privacy route | 保留來源唯讀、尺寸／檔案上限、hash 同 FD、變更來源拒絕、取消不完成全量 missing census。未掃描使用者照片，也未改相片排序契約。 |
 | 排序／選片／渲染 | scoring／content filter、local selection、rendering source／caption、font validation、bounded render cache | 保留 v4/v5 可讀、67/33 排名、人工保護、HEIF 方向與不描述畫面的短句契約。字型與圖片品質的代表樣本仍需產品驗收。 |
 | Release／回滾／清理 | AtomicReleasePublisher validate／pointer／metadata guard、coordinator publish/reconcile/GC、rollback | 修 N03；GC 仍保護 active pointer、裝置 assignment、queue、offline schedule。整庫 hash reconciliation 的長期 I/O 成本仍需規模量測，不能宣稱已優化 NAS 性能。 |
-| 配對／裝置／Queue | device auth、pairing transaction／nonce／credential version、latest／offline manifest、resilience ACK／retention | 內網加入改自動、公開網站按一下核准；nonce／憑證驗證與 Release 授權保留。韌體所需的 F01/F02 暫不修改，包括與它們耦合的 backend 行為。 |
+| 配對／裝置／Queue | device auth、pairing transaction／nonce／credential version、latest／offline manifest、resilience ACK／retention | 內網加入改自動、公開網站按一下核准；nonce／憑證驗證與 Release 授權保留。後續批准的 F01/F02 修復已接入空排程設定與最後成功照片持久化。 |
 | 備份／Migration／設定 | backup format／offline replacement／safety snapshot／paid fence、released migration transaction、settings mutation／provider CAS | 修 N05；保留 schema downgrade 拒絕、離線 lock 與付費暫停 fence。恢復舊 DB 無法重建快照後的外部供應商帳單或遺失的原圖／Release payload。 |
 | 通知／對外網路／觀測 | webhook DNS pinning／allowlist／timeout、stock transport bounds、offline alerts、diagnostic redaction、weather cache | SSRF 邊界與回應大小上限保留；修 N04。正常深睡不能由「無回報」直接當成故障；未對真實 Webhook／Stock endpoint 傳送資料。 |
 | Web／操作恢復 | shared helpers、jobs／providers／rendering／backups busy/idempotency、API role boundaries、CSP | R08/R11 已有操作保護與管理員 critical 告警邊界；補 N01/N02。HTTP 替代 UUID 不降低隨機來源品質。 |
 | 部署／CI／相依套件 | NAS Compose／update/restore CLI、container process health、dependency pins、CI event/route/full-ci | 不改 runtime，不部署。325 個 tracked Python 檔做 AST syntax；Hosted full suite 才負責功能、安全掃描、容器與板型編譯。沒有以依賴釘選或舊 CI 當成今日無漏洞保證。 |
-| 韌體 | 現行 7C 入口／PMIC 安全契約、設定／ACK／display／offline／transport／storage／wake helpers；13C sketch／driver | 完整發現清單見 [FIRMWARE_REVIEW_20261011.md](FIRMWARE_REVIEW_20261011.md)：F01–F09 與 V01–V06。本次 firmware diff 必須為空。 |
+| 韌體 | 現行 7C 入口／PMIC 安全契約、設定／ACK／display／offline／transport／storage／wake helpers；13C sketch／driver | 完整發現清單見 [FIRMWARE_REVIEW_20261011.md](FIRMWARE_REVIEW_20261011.md)：F01–F09 與 V01–V06。F01/F02 已按後續批准修改；其餘 firmware 項目保留待量測／確認。 |
 
 ## 附件逐項重新核對
 
@@ -57,7 +65,7 @@ BASE_HEAD=`7ef3e4f`；分支：`fix/full-project-audit-20261011`。
 - R08：已有 busy、operation key、診斷 checkpoint；本次補 HTTP／storage 相容性 N01。
 - R11：公開登入不查詢／顯示詳細 critical 告警；管理員保留。
 - U01：還原 fence 保留；外部對帳不能由 source inspection 自動完成。
-- U02：latest 空庫路徑已修，enhanced offline 空庫仍有 F01。
+- U02：latest 空庫路徑已修，enhanced offline 空庫已追加 F01 修復，Hosted／實板驗證待完成。
 - U03：送出前照片狀態／工作狀態複查已有接線；傳输開始後的資料與費用不宣稱可撤回。
 - U04：原 CAS 與 publication compensation 鎖保留；本次補 background repair 共用鎖 N03。
 - U05/U06/U07/U09：安全邊界／保留規則仍存在；實板、長期成長與耗電量測未完成。
