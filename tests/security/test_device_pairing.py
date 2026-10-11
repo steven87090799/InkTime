@@ -761,7 +761,7 @@ def test_admin_can_reject_issued_credential_before_confirm(client, app):
     device_page = client.get("/devices")
     assert device_page.status_code == 200
     device_page_html = device_page.get_data(as_text=True)
-    assert "等待裝置確認" in device_page_html
+    assert "等待相框完成連線" in device_page_html
     assert "reject-pairing" in device_page_html
 
     rejected = client.post(
