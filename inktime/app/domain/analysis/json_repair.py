@@ -13,7 +13,7 @@ from copy import deepcopy
 import json
 from typing import Any
 
-from inktime.app.domain.analysis.schema import AnalysisValidationError
+from inktime.app.domain.analysis.schema import AnalysisValidationError, analysis_json_decoder
 
 
 LEGACY_V4_SEMANTIC_INTEGRITY_FIELDS = frozenset(
@@ -60,7 +60,7 @@ def _fenced_object(text: str) -> dict[str, Any] | None:
     if body.startswith("json\n") or body.startswith("json\r\n"):
         body = body.partition("\n")[2].strip()
     try:
-        value, end = json.JSONDecoder().raw_decode(body)
+        value, end = analysis_json_decoder().raw_decode(body)
     except json.JSONDecodeError:
         return None
     return value if candidate_is_object(value, body[end:]) else None
@@ -78,7 +78,7 @@ def _wrapped_object(text: str) -> dict[str, Any] | None:
     the response, even when they contain only one object.
     """
 
-    decoder = json.JSONDecoder()
+    decoder = analysis_json_decoder()
     candidates: list[tuple[int, int, Any]] = []
     index = 0
     while index < len(text):
@@ -108,7 +108,7 @@ def extract_json_value(raw: str) -> dict[str, Any] | None:
     text = str(raw or "").strip()
     if not text:
         return None
-    decoder = json.JSONDecoder()
+    decoder = analysis_json_decoder()
     try:
         value, end = decoder.raw_decode(text)
     except json.JSONDecodeError:

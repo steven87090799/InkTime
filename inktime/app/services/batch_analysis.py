@@ -11,7 +11,6 @@ import hashlib
 import inspect
 import json
 import logging
-import math
 import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -36,11 +35,11 @@ from inktime.app.domain.analysis import (
 from inktime.app.domain.analysis.plan import SCHEMA_VERSION, provider_prompt_contract_sha256
 from inktime.app.domain.analysis.schema import validate_model_response
 from inktime.app.domain.photos.quality_policy import is_confirmed_screenshot
-from inktime.app.services.analysis import FULL_ANALYSIS_TOKEN_CAP
+from inktime.app.domain.analysis.plan import FULL_ANALYSIS_TOKEN_CAP, analysis_output_token_cap
 from inktime.app.services.budgets import BudgetService
 from inktime.app.repositories.batch_result_staging import BatchResultStore
 from inktime.app.providers.base import MAX_BATCH_RESULT_BYTES, Usage
-from inktime.app.providers.openai_compatible import calculate_usage_cost
+from inktime.app.providers.openai_compatible import OpenAICompatibleProvider, calculate_usage_cost
 from inktime.app.repositories.analysis_reservations import (
     AnalysisReservationConflict,
     reserved_analysis_sql,
@@ -811,11 +810,7 @@ class BatchAnalysisService:
                 provider.close()
 
     def _line_factory(self, provider, plan: dict[str, Any]) -> Callable[[dict[str, Any]], bytes]:
-        global_cap = int(self.settings.get("budget.max_tokens", 8000))
-        requested_cap = int(
-            self.settings.get("budget.full_analysis_max_tokens", FULL_ANALYSIS_TOKEN_CAP)
-        )
-        max_tokens = max(256, min(global_cap, requested_cap, FULL_ANALYSIS_TOKEN_CAP))
+        max_tokens = analysis_output_token_cap(self.settings)
 
         def make_line(item: dict[str, Any]) -> bytes:
             body = provider.build_analysis_request_body(
@@ -826,6 +821,7 @@ class BatchAnalysisService:
                 max_tokens=max_tokens,
                 caption_controls=plan.get("caption_controls") or None,
                 reasoning_effort=str(plan["reasoning_effort"]),
+                **({"prompt_version": str(plan["prompt_version"])} if getattr(provider, "supports_prompt_version", False) else {}),
             )
             payload = {
                 "custom_id": str(item["custom_id"]),
@@ -2081,47 +2077,8 @@ class BatchAnalysisService:
 
     @staticmethod
     def _usage_from_body(body: dict[str, Any]) -> Usage:
-        usage_value: Any = body.get("usage")
-        usage: dict[str, Any] = usage_value if isinstance(usage_value, dict) else {}
-        prompt_details_value = usage.get("prompt_tokens_details") or usage.get("input_tokens_details")
-        prompt_details = prompt_details_value if isinstance(prompt_details_value, dict) else {}
-        completion_details_value = usage.get("completion_tokens_details")
-        completion_details = completion_details_value if isinstance(completion_details_value, dict) else {}
-        def bounded_int(value: Any) -> int:
-            if isinstance(value, bool):
-                return 0
-            try:
-                return max(0, int(value or 0))
-            except (TypeError, ValueError, OverflowError):
-                return 0
-
-        reported_cost = usage.get("cost")
-        if reported_cost is None:
-            reported_cost = body.get("cost")
-        try:
-            reported_cost = (
-                float(reported_cost)
-                if reported_cost is not None and not isinstance(reported_cost, bool)
-                else None
-            )
-        except (TypeError, ValueError, OverflowError):
-            reported_cost = None
-        if reported_cost is not None and (not math.isfinite(reported_cost) or reported_cost < 0):
-            reported_cost = None
-        return Usage(
-            bounded_int(usage.get("prompt_tokens", usage.get("input_tokens", 0))),
-            bounded_int(usage.get("completion_tokens", usage.get("output_tokens", 0))),
-            bounded_int(prompt_details.get("cached_tokens", usage.get("cached_tokens", 0))),
-            bounded_int(completion_details.get("reasoning_tokens", usage.get("reasoning_tokens", 0))),
-            bounded_int(
-                prompt_details.get("cache_write_tokens", usage.get("cache_write_tokens", 0))
-            ),
-            reported_cost,
-            tokens_reported=(
-                any(usage.get(key) is not None for key in ("prompt_tokens", "input_tokens"))
-                and any(usage.get(key) is not None for key in ("completion_tokens", "output_tokens"))
-            ),
-        )
+        # Sync and Batch must agree on invalid usage and unknown-cost fencing.
+        return OpenAICompatibleProvider._usage(body)
 
     @staticmethod
     def _current_content_sha(photo) -> str | None:
@@ -2267,7 +2224,7 @@ class BatchAnalysisService:
             )
             return "schema_invalid"
         try:
-            result = validate_model_response(json.loads(raw_content), caption_controls=plan.get("caption_controls"))
+            result = validate_model_response(raw_content, caption_controls=plan.get("caption_controls"))
         except (ValueError, TypeError, json.JSONDecodeError, AnalysisValidationError) as exc:
             self._mark_item_error(
                 item, "schema_invalid", str(exc), "schema_invalid", job_id=str(batch["job_id"])

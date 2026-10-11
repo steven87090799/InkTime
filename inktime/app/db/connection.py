@@ -306,7 +306,9 @@ class Database:
         connection.execute("PRAGMA foreign_keys = ON")
         connection.execute(f"PRAGMA busy_timeout = {self.busy_timeout_ms}")
         connection.execute("PRAGMA journal_mode = WAL")
-        connection.execute("PRAGMA synchronous = NORMAL")
+        # Paid-operation checkpoints and accepted analysis must survive power loss.
+        # FULL syncs each WAL commit; NORMAL may lose recently committed rows.
+        connection.execute("PRAGMA synchronous = FULL")
         connection.configure_writer_lock(
             self.writer_lock_path,
             self.busy_timeout_ms / 1000,

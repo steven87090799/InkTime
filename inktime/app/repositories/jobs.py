@@ -55,11 +55,13 @@ class JobRepository:
                 remaining -= len(rows)
 
     def selection_preview(
-        self, *, analysis_fingerprint: str | None, selection_mode: str = "pending", limit: int | None = None
+        self, *, analysis_fingerprint: str | None, selection_mode: str = "pending", limit: int | None = None,
+        alternate_analysis_fingerprint: str | None = None
     ) -> dict:
         """Bounded SQLite-only pending selector; it never touches image files."""
         fingerprint = str(analysis_fingerprint or "")
-        current = "EXISTS (SELECT 1 FROM photo_analysis a WHERE a.photo_id=p.id AND a.analysis_fingerprint=?)"
+        alternate = str(alternate_analysis_fingerprint or fingerprint)
+        current = "EXISTS (SELECT 1 FROM photo_analysis a WHERE a.photo_id=p.id AND a.analysis_fingerprint IN (?,?))"
         queued = reserved_analysis_sql()
         if selection_mode == "force_all":
             predicate = "1=1"
@@ -69,9 +71,9 @@ class JobRepository:
             predicate = f"NOT {current}"
         with self.database.session() as connection:
             # Bind the repeated fingerprint predicates in their SQL order.
-            params = [fingerprint]
+            params = [fingerprint, alternate]
             if selection_mode != "force_all":
-                params.append(fingerprint)
+                params.extend((fingerprint, alternate))
             row = connection.execute(
                 f"""
                 SELECT
@@ -90,7 +92,7 @@ class JobRepository:
                     SUM(CASE WHEN EXISTS (SELECT 1 FROM photo_analysis a WHERE a.photo_id=p.id) AND NOT ({current}) THEN 1 ELSE 0 END) AS stale
                 FROM photos p WHERE p.lifecycle_status='active'
                 """,
-                [*params, fingerprint, fingerprint, fingerprint],
+                [*params, fingerprint, alternate, fingerprint, fingerprint, alternate],
             ).fetchone()
             missing = int(
                 connection.execute("SELECT COUNT(*) FROM photos WHERE lifecycle_status='missing'").fetchone()[
@@ -118,10 +120,12 @@ class JobRepository:
         }
 
     def iter_pending_photo_ids(
-        self, *, analysis_fingerprint: str | None, selection_mode: str = "pending", limit: int | None = None
+        self, *, analysis_fingerprint: str | None, selection_mode: str = "pending", limit: int | None = None,
+        alternate_analysis_fingerprint: str | None = None
     ) -> Iterator[str]:
         fingerprint = str(analysis_fingerprint or "")
-        current = "EXISTS (SELECT 1 FROM photo_analysis a WHERE a.photo_id=p.id AND a.analysis_fingerprint=?)"
+        alternate = str(alternate_analysis_fingerprint or fingerprint)
+        current = "EXISTS (SELECT 1 FROM photo_analysis a WHERE a.photo_id=p.id AND a.analysis_fingerprint IN (?,?))"
         queued = reserved_analysis_sql()
         predicate = (
             "1=1"
@@ -140,7 +144,7 @@ class JobRepository:
             with self.database.session() as connection:
                 params = [last_score, last_score, last_id]
                 if selection_mode != "force_all":
-                    params.append(fingerprint)
+                    params.extend((fingerprint, alternate))
                 params.append(size)
                 rows = connection.execute(
                     f"SELECT p.id,COALESCE(p.local_candidate_score,-1) AS candidate_score FROM photos p "
