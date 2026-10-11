@@ -471,3 +471,73 @@ def test_failed_publication_cannot_compensate_over_another_publication(app, monk
         statuses = dict(connection.execute("SELECT id,status FROM releases WHERE id IN (?,?)", (first["release_id"], second["release_id"])).fetchall())
     assert statuses[first["release_id"]] == "staged_failed"
     assert statuses[second["release_id"]] == "published"
+
+
+def test_reconciliation_cannot_revert_publication_between_pointer_and_database_commit(app, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    from contextlib import contextmanager
+    from threading import Event
+    from inktime.app.services import release_coordinator as coordinator_module
+
+    publisher = app.extensions["inktime_release_publisher"]
+    coordinator = app.extensions["inktime_release_coordinator"]
+    previous = _stage(publisher, "safe_4c")
+    coordinator.publish([previous], created_by="test", photo_ids=[])
+    incoming = _stage(publisher, "safe_4c")
+    activated, repair_waiting, release_publication = Event(), Event(), Event()
+    original_activate = publisher.activate_manifests
+    original_guard = coordinator_module.release_metadata_guard
+
+    @contextmanager
+    def observed_guard(root):
+        if activated.is_set():
+            repair_waiting.set()
+        with original_guard(root):
+            yield
+
+    def activation(manifests):
+        original_activate(manifests)
+        activated.set()
+        assert release_publication.wait(5)
+
+    monkeypatch.setattr(coordinator_module, "release_metadata_guard", observed_guard)
+    monkeypatch.setattr(publisher, "activate_manifests", activation)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        publication = executor.submit(coordinator.publish, [incoming], created_by="test", photo_ids=[])
+        assert activated.wait(5)
+        repair = executor.submit(coordinator.reconcile)
+        try:
+            assert repair_waiting.wait(5)
+            assert not repair.done()
+        finally:
+            release_publication.set()
+        publication.result(timeout=5)
+        repair.result(timeout=5)
+    assert (publisher.root / "latest.safe_4c").read_text().strip() == incoming["release_id"]
+    assert (publisher.root / "latest").read_text().strip() == incoming["release_id"]
+
+
+def test_reconciliation_discards_snapshot_if_publication_completes_during_payload_hashing(app, monkeypatch):
+    publisher = app.extensions["inktime_release_publisher"]
+    coordinator = app.extensions["inktime_release_coordinator"]
+    previous = _stage(publisher, "safe_4c")
+    coordinator.publish([previous], created_by="test", photo_ids=[])
+    incoming = _stage(publisher, "safe_4c")
+    original_validate = publisher.validate
+    published = False
+
+    def validate(release_id):
+        nonlocal published
+        manifest = original_validate(release_id)
+        if release_id == previous["release_id"] and not published:
+            published = True
+            coordinator.publish([incoming], created_by="test", photo_ids=[])
+        return manifest
+
+    monkeypatch.setattr(publisher, "validate", validate)
+    result = coordinator.reconcile()
+    assert published
+    assert result["deferred"] == 1
+    assert result["pointer_recovered"] == 0
+    assert (publisher.root / "latest.safe_4c").read_text().strip() == incoming["release_id"]
+    assert (publisher.root / "latest").read_text().strip() == incoming["release_id"]

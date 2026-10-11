@@ -166,6 +166,8 @@
 - [`archive/reports/FINAL_CROSS_MODULE_HARDENING_REVIEW_ZH_TW.md`](archive/reports/FINAL_CROSS_MODULE_HARDENING_REVIEW_ZH_TW.md)：2026-07-22 跨模組與硬體邊界報告。
 - [`archive/reports/N100_IMPLEMENTATION_REPORT_ZH_TW.md`](archive/reports/N100_IMPLEMENTATION_REPORT_ZH_TW.md)：2026-07-18 N100 實作／量測報告。
 - [`reports/AUDIT_REMEDIATION_20261004.md`](reports/AUDIT_REMEDIATION_20261004.md)：2026-10-04 問題清單逐項核對、修補、回歸驗證與現場驗收邊界。
+- [`reports/PROJECT_AUDIT_20261011.md`](reports/PROJECT_AUDIT_20261011.md)：最新主分支的跨子系統重新稽核、非韌體修復與驗證範圍。
+- [`reports/FIRMWARE_REVIEW_20261011.md`](reports/FIRMWARE_REVIEW_20261011.md)：韌體缺口、舊原型限制與待實機驗收項目；本次未修改韌體。
 - [`reports/PERFORMANCE_REPORT.md`](reports/PERFORMANCE_REPORT.md)：100,000 筆效能測試紀錄；測試腳本會更新此檔。
 - [`archive/reports/FINAL_ONE_SHOT_HARDENING_AUDIT.md`](archive/reports/FINAL_ONE_SHOT_HARDENING_AUDIT.md)：歷史 PR #53 的 P1、Provider、AI、Release、Container 與 hosted CI 交接證據。
 

@@ -7,6 +7,7 @@ import threading
 import pytest
 
 from inktime.app.core.security import hash_password
+from inktime.app.core.redirects import safe_local_redirect_target
 from inktime.app.domain.auth import (
     AuthValidationError,
     LastAdministratorRequired,
@@ -157,6 +158,33 @@ def test_unauthenticated_access_redirects_to_login(client, app):
     response = client.get("/dashboard")
     assert response.status_code == 302
     assert "/login" in response.headers["Location"]
+
+
+@pytest.mark.parametrize("target", ["//evil.example", "/\\evil.example", "/\t/evil.example", "http://[broken", "https://evil.example"])
+def test_login_rejects_unsafe_return_targets(client, app, target):
+    create_admin(app)
+    client.get("/login")
+    response = client.post(
+        "/login", query_string={"next": target},
+        data={"username": "admin", "password": "very-safe-passphrase", "csrf_token": csrf(client)},
+    )
+    assert response.status_code == 302
+    assert response.headers["Location"] == "/dashboard"
+
+
+def test_login_preserves_local_return_path_and_query(client, app):
+    create_admin(app)
+    client.get("/login")
+    response = client.post(
+        "/login", query_string={"next": "/photos?favorite=1"},
+        data={"username": "admin", "password": "very-safe-passphrase", "csrf_token": csrf(client)},
+    )
+    assert response.headers["Location"] == "/photos?favorite=1"
+
+
+def test_malformed_absolute_referrer_and_host_fail_closed():
+    assert safe_local_redirect_target("https://[broken", allowed_host="localhost") is None
+    assert safe_local_redirect_target("http://localhost/photos", allowed_host="[broken") is None
 
 
 def test_csrf_is_required_for_mutation(client, app):

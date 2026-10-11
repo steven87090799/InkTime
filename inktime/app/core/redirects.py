@@ -20,7 +20,10 @@ def safe_local_redirect_target(
         or "\\" in candidate
     ):
         return None
-    parsed = urlparse(candidate)
+    try:
+        parsed = urlparse(candidate)
+    except ValueError:
+        return None
     if parsed.scheme or parsed.netloc:
         try:
             hostname = parsed.hostname
@@ -33,8 +36,8 @@ def safe_local_redirect_target(
             return None
         if allowed_scheme and parsed.scheme.casefold() != str(allowed_scheme).casefold():
             return None
-        expected = urlparse(f"//{allowed_host}")
         try:
+            expected = urlparse(f"//{allowed_host}")
             expected_port = expected.port
         except ValueError:
             return None

@@ -210,11 +210,14 @@ class ReleaseCoordinator:
             "pointer_missing": 0,
             "pointer_recovered": 0,
         }
-        with self.database.session() as connection:
-            rows = connection.execute(
-                "SELECT id,status,render_profile,created_at,reconciliation_status FROM releases"
-            ).fetchall()
-            known = {str(row["id"]) for row in rows}
+        # Snapshot only after any publication's pointer/DB transaction ends.
+        # Hash large payloads outside the short metadata lock, then discard
+        # stale evidence if publication, rollback or GC changed the snapshot.
+        snapshot_sql = "SELECT id,status,render_profile,created_at,reconciliation_status FROM releases ORDER BY id"
+        with release_metadata_guard(self.publisher.root), self.database.session() as connection:
+            rows = connection.execute(snapshot_sql).fetchall()
+        known = {str(row["id"]) for row in rows}
+        missing = []
         valid: dict[str, list[tuple[str, str]]] = {}
         for row in rows:
             release_id = str(row["id"])
@@ -224,11 +227,7 @@ class ReleaseCoordinator:
                 self.publisher.validate(release_id)
             except ValueError:
                 diagnostics["payload_missing"] += 1
-                with self.database.session() as connection:
-                    connection.execute(
-                        "UPDATE releases SET reconciliation_status='payload_missing' WHERE id=?",
-                        (release_id,),
-                    )
+                missing.append(release_id)
             else:
                 if str(row["status"]) == "published":
                     valid.setdefault(str(row["render_profile"]), []).append(
@@ -236,6 +235,36 @@ class ReleaseCoordinator:
                     )
             if str(row["status"]) == "staged":
                 diagnostics["staged"] += 1
+        with release_metadata_guard(self.publisher.root):
+            with self.database.session() as connection:
+                current_rows = connection.execute(snapshot_sql).fetchall()
+            if [tuple(row) for row in current_rows] != [tuple(row) for row in rows]:
+                # A later scheduler tick retries; never overwrite live state
+                # using a scan that predates a successful publish or GC.
+                diagnostics["deferred"] = 1
+            else:
+                with self.database.transaction() as connection:
+                    connection.executemany(
+                        "UPDATE releases SET reconciliation_status='payload_missing' WHERE id=?",
+                        [(release_id,) for release_id in missing],
+                    )
+                self._repair_reconciled_pointers(known, valid, diagnostics)
+        actions = sum(int(value) for value in diagnostics.values())
+        log_event(
+            LOGGER,
+            logging.INFO if actions else logging.DEBUG,
+            "Release reconciliation completed",
+            event="release_reconcile_completed",
+            operation="release_reconcile",
+            duration_ms=int((time.monotonic() - started) * 1000),
+            details=diagnostics,
+        )
+        return diagnostics
+
+    def _repair_reconciled_pointers(
+        self, known: set[str], valid: dict[str, list[tuple[str, str]]], diagnostics: dict[str, int]
+    ) -> None:
+        """Apply verified snapshot decisions while the metadata guard is held."""
         for manifest in self.publisher.list():
             release_id = str(manifest.get("release_id", ""))
             if release_id and release_id not in known:
@@ -265,17 +294,6 @@ class ReleaseCoordinator:
                     temporary.replace(pointer)
                     fsync_directory(self.publisher.root)
                     diagnostics["pointer_recovered"] += 1
-        actions = sum(int(value) for value in diagnostics.values())
-        log_event(
-            LOGGER,
-            logging.INFO if actions else logging.DEBUG,
-            "Release reconciliation completed",
-            event="release_reconcile_completed",
-            operation="release_reconcile",
-            duration_ms=int((time.monotonic() - started) * 1000),
-            details=diagnostics,
-        )
-        return diagnostics
 
     def gc_unreferenced_releases(self, *, retention_days: int = 90, max_items: int = 20) -> dict[str, int]:
         """Prune old payloads while retaining release and display-history metadata."""
