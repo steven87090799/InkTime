@@ -15,9 +15,11 @@
 | M05 | 費用保存用實際 served model，但釋放預算保留額度用 requested model；可能提前釋放 unknown 費用或留下已知費用的防護。 | 計價與釋放採同一個實際 served model；沒有該模型確切價格時保留 unknown，不能猜 alias 價格。回歸包含兩種 requested/served 價格差異。 |
 | M06 | JSON 重複鍵會被一般解析器以最後值覆寫，衝突的內容分類可能被掩蓋；孤立 Unicode surrogate 會在編碼保存時才失敗；極大整數可能溢位。 | 模型入口、Batch、本機 JSON 抽取與儲存驗證共用拒絕重複鍵／NaN／Infinity 的 decoder；在轉繁體及保存前拒絕不可編成 UTF-8 的字串；先做數值界線再有限值檢查。回歸確認不保存衝突結果、不自動再發付費請求；v4/v5 正常歷史資料仍可讀。 |
 | M07 | WAL + synchronous=NORMAL 可在斷電後失去最近已提交交易，已計費但分析／usage 遺失會造成後續判斷錯誤。 | 每條連線採 FULL，保留 WAL、外鍵、busy timeout 與既有公平 writer lock。回歸檢查新連線設定、交易提交及重新讀取。增加 fsync 是明確的耐久性／I/O 取捨；不代表已驗證 NAS 斷電。 |
-| M08 | 提示詞縮減可能弱化文案、評分範例與安全邊界；更換文字也不能沿用舊指紋。 | 依使用者確認，撤回以縮減輸入為目的的 672 字元版，完整保留原版 886 字元，再補充文青表達、各 confidence 獨立、EXIF 不重複旋轉與精簡但完整的 JSON；現行共 1299 字元。新版本為 `photo-analysis-v5-complete-literary-20261011`；舊原版與 672 字元版的凍結工作各用原文字，同步／Batch 傳遞版本。完整前後比較見 [提示詞修訂](PROMPT_REVIEW_20261011.md)。品質未經付費照片對照，不能以字數推導 Token 或效果。 |
+| M08 | 提示詞縮減可能弱化文案、評分範例與安全邊界；更換文字也不能沿用舊指紋。 | 依使用者確認，撤回以縮減輸入為目的的 672 字元版，完整保留原版 886 字元，再補充文青表達、各 confidence 獨立、EXIF 不重複旋轉與精簡但完整的 JSON；現行共 1752 字元。新版本為 `photo-analysis-v5-complete-literary-v2-20261011`；舊原版、672 字元版與 1299 字元版的凍結工作各用原文字，同步／Batch 傳遞版本。完整前後比較見 [提示詞修訂](PROMPT_REVIEW_20261011.md)。品質未經付費照片對照，不能以字數推導 Token 或效果。 |
 | M09 | 定期分析未保存 plan，Worker 會使用空 plan 的 automatic_ai 預設與當時 Provider；建立工作時沒有完整檢查執行模式，違反「設定 API key 不會自行開始付費」。 | Scheduler 建立工作前檢查執行模式、Vision route，凍結模型／Provider／提示詞／規則／執行政策。disabled 拒絕新分析；local_only 與 local_with_manual_ai 拒絕定期雲端分析，即使手動觸發排程也不能繞過。回歸測三種模式與本機計畫。 |
 | M10 | 工作選取對完整 plan 做指紋，保存同步結果卻移除 display／repair 欄位；同一計畫完成後仍可能被判為待分析。 | 定義共用的同步結果指紋，沿用原保存格式，API 選取／預覽、Scheduler 與結果保存一致。顯示控制與停用修復不影響完成判斷，提示詞變更仍會過期。回歸測已保存結果不再入選，真正提示詞變更可再入選。候選選取同時接受同一 plan 的同步與 Batch 指紋；Batch 的提交完整指紋保留，避免破壞已上傳的批次請求。 |
+
+| M11 | Provider Level 2 幾何圖形診斷同時拼入照片分析提示詞，一邊要求 v5 分數／旁白，一邊要求僅回圖形欄位，且浪費輸入。 | Level 2 僅送原幾何診斷提示詞與該階段 Schema；一般照片分析仍使用完整提示詞。既有 wire regression 新增檢查，不新增請求。 |
 
 ## 模型選擇與最省 Token 的界線
 
@@ -26,7 +28,7 @@
 - 官方 Pro/Codex 的已知 Responses-only 變體不適合目前 Chat Completions 路徑。沒有為短句引入 Responses、多回合、工具或 reasoning text，避免增加架構與額外請求。
 - 全域模型與 Provider 專屬模型有優先順序；實際 Provider 模型優先。不能只看全域名稱來判斷帳單或可用功能；自訂相容服務的能力仍須由服務契約驗證。
 - Web 預設最大邊 1024、可選 1600，保留正規化與 EXIF transpose。降低 JPEG 檔案大小只減少傳輸位元組，不能直接推導圖片 Token。圖片計费取決於模型、尺寸、detail 及 patch/tile 規則；512 在底層可用，但未經代表照片驗證不能宣稱不影響辨識與短句品質。
-- 不存在已證明的「全球最少 Token 且文案品質相同」模型選擇。此次實際減少可避免的提示詞與重複工作，並限制 output／預設 reasoning；沒有擅自發付費請求。需要代表照片的實際 usage、費用及人工文案品質對照，才能比較不同模型與解析度。
+- 不存在已證明的「全球最少 Token 且文案品質相同」模型選擇。此次保留完整提示詞，減少可避免的重複工作，並限制 output／預設 reasoning；沒有擅自發付費請求。需要代表照片的實際 usage、費用及人工文案品質對照，才能比較不同模型與解析度。
 - 費用、Token 數與主觀分數分開：照片回看價值與文案品質不是可證明精準的物理測量。67% 回憶／33% 視覺為既定排序政策，本機技術品質仍只作資格門檻；保留範圍與有限值檢查，未把模型 confidence 當成校準機率。
 
 模型規則依據（2026-10-11 核對）：[GPT-5](https://developers.openai.com/api/docs/models/gpt-5)、[GPT-5.1](https://developers.openai.com/api/docs/models/gpt-5.1)、[GPT-5.6 Luna](https://developers.openai.com/api/docs/models/gpt-5.6-luna)、[新模型參數](https://developers.openai.com/api/docs/guides/latest-model#gpt-6-astra-update-api-and-model-parameters)、[GPT-5.2 Pro](https://developers.openai.com/api/docs/models/gpt-5.2-pro)、[GPT-5.2 Codex](https://developers.openai.com/api/docs/models/gpt-5.2-codex)、[圖片 Token 計算](https://developers.openai.com/api/docs/guides/images-vision#calculating-costs)。API 能力可能更新，自訂 Provider 不自動沿用原生 OpenAI 的全部限制。

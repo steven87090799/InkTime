@@ -62,7 +62,7 @@ class AnalysisDisabledError(RuntimeError):
     code = "ANALYSIS-DISABLED"
 
 
-PROMPT_VERSION = "photo-analysis-v5-complete-literary-20261011"
+PROMPT_VERSION = "photo-analysis-v5-complete-literary-v2-20261011"
 # The compact eight-field response still needs enough headroom to complete
 # strict JSON without truncation.
 LOGGER = logging.getLogger("analysis")
