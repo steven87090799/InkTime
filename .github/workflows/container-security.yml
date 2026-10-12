@@ -279,7 +279,7 @@ jobs:
           exit "$status"
       - name: Upload SBOM and Trivy evidence
         if: always()
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.1 (Node 24)
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2 (Node 24)
         with:
           name: inktime-container-security-${{ github.sha }}
           path: artifacts/
@@ -305,7 +305,7 @@ jobs:
             --markdown-output "artifacts/model-benchmark-${GITHUB_SHA}.md"
       - name: Upload offline benchmark evidence
         if: always()
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.1 (Node 24)
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2 (Node 24)
         with:
           name: inktime-offline-benchmark-${{ github.sha }}
           path: artifacts/

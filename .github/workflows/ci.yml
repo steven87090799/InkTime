@@ -355,7 +355,7 @@ jobs:
           if [ -f artifacts/python-timings.md ]; then cat artifacts/python-timings.md >> "${GITHUB_STEP_SUMMARY}"; fi
       - name: Upload full-suite timings
         if: ${{ always() && needs.changes.outputs.run_python312_full == 'true' }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: python-timings-${{ github.run_id }}
           path: |
@@ -673,7 +673,7 @@ jobs:
       - run: pip install -r requirements-dev.txt
       - run: mkdir -p .artifacts && timeout 240 python scripts/runtime_soak.py --max-iterations 30 --timeout-seconds 180 --summary-json .artifacts/runtime-soak-bounded.json
       - if: always()
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.1 (Node 24)
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2 (Node 24)
         with:
           name: runtime-soak-bounded-summary
           path: .artifacts/runtime-soak-bounded.json
@@ -816,7 +816,7 @@ jobs:
           } > "${output}/manifest.txt"
       - name: Upload app-only PhotoPainter artifact
         if: ${{ contains(needs.changes.outputs.firmware_execution_profiles, 'photopainter_release') }}
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.1 (Node 24)
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2 (Node 24)
         with:
           name: photopainter-app-only-${{ github.event.pull_request.head.sha || github.sha }}
           path: ${{ runner.temp }}/photopainter-app-only/
