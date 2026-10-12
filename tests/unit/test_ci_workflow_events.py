@@ -59,7 +59,7 @@ def _step_by_name(job: dict[str, Any], name: str) -> dict[str, Any]:
 
 
 @pytest.mark.parametrize("workflow_path", WORKFLOW_PATHS)
-def test_all_pr_events_share_validation_concurrency(workflow_path):
+def test_metadata_edits_do_not_cancel_validation(workflow_path):
     workflow = _load_workflow(workflow_path)
     pull_request = workflow["on"]["pull_request"]
     concurrency = workflow["concurrency"]
@@ -69,9 +69,9 @@ def test_all_pr_events_share_validation_concurrency(workflow_path):
     assert "ready_for_review" in pull_request["types"]
     assert workflow["on"]["push"]["branches"] == ["main"]
     assert "workflow_dispatch" in workflow["on"]
-    assert concurrency["group"].endswith("-validation")
-    assert "github.event.action" not in concurrency["group"]
-    assert "metadata-only" not in concurrency["group"]
+    assert "github.event.action == 'edited'" in concurrency["group"]
+    assert "github.event.changes.base == null" in concurrency["group"]
+    assert "'metadata' || 'validation'" in concurrency["group"]
     assert concurrency["cancel-in-progress"] is True
     assert "pull_request_target" not in workflow["on"]
 
@@ -86,12 +86,17 @@ def test_every_event_runs_checkout_routing_and_provenance(workflow_path):
     upload = _step_by_name(changes, "Upload provenance metadata")
 
     assert changes["outputs"]["full_validation"] == (
-        "${{ steps.event.outputs.full_validation }}"
+        "${{ steps.reuse.outputs.full_validation }}"
     )
     assert event["env"]["FULL_VALIDATION"] == "true"
     assert checkout["if"] == "${{ steps.event.outputs.full_validation == 'true' }}"
     assert route["if"] == "${{ steps.event.outputs.full_validation == 'true' }}"
     assert upload["if"] == "${{ steps.event.outputs.full_validation == 'true' }}"
+    reuse = _step_by_id(changes, "reuse")
+    assert reuse["run"] == "python scripts/ci/reuse_validation.py"
+    assert reuse["env"]["PLAN_JSON"] == "${{ steps.route.outputs.plan_json }}"
+    assert changes["outputs"]["reused_run_id"] == "${{ steps.reuse.outputs.reused_run_id }}"
+    assert workflow["permissions"]["actions"] == "read"
 
 
 @pytest.mark.parametrize(
@@ -146,6 +151,9 @@ def test_required_gate_identity_is_stable_and_attested(
     assert checkout["if"] == "${{ needs.changes.outputs.full_validation == 'true' }}"
     assert attestation["if"] == "${{ needs.changes.outputs.full_validation == 'true' }}"
     assert f"--workflow {attestation_workflow}" in attestation["run"]
+    reused = _step_by_name(gate, "Publish identical prior validation evidence")
+    assert reused["if"] == "${{ needs.changes.outputs.full_validation == 'false' }}"
+    assert 'test -n "${REUSED_RUN_ID}"' in reused["run"]
 
 
 def test_main_canonical_planner_and_provenance_contracts_are_preserved():

@@ -26,6 +26,7 @@ def lock_lines(report: dict, target: str) -> list[str]:
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, default=ROOT / "requirements-locks")
+    parser.add_argument("--requirements", type=Path, default=ROOT / "requirements.txt")
     args = parser.parse_args()
     if sys.version_info[:2] != (3, 12):
         parser.error("Run with Python 3.12 (matching the container)")
@@ -41,7 +42,7 @@ def main():
             ]
             for platform in ("manylinux_2_34", "manylinux_2_28", "manylinux_2_17", "manylinux2014"):
                 command += ["--platform", f"{platform}_{architecture}"]
-            command += ["--report", str(report), "-r", str(ROOT / "requirements.txt")]
+            command += ["--report", str(report), "-r", str(args.requirements.resolve())]
             subprocess.run(command, check=True)  # noqa: S603 -- argv only, fixed pip operation
             lines = lock_lines(json.loads(report.read_text()), target)
             (args.output / f"linux-{target}-py312.txt").write_text("\n".join(lines) + "\n")
