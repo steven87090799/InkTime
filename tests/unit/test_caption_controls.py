@@ -5,6 +5,8 @@ import json
 from inktime.app.domain.analysis.schema import FULL_ANALYSIS_JSON_SCHEMA, json_schema_for_stage
 from inktime.app.providers.openai_compatible import (
     ANALYSIS_USER_PROMPT,
+    COMMON_PROMPT,
+    LEGACY_V5_COMMON_PROMPT,
     OpenAICompatibleProvider,
     analysis_system_prompt,
 )
@@ -53,7 +55,7 @@ def test_empty_custom_rule_adds_no_prompt_section_and_nonempty_adds_one_line():
     assert custom == base + "\n\nside_caption 自訂規則：避開雙關語 保持口語"
 
 
-def test_compact_prompt_and_schema_have_no_advanced_caption_contract(tmp_path):
+def test_complete_prompt_and_schema_have_no_advanced_caption_contract(tmp_path):
     controls = _controls()
     provider = OpenAICompatibleProvider(
         name="test", base_url="https://example.invalid", api_key="", caption_controls=controls
@@ -73,7 +75,8 @@ def test_compact_prompt_and_schema_have_no_advanced_caption_contract(tmp_path):
         "文案語感示例",
     ):
         assert removed not in prompt
-    assert len(prompt) < 1600
+    assert prompt.startswith(COMMON_PROMPT + "\n\n")
+    assert COMMON_PROMPT.startswith(LEGACY_V5_COMMON_PROMPT + "\n\n補充要求：")
     assert FULL_ANALYSIS_TOKEN_CAP == 512
     assert PhotoAnalysisService._prompt_version(None) == PROMPT_VERSION
 
@@ -103,7 +106,7 @@ def test_compact_prompt_and_schema_have_no_advanced_caption_contract(tmp_path):
     assert user_content[0] == {"type": "text", "text": ANALYSIS_USER_PROMPT}
     assert len([item for item in user_content if item["type"] == "image_url"]) == 1
     assert provider.last_request_metrics["prompt_chars"] == len(prompt)
-    assert provider.last_request_metrics["prompt_chars"] < 1600
+    assert body["messages"][0]["content"] == prompt
     assert "caption" not in json.dumps(schema, ensure_ascii=False).replace("side_caption", "")
     provider.close()
 

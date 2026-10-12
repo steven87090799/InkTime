@@ -15,6 +15,14 @@ REASONING_EFFORTS = ("none", "low", "medium", "high", "xhigh", "max")
 SINGLE_ANALYSIS_STRATEGIES = {"single", "single_high", "high_quality"}
 LEGACY_ANALYSIS_STRATEGIES = {"custom", "low_cost", "smart", "smart_two_stage"}
 REPAIR_TOKEN_CAP = 1200
+FULL_ANALYSIS_TOKEN_CAP = 512
+
+
+def analysis_output_token_cap(settings) -> int:
+    """One output ceiling for request building, Batch and cost preview."""
+    global_cap = int(settings.get("budget.max_tokens", 8000)) if settings else 8000
+    requested_cap = int(settings.get("budget.full_analysis_max_tokens", FULL_ANALYSIS_TOKEN_CAP)) if settings else FULL_ANALYSIS_TOKEN_CAP
+    return max(256, min(global_cap, requested_cap, FULL_ANALYSIS_TOKEN_CAP))
 
 
 def normalize_analysis_strategy(value: Any) -> str:
@@ -44,6 +52,14 @@ def canonical_json(value: Mapping[str, Any]) -> str:
 
 def fingerprint(value: Mapping[str, Any]) -> str:
     return hashlib.sha256(canonical_json(value).encode("utf-8")).hexdigest()
+
+
+def stored_analysis_fingerprint(plan: Mapping[str, Any]) -> str:
+    """Match the existing synchronous result identity when selecting work."""
+    identity = dict(plan)
+    identity.pop("caption_display_controls", None)
+    identity.pop("repair_policy", None)
+    return fingerprint(identity)
 
 
 def reusable_analysis_fingerprint(plan: Mapping[str, Any]) -> str:

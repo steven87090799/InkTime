@@ -261,3 +261,44 @@ def test_frozen_caption_limits_are_enforced_by_local_wire_validator():
     assert validate_model_response(valid_result(side_caption="甲" * 9), caption_controls=controls)
     with pytest.raises(AnalysisValidationError):
         validate_model_response(valid_result(side_caption="甲" * 11), caption_controls=controls)
+
+
+@pytest.mark.parametrize("wrap", ["{}", "```json\n{}\n```", "模型結果：{}"])
+def test_duplicate_model_members_are_rejected_before_wrapper_normalization(wrap):
+    from inktime.app.domain.analysis.json_repair import extract_json_value
+    raw = json.dumps(valid_result(), ensure_ascii=False)
+    raw = raw.replace('"memory_score": 72', '"memory_score": 20, "memory_score": 72')
+    with pytest.raises(AnalysisValidationError, match="重複 JSON"):
+        extract_json_value(wrap.format(raw))
+    with pytest.raises(AnalysisValidationError, match="重複 JSON"):
+        validate_model_response(raw)
+    with pytest.raises(AnalysisValidationError, match="重複 JSON"):
+        validate_analysis_result(raw)
+
+
+def test_nested_duplicate_safety_members_cannot_silently_overwrite_detection():
+    raw = json.dumps(valid_result(), ensure_ascii=False)
+    raw = raw.replace('"detected": false', '"detected": true, "detected": false', 1)
+    with pytest.raises(AnalysisValidationError, match="重複 JSON"):
+        validate_model_response(raw)
+
+
+@pytest.mark.parametrize("constant", ["NaN", "Infinity", "-Infinity"])
+def test_non_json_constants_fail_before_semantic_normalization(constant):
+    raw = json.dumps(valid_result()).replace('"memory_score": 72', f'"memory_score": {constant}')
+    with pytest.raises(AnalysisValidationError):
+        validate_model_response(raw)
+
+
+def test_unpaired_surrogate_cannot_reach_database_or_utf8_rendering():
+    value = valid_result(side_caption="時光停在此刻" + chr(0xDEAD) + "之間。")
+    for payload in (value, json.dumps(value)):
+        with pytest.raises(AnalysisValidationError, match="Unicode"):
+            validate_model_response(payload)
+        with pytest.raises(AnalysisValidationError, match="Unicode"):
+            validate_analysis_result(payload)
+
+
+def test_huge_integer_score_is_a_schema_error_without_float_overflow():
+    with pytest.raises(AnalysisValidationError):
+        validate_model_response(valid_result(memory_score=10**400))

@@ -11,6 +11,8 @@ import time
 from zoneinfo import ZoneInfo
 
 from inktime.app.core.logging import configure_logging, log_event
+from inktime.app.domain.analysis.execution_mode import execution_mode, permits_automatic_ai
+from inktime.app.domain.analysis.plan import normalize_analysis_strategy, stored_analysis_fingerprint
 from inktime.app.domain.jobs.failure_policy import (
     FailureClass,
     classify_failure,
@@ -721,9 +723,26 @@ class SchedulerRunner:
             if config.get("mode") == "disabled" and not force:
                 self.app.extensions["inktime_schedule_repository"].mark_enqueued(task, now)
                 return
+            strategy = normalize_analysis_strategy(str(config.get("strategy", "single")))
+            settings = self.app.extensions["inktime_settings_repository"]
+            if execution_mode(settings) == "disabled" or (
+                strategy != "local" and not permits_automatic_ai(execution_mode(settings))
+            ):
+                raise ValueError("目前分析模式不允許建立排程分析工作")
+            route = []
+            if strategy != "local":
+                route = self.app.extensions["inktime_provider_service"].usable_route_snapshot()
+                if not route:
+                    raise ValueError("目前沒有已啟用且設定完整的 Vision Provider")
+            scoring = self.app.extensions["inktime_scoring_repository"].current()
+            plan = self.app.extensions["inktime_analysis_service"].build_plan(
+                strategy=strategy, provider_route=route, scoring_profile_id=str(scoring["id"])
+            )
             job_id = self.app.extensions["inktime_job_service"].create_analysis_job(
                 name=f"排程：{task['name']}",
-                strategy=str(config.get("strategy", "single")),
+                strategy=strategy,
+                analysis_spec=plan,
+                analysis_fingerprint=stored_analysis_fingerprint(plan),
                 settings=common | {"concurrency": int(config.get("concurrency", 1))},
                 created_by="system",
                 budget_limit=None,

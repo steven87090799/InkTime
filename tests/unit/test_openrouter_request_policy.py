@@ -108,6 +108,9 @@ def test_openrouter_analysis_explicitly_disables_reasoning_when_requested(tmp_pa
     )
 
     assert body["reasoning"] == {"effort": "none"}
+    from inktime.app.providers.openai_compatible import PROVIDER_CONTRACT_PROMPT
+    assert body["messages"][0]["content"] == PROVIDER_CONTRACT_PROMPT
+    assert "side_caption" not in body["messages"][0]["content"]
 
 
 @pytest.mark.parametrize(
@@ -266,9 +269,8 @@ def test_o_series_uses_completion_cap_without_temperature(tmp_path, model):
     )
     assert body["max_completion_tokens"] == 512
     assert "max_tokens" not in body and "temperature" not in body
-    provider.repair_json(invalid_content="{}", validation_error="invalid", model=model, max_tokens=512)
-    assert provider.captured_body["max_completion_tokens"] == 512
-    assert "temperature" not in provider.captured_body
+    with pytest.raises(ValueError, match="不能關閉推理"):
+        provider.repair_json(invalid_content="{}", validation_error="invalid", model=model, max_tokens=512)
 
 
 def test_text_only_model_is_rejected_before_reading_image(tmp_path):
@@ -276,3 +278,114 @@ def test_text_only_model_is_rejected_before_reading_image(tmp_path):
         _provider(kind="openai").build_analysis_request_body(
             image_path=tmp_path / "missing.jpg", model="o3-mini", detail="high", stage="single",
         )
+
+
+@pytest.mark.parametrize("invalid", [True, -1, "invalid", "12", 1.5, float("nan"), float("inf"), 2**63])
+def test_invalid_wire_usage_is_unknown_in_sync_and_batch(invalid):
+    payload = {"usage": {"prompt_tokens": invalid, "completion_tokens": 0}}
+    for usage in (OpenAICompatibleProvider._usage(payload), BatchAnalysisService._usage_from_body(payload)):
+        assert not usage.tokens_reported
+        assert calculate_usage_cost({"input_per_million": 1, "output_per_million": 1}, usage) is None
+        assert calculate_usage_cost({}, usage, batch=True) is None
+    payload["usage"]["cost"] = 0.02
+    assert OpenAICompatibleProvider._usage(payload).provider_reported_cost == 0.02
+
+
+@pytest.mark.parametrize("details", [
+    {"prompt_tokens_details": {"cached_tokens": 11}},
+    {"completion_tokens_details": {"reasoning_tokens": 3}},
+    {"prompt_tokens_details": {"cached_tokens": -1}},
+    {"completion_tokens_details": []},
+    {"input_tokens_details": "invalid"},
+])
+def test_invalid_usage_details_cannot_make_a_known_estimate(details):
+    payload = {"usage": {"prompt_tokens": 10, "completion_tokens": 2, **details}}
+    for usage in (OpenAICompatibleProvider._usage(payload), BatchAnalysisService._usage_from_body(payload)):
+        assert not usage.tokens_reported
+        assert calculate_usage_cost({}, usage) is None
+
+
+def test_cost_counts_cached_input_once_and_reasoning_as_part_of_output():
+    pricing = {"input_per_million": 1, "cached_input_per_million": 0.1, "output_per_million": 2}
+    usage = Usage(input_tokens=10, output_tokens=5, cached_tokens=4, reasoning_tokens=3)
+    assert calculate_usage_cost(pricing, usage) == 0.0000164
+    assert calculate_usage_cost(pricing, usage, batch=True) == 0.0000082
+    assert calculate_usage_cost(pricing, Usage(input_tokens=1, cached_tokens=2)) is None
+    assert calculate_usage_cost(pricing, Usage(input_tokens=-1)) is None
+    assert calculate_usage_cost(pricing, Usage(input_tokens=1, cache_write_tokens=1)) is None
+    assert calculate_usage_cost({"input_per_million": 0.1, "output_per_million": 0.2}, Usage(1, 1)) == 0.0000003
+
+
+@pytest.mark.parametrize("model", ["gpt-4o", "gpt-4.1-mini"])
+def test_nonreasoning_openai_model_omits_reasoning_parameter(tmp_path, model):
+    image = tmp_path / "synthetic.jpg"
+    image.write_bytes(b"synthetic")
+    body = _provider(kind="openai").build_analysis_request_body(
+        image_path=image, model=model, detail="high", stage="single", max_tokens=512, reasoning_effort="none",
+    )
+    assert "reasoning_effort" not in body
+    assert body["max_tokens"] == 512
+
+
+@pytest.mark.parametrize("model", ["gpt-5.1", "gpt-5.1-2025-11-13", "gpt-5.6-luna", "gpt-6-luna"])
+def test_supported_nonreasoning_modern_openai_request_uses_completion_cap(tmp_path, model):
+    image = tmp_path / "synthetic.jpg"
+    image.write_bytes(b"synthetic")
+    provider = _provider(kind="openai")
+    body = provider.build_analysis_request_body(
+        image_path=image, model=model, detail="high", stage="single", max_tokens=512, reasoning_effort="none",
+    )
+    assert body["max_completion_tokens"] == 512 and "max_tokens" not in body
+    assert body["reasoning_effort"] == "none"
+    provider.repair_json(invalid_content="{}", validation_error="invalid", model=model, max_tokens=512)
+    assert provider.captured_body["reasoning_effort"] == "none"
+
+
+@pytest.mark.parametrize("model", ["gpt-5", "gpt-5-mini", "gpt-5-2025-08-07", "gpt-6-astra", "gpt-6.1-sol"])
+def test_mandatory_reasoning_model_does_not_silently_spend_reasoning_tokens(tmp_path, model):
+    image = tmp_path / "synthetic.jpg"
+    image.write_bytes(b"synthetic")
+    with pytest.raises(ValueError, match="不能關閉推理"):
+        _provider(kind="openai").build_analysis_request_body(
+            image_path=image, model=model, detail="high", stage="single", max_tokens=512, reasoning_effort="none",
+        )
+
+
+@pytest.mark.parametrize("model", ["gpt-5.2-pro", "gpt-5.2-codex"])
+def test_responses_only_model_is_rejected_before_image_access(tmp_path, model):
+    with pytest.raises(ValueError, match="Responses API"):
+        _provider(kind="openai").build_analysis_request_body(
+            image_path=tmp_path / "missing.jpg", model=model, detail="high", stage="single", max_tokens=512,
+        )
+
+
+@pytest.mark.parametrize("version, contract_name", [
+    ("photo-analysis-v5-compact", "LEGACY_V5_COMMON_PROMPT"),
+    ("photo-analysis-v5-compact-caption-abc123", "LEGACY_V5_COMMON_PROMPT"),
+    ("photo-analysis-v5-compact-literary-20261011", "COMPACT_V5_COMMON_PROMPT"),
+    ("photo-analysis-v5-compact-literary-20261011-caption-abc123", "COMPACT_V5_COMMON_PROMPT"),
+    ("photo-analysis-v5-complete-literary-20261011", "COMPLETE_V5_INITIAL_COMMON_PROMPT"),
+    ("photo-analysis-v5-complete-literary-20261011-caption-abc123", "COMPLETE_V5_INITIAL_COMMON_PROMPT"),
+    ("photo-analysis-v5-complete-literary-v2-20261011", "COMMON_PROMPT"),
+    ("photo-analysis-v5-complete-literary-v2-20261011-caption-abc123", "COMMON_PROMPT"),
+    (None, "COMMON_PROMPT"),
+])
+def test_frozen_prompt_version_matches_actual_wire_contract(tmp_path, version, contract_name):
+    from inktime.app.providers import openai_compatible
+    image = tmp_path / "synthetic.jpg"
+    image.write_bytes(b"synthetic")
+    body = _provider(kind="openai").build_analysis_request_body(
+        image_path=image, model="gpt-4o", detail="high", stage="single", prompt_version=version,
+    )
+    assert body["messages"][0]["content"].startswith(getattr(openai_compatible, contract_name))
+
+
+def test_complete_prompt_retains_original_contract_and_bounds_output():
+    from inktime.app.providers.openai_compatible import COMMON_PROMPT, LEGACY_V5_COMMON_PROMPT
+    from inktime.app.services.analysis import PROMPT_VERSION
+
+    assert COMMON_PROMPT.startswith(LEGACY_V5_COMMON_PROMPT + "\n\n補充要求：")
+    assert PROMPT_VERSION == "photo-analysis-v5-complete-literary-v2-20261011"
+    assert "以文青風格表達" in COMMON_PROMPT
+    assert "不要求加總為 1" in COMMON_PROMPT
+    assert "不為縮短輸出省略欄位或截斷內容" in COMMON_PROMPT

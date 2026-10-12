@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from inktime.app.domain.analysis.plan import normalize_analysis_strategy
+from inktime.app.domain.analysis.plan import FULL_ANALYSIS_TOKEN_CAP, fingerprint, normalize_analysis_strategy, stored_analysis_fingerprint
 from inktime.app.domain.jobs.failure_policy import NoEligibleCandidatesError
 from inktime.app.repositories.jobs import JobRepository
 
@@ -44,14 +44,21 @@ class JobService:
             )
             if existing is not None:
                 return str(existing["id"])
+        alternate = (
+            fingerprint(analysis_spec)
+            if analysis_spec and analysis_fingerprint == stored_analysis_fingerprint(analysis_spec)
+            else None
+        )
         if photo_ids is None:
             preview = self.repository.selection_preview(
-                analysis_fingerprint=analysis_fingerprint, selection_mode=selection_mode, limit=limit
+                analysis_fingerprint=analysis_fingerprint, selection_mode=selection_mode, limit=limit,
+                alternate_analysis_fingerprint=alternate,
             )
             if not preview["limited_to"]:
                 raise NoEligibleCandidatesError("目前沒有符合條件的待分析照片")
             selected = self.repository.iter_pending_photo_ids(
-                analysis_fingerprint=analysis_fingerprint, selection_mode=selection_mode, limit=limit
+                analysis_fingerprint=analysis_fingerprint, selection_mode=selection_mode, limit=limit,
+                alternate_analysis_fingerprint=alternate,
             )
         else:
             selected = photo_ids
@@ -97,7 +104,7 @@ class JobService:
         *,
         pricing: dict | None = None,
         input_tokens: int = 8000,
-        output_tokens: int = 1200,
+        output_tokens: int = FULL_ANALYSIS_TOKEN_CAP,
     ) -> dict:
         normalized = normalize_analysis_strategy(strategy)
         image_calls = 0 if normalized == "local" else photo_count
@@ -107,7 +114,9 @@ class JobService:
         average = 0.0 if image_calls == 0 else None if unit is None else image_calls * unit
         return {
             "price_known": average is not None,
-            "estimate_basis": "Token 假設；快取沿用可降低費用，實際帳單依供應商回報",
+            "estimate_basis": "輸入 Token 為假設，未量測圖片 Token；0.5–2 倍為費用情境，非保證上下限；實際帳單依供應商回報",
+            "estimate_is_bound": False,
+            "input_tokens_measured": False,
             "cache_savings_included": False,
             "photos": photo_count,
             "image_calls": image_calls,

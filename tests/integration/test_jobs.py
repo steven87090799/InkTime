@@ -738,3 +738,50 @@ def test_realtime_and_batch_reserve_one_owner_when_candidates_race(app):
         results = list(executor.map(reserve, ["analysis", "analysis_batch"]))
     assert sum(result is not None for result in results) == 1
     assert len(repository.list()) == 1
+
+
+@pytest.mark.parametrize("configured_cap, expected_cap", [(1200, 512), (8000, 512), (300, 300)])
+def test_cost_preview_uses_same_output_ceiling_as_live_analysis(app, configured_cap, expected_cap):
+    from inktime.app.api.jobs import _estimate_plan
+    from inktime.app.domain.analysis.plan import analysis_output_token_cap
+    app.extensions["inktime_settings_repository"] = {
+        "budget.max_tokens": 8000, "budget.full_analysis_max_tokens": configured_cap,
+    }
+    with app.test_request_context():
+        preview = _estimate_plan(3, "single", {"model": "mock", "provider_route": []})
+    assert preview["estimated_output_tokens"] == 3 * expected_cap
+    assert preview["estimated_output_tokens"] == 3 * analysis_output_token_cap(app.extensions["inktime_settings_repository"])
+    assert preview["price_known"] is False
+
+
+@pytest.mark.parametrize("batch_identity", [False, True])
+def test_pending_selection_matches_saved_analysis_identity(app, batch_identity):
+    from inktime.app.api.jobs import _analysis_plan
+    from inktime.app.domain.analysis.plan import fingerprint, stored_analysis_fingerprint
+
+    photo_id = add_photos(app, 1)[0]
+    with app.test_request_context():
+        plan, _ = _analysis_plan("local")
+    identity = stored_analysis_fingerprint(plan)
+    repository = app.extensions["inktime_job_repository"]
+    with app.extensions["inktime_database"].session() as connection:
+        connection.execute("UPDATE photos SET eligible=1,local_features_status='complete' WHERE id=?", (photo_id,))
+        connection.execute(
+            "INSERT INTO photo_analysis(photo_id,schema_version,stage,raw_json,analysis_fingerprint,created_at) "
+            "VALUES (?,5,'single','{}',?,?)",
+            (photo_id, fingerprint(plan) if batch_identity else identity, datetime.now(timezone.utc).isoformat()),
+        )
+    assert repository.selection_preview(analysis_fingerprint=identity, alternate_analysis_fingerprint=fingerprint(plan))["limited_to"] == 0
+    changed = dict(plan, prompt_version="changed-model-prompt")
+    assert repository.selection_preview(analysis_fingerprint=stored_analysis_fingerprint(changed), alternate_analysis_fingerprint=fingerprint(changed))["limited_to"] == 1
+
+    assert list(repository.iter_pending_photo_ids(
+        analysis_fingerprint=identity, alternate_analysis_fingerprint=fingerprint(plan),
+    )) == []
+
+    from inktime.app.domain.jobs.failure_policy import NoEligibleCandidatesError
+    with pytest.raises(NoEligibleCandidatesError):
+        app.extensions["inktime_job_service"].create_analysis_job(
+            name="no duplicate work", strategy="local", settings={}, created_by="test", budget_limit=None,
+            analysis_spec=plan, analysis_fingerprint=identity,
+        )

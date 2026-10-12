@@ -1501,3 +1501,41 @@ def test_local_request_builder_error_releases_operation_and_budget(app, tmp_path
     result = service.analyze_photo(photo_id=photo, job_id=None, provider=provider, strategy="high_quality", high_model="mock", force_ai=True)
     assert result["analysis"]
     provider.close()
+
+
+@pytest.mark.parametrize("priced_model, expected_active", [("mock", 1), ("served-model", 0)])
+def test_budget_reservation_matches_recorded_served_model_cost(app, tmp_path, monkeypatch, priced_model, expected_active):
+    photo, service = _isolated_service(app, tmp_path, None)
+    provider = OpenAICompatibleProvider(
+        name="served-price", base_url="https://provider.invalid/v1", api_key="fixture",
+        pricing={priced_model: {"input_per_million": 1, "output_per_million": 2}},
+    )
+    monkeypatch.setattr(provider, "_post_completion", lambda *args, **kwargs: ProviderResponse(
+        json.dumps(valid_result(), ensure_ascii=False), Usage(100, 20), served_model="served-model",
+    ))
+    result = service.analyze_photo(
+        photo_id=photo, job_id=None, provider=provider, strategy="high_quality", high_model="mock", force_ai=True,
+    )
+    assert result["analysis"]
+    with app.extensions["inktime_database"].session() as connection:
+        usage = connection.execute("SELECT model,cost_source FROM api_usage WHERE photo_id=?", (photo,)).fetchone()
+        assert usage["model"] == "served-model"
+        assert usage["cost_source"] == ("unknown" if expected_active else "estimated")
+        assert connection.execute("SELECT COUNT(*) FROM budget_reservations WHERE state='active'").fetchone()[0] == expected_active
+    provider.close()
+
+
+def test_duplicate_model_json_cannot_create_analysis_or_a_paid_retry(app, tmp_path):
+    _, ids, service = prepare(app, tmp_path)
+    raw = json.dumps(valid_result(), ensure_ascii=False)
+    # Construct conflicting safety values in otherwise valid JSON.
+    raw = raw.replace('"detected": false', '"detected": true, "detected": false', 1)
+    provider = MockProvider([raw, valid_result()])
+    for _ in range(2):
+        with pytest.raises(AnalysisValidationError, match="重複 JSON"):
+            service.analyze_photo(photo_id=ids[0], job_id=None, provider=provider, strategy="high_quality", high_model="mock")
+    assert provider.analyze_calls == 1
+    with app.extensions["inktime_database"].session() as connection:
+        assert connection.execute("SELECT COUNT(*) FROM photo_analysis WHERE photo_id=?", (ids[0],)).fetchone()[0] == 0
+        assert connection.execute("SELECT COUNT(*) FROM api_usage WHERE photo_id=?", (ids[0],)).fetchone()[0] == 1
+        assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
