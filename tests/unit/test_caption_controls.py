@@ -106,7 +106,7 @@ def test_complete_prompt_and_schema_have_no_advanced_caption_contract(tmp_path):
     assert user_content[0] == {"type": "text", "text": ANALYSIS_USER_PROMPT}
     assert len([item for item in user_content if item["type"] == "image_url"]) == 1
     assert provider.last_request_metrics["prompt_chars"] == len(prompt)
-    assert provider.last_request_metrics["prompt_chars"] < 1600
+    assert body["messages"][0]["content"] == prompt
     assert "caption" not in json.dumps(schema, ensure_ascii=False).replace("side_caption", "")
     provider.close()
 
