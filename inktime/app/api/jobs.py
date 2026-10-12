@@ -14,7 +14,7 @@ from inktime.app.core.json_values import (
     optional_json_int,
 )
 from inktime.app.core.idempotency import request_fingerprint, scoped_idempotency_key
-from inktime.app.domain.analysis.plan import canonical_json, fingerprint, normalize_analysis_strategy
+from inktime.app.domain.analysis.plan import stored_analysis_fingerprint, canonical_json, fingerprint, normalize_analysis_strategy, analysis_output_token_cap
 from inktime.app.domain.analysis.execution_mode import execution_mode, permits_automatic_ai
 from inktime.app.web.ai_readiness import ai_readiness_snapshot
 from inktime.app.services.jobs import InvalidJobTransition, JobService
@@ -345,8 +345,7 @@ def _estimate_plan(count: int, strategy: str, plan: dict) -> dict:
     pricing = (current_app.extensions["inktime_provider_repository"].pricing(str(route[0]["provider_id"])).get(model)
                if route else None)
     settings = current_app.extensions["inktime_settings_repository"]
-    cap = max(256, min(1200, int(settings.get("budget.max_tokens", 8000)),
-                       int(settings.get("budget.full_analysis_max_tokens", 1200))))
+    cap = analysis_output_token_cap(settings)
     estimate = _service().estimate(count, strategy, pricing=pricing, output_tokens=cap)
     alternatives = []
     for channel in route:
@@ -519,7 +518,7 @@ def create_job():
         plan, _ = _analysis_plan(strategy)
     except ValueError as exc:
         return {"error_code": "VLM-001", "message": str(exc)}, 409
-    analysis_fingerprint = fingerprint(plan)
+    analysis_fingerprint = stored_analysis_fingerprint(plan)
     idempotency_key = scoped_idempotency_key("analysis", str(g.user["id"]), request.headers.get("Idempotency-Key"))
     idempotency_fingerprint = (
         request_fingerprint(
@@ -593,7 +592,8 @@ def selection_preview():
     except ValueError as exc:
         return {"error_code": "VLM-001", "message": str(exc)}, 409
     preview = _repository().selection_preview(
-        analysis_fingerprint=fingerprint(_plan),
+        analysis_fingerprint=stored_analysis_fingerprint(_plan),
+        alternate_analysis_fingerprint=fingerprint(_plan),
         selection_mode=mode,
         limit=limit,
     )

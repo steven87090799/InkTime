@@ -1612,3 +1612,38 @@ def test_daily_backup_catches_up_after_scheduled_hour_and_restart(app, monkeypat
             "SELECT id FROM jobs WHERE dedupe_key='scheduled-backup:2030-05-07'"
         ).fetchall()
     assert len(rows) == 1
+
+
+@pytest.mark.parametrize("mode", ["disabled", "local_only", "local_with_manual_ai"])
+def test_analysis_schedule_cannot_bypass_execution_mode(app, monkeypatch, mode):
+    app.extensions["inktime_settings_repository"].update(
+        "analysis.execution_mode", mode, changed_by="test", source_ip="127.0.0.1"
+    )
+    task = dict(app.extensions["inktime_schedule_repository"].get("ai_schedule"))
+    task["config"] = dict(task["config"], mode="enabled", strategy="single")
+    create = Mock()
+    monkeypatch.setattr(app.extensions["inktime_job_service"], "create_analysis_job", create)
+    with pytest.raises(ValueError, match="不允許建立排程分析工作"):
+        SchedulerRunner(app)._enqueue_task(task, datetime.now(timezone.utc), force=True, trigger_source="manual")
+    create.assert_not_called()
+
+
+def test_analysis_schedule_freezes_plan_before_selecting_photos(app, monkeypatch):
+    from inktime.app.domain.analysis.plan import stored_analysis_fingerprint
+
+    app.extensions["inktime_settings_repository"].update(
+        "analysis.execution_mode", "local_only", changed_by="test", source_ip="127.0.0.1"
+    )
+    task = dict(app.extensions["inktime_schedule_repository"].get("ai_schedule"))
+    task["config"] = dict(task["config"], mode="enabled", strategy="local")
+    create = Mock(side_effect=RuntimeError("captured-before-selection"))
+    monkeypatch.setattr(app.extensions["inktime_job_service"], "create_analysis_job", create)
+    with pytest.raises(RuntimeError, match="captured-before-selection"):
+        SchedulerRunner(app)._enqueue_task(task, datetime.now(timezone.utc), force=True, trigger_source="manual")
+    values = create.call_args.kwargs
+    plan = values["analysis_spec"]
+    assert plan["strategy"] == "local"
+    assert plan["provider_route"] == []
+    assert plan["ai_execution_policy"]["execution_mode"] == "local_only"
+    assert values["analysis_fingerprint"] == stored_analysis_fingerprint(plan)
+    assert plan["scoring_profile_id"] == app.extensions["inktime_scoring_repository"].current()["id"]

@@ -234,6 +234,38 @@ class AnalysisValidationError(ValueError):
     code = "VLM-004"
 
 
+def _unique_json_members(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    value: dict[str, Any] = {}
+    for key, item in pairs:
+        if key in value:
+            raise AnalysisValidationError("模型回傳重複 JSON 欄位；不可選擇性覆寫語意")
+        value[key] = item
+    return value
+
+
+def _reject_json_constant(_value: str) -> None:
+    raise AnalysisValidationError("模型回傳非有限 JSON 數值")
+
+
+def analysis_json_decoder() -> json.JSONDecoder:
+    return json.JSONDecoder(object_pairs_hook=_unique_json_members, parse_constant=_reject_json_constant)
+
+
+def _validate_unicode(value: Any) -> None:
+    if isinstance(value, str):
+        try:
+            value.encode("utf-8")
+        except UnicodeEncodeError as exc:
+            raise AnalysisValidationError("模型文字不可包含未配對 Unicode surrogate") from exc
+    elif isinstance(value, dict):
+        for key, item in value.items():
+            _validate_unicode(key)
+            _validate_unicode(item)
+    elif isinstance(value, list):
+        for item in value:
+            _validate_unicode(item)
+
+
 def json_schema_for_stage(
     stage: str, *, caption_controls: dict[str, Any] | None = None
 ) -> dict[str, Any]:
@@ -287,9 +319,7 @@ def _validate(value: Any, schema: dict[str, Any], path: str) -> None:
         if len(set(value)) != len(value):
             raise AnalysisValidationError(f"{path} 不可重複")
     elif kind in {"integer", "number"}:
-        if not math.isfinite(value) or not schema.get("minimum", value) <= value <= schema.get(
-            "maximum", value
-        ):
+        if not schema.get("minimum", value) <= value <= schema.get("maximum", value) or not math.isfinite(value):
             raise AnalysisValidationError(f"{path} 數值超出範圍")
     elif kind == "string" and not schema.get("minLength", 0) <= len(value.strip()) <= schema.get(
         "maxLength", len(value)
@@ -306,9 +336,10 @@ def validate_model_response(raw: str | dict, *, caption_controls: dict[str, Any]
     """
     if isinstance(raw, str):
         try:
-            raw = json.loads(raw)
+            raw = analysis_json_decoder().decode(raw)
         except json.JSONDecodeError as exc:
             raise AnalysisValidationError("模型回傳無效 JSON") from exc
+    _validate_unicode(raw)
     value = to_taiwan_traditional(deepcopy(raw), protected=PROTOCOL_ENUM_VALUES)
     _validate(value, json_schema_for_stage("single", caption_controls=caption_controls)["schema"], "analysis")
     if not isinstance(value, dict):
@@ -333,11 +364,12 @@ def validate_analysis_result(
 ) -> dict:
     if isinstance(raw, str):
         try:
-            raw = json.loads(raw)
+            raw = analysis_json_decoder().decode(raw)
         except json.JSONDecodeError as exc:
             error = AnalysisValidationError("模型回傳無效 JSON")
             error.code = "VLM-003"
             raise error from exc
+    _validate_unicode(raw)
     value = to_taiwan_traditional(deepcopy(raw), protected=PROTOCOL_ENUM_VALUES)
     if not isinstance(value, dict):  # Narrow the type after the schema validator accepts it.
         raise AnalysisValidationError("analysis 必須是 object")

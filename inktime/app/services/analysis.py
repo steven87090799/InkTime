@@ -21,6 +21,7 @@ from inktime.app.domain.analysis import (
     normalize_reasoning_effort,
     validate_analysis_result,
 )
+from inktime.app.domain.analysis.plan import FULL_ANALYSIS_TOKEN_CAP as FULL_ANALYSIS_TOKEN_CAP, analysis_output_token_cap, stored_analysis_fingerprint
 from inktime.app.domain.analysis.content_filter import CONTENT_FILTER_SWITCHES
 from inktime.app.domain.analysis.json_repair import extract_json_value
 from inktime.app.domain.analysis.execution_mode import (
@@ -61,10 +62,9 @@ class AnalysisDisabledError(RuntimeError):
     code = "ANALYSIS-DISABLED"
 
 
-PROMPT_VERSION = "photo-analysis-v5-compact"
+PROMPT_VERSION = "photo-analysis-v5-complete-literary-v2-20261011"
 # The compact eight-field response still needs enough headroom to complete
 # strict JSON without truncation.
-FULL_ANALYSIS_TOKEN_CAP = 512
 LOGGER = logging.getLogger("analysis")
 
 
@@ -1072,9 +1072,7 @@ class PhotoAnalysisService:
         started_at = datetime.now(timezone.utc).isoformat()
         started_perf = time.perf_counter()
         settings = self.budgets.settings if self.budgets else self.settings
-        global_token_cap = int(settings.get("budget.max_tokens", 8000)) if settings else 8000
-        requested_token_cap = int(settings.get("budget.full_analysis_max_tokens", FULL_ANALYSIS_TOKEN_CAP)) if settings else FULL_ANALYSIS_TOKEN_CAP
-        max_tokens = max(256, min(global_token_cap, requested_token_cap, FULL_ANALYSIS_TOKEN_CAP))
+        max_tokens = analysis_output_token_cap(settings)
         actual_call_provider = selected_channel.provider if selected_channel is not None else provider
         vision_attempt_id = self._trace_write(
             "start_attempt",
@@ -1108,6 +1106,8 @@ class PhotoAnalysisService:
                 "caption_controls": caption_controls,
                 "provider_request_context_id": provider_request_context_id,
             }
+            if getattr(actual_call_provider, "supports_prompt_version", False):
+                call["prompt_version"] = prompt_version
             if self.process_boundary is None:
                 # Cooperative providers may use this mutable marker to tell
                 # the caller exactly when their transport has been handed the
@@ -1144,6 +1144,7 @@ class PhotoAnalysisService:
                             caption_controls=caption_controls,
                             vision_attempt=vision_attempt,
                             provider_request_context_id=provider_request_context_id,
+                            **({"prompt_version": prompt_version} if getattr(actual_call_provider, "supports_prompt_version", False) else {}),
                         )
                     else:
                         response = self.process_boundary.call_provider(
@@ -1163,6 +1164,7 @@ class PhotoAnalysisService:
                         caption_controls=caption_controls,
                         vision_attempt=vision_attempt,
                         provider_request_context_id=provider_request_context_id,
+                        **({"prompt_version": prompt_version} if getattr(actual_call_provider, "supports_prompt_version", False) else {}),
                         **({"upload_guard": guard} if getattr(provider, "supports_upload_guard", False) else {}),
                     )
             vision_attempt.vision_started = True
@@ -1300,7 +1302,7 @@ class PhotoAnalysisService:
             operation_id=operation_id,
         )
         if self.budgets and (response.usage.provider_reported_cost is not None or
-                             (response.usage.tokens_reported and provider.estimate_cost(model, response.usage) is not None)):
+                             (response.usage.tokens_reported and provider.estimate_cost(str(response.served_model or model), response.usage) is not None)):
             self.budgets.release("vision:" + operation_id)
         self._trace_write(
             "update_run_progress",
@@ -1439,10 +1441,7 @@ class PhotoAnalysisService:
         image_max_side = int(vision_input["max_side"])
         scoring_version_id = str(analysis_spec["scoring_profile_id"]) or scoring_version_id
         analysis_spec_json = canonical_json(analysis_spec)
-        identity_spec = dict(analysis_spec)
-        identity_spec.pop("caption_display_controls", None)
-        identity_spec.pop("repair_policy", None)
-        analysis_fingerprint = fingerprint(identity_spec)
+        analysis_fingerprint = stored_analysis_fingerprint(analysis_spec)
         content_sha = str(photo["sha256"] or "")
         plan_prefilter = {
             "analysis.prefilter_enabled": bool(analysis_spec.get("prefilter", {}).get("enabled", True)),

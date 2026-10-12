@@ -4,7 +4,7 @@ name: InkTime Container Security and Benchmark Contracts
   pull_request:
     branches:
       - main
-    # Every PR event must publish the required gates, including title/body edits.
+    # Metadata edits keep required gates, reusing identical successful evidence when available.
     types: [opened, synchronize, reopened, ready_for_review, labeled, unlabeled, edited]
   push:
     branches:
@@ -23,10 +23,11 @@ name: InkTime Container Security and Benchmark Contracts
         type: string
 
 concurrency:
-  group: inktime-container-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}-validation
+  group: inktime-container-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'pull_request' && github.event.action == 'edited' && github.event.changes.base == null && (github.event.changes.title != null || github.event.changes.body != null) && 'metadata' || 'validation' }}
   cancel-in-progress: true
 
 permissions:
+  actions: read
   contents: read
 
 jobs:
@@ -35,7 +36,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     outputs:
-      full_validation: ${{ steps.event.outputs.full_validation }}
+      full_validation: ${{ steps.reuse.outputs.full_validation }}
+      reused_run_id: ${{ steps.reuse.outputs.reused_run_id }}
       ci_mode: ${{ steps.route.outputs.ci_mode }}
       selected_test_suites: ${{ steps.route.outputs.selected_test_suites }}
       selected_gates: ${{ steps.route.outputs.selected_gates }}
@@ -203,16 +205,24 @@ jobs:
             echo '```'
           } >> "${GITHUB_STEP_SUMMARY}"
           mkdir -p artifacts
-          jq '{event_name, ref, source_head_sha, base_sha, tested_sha, tested_ref, tested_ref_kind}' \
+          jq '{event_name, ref, source_head_sha, base_sha, tested_sha, tested_ref, tested_ref_kind, ci_mode, selected_test_suites, selected_gates}' \
             <<<"${plan_json}" > "artifacts/container-provenance-${GITHUB_RUN_ID}.json"
       - name: Upload provenance metadata
         if: ${{ steps.event.outputs.full_validation == 'true' }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: inktime-container-provenance-${{ github.run_id }}
           path: artifacts/container-provenance-${{ github.run_id }}.json
           if-no-files-found: error
           retention-days: 14
+      - id: reuse
+        name: Verify reusable hosted validation evidence
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PLAN_JSON: ${{ steps.route.outputs.plan_json }}
+          VALIDATION_WORKFLOW: container-security.yml
+          PROVENANCE_PREFIX: container
+        run: python scripts/ci/reuse_validation.py
 
   container-security:
     if: ${{ needs.changes.outputs.full_validation == 'true' && needs.changes.outputs.run_container_security == 'true' }}
@@ -269,7 +279,7 @@ jobs:
           exit "$status"
       - name: Upload SBOM and Trivy evidence
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1 (Node 24)
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2 (Node 24)
         with:
           name: inktime-container-security-${{ github.sha }}
           path: artifacts/
@@ -295,7 +305,7 @@ jobs:
             --markdown-output "artifacts/model-benchmark-${GITHUB_SHA}.md"
       - name: Upload offline benchmark evidence
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1 (Node 24)
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2 (Node 24)
         with:
           name: inktime-offline-benchmark-${{ github.sha }}
           path: artifacts/
@@ -329,3 +339,10 @@ jobs:
             --plan-json "${PLAN_JSON}" \
             --needs-json "${NEEDS_JSON}" \
             --workflow container
+      - name: Publish identical prior validation evidence
+        if: ${{ needs.changes.outputs.full_validation == 'false' }}
+        env:
+          REUSED_RUN_ID: ${{ needs.changes.outputs.reused_run_id }}
+        run: |
+          test -n "${REUSED_RUN_ID}"
+          echo "Required gate reuses successful run ${REUSED_RUN_ID}; source/base/merge SHA and selected plan were verified."

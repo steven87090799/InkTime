@@ -67,3 +67,15 @@ def test_unexpected_exception_rolls_back_and_is_not_swallowed(tmp_path, caplog):
 
     assert _stored_values(database) == []
     assert len(_db_failure_records(caplog)) == 1
+
+
+def test_every_database_connection_preserves_durable_wal_and_foreign_keys(tmp_path):
+    database = _database(tmp_path)
+    for _ in range(2):
+        with database.session() as connection:
+            assert connection.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+            assert connection.execute("PRAGMA synchronous").fetchone()[0] == 2
+            assert connection.execute("PRAGMA foreign_keys").fetchone()[0] == 1
+    with database.transaction() as connection:
+        connection.execute("INSERT INTO writes(value) VALUES ('durable checkpoint')")
+    assert _stored_values(database) == ["durable checkpoint"]

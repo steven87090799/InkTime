@@ -22,7 +22,7 @@ from inktime.app.core.idempotency import (
 from inktime.app.api.photo_derivatives import photo_derivative_response
 from inktime.app.core.paths import UnsafePathError, safe_join
 from inktime.app.domain.analysis.schema import ALLOWED_TYPES
-from inktime.app.domain.analysis.plan import fingerprint
+from inktime.app.domain.analysis.plan import stored_analysis_fingerprint, fingerprint
 from inktime.app.domain.analysis.execution_mode import execution_mode, permits_automatic_ai, permits_manual_ai
 from inktime.app.domain.analysis.scoring import (
     LOCAL_QUALITY_SCORE_KIND,
@@ -132,7 +132,7 @@ def _queue_ai(
         priority=2,
         dedupe_key=idempotency_key_value,
         request_fingerprint=idempotency_fingerprint,
-        analysis_fingerprint=fingerprint(plan),
+        analysis_fingerprint=stored_analysis_fingerprint(plan),
         force_recompute=force_ai,
         analysis_spec=plan,
     )
@@ -446,7 +446,7 @@ def queue_ai_mode_run():
         request_key = request.headers.get("Idempotency-Key")
         if request_key and str(request_key).strip():
             actor = str(g.user["id"])
-            analysis_fingerprint = fingerprint(analysis_plan)
+            analysis_fingerprint = stored_analysis_fingerprint(analysis_plan)
             request_material = {
                 "analysis_fingerprint": analysis_fingerprint,
                 "analysis_spec": analysis_plan,

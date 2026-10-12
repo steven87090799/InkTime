@@ -22,6 +22,9 @@ Config Store v5 是裝置本機儲存格式，不是所有 HTTP Manifest 的版�
 - 三程序為 Web（`server:app`）、Worker（`inktime.app.workers.runner`）、Scheduler（`inktime.app.workers.scheduler`），共用 `/data` 與唯讀 `/photos`。
 - 新安裝 `analysis.execution_mode=local_only`。只有設定 Provider 不會開啟 AI；一般 AI 工作需要 `automatic_ai`，單張手動 AI 可使用 `local_with_manual_ai`。`disabled` 拒絕新分析，但既有照片與 Release 仍可讀。
 - 新策略為 `local`／`single`；舊的 `low_cost`、`smart`、`smart_two_stage`、`high_quality`、`single_high`、`custom` 正規化成 `single`，不恢復兩階段圖片分析。一次分析計畫最多一次圖片 Vision，只在本機抽取 JSON 並嚴格驗證，不追加模型 JSON 修復或長描述請求；另建重跑工作仍可能產生新費用。
+- 新分析提示詞為 `photo-analysis-v5-complete-literary-v2-20261011`，逐字保留原版規則，再補充文青表達、分類信心、EXIF 與完整精簡 JSON 要求；舊原版、672 字元版及第一個完整版本的凍結工作各自使用原文字。實際請求與費用預覽共用最高 512 output tokens；圖片輸入 Token 依模型與像素計費，預覽只是情境而非保證上限。
+- 同步分析的候選選取與保存共用指紋，顯示控制與停用的修復策略不影響是否已完成。定期分析先凍結 Provider／模型／提示詞／規則與執行模式；只有自動 AI 模式允許建立定期雲端分析工作。
+- SQLite 連線採 WAL／`synchronous=FULL`／外鍵檢查，優先保留已提交的分析與費用紀錄；仍需本機可靠檔案系統、完整備份及還原驗證，不能據此宣稱硬體斷電驗收。
 - Web 的 `analysis.image_max_side` 預設 1024、可選 1600；底層 plan／benchmark 額外支援 512。不要把低解析度誤寫成第一階段。
 - Migration 51 增加有界 AI Trace；Migration 52 增加 `providers.model`。Provider 專屬模型優先於全域模型，留白才沿用；OpenRouter 必須使用完整模型 ID。
 - 現行 v5 與相容 v4 採 `ranking-v5-ai-first`：回憶 67%、視覺 33%、本機品質 0%，再套用 special bonus 與最愛提升。本機品質現在是 candidate qualification／quality gate，不是 ranking weight；它只負責本機特徵完成、品質與來源資格判斷，不與 semantic 分數混比或補位。E6 只參與顯示分數；內容分類有獨立門檻與人工恢復保護，見 [現行 Vision Schema](../VISION_SCHEMA.md)。

@@ -277,13 +277,26 @@ def validate_base_url(
 
 
 def model_request_capabilities(kind: str, model: str) -> dict:
-    """Wire differences for OpenAI reasoning models; compatible hosts opt in by kind."""
+    """Native OpenAI wire policy; do not impose it on compatible hosts."""
     value = str(model).casefold()
-    o_series = kind == "openai" and bool(re.match(r"^o[1-9](?:-|$)", value))
+    native = kind == "openai"
+    o_series = native and bool(re.match(r"^o[1-9](?:-|$)", value))
+    modern_gpt = native and bool(re.match(r"^gpt-[56](?:[.-]|$)", value))
+    gpt_reasoning = modern_gpt and "-chat" not in value
+    original_gpt5 = native and bool(re.fullmatch(r"gpt-5(?:-mini|-nano)?(?:-\d{4}-\d{2}-\d{2})?", value))
+    mandatory_reasoning = o_series or (native and (
+        original_gpt5 or value.startswith(("gpt-6-astra", "gpt-6.1-sol"))
+        or "-pro" in value or "-codex" in value
+    ))
+    responses_only = native and ("-pro" in value or "-codex" in value)
+    text_only = native and bool(re.match(r"^(?:o1-mini|o3-mini)(?:-|$)", value))
     return {
-        "token_parameter": "max_completion_tokens" if o_series else "max_tokens",
-        "temperature": not o_series,
-        "vision": not (kind == "openai" and (value == "o3-mini" or value.startswith("o3-mini-"))),
+        "token_parameter": "max_completion_tokens" if o_series or modern_gpt else "max_tokens",
+        "temperature": not o_series and not original_gpt5,
+        "vision": not text_only,
+        "reasoning": o_series or gpt_reasoning,
+        "reasoning_none": not mandatory_reasoning,
+        "chat_completions": not responses_only,
     }
 
 

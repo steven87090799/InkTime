@@ -7,6 +7,7 @@ from inktime.app.domain.analysis.plan import (
     fingerprint,
     normalize_analysis_plan,
     reusable_analysis_fingerprint,
+    stored_analysis_fingerprint,
 )
 
 
@@ -109,3 +110,14 @@ def test_default_production_vision_input_is_1024_high_jpeg88_and_single_call():
     }
     assert plan["repair_policy"]["max_attempts"] == 1
     assert plan["repair_policy"]["text_only"] is True
+
+
+def test_pending_identity_matches_stored_results_and_ignores_display_repair():
+    plan = _plan()
+    identity = dict(plan)
+    identity.pop("caption_display_controls")
+    identity.pop("repair_policy")
+    assert stored_analysis_fingerprint(plan) == fingerprint(identity)
+    changed = dict(plan, caption_display_controls={"layout": "side"}, repair_policy={"enabled": False})
+    assert stored_analysis_fingerprint(changed) == stored_analysis_fingerprint(plan)
+    assert stored_analysis_fingerprint(dict(plan, prompt_version="changed")) != stored_analysis_fingerprint(plan)
