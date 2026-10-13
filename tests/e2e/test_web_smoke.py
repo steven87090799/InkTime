@@ -194,6 +194,48 @@ def _virtual_display_failure_regression(page, base):
     assert page.locator('#display-canvas').evaluate("canvas => Array.from(canvas.getContext('2d').getImageData(0,0,2,2).data)") != pixels
 
 
+def _p3_filter_clear_regression(page, base):
+    page.route("**/api/v1/activity?*", lambda route: route.fulfill(json={"events": [], "next_cursor": "0:0:0:0", "summary": {}}))
+    page.goto(base + "/activity?job_id=p3-job&severity=ERROR&photo_id=p3-photo")
+    expect(page.locator('[name="job_id"]')).to_have_value("p3-job")
+    with page.expect_response(lambda response: "/api/v1/activity?" in response.url and not parse_qs(urlparse(response.url).query).get("job_id")):
+        page.locator("#clear-filters").click()
+    assert urlparse(page.url).query == ""
+    expect(page.locator('[name="job_id"]')).to_have_value("")
+    expect(page.locator('[name="photo_id"]')).to_have_value("")
+    expect(page.locator('[name="severity"]')).to_have_value("")
+    expect(page.locator("#auto-refresh")).to_be_checked()
+    page.unroute("**/api/v1/activity?*")
+
+    page.route("**/api/v1/ai/traces?*", lambda route: route.fulfill(json={"traces": []}))
+    page.goto(base + "/ai/traces?job_id=p3-job&photo_id=p3-photo&provider=p3-provider&model=p3-model&status=SUCCESS")
+    expect(page.locator('[name="job_id"]')).to_have_value("p3-job")
+    with page.expect_response(lambda response: "/api/v1/ai/traces?" in response.url and not parse_qs(urlparse(response.url).query).get("job_id")):
+        page.locator("#clear-traces").click()
+    assert urlparse(page.url).query == ""
+    for name in ("photo_id", "job_id", "provider", "model", "status"):
+        expect(page.locator(f'[name="{name}"]')).to_have_value("")
+    page.evaluate("""() => {
+      window.p3Calls=[]; window.p3StaleRendered=false;
+      const fetchOriginal=window.fetch, renderOriginal=window.renderTraceSnapshot;
+      window.renderTraceSnapshot=items=>{if(items.some(item=>item.trace_id==='p3-stale'))window.p3StaleRendered=true;renderOriginal(items);};
+      window.fetch=(url,...options)=>{if(String(url).startsWith('/api/v1/ai/traces?')){
+        window.p3Calls.push(String(url));if(window.p3Calls.length===1)return new Promise(resolve=>window.p3Resolve=resolve);
+      }return fetchOriginal(url,...options);};
+      document.querySelector('[name="job_id"]').value='p3-old-request';
+      document.querySelector('#trace-filters').requestSubmit();
+    }""")
+    page.wait_for_function("window.p3Calls.length===1")
+    page.locator("#clear-traces").click()
+    with page.expect_response(lambda response: "/api/v1/ai/traces?" in response.url and not parse_qs(urlparse(response.url).query).get("job_id")):
+        page.evaluate("window.p3Resolve(new Response(JSON.stringify({traces:[{trace_id:'p3-stale',status:'FAILED'}]}), {headers:{'Content-Type':'application/json'}}))")
+        page.wait_for_function("window.p3Calls.length>=2")
+    assert not parse_qs(urlparse(page.evaluate("window.p3Calls[1]")).query).get("job_id")
+    assert page.evaluate("window.p3StaleRendered") is False
+    assert urlparse(page.url).query == ""
+    page.unroute("**/api/v1/ai/traces?*")
+
+
 @pytest.mark.skipif(not os.environ.get("INKTIME_E2E_URL"), reason="只在 E2E 環境執行")
 def test_first_setup_login_and_primary_console_pages():
     base = os.environ["INKTIME_E2E_URL"]
@@ -286,5 +328,6 @@ def test_first_setup_login_and_primary_console_pages():
         _crop_state_regression(page, base)
         _action_failure_regression(page, base)
         _virtual_display_failure_regression(page, base)
+        _p3_filter_clear_regression(page, base)
         assert csp_violations == []
         browser.close()
