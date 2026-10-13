@@ -9,7 +9,8 @@
   <dl><dt>上次成功</dt><dd>{{ task.last_success or '尚無' }}</dd><dt>上次失敗</dt><dd>{{ task.last_failure or '尚無' }}{% if task.error_status %}<div class="warning">{{ error_notice('', task.error_status) }}</div>{% endif %}</dd><dt>下次執行</dt><dd>{{ task.next_run or '停用' }}</dd></dl>
   {% if g.user.role == 'administrator' %}<form class="form-stack schedule-form">
     <label>啟用<select name="enabled"><option value="true" {% if task.enabled %}selected{% endif %}>啟用</option><option value="false" {% if not task.enabled %}selected{% endif %}>停用</option></select></label>
-    <label>Cron<input name="cron" value="{{ task.cron }}" required><small>支援五欄的 *、數字、逗號與 */間隔。</small></label>
+    <label>Cron<input name="cron" value="{{ task.cron }}" required><small>支援五欄的 *、範圍內數字、逗號與正數 */間隔；月份／月日步進從1開始，月日與星期皆受限時採OR。DST重複時刻只執行一次。修改Cron會採用此規則。</small></label>
+    {% if task.cron_semantics == 'legacy_v1' %}<label><input type="checkbox" name="cron_semantics" value="cronie_v2">將此舊排程轉成上述Cron規則；未勾選且Cron不變時保留原執行日期規則。</label>{% endif %}
     <label>指定星期（0=週一，逗號分隔；留空為每天）<input name="weekdays" value="{{ task.weekdays|join(',') }}"></label>
     <label>開始時間<input name="start_time" type="time" value="{{ task.start_time }}" required></label>
     <label>允許執行時段起點<input name="window_start" type="time" value="{{ task.window_start or '' }}"></label>

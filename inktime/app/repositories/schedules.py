@@ -141,7 +141,7 @@ class ScheduledTaskRepository:
                         task["retry_count"],
                         task["retry_interval_seconds"],
                         next_run.isoformat(),
-                        json.dumps(task["config"], ensure_ascii=False),
+                        json.dumps({**task["config"], "_cron_semantics": "cronie_v2"}, ensure_ascii=False),
                         utc_now(),
                         utc_now(),
                     ),
@@ -162,7 +162,9 @@ class ScheduledTaskRepository:
         current = self.get(key)
         if current is None:
             raise KeyError(key)
-        cron = self._cron(str(payload.get("cron", current["cron"])))
+        changed_cron = "cron" in payload and str(payload["cron"]).strip() != current["cron"]
+        semantics = "cronie_v2" if changed_cron or payload.get("cron_semantics") == "cronie_v2" else current["cron_semantics"]
+        cron = self._cron(str(payload.get("cron", current["cron"]))) if semantics == "cronie_v2" else current["cron"]
         weekdays = self._weekdays(payload.get("weekdays", current["weekdays"]))
         start_time = self._clock(str(payload.get("start_time", current["start_time"])))
         window_start = self._optional_clock(payload.get("window_start", current["window_start"]))
@@ -175,7 +177,7 @@ class ScheduledTaskRepository:
             config["device_ids"] = list(config["device_ids"])
             config["candidate_years"] = list(config["candidate_years"])
         now = datetime.now(ZoneInfo(timezone))
-        next_run = self._next_run(cron, now, weekdays).isoformat() if enabled else None
+        next_run = self._next_run(cron, now, weekdays, semantics=semantics).isoformat() if enabled else None
         values = (
             int(enabled),
             cron,
@@ -189,7 +191,7 @@ class ScheduledTaskRepository:
                 payload.get("retry_interval_seconds", current["retry_interval_seconds"]), 30, 86400
             ),
             next_run,
-            json.dumps(config, ensure_ascii=False),
+            json.dumps({**config, "_cron_semantics": semantics}, ensure_ascii=False),
             utc_now(),
             key,
         )
@@ -225,14 +227,15 @@ class ScheduledTaskRepository:
         authoritative = now if now.tzinfo is not None else now.replace(tzinfo=timezone.utc)
         local_now = authoritative.astimezone(zone)
         rows = connection.execute(
-            """SELECT key,cron,weekdays_json,next_run
+            """SELECT key,cron,weekdays_json,next_run,config_json
                FROM scheduled_tasks WHERE enabled=1 ORDER BY key"""
         ).fetchall()
         updated = 0
         changed_at = utc_now()
         for row in rows:
             weekdays = json.loads(str(row["weekdays_json"] or "[]"))
-            next_run = self._next_run(str(row["cron"]), local_now, weekdays).isoformat()
+            semantics = json.loads(str(row["config_json"] or "{}")).get("_cron_semantics", "legacy_v1")
+            next_run = self._next_run(str(row["cron"]), local_now, weekdays, semantics=semantics).isoformat()
             if str(row["next_run"] or "") == next_run:
                 continue
             connection.execute(
@@ -243,7 +246,7 @@ class ScheduledTaskRepository:
         return updated
 
     def mark_enqueued(self, task: dict[str, Any], now: datetime) -> None:
-        next_run = self._next_run(task["cron"], now, task["weekdays"]).isoformat()
+        next_run = self._next_run(task["cron"], now, task["weekdays"], semantics=task.get("cron_semantics", "legacy_v1")).isoformat()
         with self.database.session() as connection:
             connection.execute(
                 "UPDATE scheduled_tasks SET next_run=?,error_status=NULL,updated_at=? WHERE key=?",
@@ -263,7 +266,7 @@ class ScheduledTaskRepository:
         occurrence = datetime.fromisoformat(scheduled_occurrence_at)
         if occurrence.tzinfo is not None and now.tzinfo is not None:
             occurrence = occurrence.astimezone(now.tzinfo)
-        repaired_next_run = self._next_run(task["cron"], occurrence, task["weekdays"])
+        repaired_next_run = self._next_run(task["cron"], occurrence, task["weekdays"], semantics=task.get("cron_semantics", "legacy_v1"))
         if repaired_next_run.tzinfo is not None and now.tzinfo is not None:
             repair_is_due = repaired_next_run.astimezone(timezone.utc) <= now.astimezone(
                 timezone.utc
@@ -271,7 +274,7 @@ class ScheduledTaskRepository:
         else:
             repair_is_due = repaired_next_run <= now
         if repair_is_due:
-            repaired_next_run = self._next_run(task["cron"], now, task["weekdays"])
+            repaired_next_run = self._next_run(task["cron"], now, task["weekdays"], semantics=task.get("cron_semantics", "legacy_v1"))
         repaired_next_run_iso = repaired_next_run.isoformat()
         completed_at = utc_now()
         context = nullcontext(connection) if connection is not None else self.database.session()
@@ -296,7 +299,7 @@ class ScheduledTaskRepository:
     ) -> None:
         """Advance a successful business outcome without recording a failure."""
 
-        next_run = self._next_run(task["cron"], now, task["weekdays"]).isoformat()
+        next_run = self._next_run(task["cron"], now, task["weekdays"], semantics=task.get("cron_semantics", "legacy_v1")).isoformat()
         context = nullcontext(connection) if connection is not None else self.database.session()
         with context as active_connection:
             active_connection.execute(
@@ -311,7 +314,7 @@ class ScheduledTaskRepository:
     ) -> None:
         """Record an exhausted Job budget while preserving the normal cron cursor."""
 
-        next_run = self._next_run(task["cron"], now, task["weekdays"]).isoformat()
+        next_run = self._next_run(task["cron"], now, task["weekdays"], semantics=task.get("cron_semantics", "legacy_v1")).isoformat()
         context = nullcontext(connection) if connection is not None else self.database.session()
         with context as active_connection:
             active_connection.execute(
@@ -338,7 +341,7 @@ class ScheduledTaskRepository:
         when the task is next eligible.
         """
 
-        next_run = self._next_run(task["cron"], now, task["weekdays"]).isoformat()
+        next_run = self._next_run(task["cron"], now, task["weekdays"], semantics=task.get("cron_semantics", "legacy_v1")).isoformat()
         context = nullcontext(connection) if connection is not None else self.database.session()
         with context as active_connection:
             active_connection.execute(
@@ -352,6 +355,7 @@ class ScheduledTaskRepository:
         result["enabled"] = bool(result["enabled"])
         result["weekdays"] = json.loads(result.pop("weekdays_json"))
         result["config"] = json.loads(result.pop("config_json"))
+        result["cron_semantics"] = result["config"].pop("_cron_semantics", "legacy_v1")
         return result
 
     @staticmethod
@@ -468,14 +472,25 @@ class ScheduledTaskRepository:
     @staticmethod
     def _cron(value: str) -> str:
         fields = value.split()
-        if len(fields) != 5:
+        if len(fields) != 5 or len(value) > 256:
             raise ValueError("Cron 必須是五欄格式")
-        for field in fields:
-            for part in field.split(","):
-                if part == "*" or (part.startswith("*/") and part[2:].isdigit()) or part.isdigit():
-                    continue
-                raise ValueError("Cron 僅支援 *、數字、逗號與 */間隔")
-        return value
+        for field, bounds in zip(fields, ((0, 59), (0, 23), (1, 31), (1, 12), (0, 7)), strict=True):
+            ScheduledTaskRepository._field_values(field, *bounds)
+        return " ".join(fields)
+
+    @staticmethod
+    def _field_values(field: str, lower: int, upper: int) -> set[int]:
+        values: set[int] = set()
+        for part in field.split(","):
+            if part == "*":
+                values.update(range(lower, upper + 1))
+            elif part.startswith("*/") and part[2:].isdigit() and int(part[2:]) > 0:
+                values.update(range(lower, upper + 1, int(part[2:])))
+            elif part.isdigit() and lower <= int(part) <= upper:
+                values.add(int(part))
+            else:
+                raise ValueError("Cron 僅支援範圍內數字、*、逗號與正數 */間隔")
+        return values
 
     @staticmethod
     def _matches(field: str, value: int) -> bool:
@@ -486,8 +501,17 @@ class ScheduledTaskRepository:
                 return True
         return False
 
-    def _next_run(self, cron: str, after: datetime, weekdays: builtin_list[int]) -> datetime:
+    def _next_run(self, cron: str, after: datetime, weekdays: builtin_list[int], *, semantics: str = "cronie_v2") -> datetime:
         minute, hour, day, month, weekday = cron.split()
+        if semantics not in {"legacy_v1", "cronie_v2"}:
+            raise ValueError("不支援的 Cron 語義版本")
+        fields = None
+        if semantics == "cronie_v2":
+            self._cron(cron)
+            fields = [self._field_values(field, *bounds) for field, bounds in
+                      zip((minute, hour, day, month, weekday), ((0, 59), (0, 23), (1, 31), (1, 12), (0, 7)), strict=True)]
+            if 7 in fields[4]:
+                fields[4].add(0)
         if after.tzinfo is None:
             candidate = after.replace(second=0, microsecond=0) + timedelta(minutes=1)
             candidates = (candidate + timedelta(minutes=offset) for offset in range(527041))
@@ -523,6 +547,13 @@ class ScheduledTaskRepository:
                 continue
             max_wall_minute = wall_minute
             cron_weekday = (candidate.weekday() + 1) % 7
+            if fields is not None:
+                day_match, weekday_match = candidate.day in fields[2], cron_weekday in fields[4]
+                date_match = (day_match and weekday_match) if "*" in day or "*" in weekday else (day_match or weekday_match)
+                if (candidate.minute in fields[0] and candidate.hour in fields[1] and candidate.month in fields[3]
+                        and date_match and (not weekdays or candidate.weekday() in weekdays)):
+                    return candidate
+                continue
             if (
                 self._matches(minute, candidate.minute)
                 and self._matches(hour, candidate.hour)
