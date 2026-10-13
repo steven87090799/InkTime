@@ -1843,7 +1843,7 @@ class SettingsRepository:
                 raise ValueError(f"{key} 必須是數字")
             try:
                 value = float(value)
-            except (TypeError, ValueError) as exc:
+            except (TypeError, ValueError, OverflowError) as exc:
                 raise ValueError(f"{key} 必須是數字") from exc
             if not math.isfinite(value):
                 raise ValueError(f"{key} 必須是有限數字")

@@ -195,7 +195,10 @@ class ProviderRepository:
                 return None
             if isinstance(value, bool) or not isinstance(value, (int, float)):
                 raise ValueError(f"{name} 必須是有限非負數")
-            result = float(value)
+            try:
+                result = float(value)
+            except OverflowError as exc:
+                raise ValueError(f"{name} 必須是有限非負數且不可超過 {maximum}") from exc
             if not math.isfinite(result) or result < 0 or result > maximum:
                 raise ValueError(f"{name} 必須是有限非負數且不可超過 {maximum}")
             return result

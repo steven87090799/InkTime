@@ -17,7 +17,10 @@ def csrf_token() -> str:
 def verify_csrf() -> None:
     supplied = request.headers.get("X-CSRF-Token") or request.form.get("csrf_token", "")
     expected = session.get("csrf_token", "")
-    if not expected or not secrets.compare_digest(str(supplied), str(expected)):
+    if (not isinstance(supplied, str) or not isinstance(expected, str)
+            or not supplied or not expected or len(supplied) > 128 or len(expected) > 128
+            or not supplied.isascii() or not expected.isascii()
+            or not secrets.compare_digest(supplied, expected)):
         abort(403, description="AUTH-002 CSRF 驗證失敗")
 
 

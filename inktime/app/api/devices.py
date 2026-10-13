@@ -107,7 +107,7 @@ def _validated_device_fields(
     timezone_name = str(payload.get("timezone", defaults.get("timezone", "Asia/Taipei")))
     try:
         ZoneInfo(timezone_name)
-    except ZoneInfoNotFoundError:
+    except (ZoneInfoNotFoundError, ValueError):
         abort(400, description="DEVICE-003 時區不是有效的 IANA 時區")
     try:
         rotation = json_int(

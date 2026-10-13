@@ -381,7 +381,11 @@ class ScheduledTaskRepository:
         return value
 
     def _optional_clock(self, value: Any) -> str | None:
-        return None if value in {None, ""} else self._clock(str(value))
+        if value is None:
+            return None
+        if not isinstance(value, str):
+            raise ValueError("時間必須是 HH:MM 字串或 null")
+        return None if value == "" else self._clock(value)
 
     @staticmethod
     def _weekdays(value: Any) -> builtin_list[int]:
