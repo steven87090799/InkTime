@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from urllib.parse import parse_qs, urlparse
 from uuid import UUID
 
 import pytest
@@ -8,6 +9,73 @@ import pytest
 playwright_api = pytest.importorskip("playwright.sync_api")
 sync_playwright = playwright_api.sync_playwright
 expect = playwright_api.expect
+
+
+def _review_draft_and_failure_regression(page, base):
+    photos = [{"id": f"review-fixture-{index}", "analysis_id": index, "review_version": 0,
+               "thumbnail_url": "/fixture-review.svg", "review_state": "unreviewed", "caption_override": "",
+               "score_kind": "semantic", "analysis_provider": "fixture", "analysis_model": "fixture"}
+              for index in (1, 2, 3)]
+    state = {"fail_patch": False, "bad_json": False, "patches": []}
+
+    def review_route(route):
+        request = route.request
+        if request.method == "PATCH":
+            if state["fail_patch"]:
+                route.abort()
+                return
+            payload = request.post_data_json
+            state["patches"].append(payload)
+            photo = next(value for value in photos if request.url.endswith('/' + value["id"]))
+            assert payload["analysis_id"] == photo["analysis_id"]
+            assert payload["expected_version"] == photo["review_version"]
+            photo.update({key: value for key, value in payload.items() if key not in {"expected_version", "analysis_id"}})
+            photo["review_version"] += 1
+            route.fulfill(json={"photo": photo})
+            return
+        if state["bad_json"]:
+            route.fulfill(status=200, content_type="application/json", body="invalid-json")
+            return
+        append = bool(parse_qs(urlparse(request.url).query).get("cursor"))
+        route.fulfill(json={"items": photos[2:] if append else photos[:2], "next_cursor": None if append else "next", "has_more": not append})
+
+    page.route("**/api/v1/review/photos**", review_route)
+    page.route("**/api/v1/review/summary?**", lambda route: route.fulfill(json={"total": 3, "states": {"unreviewed": 3}}))
+    page.route("**/fixture-review.svg", lambda route: route.fulfill(content_type="image/svg+xml", body='<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8"/>'))
+    page.goto(base + "/review/photos")
+    expect(page.locator('.review-card')).to_have_count(2)
+    first = page.locator('.review-card[data-id="review-fixture-1"]')
+    draft = first.locator('[data-caption]')
+    draft.click()
+    draft.press_sequentially("UNSAVED-DRAFT")
+    expect(draft).to_be_focused()
+    page.locator('.review-card[data-id="review-fixture-2"] img').click()
+    page.keyboard.press("ArrowLeft")
+    expect(draft).to_have_value("UNSAVED-DRAFT")
+    draft.focus()
+    page.evaluate("document.getElementById('review-more').click()")
+    expect(page.locator('.review-card')).to_have_count(3)
+    expect(draft).to_be_focused()
+    expect(draft).to_have_value("UNSAVED-DRAFT")
+    page.locator('.review-card[data-id="review-fixture-2"] [data-action="keep"]').click()
+    expect(page.locator('#review-status')).to_contain_text('已儲存 review-fixture-2')
+    expect(draft).to_have_value("UNSAVED-DRAFT")
+    first.locator('[data-action="save_caption"]').click()
+    expect(page.locator('#review-status')).to_contain_text('已儲存 review-fixture-1')
+    assert photos[0]["caption_override"] == "UNSAVED-DRAFT"
+    state["fail_patch"] = True
+    draft.fill("RETAIN-ON-FAILURE")
+    first.locator('[data-action="favorite"]').click()
+    expect(page.locator('#review-status')).to_contain_text('儲存結果請重新載入查核')
+    expect(first.locator('[data-action="favorite"]')).to_be_enabled()
+    expect(draft).to_have_value("RETAIN-ON-FAILURE")
+    state["bad_json"] = True
+    page.locator('#review-filter').evaluate("form => form.requestSubmit()")
+    expect(page.locator('#review-status')).to_contain_text('草稿保留')
+    expect(page.locator('#review-more')).to_be_enabled()
+    expect(draft).to_have_value("RETAIN-ON-FAILURE")
+    assert len(state["patches"]) == 2
+    page.unroute("**/api/v1/review/photos**", review_route)
 
 
 @pytest.mark.skipif(not os.environ.get("INKTIME_E2E_URL"), reason="只在 E2E 環境執行")
@@ -98,5 +166,6 @@ def test_first_setup_login_and_primary_console_pages():
         assert saved.value.status == 200
         expect(concurrency).to_have_value("3")
         expect(page.locator('#dirty-count')).to_have_text("0")
+        _review_draft_and_failure_regression(page, base)
         assert csp_violations == []
         browser.close()

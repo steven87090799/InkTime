@@ -1,7 +1,56 @@
 from __future__ import annotations
 
+import pytest
+
 from tests.conftest import create_admin, csrf, login
 from tests.integration.test_jobs import add_photos
+
+
+def _analysis(app, photo_id, *, kind="semantic", schema=5, created="2026-10-01", provider="dummy-semantic"):
+    with app.extensions["inktime_database"].transaction() as connection:
+        cursor = connection.execute(
+            "INSERT INTO photo_analysis(photo_id,schema_version,stage,provider,model,caption,types_json,"
+            "memory_score,beauty_score,technical_quality_score,emotion_score,side_caption,should_keep,sensitive,reason,raw_json,created_at,score_kind) "
+            "VALUES (?,?,'single',?,'fixture','fixture','[]',80,70,75,65,'fixture',1,0,'fixture','{}',?,?)",
+            (photo_id, schema, provider, created, kind),
+        )
+        return int(cursor.lastrowid)
+
+
+@pytest.mark.parametrize("schema", [4, 5])
+def test_semantic_then_local_uses_same_identity_for_list_summary_facets_and_events(client, app, schema):
+    create_admin(app)
+    login(client)
+    photo_id = add_photos(app, 1)[0]
+    semantic = _analysis(app, photo_id, schema=schema)
+    _analysis(app, photo_id, kind="local_quality", created="2026-10-02", provider="dummy-local")
+    listing = client.get("/api/v1/review/photos?provider=dummy-semantic").get_json()
+    summary = client.get("/api/v1/review/summary?provider=dummy-semantic").get_json()
+    facets = client.get("/api/v1/review/date-facets?provider=dummy-semantic").get_json()
+    assert len(listing["items"]) == summary["total"] == 1
+    assert sum(value["count"] for value in facets["years"]) == 1
+    photo = listing["items"][0]
+    assert photo["analysis_id"] == semantic
+    saved = client.patch(f"/api/v1/review/photos/{photo_id}", headers={"X-CSRF-Token": csrf(client)},
+                         json={"expected_version": photo["review_version"], "analysis_id": semantic, "understanding_incorrect": True})
+    assert saved.status_code == 200
+    with app.extensions["inktime_database"].session() as connection:
+        assert connection.execute("SELECT analysis_id FROM photo_review_events WHERE photo_id=?", (photo_id,)).fetchone()[0] == semantic
+    newer = _analysis(app, photo_id, schema=schema, created="2026-10-03")
+    assert client.get(f"/api/v1/review/photos/{photo_id}").get_json()["analysis_id"] == newer
+    conflict = client.patch(f"/api/v1/review/photos/{photo_id}", headers={"X-CSRF-Token": csrf(client)},
+                            json={"expected_version": saved.get_json()["photo"]["review_version"], "analysis_id": semantic, "caption_bad": True})
+    assert conflict.status_code == 409
+
+
+def test_null_displayed_analysis_conflicts_if_a_new_analysis_arrives(client, app):
+    create_admin(app)
+    login(client)
+    photo_id = add_photos(app, 1)[0]
+    _analysis(app, photo_id)
+    response = client.patch(f"/api/v1/review/photos/{photo_id}", headers={"X-CSRF-Token": csrf(client)},
+                            json={"expected_version": 0, "analysis_id": None, "review_state": "keep"})
+    assert response.status_code == 409
 
 
 def test_review_workbench_is_bounded_and_uses_optimistic_versions(client, app):
