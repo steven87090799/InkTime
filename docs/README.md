@@ -170,6 +170,7 @@
 - [`reports/MODEL_STABILITY_AUDIT_20261011.md`](reports/MODEL_STABILITY_AUDIT_20261011.md)：模型優先的完整稽核、Token／費用／輸出保存／排程修復及尚待驗證範圍。
 - [`reports/PROJECT_AUDIT_20261011.md`](reports/PROJECT_AUDIT_20261011.md)：最新主分支的跨子系統重新稽核、非韌體修復與驗證範圍。
 - [`reports/FIRMWARE_REVIEW_20261011.md`](reports/FIRMWARE_REVIEW_20261011.md)：韌體缺口、舊原型限制與待實機驗收項目；本次未修改韌體。
+- [`reports/CI_FIXES_20261013.md`](reports/CI_FIXES_20261013.md)：PR #159 CI 失敗原因、程式位置、修復方法與容器安全驗收界線。
 - [`reports/P1_FIXES_20261013.md`](reports/P1_FIXES_20261013.md)：上線前五項 P1 的原因、修復與驗證界線。
 - [`reports/P2_FIXES_20261013.md`](reports/P2_FIXES_20261013.md)：同分支 P2 接續修復逐項狀態，與 P1 分開追蹤。
 - [`reports/PERFORMANCE_REPORT.md`](reports/PERFORMANCE_REPORT.md)：100,000 筆效能測試紀錄；測試腳本會更新此檔。
