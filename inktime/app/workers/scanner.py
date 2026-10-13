@@ -173,7 +173,18 @@ class PhotoScanner:
                 return self.preprocessor.analyze(entry.path)
             raise
 
-    def scan(
+    def scan(self, name: str, root: Path, **options) -> dict:
+        canonical = root.expanduser().resolve()
+        identity = sha256(os.path.normcase(str(canonical)).encode("utf-8")).hexdigest()
+        lock = self.repository.database.try_acquire_operation_lock("photo-scan-" + identity)
+        if lock is None:
+            raise RuntimeError("SCAN-005 此照片庫已有掃描進行中，請等待原工作完成")
+        try:
+            return self._scan_locked(name, canonical, **options)
+        finally:
+            lock.close()  # flock releases on close or process exit; the lock file is retained.
+
+    def _scan_locked(
         self,
         name: str,
         root: Path,

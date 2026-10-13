@@ -64,9 +64,9 @@ def _effective_cache_version(prompt_version: str, vision_request_fingerprint: st
     return f"{prompt_version}@vision-{vision_request_fingerprint[:16]}"
 
 
-def _stored_exclusion(photo: dict) -> tuple[str, dict] | None:
+def _stored_exclusion(photo: dict, *, settings: dict | None = None) -> tuple[str, dict] | None:
     """讓人工要求重新套用時使用同一規則與相同門檻。"""
-    evaluation = evaluate_local_quality({**photo, "relative_path": str(photo.get("relative_path") or "")})
+    evaluation = evaluate_local_quality({**photo, "relative_path": str(photo.get("relative_path") or "")}, settings=settings)
     if evaluation["decision"] != "auto_excluded":
         return None
     return str(evaluation["primary_reason"]), evaluation
@@ -951,14 +951,20 @@ class PhotoRepository:
             scan = connection.execute("SELECT * FROM scan_runs WHERE id=?", (scan_id,)).fetchone()
             if scan is None:
                 raise KeyError(scan_id)
+            if scan["status"] != "running":
+                return dict(scan)
+            newer = connection.execute(
+                "SELECT 1 FROM scan_runs WHERE library_id=? AND rowid>(SELECT rowid FROM scan_runs WHERE id=?) LIMIT 1",
+                (scan["library_id"], scan_id),
+            ).fetchone()
             candidate_count = int(
                 connection.execute(
                     """
                     SELECT COUNT(*) FROM photos
                     WHERE library_id=? AND lifecycle_status='active'
-                      AND COALESCE(last_seen_scan_id,'')<>?
+                      AND COALESCE(last_seen_scan_id,'')<>? AND julianday(created_at)<=julianday(?)
                     """,
-                    (scan["library_id"], scan_id),
+                    (scan["library_id"], scan_id, scan["started_at"]),
                 ).fetchone()[0]
             )
             baseline = int(scan["previous_active_count"])
@@ -969,6 +975,7 @@ class PhotoRepository:
                 and full_census
                 and not cancelled
                 and major_io_errors == 0
+                and not newer
             )
             threshold = float(scan["missing_threshold_ratio"])
             marked = 0
@@ -980,7 +987,7 @@ class PhotoRepository:
                 warning_code = "SCAN-CANCELLED"
             elif not safe:
                 status = "completed_with_warnings"
-                warning_code = "SCAN-IO-002" if major_io_errors else "SCAN-INCOMPLETE"
+                warning_code = "SCAN-MISSING-004" if newer else "SCAN-IO-002" if major_io_errors else "SCAN-INCOMPLETE"
             elif ratio > threshold:
                 status = "completed_with_warnings"
                 warning_code = "SCAN-MISSING-THRESHOLD"
@@ -990,9 +997,9 @@ class PhotoRepository:
                     INSERT INTO scan_missing_candidates(scan_id,photo_id,created_at)
                     SELECT ?,id,? FROM photos
                     WHERE library_id=? AND lifecycle_status='active'
-                      AND COALESCE(last_seen_scan_id,'')<>?
+                      AND COALESCE(last_seen_scan_id,'')<>? AND julianday(created_at)<=julianday(?)
                     """,
-                    (scan_id, now, scan["library_id"], scan_id),
+                    (scan_id, now, scan["library_id"], scan_id, scan["started_at"]),
                 )
             else:
                 cursor = connection.execute(
@@ -1000,9 +1007,9 @@ class PhotoRepository:
                     UPDATE photos SET lifecycle_status='missing',missing_since=?,
                         missing_reason='not_seen_in_complete_scan',updated_at=?
                     WHERE library_id=? AND lifecycle_status='active'
-                      AND COALESCE(last_seen_scan_id,'')<>?
+                      AND COALESCE(last_seen_scan_id,'')<>? AND julianday(created_at)<=julianday(?)
                     """,
-                    (now, now, scan["library_id"], scan_id),
+                    (now, now, scan["library_id"], scan_id, scan["started_at"]),
                 )
                 marked = int(cursor.rowcount)
                 reconciliation = "applied"
@@ -1339,7 +1346,7 @@ class PhotoRepository:
                     changes = {"eligible": True, "candidate_pool": True}
                 elif action == "reanalyze":
                     evaluation_photo = {**photo, "manual_override": 0, "favorite": 0, "exclusion_status": "eligible"} if reapply_rules else photo
-                    exclusion = _stored_exclusion(evaluation_photo)
+                    exclusion = _stored_exclusion(evaluation_photo, settings=self._local_quality_settings(connection))
                     if reapply_rules and exclusion is None:
                         analysis = connection.execute(
                             "SELECT content_filter_json FROM photo_analysis "

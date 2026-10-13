@@ -9,6 +9,7 @@ import tracemalloc
 import pytest
 
 from inktime.app.db import Database, migrate
+from inktime.app.domain.photos.quality_policy import FEATURE_VERSION
 from inktime.app.repositories.photos import PhotoRepository
 from inktime.app.workers.scanner import PhotoScanner
 
@@ -64,8 +65,8 @@ def seed(database: Database, library_id: str, count: int) -> None:
                 """
                 INSERT INTO photos(
                     id,library_id,relative_path,file_size,modified_time,sha256,status,
-                    lifecycle_status,metadata_status,local_features_status,created_at,updated_at
-                ) VALUES (?,?,?,?,?,?,'preprocessed','active','complete','complete',datetime('now'),datetime('now'))
+                    lifecycle_status,metadata_status,local_features_status,feature_version,created_at,updated_at
+                ) VALUES (?,?,?,?,?,?,'preprocessed','active','complete','complete',?,datetime('now'),datetime('now'))
                 """,
                 [
                     (
@@ -75,6 +76,7 @@ def seed(database: Database, library_id: str, count: int) -> None:
                         123,
                         456.0,
                         f"{index:064x}",
+                        FEATURE_VERSION,
                     )
                     for index in range(start, min(start + 1_000, count))
                 ],
