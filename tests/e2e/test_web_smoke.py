@@ -225,11 +225,11 @@ def _p3_filter_clear_regression(page, base):
       document.querySelector('[name="job_id"]').value='p3-old-request';
       document.querySelector('#trace-filters').requestSubmit();
     }""")
-    page.wait_for_function("window.p3Calls.length===1")
+    page.wait_for_function("() => window.p3Calls.length === 1")
     page.locator("#clear-traces").click()
     with page.expect_response(lambda response: "/api/v1/ai/traces?" in response.url and not parse_qs(urlparse(response.url).query).get("job_id")):
         page.evaluate("window.p3Resolve(new Response(JSON.stringify({traces:[{trace_id:'p3-stale',status:'FAILED'}]}), {headers:{'Content-Type':'application/json'}}))")
-        page.wait_for_function("window.p3Calls.length>=2")
+        page.wait_for_function("() => window.p3Calls.length >= 2")
     assert not parse_qs(urlparse(page.evaluate("window.p3Calls[1]")).query).get("job_id")
     assert page.evaluate("window.p3StaleRendered") is False
     assert urlparse(page.url).query == ""
