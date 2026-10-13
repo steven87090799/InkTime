@@ -30,6 +30,11 @@ class WebhookReadTimeout(WebhookTimeoutError):
     code = "webhook_read_timeout"
 
 
+def _https_authority(hostname: str, port: int) -> str:
+    host = f"[{hostname}]" if ":" in hostname else hostname
+    return host if port == 443 else f"{host}:{port}"
+
+
 def _normalized_ip(value: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address:
     address = ipaddress.ip_address(value.split("%", 1)[0])
     if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped is not None:
@@ -140,7 +145,7 @@ def resolve_webhook_destination(
         raise UnsafeWebhookURL("WEBHOOK-SSRF-002 Webhook 網域沒有可用位址")
     normalized = SplitResult(
         "https",
-        f"{hostname}:{port}" if port != 443 else hostname,
+        _https_authority(hostname, port),
         parsed.path or "/",
         parsed.query,
         "",
@@ -268,9 +273,7 @@ class PinnedWebhookTransport:
         body = json_module_dumps(json)
         request_headers = dict(headers)
         request_headers["Content-Length"] = str(len(body))
-        request_headers["Host"] = (
-            target.hostname if target.port == 443 else f"{target.hostname}:{target.port}"
-        )
+        request_headers["Host"] = _https_authority(target.hostname, target.port)
         last_error: OSError | http.client.HTTPException | None = None
         for address in target.addresses:
             connection = self.connection_factory(

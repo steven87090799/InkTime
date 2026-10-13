@@ -4,6 +4,7 @@ import socket
 import ssl
 import time
 import http.client
+from urllib.parse import urlsplit
 
 import pytest
 
@@ -148,6 +149,27 @@ class _Connection:
 
     def close(self):
         self.closed = True
+
+
+@pytest.mark.parametrize("hostname,authority", [
+    ("hooks.example.net", "hooks.example.net"), ("8.8.8.8", "8.8.8.8"),
+    ("2001:4860:4860::8888", "[2001:4860:4860::8888]"),
+])
+@pytest.mark.parametrize("port", [443, 8443])
+def test_webhook_authority_roundtrip_and_host_header_preserve_pinning(hostname, authority, port):
+    requests, targets = [], []
+    address = hostname if ":" in hostname else "8.8.8.8"
+    def factory(target, pinned, timeout, context):
+        targets.append((target, pinned))
+        return _Connection(requests)
+    suffix = "" if port == 443 else f":{port}"
+    transport = PinnedWebhookTransport(resolver=lambda *_args, **_kwargs: _records(address), connection_factory=factory)
+    transport.post(f"https://{authority}{suffix}/hook", json={}, headers={}, timeout=(1, 1), allow_redirects=False)
+    target, pinned = targets[0]
+    assert target.hostname == hostname and pinned == address
+    assert urlsplit(target.url).hostname == hostname
+    assert (urlsplit(target.url).port or 443) == port
+    assert requests[0]["headers"]["Host"] == authority + suffix
 
 
 def test_webhook_transport_pins_validated_ip_preserves_tls_hostname_and_never_redirects():
