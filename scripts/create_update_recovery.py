@@ -259,8 +259,8 @@ def main() -> int:
     parser.add_argument("--previous-image-ref", required=True)
     parser.add_argument("--previous-image-digest", required=True)
     parser.add_argument("--target-image-ref", required=True)
-    parser.add_argument("--target-source-ref")
-    parser.add_argument("--target-source-revision")
+    parser.add_argument("--target-source-ref", default=os.environ.get("INKTIME_UPDATE_TARGET_SOURCE_REF"))
+    parser.add_argument("--target-source-revision", default=os.environ.get("INKTIME_UPDATE_TARGET_SOURCE_REVISION"))
     parser.add_argument("--deployment-contract", required=True)
     args = parser.parse_args()
 

@@ -357,8 +357,12 @@ PY
     echo "NAS-UPDATE-RECOVERY-001 live SQLite snapshot was not created safely; existing containers and data were not replaced" >&2
     exit 2
   fi
+  # Contract-3 images may predate the optional provenance fields. Keep their
+  # recovery CLI compatible; newer helpers read this metadata from the environment.
   recovery_output=$(docker run --rm --read-only --network none --user 10001:10001 \
     --security-opt no-new-privileges --cap-drop ALL \
+    --env "INKTIME_UPDATE_TARGET_SOURCE_REF=${target_source_ref}" \
+    --env "INKTIME_UPDATE_TARGET_SOURCE_REVISION=${target_source_revision}" \
     --mount "type=bind,source=${data_path},target=/source,readonly" \
     --mount "type=bind,source=${recovery_dir},target=/recovery" \
     --tmpfs /tmp:size=64m,mode=1777 \
@@ -369,8 +373,6 @@ PY
     --previous-image-ref "$previous_image_ref" \
     --previous-image-digest "$previous_image_digest" \
     --target-image-ref "$target_image_ref" \
-    --target-source-ref "$target_source_ref" \
-    --target-source-revision "$target_source_revision" \
     --deployment-contract "$deployment_contract") || {
       cleanup_new_recovery || true
       echo "NAS-UPDATE-RECOVERY-001 recovery point failed; existing containers and data were not replaced" >&2

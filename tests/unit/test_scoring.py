@@ -248,6 +248,33 @@ def test_scoring_lab_records_usage_and_uses_current_profile(app, tmp_path, monke
     assert [tuple(row) for row in usage] == [("scoring_test_vision", 120, 30, 10)]
 
 
+@pytest.mark.parametrize(
+    ("global_cap", "analysis_cap", "expected"),
+    [(8000, 256, 256), (8000, 384, 384), (300, 1200, 300), (8000, 1200, 512)],
+)
+def test_scoring_lab_honors_analysis_and_global_token_limits(
+    app, tmp_path, monkeypatch, global_cap, analysis_cap, expected,
+):
+    service = app.extensions["inktime_scoring_lab_service"]
+    service.settings.update("budget.max_tokens", global_cap, changed_by="test", source_ip="test")
+    service.settings.update("budget.full_analysis_max_tokens", analysis_cap, changed_by="test", source_ip="test")
+    requests = []
+
+    class CaptureLabProvider(LabProvider):
+        def analyze(self, **kwargs):
+            requests.append(kwargs)
+            return super().analyze(**kwargs)
+
+    monkeypatch.setattr(service.providers, "build_router", lambda *args, **kwargs: CaptureLabProvider())
+    image_path = tmp_path / "token-cap.jpg"
+    Image.new("RGB", (64, 64), "orange").save(image_path)
+
+    service.analyze(image_path)
+
+    assert len(requests) == 1
+    assert requests[0]["max_tokens"] == expected
+
+
 def test_scoring_lab_rejects_invalid_response_without_extra_paid_repair(app, tmp_path, monkeypatch):
     from inktime.app.domain.analysis.schema import AnalysisValidationError
 

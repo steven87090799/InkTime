@@ -1,5 +1,7 @@
+import argparse
 from pathlib import Path
 import re
+import subprocess
 
 import yaml
 
@@ -187,6 +189,45 @@ def test_nas_updater_pulls_before_no_build_recreate_and_never_deletes_volumes():
     contract_path = "tests/unit/test_container_release_workflow.py"
     assert contract_path in RUNNER_SUITE_TEST_PATHS["ci_planner_contracts"]
     assert contract_path in RUNNER_SUITE_TEST_PATHS["ci_routing_contracts"]
+
+
+def test_nas_recovery_invocation_accepts_original_contract_3_cli():
+    updater = UPDATER_PATH.read_text(encoding="utf-8")
+    command = updater.split("recovery_output=$(", 1)[1].split(") || {", 1)[0]
+    image_id = "sha256:" + "b" * 64
+    source_ref = "registry.example/inktime:v1.1.0"
+    source_revision = "c" * 40
+    result = subprocess.run(
+        ["sh", "-c", 'docker() { printf \'%s\\n\' "$@"; }\n' + command],
+        env={
+            "data_path": "/srv/data with spaces",
+            "recovery_dir": "/srv/data with spaces/backups/recovery",
+            "previous_image_ref": "registry.example/inktime:v1.0.0",
+            "previous_image_digest": "sha256:" + "a" * 64,
+            "target_image_ref": image_id,
+            "target_source_ref": source_ref,
+            "target_source_revision": source_revision,
+            "deployment_contract": "3",
+        },
+        check=True, capture_output=True, text=True,
+    )
+    invocation = result.stdout.splitlines()
+    helper_index = invocation.index("scripts/create_update_recovery.py")
+    # This is the public CLI supported by contract-3 images before PR #159.
+    legacy_parser = argparse.ArgumentParser(allow_abbrev=False)
+    for option in (
+        "--source-root", "--destination-root", "--staged-snapshot",
+        "--previous-image-ref", "--previous-image-digest",
+        "--target-image-ref", "--deployment-contract",
+    ):
+        legacy_parser.add_argument(option, required=True)
+    parsed = legacy_parser.parse_args(invocation[helper_index + 1:])
+
+    assert parsed.target_image_ref == image_id
+    assert invocation[helper_index - 2:helper_index] == [image_id, "python"]
+    assert f"INKTIME_UPDATE_TARGET_SOURCE_REF={source_ref}" in invocation[:helper_index]
+    assert f"INKTIME_UPDATE_TARGET_SOURCE_REVISION={source_revision}" in invocation[:helper_index]
+    assert "type=bind,source=/srv/data with spaces,target=/source,readonly" in invocation
 
 
 def test_update_recovery_validates_staged_snapshot_and_excludes_payload_copies():

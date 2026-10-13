@@ -7,9 +7,10 @@ from uuid import uuid4
 
 from inktime.app.domain.photos.formats import load_rgb
 
+from inktime.app.domain.analysis.plan import analysis_output_token_cap
 from inktime.app.domain.analysis.schema import AnalysisValidationError, validate_model_response
 from inktime.app.domain.analysis.scoring import calculate_ranking_score
-from inktime.app.services.analysis import PhotoAnalysisService, FULL_ANALYSIS_TOKEN_CAP
+from inktime.app.services.analysis import PhotoAnalysisService
 from inktime.app.domain.photos.preprocessing import PhotoPreprocessor
 from inktime.app.domain.photos.quality_policy import evaluate_local_quality, local_candidate_score
 from inktime.app.repositories.scoring import ScoringProfileRepository
@@ -71,7 +72,7 @@ class ScoringLabService:
         profile = self.profiles.current()
         plan = plan or self._plan()
         model = str(plan["model"])
-        max_tokens = max(256, min(int(self.settings.get("budget.max_tokens", 8000)), FULL_ANALYSIS_TOKEN_CAP))
+        max_tokens = analysis_output_token_cap(self.settings)
         provider_request_context_id = f"scoring_test|{uuid4()}"
         selected_provider = provider
         provider_id = ""

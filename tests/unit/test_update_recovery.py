@@ -5,10 +5,12 @@ import json
 import os
 from pathlib import Path
 import sqlite3
+import sys
 import zipfile
 
 import pytest
 
+from scripts import create_update_recovery
 from scripts.create_update_recovery import create_recovery
 
 
@@ -88,6 +90,49 @@ def _create(source: Path, destination: Path, *, source_read_only: bool) -> Path:
             source_read_only=source_read_only,
         ),
     )
+
+
+@pytest.mark.parametrize("provenance", ["absent", "environment", "cli"])
+def test_recovery_cli_supports_optional_provenance(tmp_path, monkeypatch, capsys, provenance):
+    contract = tmp_path / "contract.version"
+    contract.write_text("3\n", encoding="utf-8")
+    monkeypatch.setattr(create_update_recovery, "CONTRACT_FILE", contract)
+    captured = {}
+
+    def capture_recovery(**kwargs):
+        captured.update(kwargs)
+        return kwargs["destination_root"]
+
+    monkeypatch.setattr(create_update_recovery, "create_recovery", capture_recovery)
+    argv = [
+        "create_update_recovery.py",
+        "--source-root", "/source", "--destination-root", "/recovery",
+        "--staged-snapshot", "/recovery/.source-snapshot.sqlite3",
+        "--previous-image-ref", "registry.example/inktime:v1.0.0",
+        "--previous-image-digest", "sha256:previous",
+        "--target-image-ref", "sha256:target", "--deployment-contract", "3",
+    ]
+    source_ref = None
+    source_revision = None
+    monkeypatch.delenv("INKTIME_UPDATE_TARGET_SOURCE_REF", raising=False)
+    monkeypatch.delenv("INKTIME_UPDATE_TARGET_SOURCE_REVISION", raising=False)
+    if provenance != "absent":
+        source_ref = "registry.example/inktime:v1.1.0"
+        source_revision = "b" * 40
+        monkeypatch.setenv("INKTIME_UPDATE_TARGET_SOURCE_REF", source_ref)
+        monkeypatch.setenv("INKTIME_UPDATE_TARGET_SOURCE_REVISION", source_revision)
+    if provenance == "cli":
+        source_ref = "registry.example/inktime:v1.2.0"
+        source_revision = "c" * 40
+        argv += ["--target-source-ref", source_ref, "--target-source-revision", source_revision]
+    monkeypatch.setattr(sys, "argv", argv)
+
+    assert create_update_recovery.main() == 0
+
+    assert captured["target_image_ref"] == "sha256:target"
+    assert captured["target_source_ref"] == source_ref
+    assert captured["target_source_revision"] == source_revision
+    assert capsys.readouterr().out == "RECOVERY_POINT=/recovery\n"
 
 
 def test_recovery_refuses_writable_source_mount(tmp_path):
