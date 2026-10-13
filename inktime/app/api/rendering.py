@@ -933,6 +933,8 @@ def rollback_release(release_id: str):
         current_app.extensions["inktime_render_service"].rollback(release_id)
     except KeyError:
         abort(404)
+    except ValueError as exc:
+        abort(409, description=str(exc))
     return {"status": "ok"}
 
 

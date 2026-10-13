@@ -4,6 +4,8 @@ from datetime import datetime, timedelta, timezone
 import json
 import logging
 import os
+import re
+import tempfile
 from pathlib import Path
 import time
 from typing import Any
@@ -12,6 +14,7 @@ from inktime.app.db import Database
 from inktime.app.core.logging import log_event
 from inktime.app.domain.rendering import AtomicReleasePublisher, DeviceTestReleaseStore
 from inktime.app.domain.rendering.release import fsync_directory, release_metadata_guard
+from inktime.app.domain.rendering.palette import get_display_profile
 
 
 LOGGER = logging.getLogger("release")
@@ -23,6 +26,97 @@ class ReleaseCoordinator:
     def __init__(self, database: Database, publisher: AtomicReleasePublisher) -> None:
         self.database = database
         self.publisher = publisher
+
+    def _write_rollback_intent(self, payload: dict) -> None:
+        temporary = None
+        try:
+            with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=self.publisher.root,
+                                             prefix=".rollback.", suffix=".tmp", delete=False) as handle:
+                temporary = Path(handle.name)
+                json.dump(payload, handle, separators=(",", ":"))
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, self.publisher.root / ".rollback-intent.json")
+            fsync_directory(self.publisher.root)
+        finally:
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
+
+    def _clear_rollback_intent(self) -> None:
+        (self.publisher.root / ".rollback-intent.json").unlink(missing_ok=True)
+        fsync_directory(self.publisher.root)
+
+    def _recover_rollback_locked(self) -> bool:
+        path = self.publisher.root / ".rollback-intent.json"
+        if not path.exists() and not path.is_symlink():
+            return False
+        if path.is_symlink() or not path.is_file() or path.stat().st_size > 64 * 1024:
+            raise ValueError("RENDER-010 回復紀錄不安全，保留待人工核對")
+        try:
+            intent = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(intent, dict) or not isinstance(intent.get("profile"), str):
+                raise ValueError("invalid rollback intent")
+            profile = intent["profile"]
+            get_display_profile(profile)
+            snapshot = intent["pointers"]
+            if (intent["version"] != 1 or not isinstance(snapshot, dict)
+                    or set(snapshot) != {"latest", f"latest.{profile}"}
+                    or not isinstance(intent["published_at"], str)
+                    or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", intent["release_id"])):
+                raise ValueError("invalid rollback intent")
+            for value in snapshot.values():
+                if value is not None and (not isinstance(value, str)
+                        or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", value)):
+                    raise ValueError("invalid pointer snapshot")
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError("RENDER-010 回復紀錄無效，保留待人工核對") from exc
+        with self.database.session() as connection:
+            row = connection.execute("SELECT status,published_at FROM releases WHERE id=?",
+                                     (intent["release_id"],)).fetchone()
+        if row and row["status"] == "published" and row["published_at"] == intent["published_at"]:
+            manifest = self.publisher.validate(intent["release_id"])
+            if manifest.get("release_kind", "formal") != "formal" or manifest["render_profile"] != profile:
+                raise ValueError("RENDER-010 回復目標不符，保留待人工核對")
+            self.publisher.activate_manifests([manifest])
+        else:
+            self.publisher.restore_pointers(snapshot)
+        self._clear_rollback_intent()
+        return True
+
+    def rollback(self, release_id: str) -> None:
+        with release_metadata_guard(self.publisher.root):
+            self._recover_rollback_locked()
+            with self.database.session() as connection:
+                row = connection.execute("SELECT * FROM releases WHERE id=?", (release_id,)).fetchone()
+            if row is None:
+                raise KeyError(release_id)
+            if row["status"] not in {"published", "superseded"} or row["reconciliation_status"] == "payload_pruned":
+                raise ValueError("RENDER-012 Release 不是可回復的正式版本")
+            manifest = self.publisher.validate(release_id)
+            profile = str(row["render_profile"])
+            if manifest.get("release_kind", "formal") != "formal" or manifest["render_profile"] != profile:
+                raise ValueError("RENDER-010 Manifest 與正式版本資料不符")
+            snapshot = self.publisher.pointer_snapshot([profile])
+            now = datetime.now(timezone.utc).isoformat()
+            self._write_rollback_intent({"version": 1, "release_id": release_id, "profile": profile,
+                                         "published_at": now, "pointers": snapshot})
+            committed = False
+            try:
+                with self.database.transaction(operation="release_rollback") as connection:
+                    connection.execute(
+                        "UPDATE releases SET status='superseded' WHERE render_profile=? "
+                        "AND status='published' AND id<>?", (profile, release_id),
+                    )
+                    connection.execute("UPDATE releases SET status='published',published_at=? WHERE id=?",
+                                       (now, release_id))
+                    self.publisher.activate_manifests([manifest])
+                committed = True
+                self._clear_rollback_intent()
+            except Exception:
+                if not committed:
+                    self.publisher.restore_pointers(snapshot)
+                    self._clear_rollback_intent()
+                raise
 
     def publish(
         self,
@@ -93,6 +187,7 @@ class ReleaseCoordinator:
             raise
 
         with release_metadata_guard(self.publisher.root):
+            self._recover_rollback_locked()
             snapshot = (
                 self.publisher.pointer_snapshot([str(item["render_profile"]) for item in verified])
                 if activate_pointers
@@ -196,6 +291,8 @@ class ReleaseCoordinator:
 
     def reconcile(self) -> dict[str, int]:
         started = time.monotonic()
+        with release_metadata_guard(self.publisher.root):
+            recovered_rollback = self._recover_rollback_locked()
         log_event(
             LOGGER,
             logging.DEBUG,
@@ -210,6 +307,8 @@ class ReleaseCoordinator:
             "pointer_missing": 0,
             "pointer_recovered": 0,
         }
+        if recovered_rollback:
+            diagnostics["rollback_recovered"] = 1
         # Snapshot only after any publication's pointer/DB transaction ends.
         # Hash large payloads outside the short metadata lock, then discard
         # stale evidence if publication, rollback or GC changed the snapshot.

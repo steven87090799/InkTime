@@ -12,6 +12,7 @@ import secrets
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.scrypt import Scrypt
+from cryptography.fernet import Fernet, InvalidToken
 
 from inktime import __version__
 from inktime.app.db import Database
@@ -37,14 +38,16 @@ class RecoveryBundleService:
     def create(self, destination: Path, passphrase: str) -> dict[str, object]:
         if self.session_path.is_symlink() or not self.session_path.is_file():
             raise RecoveryBundleError("RECOVERY-002 找不到安全的 session.key")
+        session_key = self.session_path.read_text(encoding="utf-8").strip()
         with self.database.session() as connection:
+            self._assert_database_key(connection, session_key)
             rows = connection.execute(
                 "SELECT key,encrypted_value,updated_by,updated_at FROM secrets ORDER BY key"
             ).fetchall()
             schema = self.database.schema_version()
         plaintext = json.dumps(
             {
-                "session_key": self.session_path.read_text(encoding="utf-8").strip(),
+                "session_key": session_key,
                 "secrets": [
                     {
                         "key": str(row["key"]),
@@ -57,6 +60,7 @@ class RecoveryBundleService:
             },
             separators=(",", ":"),
         ).encode("utf-8")
+        self._validate_payload(json.loads(plaintext))
         salt, nonce = secrets.token_bytes(16), secrets.token_bytes(12)
         encrypted = AESGCM(self._key(passphrase, salt)).encrypt(
             nonce, plaintext, b"InkTime Recovery Bundle v1"
@@ -117,8 +121,7 @@ class RecoveryBundleService:
 
     def verify(self, bundle: Path, passphrase: str) -> dict[str, object]:
         envelope, payload = self._decrypt(bundle.resolve(), passphrase)
-        if not payload.get("session_key") or not isinstance(payload.get("secrets"), list):
-            raise RecoveryBundleError("RECOVERY-006 Bundle 內容不完整")
+        self._validate_payload(payload)
         return {
             "bundle_version": envelope["bundle_version"],
             "schema_version": envelope["schema_version"],
@@ -127,9 +130,14 @@ class RecoveryBundleService:
 
     def restore(self, bundle: Path, passphrase: str) -> dict[str, object]:
         envelope, payload = self._decrypt(bundle.resolve(), passphrase)  # validation happens before writes
+        self._validate_payload(payload)
         lock = self.database.acquire_runtime_lock(exclusive=True, blocking=False)
-        previous_key = self.session_path.read_bytes() if self.session_path.exists() else None
+        previous_key = None
+        key_replaced = False
         try:
+            with self.database.session() as connection:
+                self._assert_database_key(connection, payload["session_key"])
+            previous_key = self.session_path.read_bytes() if self.session_path.exists() else None
             safe_copy = (
                 self.data_dir
                 / "backups"
@@ -140,6 +148,7 @@ class RecoveryBundleService:
                 safe_copy.write_bytes(previous_key)
                 os.chmod(safe_copy, 0o600)
             with self.database.transaction(operation="secret_recovery_restore") as connection:
+                self._assert_database_key(connection, payload["session_key"])
                 connection.execute("DELETE FROM secrets")
                 connection.executemany(
                     "INSERT INTO secrets(key,encrypted_value,updated_by,updated_at) VALUES (?,?,?,?)",
@@ -157,11 +166,48 @@ class RecoveryBundleService:
                 temporary.write_text(str(payload["session_key"]), encoding="utf-8")
                 os.chmod(temporary, 0o600)
                 os.replace(temporary, self.session_path)
+                key_replaced = True
             return {"schema_version": envelope["schema_version"], "secrets": len(payload["secrets"])}
         except Exception:
-            if previous_key is not None:
+            if key_replaced and previous_key is not None:
                 self.session_path.write_bytes(previous_key)
                 os.chmod(self.session_path, 0o600)
+            elif key_replaced:
+                self.session_path.unlink(missing_ok=True)
             raise
         finally:
             lock.close()
+
+    @staticmethod
+    def _validate_payload(payload: dict) -> None:
+        if (not isinstance(payload, dict) or not isinstance(payload.get("session_key"), str)
+                or not payload["session_key"].strip() or not isinstance(payload.get("secrets"), list)):
+            raise RecoveryBundleError("RECOVERY-006 Bundle 內容不完整")
+        cipher = Fernet(base64.urlsafe_b64encode(sha256(payload["session_key"].encode("utf-8")).digest()))
+        names: set[str] = set()
+        try:
+            for item in payload["secrets"]:
+                if (not isinstance(item, dict) or not isinstance(item.get("key"), str)
+                        or not item["key"] or item["key"] in names
+                        or not isinstance(item.get("updated_at"), str)):
+                    raise ValueError("invalid secret entry")
+                names.add(item["key"])
+                ciphertext = base64.b64decode(item["encrypted_value"], validate=True)
+                cipher.decrypt(ciphertext).decode("utf-8")
+        except (KeyError, TypeError, ValueError, InvalidToken) as exc:
+            raise RecoveryBundleError("RECOVERY-007 Bundle 密鑰與加密設定不配對或內容無效") from exc
+
+    @staticmethod
+    def _assert_database_key(connection, session_key: str) -> None:
+        fingerprint = sha256(b"inktime-master-secret-fingerprint\x00" + session_key.encode("utf-8")).hexdigest()
+        identity = connection.execute(
+            "SELECT value FROM runtime_identity WHERE key='master_secret_fingerprint'"
+        ).fetchone()
+        if identity and not secrets.compare_digest(str(identity[0]), fingerprint):
+            raise RecoveryBundleError("RECOVERY-008 密鑰與目標資料庫身分不符，未還原")
+        cipher = Fernet(base64.urlsafe_b64encode(sha256(session_key.encode("utf-8")).digest()))
+        try:
+            for row in connection.execute("SELECT encrypted_value FROM secrets"):
+                cipher.decrypt(bytes(row[0])).decode("utf-8")
+        except (InvalidToken, UnicodeDecodeError, ValueError, TypeError) as exc:
+            raise RecoveryBundleError("RECOVERY-008 密鑰無法解密資料庫設定，未還原") from exc
