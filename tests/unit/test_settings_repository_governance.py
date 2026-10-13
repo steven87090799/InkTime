@@ -39,3 +39,43 @@ def test_removed_snapshot_metadata_is_safe_and_non_actionable():
     assert metadata["removed"] is True
     assert metadata["runtime_wired"] is False
     assert metadata["device_override_allowed"] is False
+
+
+@pytest.mark.parametrize("action", ["refresh", "invalidate"])
+def test_cache_reader_remains_consistent_during_refresh_or_invalidation(app, action):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
+
+    repository = app.extensions["inktime_settings_repository"]
+    key = "analysis.concurrency"
+    expected = repository.get(key)
+    reader_checked = Event()
+    continue_reader = Event()
+    writer_started = Event()
+
+    class PausedCache(dict):
+        def __contains__(self, lookup):
+            found = super().__contains__(lookup)
+            reader_checked.set()
+            assert continue_reader.wait(5)
+            return found
+
+    repository._runtime_cache = PausedCache(repository._runtime_cache)
+
+    def write():
+        writer_started.set()
+        if action == "refresh":
+            return repository.get("general.timezone")
+        repository.invalidate_runtime_cache()
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        reader = pool.submit(repository.get, key)
+        try:
+            assert reader_checked.wait(5)
+            writer = pool.submit(write)
+            assert writer_started.wait(5)
+        finally:
+            continue_reader.set()
+        assert reader.result(timeout=5) == expected
+        writer.result(timeout=5)
+    assert repository.get(key) == expected

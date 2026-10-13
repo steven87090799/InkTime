@@ -10,6 +10,7 @@ import json
 import math
 import re
 import time
+from threading import RLock
 from typing import Any
 from urllib.parse import urlparse
 from uuid import uuid4
@@ -1448,6 +1449,7 @@ class SettingsRepository:
 
     def __init__(self, database: Database) -> None:
         self.database = database
+        self._runtime_cache_lock = RLock()
         self._runtime_cache: dict[str, Any] = {}
         self._runtime_cache_at = 0.0
 
@@ -1551,8 +1553,7 @@ class SettingsRepository:
                 "WHERE key='analysis.image_max_side' AND value_json='512'",
                 (now,),
             )
-        self._runtime_cache.clear()
-        self._runtime_cache_at = 0.0
+        self.invalidate_runtime_cache()
 
     def all(self, *, redact_sensitive: bool = False):
         with self.database.session() as connection:
@@ -1602,10 +1603,17 @@ class SettingsRepository:
         return self.get_many([key], defaults={key: default})[str(key)]
 
     def invalidate_runtime_cache(self) -> None:
-        self._runtime_cache.clear()
-        self._runtime_cache_at = 0.0
+        with self._runtime_cache_lock:
+            self._runtime_cache.clear()
+            self._runtime_cache_at = 0.0
 
     def get_many(self, keys, *, defaults: dict[str, Any] | None = None, fresh: bool = False) -> dict[str, Any]:
+        # Readers, refreshes and invalidation share one lock, including the DB
+        # read, so an older refresh cannot republish after an invalidation.
+        with self._runtime_cache_lock:
+            return self._get_many_locked(keys, defaults=defaults, fresh=fresh)
+
+    def _get_many_locked(self, keys, *, defaults: dict[str, Any] | None, fresh: bool) -> dict[str, Any]:
         normalized = tuple(dict.fromkeys(str(key) for key in keys))
         if not normalized:
             return {}
