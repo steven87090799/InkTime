@@ -3,6 +3,8 @@ from __future__ import annotations
 from hashlib import sha256
 import json
 from pathlib import Path
+import subprocess
+import sys
 import psutil
 
 from PIL import Image, ImageDraw
@@ -137,7 +139,26 @@ def test_payload_memory_real_image_100_photo_jsonl(tmp_path):
 
 def test_payload_memory_real_image_500_photo_jsonl_bounded(tmp_path):
     """Production-shaped 500-photo gate; no 1 GiB-only regression threshold."""
+    # ru_maxrss is a process lifetime maximum. A fresh process keeps prior
+    # high-resolution image tests from contaminating this operation's peak.
+    # A lightweight launcher also keeps fork/exec startup from carrying the
+    # pytest process's current resident set into the measured worker's peak.
+    launcher = (
+        "import subprocess,sys; "
+        "raise SystemExit(subprocess.run([sys.executable,'-m',"
+        "'tests.unit.test_batch_payload_memory',sys.argv[1]],timeout=150).returncode)"
+    )
+    result = subprocess.run(  # noqa: S603 -- fixed repository module and pytest-owned temporary path
+        [sys.executable, "-c", launcher, str(tmp_path)],
+        cwd=Path(__file__).resolve().parents[2],
+        capture_output=True,
+        text=True,
+        timeout=180,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
 
+
+def _assert_real_image_500_photo_jsonl_bounded(tmp_path: Path) -> None:
     source_root = tmp_path / "photos-500"
     source_root.mkdir()
     source_paths = []
@@ -204,7 +225,10 @@ def test_payload_memory_real_image_500_photo_jsonl_bounded(tmp_path):
     assert all(int(shard["items_count"]) <= 500 for shard in shards)
     assert all(int(shard["bytes"]) <= 150 * 1024 * 1024 for shard in shards)
     assert all(Path(str(shard["path"])).stat().st_mode & 0o777 == 0o600 for shard in shards)
-    assert peak_rss - baseline_rss < 200 * 1024 * 1024
+    assert peak_rss - baseline_rss < 200 * 1024 * 1024, (
+        f"500-photo payload RSS exceeded 200 MiB: baseline={baseline_rss}, "
+        f"peak={peak_rss}, growth={peak_rss - baseline_rss}"
+    )
 
     custom_ids = set()
     line_count = 0
@@ -216,3 +240,7 @@ def test_payload_memory_real_image_500_photo_jsonl_bounded(tmp_path):
             custom_ids.add(json.loads(raw_line)["custom_id"])
     assert line_count == 500
     assert len(custom_ids) == 500
+
+
+if __name__ == "__main__":
+    _assert_real_image_500_photo_jsonl_bounded(Path(sys.argv[1]))

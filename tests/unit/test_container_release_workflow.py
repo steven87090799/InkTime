@@ -1,6 +1,7 @@
 import argparse
 from pathlib import Path
 import re
+import shutil
 import subprocess
 
 import yaml
@@ -197,8 +198,10 @@ def test_nas_recovery_invocation_accepts_original_contract_3_cli():
     image_id = "sha256:" + "b" * 64
     source_ref = "registry.example/inktime:v1.1.0"
     source_revision = "c" * 40
-    result = subprocess.run(
-        ["sh", "-c", 'docker() { printf \'%s\\n\' "$@"; }\n' + command],
+    shell = shutil.which("sh")
+    assert shell, "Hosted NAS recovery invocation contract requires sh"
+    result = subprocess.run(  # noqa: S603 -- repository-owned fragment, fixed fixtures and stubbed docker
+        [shell, "-c", 'docker() { printf \'%s\\n\' "$@"; }\n' + command],
         env={
             "data_path": "/srv/data with spaces",
             "recovery_dir": "/srv/data with spaces/backups/recovery",
@@ -209,7 +212,7 @@ def test_nas_recovery_invocation_accepts_original_contract_3_cli():
             "target_source_revision": source_revision,
             "deployment_contract": "3",
         },
-        check=True, capture_output=True, text=True,
+        check=True, capture_output=True, text=True, timeout=30,
     )
     invocation = result.stdout.splitlines()
     helper_index = invocation.index("scripts/create_update_recovery.py")
