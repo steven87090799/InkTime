@@ -327,7 +327,7 @@
       const currentFile = manifest.files?.[state.frameIndex];
       const currentKey = currentFile ? `${manifest.release_id}:${currentFile.name}:${currentFile.sha256}` : '';
       if (manifest.release_id === state.lastReleaseId && currentKey === state.lastFrameKey) {
-        if (!state.failedFrameKey) setConnection('synced', '已同步');
+        if (!state.failedFrameKey && !state.switching) setConnection('synced', '已同步');
         elements.stats.latency.textContent = `${Math.round(performance.now() - pollStarted)} ms`;
         debug('info', `Release ${manifest.release_id} 沒有變更。`, `unchanged:${manifest.release_id}`);
         return;

@@ -265,6 +265,12 @@ class RenderService:
         if adaptive_requested:
             fit_key = "contain"
         secondary_id = secondary_photo_id
+        if layout_key in {"photo_pair", "photo_pair_caption"} and (not secondary_id or secondary_id == photo_id):
+            layout_key = "photo_info"
+            secondary_id = None
+            effective_orientation = "portrait" if layout_key in PORTRAIT_ONLY_LAYOUTS else orientation_key
+        elif layout_key not in {"photo_pair", "photo_pair_caption", "adaptive_memory"}:
+            secondary_id = None
         if layout_key == "adaptive_memory":
             source_path = safe_join(Path(primary["root_path"]), str(primary["relative_path"]))
             source, _info = self._load_oriented_photo(primary, source_path, target_size=(512, 512))
@@ -1871,7 +1877,23 @@ class RenderService:
                 raise ValueError("RENDER-001 quantity_override 必須介於 1 到 50")
             quantity = quantity_override
         layout_key = str(self.settings.get("render.layout", "photo_info"))
-        source_limit = quantity * 2 if layout_key in {"photo_pair", "photo_pair_caption"} else quantity
+        unique_device_ids = list(dict.fromkeys(str(value) for value in (device_ids or []) if str(value)))
+        effective_devices: dict[str, dict[str, Any]] = {}
+        if unique_device_ids:
+            placeholders = ",".join("?" for _ in unique_device_ids)
+            with self.database.session() as connection:
+                devices = connection.execute(
+                    f"SELECT * FROM devices WHERE enabled=1 AND id IN ({placeholders})",  # noqa: S608 -- bound device IDs
+                    unique_device_ids,
+                ).fetchall()
+            by_id = {str(row["id"]): dict(row) for row in devices}
+            missing = [device_id for device_id in unique_device_ids if device_id not in by_id]
+            if missing:
+                raise ValueError("DISPLAY-004 指定裝置不存在或已停用")
+            effective_devices = {identifier: {**by_id[identifier], **((device_configs or {}).get(identifier) or {})}
+                                 for identifier in unique_device_ids}
+        layouts = [str(device.get("layout_mode") or layout_key) for device in effective_devices.values()] or [layout_key]
+        source_limit = quantity * (2 if any(value in {"photo_pair", "photo_pair_caption"} for value in layouts) else 1)
         selected = photo_ids[:source_limit]
         if not selected:
             selected = self.select_candidates(source_limit)
@@ -1882,32 +1904,22 @@ class RenderService:
         )
         selected = [str(row["id"]) for row in required]
         eligibility_sources = {str(row["id"]): str(row["eligibility_source"]) for row in required}
-        if device_ids:
-            unique_device_ids = list(dict.fromkeys(str(value) for value in device_ids if str(value)))
-            placeholders = ",".join("?" for _ in unique_device_ids)
-            with self.database.session() as connection:
-                devices = connection.execute(
-                    f"SELECT * FROM devices WHERE enabled=1 AND id IN ({placeholders})",  # noqa: S608
-                    unique_device_ids,
-                ).fetchall()
-            by_id = {str(row["id"]): dict(row) for row in devices}
-            missing = [device_id for device_id in unique_device_ids if device_id not in by_id]
-            if missing:
-                raise ValueError("DISPLAY-004 指定裝置不存在或已停用")
+        if unique_device_ids:
             manifests = []
             assignments: dict[str, str] = {}
             release_photo_ids: list[str] = []
             for device_id in unique_device_ids:
-                device = dict((device_configs or {}).get(device_id) or by_id[device_id])
+                device = effective_devices[device_id]
+                effective_layout = str(device.get("layout_mode") or layout_key)
                 profile_key = str(device["panel_profile"])
                 if profile_key not in DISPLAY_PROFILES:
                     raise ValueError("RENDER-003 發布包含不支援的顯示 Profile")
                 device_orientation_metadata: list[dict[str, Any]] = []
-                if layout_key in {"photo_pair", "photo_pair_caption"}:
+                if effective_layout in {"photo_pair", "photo_pair_caption"}:
                     composition_plans = [
                         self.resolve_render_plan(
                             selected[index],
-                            layout=layout_key if index + 1 < len(selected) else "photo_info",
+                            layout=effective_layout,
                             secondary_photo_id=selected[index + 1] if index + 1 < len(selected) else None,
                             device_config=device,
                             profile=profile_key,
@@ -1916,7 +1928,7 @@ class RenderService:
                     ]
                 else:
                     composition_plans = [
-                        self.resolve_render_plan(photo_id, device_config=device, profile=profile_key)
+                        self.resolve_render_plan(photo_id, layout=effective_layout, device_config=device, profile=profile_key)
                         for photo_id in selected[:quantity]
                     ]
                 for plan in composition_plans:

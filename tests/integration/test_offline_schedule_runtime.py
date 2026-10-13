@@ -29,7 +29,7 @@ def _device_dates() -> tuple[str, str]:
 
 def test_dst_collision_preparation_keeps_release_order_and_unique_manifest_epochs(app):
     device_id, _ = app.extensions["inktime_device_repository"].create(
-        "DST", timezone="America/New_York", delivery_mode="inktime_offline_schedule",
+        "DST", timezone_name="America/New_York", delivery_mode="inktime_offline_schedule",
         offline_prefetch_allowed=True, schedule_times=["02:30", "03:30"], minimum_schedule_gap_minutes=30,
     )
     releases = [_release(app, f"dst-{index}")["release_id"] for index in range(2)]
