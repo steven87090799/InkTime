@@ -869,13 +869,13 @@ def update_photo_crop(photo_id: str):
         abort(400, description="RENDER-005 裁切模式不合法")
     try:
         if mode == "auto":
-            _repository().update_crop(photo_id, manual_x=None, manual_y=None)
+            crop = _repository().update_crop(photo_id, manual_x=None, manual_y=None)
         else:
             manual_x = payload.get("x")
             manual_y = payload.get("y")
             if manual_x is None or manual_y is None:
                 raise ValueError("手動裁切必須提供 X 與 Y")
-            _repository().update_crop(
+            crop = _repository().update_crop(
                 photo_id,
                 manual_x=float(manual_x),
                 manual_y=float(manual_y),
@@ -884,7 +884,7 @@ def update_photo_crop(photo_id: str):
         abort(400, description=f"RENDER-005 {exc}")
     except KeyError:
         abort(404)
-    return {"status": "ok", "mode": mode}
+    return {"status": "ok", "mode": mode, "crop": crop}
 
 
 @bp.get("/api/v1/photos/<photo_id>/image")

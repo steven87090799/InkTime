@@ -78,6 +78,52 @@ def _review_draft_and_failure_regression(page, base):
     page.unroute("**/api/v1/review/photos**", review_route)
 
 
+def _crop_state_regression(page, base):
+    # Execute the production controller with synthetic controls and deferred HTTP replies.
+    fixture = """<select id="photo"><option value="a" data-focus-x=".25" data-focus-y=".25" data-auto-x="0" data-auto-y="1">A</option>
+      <option value="b" data-focus-x=".75" data-focus-y=".75" data-auto-x=".75" data-auto-y=".75">B</option></select>
+      <input id="x" type="range" min="0" max="100"><input id="y" type="range" min="0" max="100">
+      <button id="save">save</button><button id="auto">auto</button><p id="status"></p>
+      <script src="/static/crop-editor.js"></script><script>
+      window.pendingCrop=[];window.inktimeFetch=(url,options)=>new Promise((resolve,reject)=>pendingCrop.push({url,options,resolve,reject}));
+      window.inktimeDecodeJson=response=>response.json();window.inktimeSetStatus=(node,text)=>node.textContent=text;
+      const photo=document.getElementById('photo'),x=document.getElementById('x'),y=document.getElementById('y');
+      const refresh=reset=>{if(reset){x.value=Math.round(Number(photo.selectedOptions[0].dataset.focusX)*100);y.value=Math.round(Number(photo.selectedOptions[0].dataset.focusY)*100);}};
+      photo.onchange=()=>refresh(true);refresh(true);
+      inktimeBindCropEditor({photoSelect:photo,x,y,saveButton:document.getElementById('save'),autoButton:document.getElementById('auto'),status:document.getElementById('status'),refresh});
+      </script>"""
+    page.route("**/__crop_fixture", lambda route: route.fulfill(content_type="text/html", body=fixture))
+    page.goto(base + "/__crop_fixture")
+    page.locator('#x').press('End')
+    page.locator('#y').press('End')
+    page.locator('#save').click()
+    page.locator('#photo').select_option('b')
+    page.evaluate("pendingCrop.shift().resolve(new Response(JSON.stringify({crop:{photo_id:'a',focus_x:1,focus_y:1,auto_x:0,auto_y:1,manual:true}})))")
+    expect(page.locator('#save')).to_be_enabled()
+    expect(page.locator('#x')).to_have_value('75')
+    page.locator('#photo').select_option('a')
+    expect(page.locator('#x')).to_have_value('100')
+    page.locator('#save').click()
+    assert page.evaluate("JSON.parse(pendingCrop[0].options.body).x") == 1
+    page.locator('#x').press('Home')  # A newer unsaved slider edit while the request is pending.
+    page.evaluate("pendingCrop.shift().resolve(new Response(JSON.stringify({crop:{photo_id:'a',focus_x:1,focus_y:1,manual:true}})))")
+    expect(page.locator('#save')).to_be_enabled()
+    expect(page.locator('#x')).to_have_value('0')
+    page.locator('#auto').click()
+    page.locator('#photo').select_option('b')
+    page.evaluate("pendingCrop.shift().resolve(new Response(JSON.stringify({crop:{photo_id:'a',focus_x:0,focus_y:1,auto_x:0,auto_y:1,manual:false}})))")
+    expect(page.locator('#auto')).to_be_enabled()
+    expect(page.locator('#x')).to_have_value('75')
+    page.locator('#photo').select_option('a')
+    expect(page.locator('#x')).to_have_value('0')
+    expect(page.locator('#y')).to_have_value('100')
+    page.locator('#save').click()
+    page.evaluate("pendingCrop.shift().reject(new Error('synthetic network failure'))")
+    expect(page.locator('#status')).to_contain_text('請查核此照片的儲存結果')
+    expect(page.locator('#save')).to_be_enabled()
+    expect(page.locator('#auto')).to_be_enabled()
+
+
 @pytest.mark.skipif(not os.environ.get("INKTIME_E2E_URL"), reason="只在 E2E 環境執行")
 def test_first_setup_login_and_primary_console_pages():
     base = os.environ["INKTIME_E2E_URL"]
@@ -167,5 +213,6 @@ def test_first_setup_login_and_primary_console_pages():
         expect(concurrency).to_have_value("3")
         expect(page.locator('#dirty-count')).to_have_text("0")
         _review_draft_and_failure_regression(page, base)
+        _crop_state_regression(page, base)
         assert csp_violations == []
         browser.close()

@@ -2004,7 +2004,7 @@ class PhotoRepository:
             "never_display": bool(row["never_display"]),
         }
 
-    def update_crop(self, photo_id: str, *, manual_x: float | None, manual_y: float | None) -> None:
+    def update_crop(self, photo_id: str, *, manual_x: float | None, manual_y: float | None) -> dict[str, Any]:
         if (manual_x is None) != (manual_y is None):
             raise ValueError("裁切 X 與 Y 必須同時設定或同時清除")
         if (
@@ -2014,13 +2014,19 @@ class PhotoRepository:
         ):
             raise ValueError("裁切位置必須介於 0 到 1")
         now = datetime.now(timezone.utc).isoformat()
-        with self.database.session() as connection:
+        with self.database.transaction(operation="photo_crop_update") as connection:
             cursor = connection.execute(
                 "UPDATE photos SET crop_manual_x=?,crop_manual_y=?,updated_at=? WHERE id=?",
                 (manual_x, manual_y, now, photo_id),
             )
             if cursor.rowcount != 1:
                 raise KeyError(photo_id)
+            row = connection.execute("SELECT crop_manual_x,crop_manual_y,crop_focus_x,crop_focus_y FROM photos WHERE id=?", (photo_id,)).fetchone()
+            auto_x = float(row["crop_focus_x"]) if row["crop_focus_x"] is not None else 0.5
+            auto_y = float(row["crop_focus_y"]) if row["crop_focus_y"] is not None else 0.5
+            return {"photo_id": photo_id, "focus_x": manual_x if manual_x is not None else auto_x,
+                    "focus_y": manual_y if manual_y is not None else auto_y, "auto_x": auto_x, "auto_y": auto_y,
+                    "manual": manual_x is not None}
 
     def update_crop_analysis(self, photo_id: str, analysis) -> None:
         now = datetime.now(timezone.utc).isoformat()
