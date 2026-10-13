@@ -2443,6 +2443,12 @@ MIGRATIONS = (
             "ALTER TABLE rollout_stages ADD COLUMN ack_timeout_minutes INTEGER NOT NULL DEFAULT 1440 CHECK(ack_timeout_minutes BETWEEN 1 AND 10080)",
         ),
     ),
+    Migration(
+        65,
+        "保護渲染上傳暫存與可續行工作輸入",
+        ("CREATE TABLE render_input_leases(token TEXT PRIMARY KEY,job_id TEXT REFERENCES jobs(id) ON DELETE SET NULL,"
+         "size_bytes INTEGER NOT NULL CHECK(size_bytes>=0),staged INTEGER NOT NULL DEFAULT 1 CHECK(staged IN (0,1)),created_at TEXT NOT NULL)",),
+    ),
 )
 
 

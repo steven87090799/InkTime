@@ -11,7 +11,7 @@ from tests.unit.test_resilience_repository import _seed_old_queue_item, _seed_qu
 
 def test_upgrade_preserves_device_identity_queue_history_and_children(tmp_path, monkeypatch):
     full = migrations.MIGRATIONS
-    monkeypatch.setattr(migrations, "MIGRATIONS", full[:-1])
+    monkeypatch.setattr(migrations, "MIGRATIONS", tuple(m for m in full if m.version <= 63))
     database = Database(tmp_path / "v63.db")
     migrations.migrate(database)
     devices = DeviceRepository(database, "dummy-pepper")
@@ -21,7 +21,7 @@ def test_upgrade_preserves_device_identity_queue_history_and_children(tmp_path, 
     _seed_queue_event(database, item, device_id, "2020-01-01T00:00:00+00:00", "v63")
     before = dict(devices.get(device_id))
     monkeypatch.setattr(migrations, "MIGRATIONS", full)
-    assert migrations.migrate(database) == [64]
+    assert migrations.migrate(database) == [64, 65]
     assert dict(devices.get(device_id)) == before
     with database.session() as connection:
         assert connection.execute("SELECT COUNT(*) FROM device_content_queue_events WHERE queue_item_id=?", (item,)).fetchone()[0] == 1
