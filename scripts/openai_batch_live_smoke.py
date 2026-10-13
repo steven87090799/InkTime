@@ -15,6 +15,7 @@ from uuid import uuid4
 from inktime.app.domain.analysis.schema import validate_model_response
 from inktime.app.domain.photos import ThumbnailCache
 from inktime.app.providers.openai_compatible import OpenAICompatibleProvider
+from inktime.app.providers import openai_compatible as provider_contract
 
 TERMINAL = {"completed", "failed", "expired", "cancelled"}
 ENDPOINT = "https://api.openai.com/v1"
@@ -83,16 +84,11 @@ def _validate_outputs(remote: dict, expected: list[str], files: list[Path]) -> d
                 if line.get("error") or response.get("status_code") != 200:
                     raise ValueError("HTTP error")
                 body = response["body"]
-                tokens = body.get("usage") or {}
-                details = tokens.get("prompt_tokens_details") or tokens.get("input_tokens_details") or {}
-                completion = tokens.get("completion_tokens_details") or tokens.get("output_tokens_details") or {}
-                for key, amount in (
-                    ("input_tokens", tokens.get("prompt_tokens", tokens.get("input_tokens", 0))),
-                    ("cached_tokens", details.get("cached_tokens", 0)),
-                    ("output_tokens", tokens.get("completion_tokens", tokens.get("output_tokens", 0))),
-                    ("reasoning_tokens", completion.get("reasoning_tokens", 0)),
-                ):
-                    usage[key] += max(0, int(amount or 0))
+                parsed_usage = provider_contract.OpenAICompatibleProvider._usage(body)
+                if not parsed_usage.tokens_reported:
+                    raise ValueError("Missing or invalid usage evidence")
+                for key in usage:
+                    usage[key] += getattr(parsed_usage, key)
                 choice = body["choices"][0]
                 message = choice["message"]
                 if choice.get("finish_reason") != "stop" or message.get("refusal"):

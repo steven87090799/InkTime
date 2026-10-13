@@ -105,6 +105,26 @@ def setup_smoke(tmp_path, monkeypatch):
     return tmp_path / "receipt.json"
 
 
+@pytest.mark.parametrize("tokens,accepted", [
+    ({"input_tokens": 100, "output_tokens": 200, "input_tokens_details": {"cached_tokens": 12},
+      "output_tokens_details": {"reasoning_tokens": 3}}, True),
+    ({"prompt_tokens": 100, "completion_tokens": 200}, True),
+    ({}, False),
+    ({"prompt_tokens": True, "completion_tokens": 200}, False),
+    ({"prompt_tokens": 100, "completion_tokens": 200, "prompt_tokens_details": {"cached_tokens": 101}}, False),
+])
+def test_smoke_usage_matches_provider_parser_and_requires_complete_evidence(tmp_path, tokens, accepted):
+    line = _line()
+    line["response"]["body"]["usage"] = tokens
+    path = tmp_path / "output.jsonl"
+    path.write_text(json.dumps(line), encoding="utf-8")
+    summary = smoke._validate_outputs({"status": "completed", "request_counts": {"total": 1, "completed": 1, "failed": 0}}, ["test"], [path])
+    assert summary["accepted"] is accepted
+    if accepted and "input_tokens_details" in tokens:
+        assert summary["usage"]["cached_tokens"] == 12
+        assert summary["usage"]["reasoning_tokens"] == 3
+
+
 def test_pending_resume_does_not_upload_or_create_again_and_only_terminal_results_are_cleaned(setup_smoke, monkeypatch):
     path = setup_smoke
     provider = FakeProvider(status="in_progress")
