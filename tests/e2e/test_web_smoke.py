@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from hashlib import sha256
 from urllib.parse import parse_qs, urlparse
 from uuid import UUID
 
@@ -113,6 +114,7 @@ def _crop_state_regression(page, base):
     page.locator('#photo').select_option('b')
     page.evaluate("pendingCrop.shift().resolve(new Response(JSON.stringify({crop:{photo_id:'a',focus_x:0,focus_y:1,auto_x:0,auto_y:1,manual:false}})))")
     expect(page.locator('#auto')).to_be_enabled()
+
     expect(page.locator('#x')).to_have_value('75')
     page.locator('#photo').select_option('a')
     expect(page.locator('#x')).to_have_value('0')
@@ -122,6 +124,74 @@ def _crop_state_regression(page, base):
     expect(page.locator('#status')).to_contain_text('請查核此照片的儲存結果')
     expect(page.locator('#save')).to_be_enabled()
     expect(page.locator('#auto')).to_be_enabled()
+
+
+def _action_failure_regression(page, base):
+    failure = {"invalid_json": False, "calls": 0}
+    def fail(route):
+        failure["calls"] += 1
+        if failure["invalid_json"]:
+            route.fulfill(status=200, content_type="application/json", body="invalid-json")
+        else:
+            route.abort()
+    page.route("**/api/v1/maintenance/virtual-display", fail)
+    page.goto(base + "/maintenance")
+    button = page.locator('#publish-virtual')
+    button.click()
+    expect(page.locator('#virtual-status')).to_contain_text('建立結果尚未確認')
+    expect(button).to_be_enabled()
+    failure["invalid_json"] = True
+    button.click()
+    expect(button).to_be_enabled()
+    expect(page.locator('#virtual-status')).to_contain_text('避免重複建立')
+    assert failure["calls"] == 2  # Only the two explicit clicks; no automatic resend.
+    page.evaluate("""async () => {
+      const button=document.createElement('button'),status=document.createElement('p');
+      button.id='error-fixture-action';status.id='error-fixture-status';document.body.append(button,status);
+      await inktimeRunAction({button,status},async()=>{throw Error('synthetic resolve failure');});
+    }""")
+    expect(page.locator('#error-fixture-action')).to_be_enabled()
+    expect(page.locator('#error-fixture-status')).to_contain_text('操作結果尚未確認')
+    page.unroute("**/api/v1/maintenance/virtual-display", fail)
+
+
+def _virtual_display_failure_regression(page, base):
+    payloads = {"frame-1.bin": b"\x1b", "frame-2.bin": b"\xe4"}
+    state = {"fail_second": True, "files": []}
+    manifest = {"release_id": "virtual-fixture", "render_profile": "safe_4c", "width": 2, "height": 2,
+                "pixel_format": "2bpp", "created_at": "2026-10-13T00:00:00+00:00", "dither": "none",
+                "download_base_url": "/__virtual-payload/", "palette": [
+                    {"code": 0, "name": "black", "rgb": [0, 0, 0]}, {"code": 1, "name": "white", "rgb": [255, 255, 255]},
+                    {"code": 2, "name": "yellow", "rgb": [255, 255, 0]}, {"code": 3, "name": "red", "rgb": [255, 0, 0]},
+                ], "files": [{"name": name, "size": len(data), "sha256": sha256(data).hexdigest()} for name, data in payloads.items()]}
+    page.route("**/api/v1/virtual-display/manifest?**", lambda route: route.fulfill(json=manifest))
+    def payload(route):
+        name = urlparse(route.request.url).path.rsplit('/', 1)[-1]
+        state["files"].append(name)
+        if name == "frame-2.bin" and state["fail_second"]:
+            route.fulfill(status=503, content_type="application/json", json={"message": "synthetic payload failure"})
+        else:
+            data = payloads[name]
+            route.fulfill(content_type="application/octet-stream", body=data, headers={"X-InkTime-Payload-SHA256": sha256(data).hexdigest()})
+    page.route("**/__virtual-payload/**", payload)
+    page.goto(base + "/virtual-display")
+    expect(page.locator('#stat-frames')).to_have_text('1')
+    pixels = page.locator('#display-canvas').evaluate("canvas => Array.from(canvas.getContext('2d').getImageData(0,0,2,2).data)")
+    page.locator('#next-frame').click()
+    expect(page.locator('#connection-state')).to_have_text('切換失敗')
+    expect(page.locator('#frame-control-status')).to_have_text('第 1 / 2 張')
+    expect(page.locator('#meta-file')).to_have_text('frame-1.bin')
+    assert page.locator('#display-canvas').evaluate("canvas => Array.from(canvas.getContext('2d').getImageData(0,0,2,2).data)") == pixels
+    polls = int(page.locator('#stat-polls').inner_text())
+    page.wait_for_function("previous => Number(document.getElementById('stat-polls').textContent)>previous", arg=polls, timeout=15000)
+    expect(page.locator('#connection-state')).to_have_text('切換失敗')
+    state["fail_second"] = False
+    page.locator('#next-frame').click()
+    expect(page.locator('#stat-frames')).to_have_text('2')
+    expect(page.locator('#frame-control-status')).to_have_text('第 2 / 2 張')
+    expect(page.locator('#meta-file')).to_have_text('frame-2.bin')
+    assert state["files"] == ['frame-1.bin', 'frame-2.bin', 'frame-2.bin']
+    assert page.locator('#display-canvas').evaluate("canvas => Array.from(canvas.getContext('2d').getImageData(0,0,2,2).data)") != pixels
 
 
 @pytest.mark.skipif(not os.environ.get("INKTIME_E2E_URL"), reason="只在 E2E 環境執行")
@@ -214,5 +284,7 @@ def test_first_setup_login_and_primary_console_pages():
         expect(page.locator('#dirty-count')).to_have_text("0")
         _review_draft_and_failure_regression(page, base)
         _crop_state_regression(page, base)
+        _action_failure_regression(page, base)
+        _virtual_display_failure_regression(page, base)
         assert csp_violations == []
         browser.close()

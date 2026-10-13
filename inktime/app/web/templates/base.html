@@ -177,6 +177,17 @@
       node.dataset.statusKind = kind;
       node.setAttribute('role', kind === 'error' ? 'alert' : 'status');
     };
+    window.inktimeRunAction = async ({button, status, unknownMessage = '操作結果尚未確認；請先查核，再決定是否重試。'}, action) => {
+      if (button?.disabled) return;
+      if (button) button.disabled = true;
+      try { return await action(); }
+      catch (error) {
+        const message = String(error.message || '連線或回覆解析失敗').replace(/Failed to fetch|NetworkError/gi, '連線中斷');
+        window.inktimeSetStatus(status, `操作未完成：${message}；${unknownMessage}`, 'error');
+      } finally {
+        if (button) button.disabled = false;
+      }
+    };
     window.inktimeFormJson = (form, schema = {}) => {
       const data = new FormData(form), result = {};
       const convert = (name, raw, type) => {
