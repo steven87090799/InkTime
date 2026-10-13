@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from PIL import Image
 
 from inktime.app.domain.analysis.plan import fingerprint
@@ -380,6 +382,38 @@ def test_drain_worker_exits_after_current_queue(app):
     app.extensions["inktime_job_service"].start(job_id)
     assert WorkerRunner(app).run_drain() == 1
     assert repository.get(job_id)["status"] == "completed"
+
+
+@pytest.mark.parametrize("raw_settings", ['{"concurrency": {}}', '[]', 'null', '{broken'])
+def test_invalid_persisted_settings_do_not_starve_healthy_work(app, raw_settings):
+    repository = app.extensions["inktime_job_repository"]
+    bad = repository.create_maintenance(
+        kind="cleanup", name="invalid legacy settings", settings={"concurrency": {}}, created_by="tester"
+    )
+    good = repository.create_maintenance(kind="cleanup", name="healthy", settings={}, created_by="tester")
+    for job_id in (bad, good):
+        app.extensions["inktime_job_service"].start(job_id)
+    with app.extensions["inktime_database"].transaction() as connection:
+        connection.execute("UPDATE jobs SET settings_json=? WHERE id=?", (raw_settings, bad))
+    assert WorkerRunner(app).run_once() == 1
+    assert repository.get(bad)["status"] == "failed"
+    assert repository.get(bad)["completed_at"]
+    assert repository.get(bad)["failed_items"] == 1
+    assert repository.list_items(bad)[0]["error_code"] == "JOB-001"
+    assert repository.get(good)["status"] == "completed"
+    assert WorkerRunner(app).run_once() == 0
+
+
+def test_invalid_settings_quarantine_preserves_running_item_ownership(app):
+    repository = app.extensions["inktime_job_repository"]
+    job_id = repository.create_maintenance(kind="cleanup", name="owned", settings={}, created_by="tester")
+    app.extensions["inktime_job_service"].start(job_id)
+    item = repository.claim(job_id, "existing-worker", 1)[0]
+    assert repository.fail_invalid_settings(job_id) is False
+    retained = repository.list_items(job_id)[0]
+    assert retained["id"] == item["id"]
+    assert retained["worker_id"] == "existing-worker"
+    assert retained["status"] == "running"
 
 
 def test_scan_requested_by_ui_runs_as_background_job(client, app, tmp_path):

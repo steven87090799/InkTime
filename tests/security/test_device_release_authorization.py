@@ -13,9 +13,9 @@ from inktime.app.repositories.resilience import ResilienceRepository
 from inktime.app.services.device_releases import payload_entry_from_manifest
 
 
-def _publish(app, name: str, *, activate: bool) -> dict:
+def _publish(app, name: str, *, activate: bool, count: int = 1) -> dict:
     manifest = app.extensions["inktime_release_publisher"].publish(
-        [(name, Image.new("RGB", (480, 800), "white"))],
+        [(name if count == 1 else f"{name}-{index}", Image.new("RGB", (480, 800), "white")) for index in range(count)],
         activate=activate,
     )
     with app.extensions["inktime_database"].transaction() as connection:
@@ -45,6 +45,62 @@ def _publish(app, name: str, *, activate: bool) -> dict:
 
 def _headers(token: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
+
+
+@pytest.mark.parametrize("count", [1, 2, 5])
+def test_formal_release_serves_each_manifest_payload_but_queue_stays_single_frame(client, app, count):
+    from hashlib import sha256
+    from inktime.app.services.photopainter_stock import StockCompatibilityService
+
+    device_id, token = app.extensions["inktime_device_repository"].create("multi-frame")
+    release = _publish(app, "multi", activate=True, count=count)
+    files = [entry for entry in release["files"] if entry["name"].endswith(".bin")]
+    assert len(files) == count
+    for entry in files:
+        response = client.get(
+            f"/api/device/v1/releases/{release['release_id']}/files/{entry['name']}", headers=_headers(token)
+        )
+        assert response.status_code == 200
+        assert len(response.data) == entry["size"]
+        assert sha256(response.data).hexdigest() == entry["sha256"]
+    missing = client.get(
+        f"/api/device/v1/releases/{release['release_id']}/files/unlisted.bin", headers=_headers(token)
+    )
+    assert missing.status_code == 404
+    service = app.extensions["inktime_device_release_service"]
+    stock = StockCompatibilityService(service)
+    _payload, first = stock.payload_for_release(
+        device_id=device_id, profile_key="safe_4c", release_id=release["release_id"]
+    )
+    assert first["file_name"] == files[0]["name"]
+    _payload, selected = stock.payload_for_release(
+        device_id=device_id, profile_key="safe_4c", release_id=release["release_id"],
+        file_name=files[-1]["name"],
+    )
+    assert selected["file_name"] == files[-1]["name"]
+    if count > 1:
+        item = _queue_release(app, device_id, release)
+        assert _queue_manifest(client, token)["items"] == []
+        response = client.get(
+            f"/api/device/v1/queue/items/{item['id']}/files/{files[0]['name']}", headers=_headers(token)
+        )
+        assert response.status_code == 409
+    path = app.config["INKTIME_RELEASE_DIR"] / release["release_id"] / files[-1]["name"]
+    path.write_bytes(b"corrupt")
+    response = client.get(
+        f"/api/device/v1/releases/{release['release_id']}/files/{files[-1]['name']}", headers=_headers(token)
+    )
+    assert response.status_code == 409
+
+
+def test_multi_payload_manifest_rejects_duplicate_names_before_selection():
+    from inktime.app.services.device_releases import payload_entries_from_manifest
+
+    entry = {"name": "frame.bin", "size": 10, "sha256": "a" * 64}
+    with pytest.raises(ValueError, match="不可重複"):
+        payload_entries_from_manifest({"files": [entry, entry]})
+    with pytest.raises(ValueError, match="檔名不合法"):
+        payload_entries_from_manifest({"files": [entry, {**entry, "name": "../other.bin"}]})
 
 
 def _file_url(manifest: dict) -> str:

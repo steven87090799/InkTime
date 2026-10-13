@@ -43,12 +43,13 @@ _STOCK_MARKER_DIRECTORIES = (
 _LOGGER = logging.getLogger(__name__)
 
 
-def payload_entry_from_manifest(manifest: Mapping[str, Any]) -> dict[str, Any]:
-    """Return the single safe firmware payload described by a release manifest."""
+def payload_entries_from_manifest(manifest: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Validate every entry before selecting any firmware payload."""
     files = manifest.get("files")
     if not isinstance(files, list):
         raise ValueError("Release Manifest files 必須是陣列")
     candidates: list[dict[str, Any]] = []
+    names: set[str] = set()
     for raw_entry in files:
         if not isinstance(raw_entry, dict):
             raise ValueError("Release Manifest file entry 必須是物件")
@@ -65,6 +66,9 @@ def payload_entry_from_manifest(manifest: Mapping[str, Any]) -> dict[str, Any]:
             or "\\" in name
         ):
             raise ValueError("Release Payload 檔名不合法")
+        if name in names:
+            raise ValueError("Release Manifest 檔名不可重複")
+        names.add(name)
         if not name.lower().endswith(".bin"):
             continue
         if type(size) is not int or not 1 <= size <= MAX_DEVICE_PAYLOAD_BYTES:
@@ -72,6 +76,14 @@ def payload_entry_from_manifest(manifest: Mapping[str, Any]) -> dict[str, Any]:
         if not isinstance(digest, str) or _PAYLOAD_SHA256.fullmatch(digest) is None:
             raise ValueError("Release Payload SHA-256 不合法")
         candidates.append({**raw_entry, "name": name, "size": size, "sha256": digest.lower()})
+    if not candidates:
+        raise ValueError("Release Manifest 必須包含合法 .bin Payload")
+    return candidates
+
+
+def payload_entry_from_manifest(manifest: Mapping[str, Any]) -> dict[str, Any]:
+    """Keep Queue, offline slots and test releases on the single-frame contract."""
+    candidates = payload_entries_from_manifest(manifest)
     if len(candidates) != 1:
         raise ValueError("Release Manifest 必須包含一個合法 .bin Payload")
     return candidates[0]
@@ -919,6 +931,8 @@ class DeviceReleaseService:
         self,
         authorization: DeviceReleaseAuthorization,
         filename: str,
+        *,
+        allow_multiple: bool = False,
     ) -> tuple[bytes, dict[str, Any]]:
         if (
             not authorization.allowed
@@ -926,7 +940,9 @@ class DeviceReleaseService:
             or authorization.release_dir_identity is None
         ):
             raise PermissionError("Release 未授權")
-        entry = self.payload_entry_for_authorization(authorization)
+        entry = self.payload_entry_for_authorization(
+            authorization, filename=filename, allow_multiple=allow_multiple
+        )
         if filename != entry["name"]:
             raise FileNotFoundError(filename)
         try:
@@ -950,6 +966,9 @@ class DeviceReleaseService:
     def payload_entry_for_authorization(
         self,
         authorization: DeviceReleaseAuthorization,
+        *,
+        filename: str | None = None,
+        allow_multiple: bool = False,
     ) -> dict[str, Any]:
         """Validate directory identity and payload metadata without pathname reads."""
         if not authorization.allowed or authorization.release_dir_identity is None:
@@ -957,4 +976,14 @@ class DeviceReleaseService:
         with self._open_release_directory(authorization.release_id) as (_release_fd, identity):
             if identity != authorization.release_dir_identity:
                 raise UnsafePathError("Release 目錄在授權後已被替換")
-        return payload_entry_from_manifest(authorization.manifest or {})
+        manifest = authorization.manifest or {}
+        if allow_multiple and authorization.source in {"device_assignment", "profile_latest"}:
+            entries = payload_entries_from_manifest(manifest)
+        else:
+            entries = [payload_entry_from_manifest(manifest)]
+        if filename is None:
+            return entries[0]
+        for entry in entries:
+            if entry["name"] == filename:
+                return entry
+        raise FileNotFoundError(filename)

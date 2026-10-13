@@ -125,7 +125,6 @@ class ProviderService:
         """Return enabled, configured Vision routes without making paid/network calls."""
 
         analysis_model = str(self.settings.get("model.analysis_model", "gpt-4o") or "").strip()
-        repair_model = str(self.settings.get("model.repair_model", "gpt-4o-mini") or "").strip()
         usable_ids: set[str] = set()
         for row in self.repository.list():
             if not (
@@ -140,13 +139,14 @@ class ProviderService:
                 continue
             try:
                 configured_model = str(row.get("model") or "").strip()
-                for model in (configured_model,) if configured_model else (analysis_model, repair_model):
-                    validate_model_id(
-                        str(row.get("kind") or "openai_compatible"),
-                        model,
-                        base_url=str(row.get("base_url") or ""),
-                        required=True,
-                    )
+                # Normal analysis has no paid text-repair stage. Retired repair
+                # settings must not disable an otherwise usable Vision route.
+                validate_model_id(
+                    str(row.get("kind") or "openai_compatible"),
+                    configured_model or analysis_model,
+                    base_url=str(row.get("base_url") or ""),
+                    required=True,
+                )
             except ValueError:
                 continue
             usable_ids.add(str(row["id"]))

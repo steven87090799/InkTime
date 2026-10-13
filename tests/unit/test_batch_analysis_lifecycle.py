@@ -216,6 +216,10 @@ def _prepare_photos(app, tmp_path, count=3):
 
 
 def _wire_fake(app, fake):
+    # Batch lifecycle fixtures explicitly opt into manual paid analysis.
+    app.extensions["inktime_settings_repository"].update(
+        "analysis.execution_mode", "local_with_manual_ai", changed_by="test", source_ip="127.0.0.1"
+    )
     service = app.extensions["inktime_batch_analysis_service"]
     providers = app.extensions["inktime_provider_repository"]
     provider_service = app.extensions["inktime_provider_service"]
@@ -259,6 +263,96 @@ def _wire_fake(app, fake):
     provider_service.usable_route_snapshot = lambda: provider_snapshot
     provider_service.build_router = lambda *args, **kwargs: fake
     return service
+
+
+@pytest.mark.parametrize("mode", ["disabled", "local_only"])
+def test_batch_disabled_modes_reject_before_preparation_or_network(app, monkeypatch, mode):
+    fake = FakeBatchProvider()
+    service = _wire_fake(app, fake)
+    app.extensions["inktime_settings_repository"].update(
+        "analysis.execution_mode", mode, changed_by="test", source_ip="127.0.0.1"
+    )
+    monkeypatch.setattr(service, "_plan", lambda: pytest.fail("must reject before plan or DB writes"))
+    with pytest.raises(BatchLifecycleError) as error:
+        service.submit()
+    assert error.value.code == "BATCH-EXECUTION-MODE"
+    assert fake.batch_counter == 0
+    assert fake.custom_ids == []
+    assert service.batches.list(limit=100) == []
+
+
+@pytest.mark.parametrize("mode", ["local_with_manual_ai", "automatic_ai"])
+def test_batch_allowed_modes_submit_once(app, tmp_path, mode):
+    _prepare_photos(app, tmp_path, count=1)
+    fake = FakeBatchProvider()
+    service = _wire_fake(app, fake)
+    app.extensions["inktime_settings_repository"].update(
+        "analysis.execution_mode", mode, changed_by="test", source_ip="127.0.0.1"
+    )
+    result = service.submit(scope="sample", sample_count=1)
+    assert len(result["batch_ids"]) == 1
+    assert fake.batch_counter == 1
+
+
+@pytest.mark.parametrize("boundary", ["prepared", "uploaded"])
+def test_batch_mode_changed_by_other_process_blocks_next_paid_side_effect(app, tmp_path, monkeypatch, boundary):
+    _prepare_photos(app, tmp_path, count=1)
+    fake = FakeBatchProvider()
+    service = _wire_fake(app, fake)
+    settings = app.extensions["inktime_settings_repository"]
+    settings.get_many(["analysis.execution_mode", "analysis.ai_mode", "analysis.prefilter_enabled"])
+
+    def disable_without_invalidating_local_cache():
+        with app.extensions["inktime_database"].transaction() as connection:
+            connection.execute(
+                "UPDATE settings SET value_json=? WHERE key='analysis.execution_mode'", ('"disabled"',)
+            )
+
+    if boundary == "prepared":
+        original = service._prepare_shards
+
+        def prepare_then_disable(*args, **kwargs):
+            result = original(*args, **kwargs)
+            disable_without_invalidating_local_cache()
+            return result
+
+        monkeypatch.setattr(service, "_prepare_shards", prepare_then_disable)
+    else:
+        original_upload = fake.upload_batch_file
+
+        def upload_then_disable(path):
+            result = original_upload(path)
+            disable_without_invalidating_local_cache()
+            return result
+
+        monkeypatch.setattr(fake, "upload_batch_file", upload_then_disable)
+    result = service.submit(scope="sample", sample_count=1)
+    assert result["batch_ids"] == []
+    assert fake.batch_counter == 0
+    batch = service.batches.get(result["prepared_batch_ids"][0])
+    assert batch["last_error_code"] == "BATCH-EXECUTION-MODE"
+    if boundary == "prepared":
+        assert fake.custom_ids == []
+    else:
+        assert batch["input_file_id"] == "file-input"
+        assert batch["status"] == "cleanup_pending"
+
+
+def test_batch_disabled_mode_still_imports_and_cleans_submitted_results(app, tmp_path):
+    _prepare_photos(app, tmp_path, count=1)
+    fake = FakeBatchProvider()
+    service = _wire_fake(app, fake)
+    result = service.submit(scope="sample", sample_count=1)
+    app.extensions["inktime_settings_repository"].update(
+        "analysis.execution_mode", "disabled", changed_by="test", source_ip="127.0.0.1"
+    )
+    batch_id = result["batch_ids"][0]
+    assert service.poll_due(limit=10)["polled"] == 1
+    service.import_batch(batch_id)
+    assert fake.batch_counter == 1
+    assert fake.downloads == 1
+    assert "file-input" in fake.deleted
+    assert "file-output" in fake.deleted
 
 
 def _prepare_terminal_import_case(app, tmp_path, status: str, cleanup_status: str, *, remote_files: bool):

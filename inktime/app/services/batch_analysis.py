@@ -34,6 +34,7 @@ from inktime.app.domain.analysis import (
 )
 from inktime.app.domain.analysis.plan import SCHEMA_VERSION, provider_prompt_contract_sha256
 from inktime.app.domain.analysis.schema import validate_model_response
+from inktime.app.domain.analysis.execution_mode import execution_mode, permits_manual_ai
 from inktime.app.domain.photos.quality_policy import is_confirmed_screenshot
 from inktime.app.domain.analysis.plan import FULL_ANALYSIS_TOKEN_CAP, analysis_output_token_cap
 from inktime.app.services.budgets import BudgetService
@@ -897,7 +898,20 @@ class BatchAnalysisService:
             batch_ids.append(current_id)
         return batch_ids
 
+    def _assert_ai_submission_allowed(self) -> None:
+        policy = self.settings.get_many(
+            ["analysis.execution_mode", "analysis.ai_mode", "analysis.prefilter_enabled"],
+            defaults={"analysis.prefilter_enabled": True},
+            fresh=True,
+        )
+        if not permits_manual_ai(execution_mode(policy)):
+            raise BatchLifecycleError(
+                "目前分析執行模式不允許付費 Batch 提交；已提交結果仍可回收與對帳",
+                "BATCH-EXECUTION-MODE",
+            )
+
     def _assert_submission_allowed(self, batch_id):
+        self._assert_ai_submission_allowed()
         self.budgets.assert_restore_reconciled()
         # One indexed EXISTS-style query, not one new DB connection per photo.
         with self.database.session() as connection:
@@ -946,6 +960,7 @@ class BatchAnalysisService:
                 provider = self._provider(str(current["provider_id"]), plan)
                 upload_method = provider.upload_batch_file
                 parameters = inspect.signature(upload_method).parameters
+                self._assert_submission_allowed(batch_id)
                 if "remote_filename" in parameters or any(
                     parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()
                 ):
@@ -1010,6 +1025,7 @@ class BatchAnalysisService:
                 ambiguous and current is not None and str(current["status"]) == "uploading"
             )
             local_failure = code in {
+                "BATCH-EXECUTION-MODE",
                 "BATCH-INPUT-002",
                 "BATCH-INPUT-001",
                 "BATCH-CLAIM-STALE",
@@ -1082,6 +1098,7 @@ class BatchAnalysisService:
         budget_limit: float | None = None,
     ) -> dict[str, Any]:
         submit_started = time.monotonic()
+        self._assert_ai_submission_allowed()
         plan, analysis_fp, model = self._plan()
         provider_id = str(plan["provider_route"][0]["provider_id"])
         provider_identity = self._provider_identity(provider_id)

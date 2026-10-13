@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from inktime.app.domain.analysis.plan import FULL_ANALYSIS_TOKEN_CAP, fingerprint, normalize_analysis_strategy, stored_analysis_fingerprint
 from inktime.app.domain.jobs.failure_policy import NoEligibleCandidatesError
+from inktime.app.domain.jobs.settings import validate_worker_settings
 from inktime.app.repositories.jobs import JobRepository
 
 
@@ -36,6 +37,7 @@ class JobService:
         if strategy not in self.STRATEGIES:
             raise ValueError("不支援的分析策略")
         strategy = normalize_analysis_strategy(strategy)
+        settings = validate_worker_settings(settings)
         if budget_limit is not None and budget_limit < 0:
             raise ValueError("預算不可小於零")
         if dedupe_key:

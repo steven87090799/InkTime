@@ -33,6 +33,27 @@ def add_photos(app, count: int) -> list[str]:
     return photo_ids
 
 
+@pytest.mark.parametrize("settings", [
+    {"concurrency": "bad"}, {"concurrency": True}, {"concurrency": {}},
+    {"max_attempts": -1}, {"max_retries": 11},
+    {"retry_interval_seconds": 0}, {"timeout_seconds": 86401}, [],
+])
+def test_job_api_rejects_invalid_worker_settings_without_writes(client, app, settings):
+    from tests.conftest import create_admin, csrf, login
+
+    create_admin(app)
+    login(client)
+    response = client.post(
+        "/api/v1/jobs", json={"strategy": "local", "settings": settings},
+        headers={"X-CSRF-Token": csrf(client)},
+    )
+    assert response.status_code == 400
+    assert "JOB-001" in response.get_json()["message"]
+    with app.extensions["inktime_database"].session() as connection:
+        assert connection.execute("SELECT COUNT(*) FROM jobs").fetchone()[0] == 0
+        assert connection.execute("SELECT COUNT(*) FROM job_items").fetchone()[0] == 0
+
+
 def create_job(
     app,
     count: int = 10,

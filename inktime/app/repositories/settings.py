@@ -1605,13 +1605,13 @@ class SettingsRepository:
         self._runtime_cache.clear()
         self._runtime_cache_at = 0.0
 
-    def get_many(self, keys, *, defaults: dict[str, Any] | None = None) -> dict[str, Any]:
+    def get_many(self, keys, *, defaults: dict[str, Any] | None = None, fresh: bool = False) -> dict[str, Any]:
         normalized = tuple(dict.fromkeys(str(key) for key in keys))
         if not normalized:
             return {}
         now = time.monotonic()
         cache_fresh = now - self._runtime_cache_at < self._RUNTIME_CACHE_TTL_SECONDS
-        if cache_fresh and all(key in self._runtime_cache for key in normalized):
+        if not fresh and cache_fresh and all(key in self._runtime_cache for key in normalized):
             return {key: self._runtime_cache[key] for key in normalized}
         placeholders = ",".join("?" for _ in normalized)
         with self.database.session() as connection:
@@ -1621,6 +1621,10 @@ class SettingsRepository:
             ).fetchall()
         values = {str(row["key"]): json.loads(row["value_json"]) for row in rows}
         fallback = defaults or {}
+        if fresh:
+            # Side-effect permission gates must observe another process's
+            # committed edits without mutating the shared runtime cache.
+            return {key: values.get(key, fallback.get(key)) for key in normalized}
         self._runtime_cache.clear()
         self._runtime_cache.update(values)
         self._runtime_cache_at = now

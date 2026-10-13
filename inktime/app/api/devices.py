@@ -1051,7 +1051,7 @@ def release_file(release_id: str, filename: str):
             abort(410, description="DEVICE-010 Release Payload 已依保留政策移除")
         abort(404, description="DEVICE-002 Release 或檔案不存在")
     try:
-        payload, entry = service.read_payload(authorization, filename)
+        payload, entry = service.read_payload(authorization, filename, allow_multiple=True)
     except (FileNotFoundError, UnsafePathError):
         _repository().record_download(device["id"], release_id, False)
         abort(404, description="DEVICE-002 Release 或檔案不存在")
