@@ -328,6 +328,8 @@ def test_batch_mode_changed_by_other_process_blocks_next_paid_side_effect(app, t
         monkeypatch.setattr(fake, "upload_batch_file", upload_then_disable)
     result = service.submit(scope="sample", sample_count=1)
     assert result["batch_ids"] == []
+    assert result["submission_status"] == "needs_attention"
+    assert result["not_submitted_batch_ids"] == result["prepared_batch_ids"]
     assert fake.batch_counter == 0
     batch = service.batches.get(result["prepared_batch_ids"][0])
     assert batch["last_error_code"] == "BATCH-EXECUTION-MODE"
@@ -353,6 +355,86 @@ def test_batch_disabled_mode_still_imports_and_cleans_submitted_results(app, tmp
     assert fake.downloads == 1
     assert "file-input" in fake.deleted
     assert "file-output" in fake.deleted
+
+
+@pytest.mark.parametrize("estimated,actual", [(1.0, None), (None, None), (None, 0.0), (1.0, 0.75)])
+def test_batch_served_model_controls_receipt_and_unknown_cost_display(app, tmp_path, monkeypatch, estimated, actual):
+    _prepare_photos(app, tmp_path, count=1)
+    fake = FakeBatchProvider()
+    service = _wire_fake(app, fake)
+    batch_id = service.submit(scope="sample", sample_count=1)["batch_ids"][0]
+    requested = service.batches.get(batch_id)["model"]
+    original_download = fake.download_file_content
+
+    def download_with_served_model(file_id, destination):
+        path = original_download(file_id, destination)
+        lines = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+        for line in lines:
+            body = line["response"]["body"]
+            body["model"] = "served-model"
+            if actual is not None:
+                body["usage"]["cost"] = actual
+        path.write_text("\n".join(json.dumps(line) for line in lines) + "\n", encoding="utf-8")
+        return path
+
+    estimated_models = []
+
+    def estimate(model, usage):
+        estimated_models.append(model)
+        return estimated if model == "served-model" else 0.1
+
+    monkeypatch.setattr(fake, "download_file_content", download_with_served_model)
+    monkeypatch.setattr(fake, "estimate_batch_cost", estimate)
+    service.poll_due(limit=10)
+    assert service.import_batch(batch_id)["success"] == 1
+    with service.database.session() as connection:
+        receipt = connection.execute("SELECT * FROM api_usage WHERE batch_id=?", (batch_id,)).fetchone()
+    assert receipt["model"] == "served-model"
+    assert receipt["estimated_cost"] == estimated
+    assert receipt["actual_cost"] == actual
+    assert requested not in estimated_models
+    detail = service.get_detail(batch_id)
+    known = actual if actual is not None else estimated
+    assert detail["cost_complete"] is (known is not None)
+    assert detail["average_cost"] == known
+    assert detail["per_thousand_cost"] == (known * 1000 if known is not None else None)
+    assert detail["items"][0]["display_cost"] == known
+    assert detail["unknown_cost_items"] == int(known is None)
+
+
+@pytest.mark.parametrize("blocker", [None, "missing", "unknown"])
+def test_batch_repricing_settles_terminal_reserve_only_after_complete_evidence(app, tmp_path, monkeypatch, blocker):
+    _prepare_photos(app, tmp_path, count=2)
+    fake = FakeBatchProvider()
+    service = _wire_fake(app, fake)
+    batch_id = service.submit(scope="sample", sample_count=2)["batch_ids"][0]
+    monkeypatch.setattr(fake, "estimate_batch_cost", lambda model, usage: None)
+    service.poll_due(limit=10)
+    service.import_batch(batch_id)
+    batch = service.batches.get(batch_id)
+    first = service.batches.items(batch_id)[0]
+    if blocker == "missing":
+        service.batches.update_item(first["id"], status="retry_pending")
+    elif blocker == "unknown":
+        with service.database.transaction() as connection:
+            connection.execute("UPDATE api_usage SET usage_complete=0 WHERE batch_item_id=?", (first["id"],))
+    provider_repository = app.extensions["inktime_provider_repository"]
+    provider_repository.save_pricing(batch["provider_id"], {
+        "model": batch["model"], "input_per_million": 10.0,
+        "cached_input_per_million": 1.0, "output_per_million": 20.0,
+        "batch_multiplier": 0.5, "enabled": True,
+    })
+    with service.database.session() as connection:
+        state = connection.execute("SELECT state FROM budget_reservations WHERE id=?", ("batch:" + batch_id,)).fetchone()[0]
+    assert state == ("released" if blocker is None else "active")
+    detail = service.get_detail(batch_id)
+    assert detail["cost_complete"] is (blocker != "unknown")
+    if blocker != "unknown":
+        assert detail["known_cost"] == pytest.approx(0.0014)
+        assert service.batches.get(batch_id)["actual_cost"] == pytest.approx(0.0014)
+    assert service.batches.settle_terminal_costs(batch_id=batch_id) == 0
+    service._finish(batch_id)
+    assert service.batches.get(batch_id)["status"] == "completed"
 
 
 def _prepare_terminal_import_case(app, tmp_path, status: str, cleanup_status: str, *, remote_files: bool):

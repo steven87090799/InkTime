@@ -309,4 +309,7 @@ class ProviderRepository:
                 """,
                 (provider_key, model_key),
             ).fetchone()
+        from inktime.app.repositories.analysis_batches import AnalysisBatchRepository
+
+        AnalysisBatchRepository(self.database).settle_terminal_costs(provider_id=provider_key, model=model_key)
         return {"reconciled_count": reconciled, "remaining_unknown_count": int(remaining[0] or 0)}
