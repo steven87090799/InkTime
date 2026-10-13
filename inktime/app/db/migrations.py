@@ -2454,6 +2454,11 @@ MIGRATIONS = (
         "允許裝置 photo_pair_caption 版型並保留裝置身分與關聯資料",
         (),
     ),
+    Migration(
+        67,
+        "索引歷史活動事件的大小寫相容保留查詢",
+        ("CREATE INDEX idx_activity_events_severity_nocase_id ON activity_events(severity COLLATE NOCASE,id)",),
+    ),
 )
 
 

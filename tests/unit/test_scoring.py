@@ -14,7 +14,7 @@ from inktime.app.domain.analysis.scoring import (
 )
 from inktime.app.providers.base import ProviderResponse, Usage, VisionProvider
 from inktime.app.providers.openai_compatible import ProviderHTTPError
-from tests.conftest import create_admin
+from tests.conftest import create_admin, csrf, login
 from tests.unit.test_analysis_schema import valid_result
 
 
@@ -55,6 +55,27 @@ def test_score_labels_use_the_model_score_without_library_calibration():
     assert score_band(91) == "精選"
     assert score_band(78) == "推薦"
     assert score_band(55) == "一般"
+
+
+@pytest.mark.parametrize("length", [77, 78, 80])
+def test_long_scoring_names_restore_with_source_audit_and_preserve_original(client, app, length):
+    import json
+    user_id = create_admin(app)
+    login(client)
+    repository = app.extensions["inktime_scoring_repository"]
+    original = repository.create(name="名" * length, rules=repository.current()["rules"], created_by=user_id, source_ip="test")
+    repository.create(name="replacement", rules=original["rules"], created_by=user_id, source_ip="test")
+    for _ in range(2):
+        response = client.post(f"/api/v1/scoring/profiles/{original['id']}/restore", json={}, headers={"X-CSRF-Token": csrf(client)})
+        assert response.status_code == 201
+        restored = repository.get(response.get_json()["id"])
+        assert len(restored["name"]) <= 80
+        assert restored["rules"] == original["rules"]
+        assert (restored["memory_weight"], restored["visual_weight"], restored["local_weight"]) == (67, 33, 0)
+        assert repository.get(original["id"])["name"] == "名" * length
+        with app.extensions["inktime_database"].session() as connection:
+            audit = json.loads(connection.execute("SELECT details_json FROM activity_events WHERE source='scoring' AND source_id=?", (restored["id"],)).fetchone()[0])
+        assert audit["restored_from_version_id"] == original["id"]
 
 
 def test_scoring_profile_create_and_restore_are_versioned(app):

@@ -406,7 +406,7 @@ class ResilienceRepository:
                         (now, photo_id),
                     )
                 connection.execute(
-                    "INSERT INTO activity_events(source,source_id,severity,component,event,message,photo_id,details_json,created_at) VALUES ('feedback',?,'info','resilience','feedback_written','使用者回饋已寫入',?,?,?)",
+                    "INSERT INTO activity_events(source,source_id,severity,component,event,message,photo_id,details_json,created_at) VALUES ('feedback',?,'INFO','resilience','feedback_written','使用者回饋已寫入',?,?,?)",
                     (
                         f"{user_id}:{photo_id}:{kind}:{uuid4()}",
                         photo_id,

@@ -338,6 +338,26 @@ def test_failed_items_can_be_retried(app):
     assert repository.get(job_id)["status"] == "completed"
 
 
+def test_empty_retry_after_real_finalizer_failure_preserves_terminal_job(client, app):
+    from tests.conftest import create_admin, csrf, login
+    create_admin(app)
+    login(client)
+    service, repository, job_id = create_job(app, 1)
+    service.start(job_id)
+    item = repository.claim(job_id, "fixture-worker", 1)[0]
+    repository.complete_item(job_id, str(item["id"]), {"status": "completed"})
+    def broken_finalizer(connection, identifier, status):
+        raise RuntimeError("fixture finalizer failure")
+    assert repository.finalize_if_done(job_id, finalizer=broken_finalizer)
+    before = dict(repository.get(job_id))
+    items = repository.list_items(job_id)
+    assert before["status"] == "completed_with_errors" and before["failed_items"] == 0
+    response = client.post(f"/api/v1/jobs/{job_id}/retry-failed", json={}, headers={"X-CSRF-Token": csrf(client)})
+    assert response.status_code == 409
+    assert dict(repository.get(job_id)) == before
+    assert repository.list_items(job_id) == items
+
+
 def test_retry_failed_does_not_revive_running_or_cancelled_jobs(app):
     service, repository, running_id = create_job(app, 1)
     service.start(running_id)

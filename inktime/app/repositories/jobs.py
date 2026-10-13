@@ -1562,6 +1562,9 @@ class JobRepository:
                     """,
                     (now, job_id),
                 )
+                if cursor.rowcount == 0:
+                    connection.execute("COMMIT")
+                    return 0
                 connection.execute(
                     "UPDATE jobs SET status='pending', failed_items=0, completed_at=NULL WHERE id=? AND status IN ('failed','completed_with_errors')",
                     (job_id,),
