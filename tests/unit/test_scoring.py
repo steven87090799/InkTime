@@ -147,6 +147,47 @@ class RepairLabProvider(LabProvider):
         return ProviderResponse(json.dumps(valid_result(), ensure_ascii=False), Usage(40, 12, 2))
 
 
+@pytest.mark.parametrize("invalid", ["legacy", "length", "caption"])
+def test_scoring_lab_uses_current_plan_and_rejects_incompatible_answers(app, tmp_path, monkeypatch, invalid):
+    import json
+    from inktime.app.domain.analysis.schema import AnalysisValidationError
+
+    settings = app.extensions["inktime_settings_repository"]
+    settings.update("model.analysis_model", "openai/gpt-6-luna", changed_by="test", source_ip="test")
+    settings.update("model.high_model", "legacy-model", changed_by="test", source_ip="test")
+    settings.update("analysis.side_caption_min_chars", 12, changed_by="test", source_ip="test")
+    settings.update("analysis.side_caption_max_chars", 14, changed_by="test", source_ip="test")
+    service = app.extensions["inktime_scoring_lab_service"]
+    requests = []
+
+    class CaptureLabProvider(LabProvider):
+        def analyze(self, **kwargs):
+            requests.append(kwargs)
+            value = valid_result()
+            value["side_caption"] = "字" * (10 if invalid == "caption" else 12)
+            if invalid == "legacy":
+                value["schema_version"] = 4
+            return ProviderResponse(json.dumps(value), Usage(120, 30, 10),
+                                    finish_reason="length" if invalid == "length" else "stop")
+
+    def build_router(route, **kwargs):
+        assert kwargs["caption_controls"]["side_caption_min_chars"] == 12
+        return CaptureLabProvider()
+
+    monkeypatch.setattr(service.providers, "build_router", build_router)
+    image = tmp_path / "current-plan.jpg"
+    Image.new("RGB", (64, 64), "orange").save(image)
+    with pytest.raises(AnalysisValidationError):
+        service.analyze(image)
+    assert len(requests) == 1
+    assert requests[0]["model"] == "openai/gpt-6-luna"
+    assert requests[0]["caption_controls"]["side_caption_max_chars"] == 14
+    assert requests[0]["reasoning_effort"] == "none"
+    assert requests[0]["max_tokens"] == 512
+    with service.usage.database.session() as connection:
+        assert connection.execute("SELECT COUNT(*) FROM api_usage").fetchone()[0] == 1
+
+
 class FailingScoringProvider(LabProvider):
     def __init__(self, *, vision_error=None, repair_error=None):
         self.vision_error = vision_error
@@ -170,7 +211,7 @@ class FailingScoringProvider(LabProvider):
 
 def test_scoring_lab_records_usage_and_uses_current_profile(app, tmp_path, monkeypatch):
     service = app.extensions["inktime_scoring_lab_service"]
-    monkeypatch.setattr(service.providers, "build_router", lambda: LabProvider())
+    monkeypatch.setattr(service.providers, "build_router", lambda *args, **kwargs: LabProvider())
     image_path = tmp_path / "test.jpg"
     Image.new("RGB", (64, 64), "orange").save(image_path)
 
@@ -186,32 +227,20 @@ def test_scoring_lab_records_usage_and_uses_current_profile(app, tmp_path, monke
     assert [tuple(row) for row in usage] == [("scoring_test_vision", 120, 30, 10)]
 
 
-def test_scoring_lab_records_vision_and_text_repair_as_separate_attempts(app, tmp_path, monkeypatch):
+def test_scoring_lab_rejects_invalid_response_without_extra_paid_repair(app, tmp_path, monkeypatch):
+    from inktime.app.domain.analysis.schema import AnalysisValidationError
+
     service = app.extensions["inktime_scoring_lab_service"]
     provider = RepairLabProvider()
-    monkeypatch.setattr(service.providers, "build_router", lambda: provider)
+    monkeypatch.setattr(service.providers, "build_router", lambda *args, **kwargs: provider)
     image_path = tmp_path / "repair.jpg"
     Image.new("RGB", (64, 64), "purple").save(image_path)
-
-    result = service.analyze(image_path)
-
-    assert provider.repair_calls == 1
-    assert result["usage"]["attempts"]
-    assert result["usage"]["cost"] == 0.003
-    assert result["usage"]["vision_cost"] == 0.0015
-    assert result["usage"]["repair_cost"] == 0.0015
+    with pytest.raises(AnalysisValidationError):
+        service.analyze(image_path)
+    assert provider.repair_calls == 0
     with app.extensions["inktime_database"].session() as connection:
-        usage = connection.execute(
-            "SELECT request_type,input_tokens,output_tokens,cached_tokens,image_bytes,estimated_cost "
-            "FROM api_usage ORDER BY id"
-        ).fetchall()
-    assert [row["request_type"] for row in usage] == [
-        "scoring_test_vision",
-        "scoring_test_repair",
-    ]
-    assert usage[0]["image_bytes"] == image_path.stat().st_size
-    assert usage[1]["image_bytes"] == 0
-    assert [usage[0]["estimated_cost"], usage[1]["estimated_cost"]] == [0.0015, 0.0015]
+        usage = connection.execute("SELECT request_type,estimated_cost FROM api_usage").fetchall()
+    assert [tuple(row) for row in usage] == [("scoring_test_vision", 0.0015)]
 
 
 def test_scoring_lab_records_ambiguous_vision_failure_without_inventing_cost(
@@ -221,7 +250,7 @@ def test_scoring_lab_records_ambiguous_vision_failure_without_inventing_cost(
     provider = FailingScoringProvider(
         vision_error=ProviderHTTPError("timeout", "VLM-AMBIGUOUS", ambiguous=True)
     )
-    monkeypatch.setattr(service.providers, "build_router", lambda: provider)
+    monkeypatch.setattr(service.providers, "build_router", lambda *args, **kwargs: provider)
     image_path = tmp_path / "ambiguous.jpg"
     Image.new("RGB", (64, 64), "orange").save(image_path)
 
@@ -241,35 +270,13 @@ def test_scoring_lab_records_ambiguous_vision_failure_without_inventing_cost(
     )
 
 
-def test_scoring_lab_keeps_completed_vision_and_failed_repair_attempt(
-    app, tmp_path, monkeypatch
-):
-    service = app.extensions["inktime_scoring_lab_service"]
-    provider = FailingScoringProvider(
-        repair_error=ProviderHTTPError("reset", "VLM-AMBIGUOUS", ambiguous=True)
-    )
-    monkeypatch.setattr(service.providers, "build_router", lambda: provider)
-    image_path = tmp_path / "repair-failed.jpg"
-    Image.new("RGB", (64, 64), "purple").save(image_path)
-
-    with pytest.raises(ProviderHTTPError):
-        service.analyze(image_path)
-    with app.extensions["inktime_database"].session() as connection:
-        usage = connection.execute(
-            "SELECT request_type,status,cost_source,actual_cost,image_bytes FROM api_usage ORDER BY id"
-        ).fetchall()
-    assert [tuple(row) for row in usage] == [
-        ("scoring_test_vision", "completed", "estimated", None, image_path.stat().st_size),
-        ("scoring_test_repair", "failed", "unknown", None, 0),
-    ]
-
 
 def test_scoring_lab_does_not_record_pre_network_failure(
     app, tmp_path, monkeypatch
 ):
     service = app.extensions["inktime_scoring_lab_service"]
     provider = FailingScoringProvider(vision_error=ValueError("invalid configuration"))
-    monkeypatch.setattr(service.providers, "build_router", lambda: provider)
+    monkeypatch.setattr(service.providers, "build_router", lambda *args, **kwargs: provider)
     image_path = tmp_path / "preflight-failed.jpg"
     Image.new("RGB", (64, 64), "blue").save(image_path)
 

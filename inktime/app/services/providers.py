@@ -93,6 +93,7 @@ class ProviderService:
                     tokens_per_minute=config["token_limit_tpm"],
                     cooldown_seconds=config["cooldown_seconds"],
                     model=str(config.get("model") or "").strip() or None,
+                    analysis_revision=self.config_revision(config),
                 )
             )
         return FailoverVisionProvider(channels) if channels else None

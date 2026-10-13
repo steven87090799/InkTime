@@ -764,6 +764,9 @@ class PhotoAnalysisService:
         }
         if provider_prompt_contract_sha256:
             fingerprint_material["provider_prompt_contract_sha256"] = str(provider_prompt_contract_sha256)
+        selected_revision = str(getattr(selected_channel, "analysis_revision", "") or "")
+        if selected_revision:
+            fingerprint_material["selected_provider_analysis_revision"] = selected_revision
         request_fingerprint = fingerprint(
             {
                 **fingerprint_material,
