@@ -41,6 +41,13 @@ def test_removed_snapshot_metadata_is_safe_and_non_actionable():
     assert metadata["device_override_allowed"] is False
 
 
+@pytest.mark.parametrize("key", ["model.analysis_model", "budget.daily_stop", "analysis.concurrency"])
+def test_paid_analysis_controls_remain_available_in_manual_mode(key):
+    rule = SettingsRepository.public_metadata(key)["dependencies"][0]
+    assert rule["key"] == "analysis.execution_mode"
+    assert rule["one_of"] == ["local_with_manual_ai", "automatic_ai"]
+
+
 @pytest.mark.parametrize("action", ["refresh", "invalidate"])
 def test_cache_reader_remains_consistent_during_refresh_or_invalidation(app, action):
     from concurrent.futures import ThreadPoolExecutor

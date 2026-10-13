@@ -29,6 +29,38 @@ def _post(client, path: str, payload: dict, *, confirm: bool = False):
     )
 
 
+def test_setting_reason_percent_utf8_preserves_chinese(client, app):
+    from urllib.parse import quote
+    create_admin(app)
+    login(client)
+    reason = "降低模型預算，保留照片與設定。"
+    response = client.post("/api/v1/settings", json={"analysis.concurrency": 2}, headers={
+        "X-CSRF-Token": csrf(client), "X-InkTime-Change-Reason": quote(reason, safe=""),
+        "X-InkTime-Change-Reason-Encoding": "percent-utf8",
+    })
+    assert response.status_code == 200
+    with app.extensions["inktime_database"].session() as connection:
+        saved = connection.execute("SELECT reason FROM settings_snapshots WHERE id=?",
+                                   (response.json["snapshot_id"],)).fetchone()[0]
+    assert saved == reason
+
+
+def test_session_lifetime_updates_after_rollback_and_import(client, app):
+    create_admin(app)
+    login(client)
+    changed = _post(client, "/api/v1/settings", {"security.session_minutes": 5}, confirm=True)
+    assert changed.status_code == 200
+    assert app.permanent_session_lifetime == timedelta(minutes=5)
+    restored = _post(client, f"/api/v1/settings/snapshots/{changed.json['snapshot_id']}/rollback", {"confirm": True})
+    assert restored.status_code == 200
+    assert app.permanent_session_lifetime == timedelta(minutes=30)
+    imported = _post(client, "/api/v1/settings/import", {"confirm": True, "document": {
+        "format": "inktime-settings", "version": 1, "settings": {"security.session_minutes": 5},
+    }}, confirm=True)
+    assert imported.status_code == 200
+    assert app.permanent_session_lifetime == timedelta(minutes=5)
+
+
 def _install_atomic_test_preset(monkeypatch, *, extra_settings: dict | None = None) -> str:
     key = "atomic_test"
     settings = {

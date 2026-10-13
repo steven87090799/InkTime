@@ -1381,7 +1381,7 @@ def _metadata_dependencies(key: str) -> list[dict[str, Any]]:
         "analysis.max_retries",
         "analysis.concurrency",
     }:
-        return [{"key": "analysis.execution_mode", "equals": "automatic_ai"}]
+        return [{"key": "analysis.execution_mode", "one_of": ["local_with_manual_ai", "automatic_ai"]}]
     return []
 
 
