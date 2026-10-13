@@ -2449,6 +2449,11 @@ MIGRATIONS = (
         ("CREATE TABLE render_input_leases(token TEXT PRIMARY KEY,job_id TEXT REFERENCES jobs(id) ON DELETE SET NULL,"
          "size_bytes INTEGER NOT NULL CHECK(size_bytes>=0),staged INTEGER NOT NULL DEFAULT 1 CHECK(staged IN (0,1)),created_at TEXT NOT NULL)",),
     ),
+    Migration(
+        66,
+        "允許裝置 photo_pair_caption 版型並保留裝置身分與關聯資料",
+        (),
+    ),
 )
 
 
@@ -2950,6 +2955,52 @@ def _apply_migration_64_contracts(connection: sqlite3.Connection) -> None:
     )
 
 
+def _apply_migration_66_contracts(connection: sqlite3.Connection) -> None:
+    """Extend the device layout CHECK with the isolated SQLite rebuild protocol."""
+    if connection.execute("PRAGMA foreign_keys").fetchone()[0]:
+        raise MigrationError("Migration 66 requires its isolated schema-rebuild transaction")
+
+    def quote(name: str) -> str:
+        return '"' + name.replace('"', '""') + '"'
+
+    row = connection.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='devices'").fetchone()
+    if row is None:
+        raise MigrationError("Migration 66 is missing devices")
+    ddl, count = re.subn(
+        r"layout_mode\s+IN\s*\(\s*'adaptive_memory'\s*,\s*'full'\s*,\s*'postcard'\s*,\s*'photo_info'\s*,\s*'photo_pair'\s*,\s*'calendar'\s*,\s*'weather_sensor'\s*\)",
+        "layout_mode IN ('adaptive_memory','full','postcard','photo_info','photo_pair','photo_pair_caption','calendar','weather_sensor')",
+        str(row[0]), count=1,
+    )
+    if count != 1:
+        raise MigrationError("Migration 66 encountered an unexpected layout constraint")
+    ddl, count = re.subn(r'^(CREATE\s+TABLE\s+)(?:"devices"|devices)(?=[\s(])',
+                         r'\g<1>"devices_contract_v66"', ddl, count=1, flags=re.IGNORECASE)
+    if count != 1:
+        raise MigrationError("Migration 66 cannot identify the device table declaration")
+    objects = connection.execute(
+        "SELECT type,name,sql FROM sqlite_master WHERE type IN ('trigger','view') AND sql IS NOT NULL ORDER BY type,name"
+    ).fetchall()
+    indexes = connection.execute(
+        "SELECT sql FROM sqlite_master WHERE type='index' AND tbl_name='devices' AND sql IS NOT NULL"
+    ).fetchall()
+    for item in objects:
+        connection.execute(f"DROP {str(item['type']).upper()} {quote(str(item['name']))}")  # noqa: S608 -- trusted, quoted schema names
+    columns = [quote(str(column[1])) for column in connection.execute('PRAGMA table_xinfo("devices")') if int(column[6]) == 0]
+    selected = ",".join(columns)
+    before = connection.execute("SELECT COUNT(*) FROM devices").fetchone()[0]
+    connection.execute(ddl)
+    connection.execute(f'INSERT INTO devices_contract_v66({selected}) SELECT {selected} FROM devices')  # noqa: S608
+    after = connection.execute("SELECT COUNT(*) FROM devices_contract_v66").fetchone()[0]
+    if before != after:
+        raise MigrationError("Migration 66 device row preservation check failed")
+    connection.execute("DROP TABLE devices")
+    connection.execute("ALTER TABLE devices_contract_v66 RENAME TO devices")
+    for item in indexes:
+        connection.execute(str(item[0]))
+    for item in objects:
+        connection.execute(str(item["sql"]))
+
+
 def _applied_versions(database: Database) -> set[int]:
     with database.session() as connection:
         if not _table_exists(connection, "schema_migrations"):
@@ -3165,7 +3216,7 @@ def migrate(database: Database, backup_dir: Path | None = None) -> list[int]:
             history_id = _start_history(database, migration, backup_path, started_at=started_at)
             history_completed_in_transaction = False
             try:
-                with database.transaction(operation="schema_migration", schema_rebuild=migration.version == 64) as connection:
+                with database.transaction(operation="schema_migration", schema_rebuild=migration.version in {64, 66}) as connection:
                     for statement in migration.statements:
                         connection.execute(statement)
                     if migration.version == 33:
@@ -3182,6 +3233,8 @@ def migrate(database: Database, backup_dir: Path | None = None) -> list[int]:
                         _apply_document_type_repairs(connection)
                     if migration.version == 64:
                         _apply_migration_64_contracts(connection)
+                    if migration.version == 66:
+                        _apply_migration_66_contracts(connection)
                     connection.execute(
                         "INSERT INTO schema_migrations(version, name, applied_at) VALUES (?, ?, ?)",
                         (migration.version, migration.name, _utc_now()),
