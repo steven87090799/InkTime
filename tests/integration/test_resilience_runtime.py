@@ -71,6 +71,7 @@ def test_terminal_queue_item_can_be_queued_as_a_new_delivery_without_losing_hist
     release = _published_release(app)
     device_id, _ = app.extensions["inktime_device_repository"].create("requeue")
     repository = app.extensions["inktime_resilience_repository"]
+    repository.ensure_queue(device_id)
     first = repository.enqueue_release(device_id=device_id, release_id=release["release_id"])
     with repository.database.transaction() as connection:
         connection.execute("UPDATE device_content_queue_items SET status=? WHERE id=?", (status, first["id"]))
@@ -395,6 +396,8 @@ def test_canary_failure_creates_last_known_good_rollback_queue(client, app, mode
     last_known_good = _published_release(app)
     canary_release = _published_release(app)
     repository = app.extensions["inktime_resilience_repository"]
+    for device_id in (first_id, second_id):
+        repository.ensure_queue(device_id)
     history_ids = [repository.enqueue_release(device_id=device_id, release_id=last_known_good["release_id"])["id"]
                    for device_id in (first_id, second_id)]
     with app.extensions["inktime_database"].transaction() as connection:

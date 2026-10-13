@@ -116,6 +116,8 @@ RUNNER_SUITE_TEST_PATHS: dict[str, tuple[str, ...]] = {
         "tests/integration/test_adaptive_frame_renderer.py",
         "tests/integration/test_dual_photo_caption_layout.py",
         "tests/integration/test_render_candidate_contract.py",
+        "tests/integration/test_device_layout_delivery.py",
+        "tests/integration/test_photo_crop_state.py",
     ),
     "scanner_photos_owner": (
         "tests/unit/test_local_selection.py",

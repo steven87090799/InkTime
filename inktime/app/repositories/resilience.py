@@ -1492,8 +1492,14 @@ class ResilienceRepository:
             raise ValueError("ROLLOUT-002 最少成功裝置數超過可用 cohort")
         for device in devices:
             if device["delivery_mode"] == "inktime_offline_schedule":
-                connection.execute("INSERT OR IGNORE INTO rollout_targets(rollout_id,device_id,status,last_error_code,updated_at) "
-                                   "VALUES (?,?,'skipped_incompatible_offline','ROLLOUT-005',?)", (campaign["id"], device["id"], now))
+                inserted = connection.execute("INSERT OR IGNORE INTO rollout_targets(rollout_id,device_id,status,last_error_code,updated_at) "
+                                              "VALUES (?,?,'skipped_incompatible_offline','ROLLOUT-005',?)", (campaign["id"], device["id"], now)).rowcount
+                if inserted:
+                    connection.execute(
+                        "INSERT INTO rollout_health_events(rollout_id,device_id,event_type,severity,error_code,details_json,created_at) "
+                        "VALUES (?,?,'skipped_incompatible_offline','info','ROLLOUT-005',?,?)",
+                        (campaign["id"], device["id"], _json({"delivery_mode": "inktime_offline_schedule"}), now),
+                    )
         count = min(len(online), max(int(stage["minimum_successful_devices"]), ceil(len(online) * int(stage["target_percent"]) / 100)))
         for device in online[:count]:
             conflict = connection.execute(

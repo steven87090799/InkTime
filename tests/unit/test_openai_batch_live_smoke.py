@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 from PIL import Image
 import pytest
@@ -109,7 +110,7 @@ def test_pending_resume_does_not_upload_or_create_again_and_only_terminal_result
     provider = FakeProvider(status="in_progress")
     monkeypatch.setattr(smoke, "OpenAICompatibleProvider", lambda **kwargs: provider)
     times = iter([0, 2])
-    monkeypatch.setattr(smoke.time, "monotonic", lambda: next(times))
+    monkeypatch.setattr(smoke, "time", SimpleNamespace(monotonic=lambda: next(times), sleep=lambda _seconds: None))
     assert smoke.main(["--receipt", str(path)]) == 3
     receipt = json.loads(path.read_text(encoding="utf-8"))
     assert receipt["remote_batch_id"] == "batch-existing" and receipt["state"] == "pending"

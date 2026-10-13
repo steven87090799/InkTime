@@ -208,7 +208,7 @@ def test_pair_selection_never_repeats_a_photo(app, monkeypatch):
     monkeypatch.setattr(
         LocalSelectionPolicy,
         "ranked",
-        lambda self, *, target, orientation, limit=None, excluded_ids=None: [
+        lambda self, *, target, orientation, limit=None, excluded_ids=None, candidate_years=None: [
             dict(row) for row in ranked
         ],
     )

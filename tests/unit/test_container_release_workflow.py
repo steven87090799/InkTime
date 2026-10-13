@@ -107,7 +107,7 @@ def test_nas_compose_is_pull_only_and_keeps_data_and_photos_external():
     assert set(services) == {"inktime-web", "inktime-worker", "inktime-scheduler"}
     for service in services.values():
         assert "build" not in service
-        assert service["image"].startswith("${INKTIME_IMAGE_REPOSITORY")
+        assert service["image"] == "${INKTIME_IMAGE_REF:-${INKTIME_IMAGE_REPOSITORY:-ghcr.io/steven87090799/inktime}:${INKTIME_IMAGE_TAG:-latest}}"
         assert service["pull_policy"] == "always"
         assert service["restart"] == "unless-stopped"
         assert service["read_only"] is True
@@ -228,7 +228,9 @@ def test_hosted_ci_runs_real_nas_updater_a_to_b_and_negative_safety_cases():
     assert "build_push v1.0.0-ci-a" in script
     assert "build_push v1.0.0-ci-b" in script
     assert "run_updater --initialize v1.0.0-ci-a" in script
-    assert "run_updater v1.0.0-ci-b" in script
+    assert '"$updater" v1.0.0-ci-b "$env_file"' in script
+    assert 'assert_runtime_contract v1.0.0-ci-b "$image_b_id"' in script
+    assert "NAS_RACE_TARGET=" in script
     assert "NAS-UPDATE-PATH-002" in script
     assert "NAS-UPDATE-PATH-006" in script
     assert "NAS-UPDATE-PATH-003" in script

@@ -37,6 +37,7 @@ def test_setting_reason_percent_utf8_preserves_chinese(client, app):
     response = client.post("/api/v1/settings", json={"analysis.concurrency": 2}, headers={
         "X-CSRF-Token": csrf(client), "X-InkTime-Change-Reason": quote(reason, safe=""),
         "X-InkTime-Change-Reason-Encoding": "percent-utf8",
+        "X-InkTime-Confirm-Risk": "true",
     })
     assert response.status_code == 200
     with app.extensions["inktime_database"].session() as connection:

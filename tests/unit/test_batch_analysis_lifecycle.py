@@ -242,14 +242,6 @@ def _wire_fake(app, fake):
     providers.list = lambda: [
         {"id": "fake-batch", "name": "Fake Batch", "enabled": 1, "supports_batch": 1, "priority": 1}
     ]
-    providers.pricing = lambda _provider_id: {
-        "gpt-5.6-luna": {
-            "input_per_million": 0.2,
-            "cached_input_per_million": 0.02,
-            "output_per_million": 1.2,
-            "batch_multiplier": 0.5,
-        }
-    }
     provider_config = providers.get("fake-batch", include_secret=True)
     provider_snapshot = [
         {

@@ -513,7 +513,8 @@ def test_stock_display_uploads_the_same_authorized_release_without_completion_cl
                 manifest={"render_profile": "safe_4c"},
             )
 
-        def payload_entry_for_authorization(self, _authorization):
+        def payload_entry_for_authorization(self, _authorization, *, filename):
+            assert filename == "payload.bin"
             return {"name": "payload.bin", "sha256": "source-sha-exact", "size": 6}
 
         def read_payload(self, _authorization, _file_name):
