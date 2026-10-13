@@ -97,6 +97,10 @@ RUN set -eux; \
     done; \
     libc_version="$(dpkg-query -W -f='${Version}' libc6)"; \
     dpkg --compare-versions "${libc_version}" ge '2.43-7'; \
+    for systemd_package in libsystemd0 libudev1; do \
+        systemd_version="$(dpkg-query -W -f='${Version}' "${systemd_package}")"; \
+        dpkg --compare-versions "${systemd_version}" ge '262-1'; \
+    done; \
     pcre2_version="$(dpkg-query -W -f='${Version}' libpcre2-8-0)"; \
     dpkg --compare-versions "${pcre2_version}" ge '10.46-1~deb13u3'; \
     for openssl_package in libssl3t64 openssl openssl-provider-legacy; do \

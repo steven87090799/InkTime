@@ -68,13 +68,35 @@ def test_missing_package_inventory_never_attests_a_fix():
     assert build_vex(report, IMAGE)["statements"] == []
 
 
-def test_bsdutils_binary_and_inherited_source_epochs_must_both_match():
+def test_bsdutils_binary_epoch_and_distinct_source_epoch_must_both_match():
     report = _report()
     package = report["Results"][0]["Packages"][0]
-    package.update(ID="bsdutils@1:2.42.4-1", Name="bsdutils", Epoch=1, SrcEpoch=1)
+    package.update(ID="bsdutils@1:2.42.4-1", Name="bsdutils", Epoch=1, SrcEpoch=0)
     finding = report["Results"][0]["Vulnerabilities"][0]
     finding.update(PkgID=package["ID"], PkgName="bsdutils", InstalledVersion="1:2.42.4-1",
                    PkgIdentifier={"PURL": PURL.replace("libmount1", "bsdutils") + "&epoch=1"})
     assert len(build_vex(report, IMAGE)["statements"]) == 1
-    package["SrcEpoch"] = 0
+    package["SrcEpoch"] = 1
+    assert build_vex(report, IMAGE)["statements"] == []
+
+
+@pytest.mark.parametrize("name,source,version,release,arch,code", [
+    ("ncurses-base", "ncurses", "6.6+20260608", "2", "all", "CVE-2025-69720"),
+    ("libsystemd0", "systemd", "262", "1", "amd64", "CVE-2026-16742"),
+    ("libudev1", "systemd", "262", "1", "arm64", "CVE-2026-16742"),
+])
+def test_reviewed_independent_architecture_and_systemd_packages_have_exact_fixed_evidence(
+    name, source, version, release, arch, code,
+):
+    report = _report()
+    binary = version + "-" + release
+    purl = f"pkg:deb/debian/{name}@{binary.replace('+', '%2B')}?arch={arch}&distro=debian-13.6"
+    package = report["Results"][0]["Packages"][0]
+    package.update(ID=name + "@" + binary, Name=name, Version=version, Release=release,
+                   SrcName=source, SrcVersion=version, SrcRelease=release, Arch=arch)
+    finding = report["Results"][0]["Vulnerabilities"][0]
+    finding.update(VulnerabilityID=code, PkgID=package["ID"], PkgName=name,
+                   InstalledVersion=binary, PkgIdentifier={"PURL": purl})
+    assert len(build_vex(report, IMAGE)["statements"]) == 1
+    package["Version"] = "unreviewed"
     assert build_vex(report, IMAGE)["statements"] == []

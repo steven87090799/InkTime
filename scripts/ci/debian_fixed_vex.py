@@ -33,6 +33,7 @@ FIXES = {
         name: "6.6+20260608-2" for name in ("ncurses-base", "ncurses-bin", "libtinfo6", "libncursesw6")
     }),
     "CVE-2026-9538": ("perl", "5.42.3-1", {"perl-base": "5.42.3-1"}),
+    "CVE-2026-16742": ("systemd", "262-1", {"libsystemd0": "262-1", "libudev1": "262-1"}),
 }
 
 
@@ -70,12 +71,9 @@ def build_vex(report: dict, image_id: str) -> dict:
             package = packages.get(finding.get("PkgID"), {})
             name = finding.get("PkgName")
             approved = binaries.get(name)
-            # Debian's bsdutils Source header omits the version; dpkg/Trivy
-            # therefore inherit the binary's epoch. login specifies it.
-            expected_source = "1:" + source_version if name == "bsdutils" else source_version
             if (not approved or finding.get("InstalledVersion") != approved
                     or package.get("Name") != name or _version(package) != approved
-                    or package.get("SrcName") != source_name or _version(package, "Src") != expected_source):
+                    or package.get("SrcName") != source_name or _version(package, "Src") != source_version):
                 continue
             purl = (finding.get("PkgIdentifier") or {}).get("PURL", "")
             body, _, query = purl.partition("?")
@@ -85,7 +83,7 @@ def build_vex(report: dict, image_id: str) -> dict:
                 epoch, binary_version = "0", approved
             if (unquote(body) != f"pkg:deb/debian/{name}@{binary_version}"
                     or qualifiers.get("arch") != [package.get("Arch")]
-                    or package.get("Arch") not in {"amd64", "arm64"}
+                    or package.get("Arch") not in ({"all"} if name == "ncurses-base" else {"amd64", "arm64"})
                     or qualifiers.get("distro") != ["debian-" + str(operating_system["Name"])]
                     or qualifiers.get("epoch", ["0"]) != [epoch]):
                 continue
