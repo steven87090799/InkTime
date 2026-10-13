@@ -247,6 +247,8 @@ jobs:
             -v "${PWD}/artifacts:/artifacts" \
             anchore/syft:v1.18.1 inktime:ci \
             -o "cyclonedx-json=/artifacts/inktime-sbom-${GITHUB_SHA}.json"
+      - name: Validate machine-readable Trivy exception expirations
+        run: python scripts/ci/validate_trivy_exceptions.py
       - name: Scan image for HIGH and CRITICAL vulnerabilities
         id: trivy
         shell: bash

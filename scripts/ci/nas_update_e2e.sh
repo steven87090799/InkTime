@@ -101,12 +101,13 @@ run_updater --initialize v1.0.0-ci-a "$env_file"
 
 assert_runtime_contract() {
   local tag=$1
+  local expected_image_id=${2:-$(docker image inspect --format '{{.Id}}' "${registry}:${tag}")}
   local service container mount_json
   for service in inktime-web inktime-worker inktime-scheduler; do
     container=$(compose "$tag" ps -q "$service")
     test -n "$container"
     test "$(docker inspect --format '{{.Config.User}}' "$container")" = "10001:10001"
-    test "$(docker inspect --format '{{.Config.Image}}' "$container")" = "${registry}:${tag}"
+    test "$(docker inspect --format '{{.Image}}' "$container")" = "$expected_image_id"
     test "$(docker inspect --format '{{.HostConfig.ReadonlyRootfs}}' "$container")" = true
     docker inspect --format '{{json .HostConfig.SecurityOpt}}' "$container" | grep -q 'no-new-privileges'
     mount_json=$(docker inspect --format '{{json .Mounts}}' "$container")
@@ -288,8 +289,30 @@ sleep 1
 assert_unchanged_after_failure NAS-UPDATE-LOCK-002 v1.0.0-ci-b
 wait "$lock_pid"
 
-run_updater v1.0.0-ci-b "$env_file"
-assert_runtime_contract v1.0.0-ci-b
+image_b_id=$(docker image inspect --format '{{.Id}}' "${registry}:v1.0.0-ci-b")
+race_bin="${ci_root}/race-bin"
+mkdir -p "$race_bin"
+cat > "${race_bin}/docker" <<'SH'
+#!/bin/sh
+set -eu
+if [ "${1:-}" = image ] && [ "${2:-}" = inspect ] && [ "${4:-}" = '{{.Id}}' ] && [ "${5:-}" = "$NAS_RACE_TARGET" ] && [ ! -f "$NAS_RACE_MARKER" ]; then
+  "$NAS_REAL_DOCKER" "$@"
+  touch "$NAS_RACE_MARKER"
+  "$NAS_REAL_DOCKER" tag "$NAS_RACE_REPLACEMENT" "$NAS_RACE_TARGET"
+  "$NAS_REAL_DOCKER" push "$NAS_RACE_TARGET" >&2
+else
+  exec "$NAS_REAL_DOCKER" "$@"
+fi
+SH
+chmod 755 "${race_bin}/docker"
+sudo env PATH="${race_bin}:${PATH}" NAS_REAL_DOCKER="$(command -v docker)" \
+  NAS_RACE_TARGET="${registry}:v1.0.0-ci-b" NAS_RACE_REPLACEMENT="${registry}:v1.0.0-ci-contract-mismatch" \
+  NAS_RACE_MARKER="${ci_root}/race-triggered" \
+  INKTIME_DATA_PATH="$INKTIME_DATA_PATH" INKTIME_PHOTO_PATH="$INKTIME_PHOTO_PATH" \
+  INKTIME_IMAGE_REPOSITORY="$INKTIME_IMAGE_REPOSITORY" INKTIME_IMAGE_TAG="$INKTIME_IMAGE_TAG" \
+  "$updater" v1.0.0-ci-b "$env_file"
+test -f "${ci_root}/race-triggered"
+assert_runtime_contract v1.0.0-ci-b "$image_b_id"
 test "$state_before" = "$(snapshot v1.0.0-ci-b)"
 compose v1.0.0-ci-b exec -T inktime-web python - verify < scripts/ci/persistence_fixture.py
 test "$session_hash_before" = "$(compose v1.0.0-ci-b exec -T inktime-web sha256sum /data/session.key)"
@@ -300,11 +323,12 @@ recovery_dir=$(sudo find "${data_path}/backups" -maxdepth 1 -type d -name 'updat
 test -n "$recovery_dir"
 sudo test -f "${recovery_dir}/recovery-metadata.json"
 test "$(sudo stat -c '%a' "${recovery_dir}/session.key")" = 600
-sudo jq -e --argjson contract "$contract" '
+sudo jq -e --argjson contract "$contract" --arg target "$image_b_id" '
   .nas_deployment_contract == $contract and
   .previous_image_ref != "none" and
   .previous_image_digest != "none" and
-  .target_image_ref == "localhost:5000/inktime:v1.0.0-ci-b" and
+  .target_image_ref == $target and
+  .target_source_ref == "localhost:5000/inktime:v1.0.0-ci-b" and
   .source_mount == "read-only" and
   .destination_mount == "bounded-read-write" and
   .secrets_policy == "included" and

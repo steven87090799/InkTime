@@ -152,6 +152,8 @@ def create_recovery(
     target_image_ref: str,
     deployment_contract: str,
     image_contract: str,
+    target_source_ref: str | None = None,
+    target_source_revision: str | None = None,
     adapter: OSAdapter | None = None,
 ) -> Path:
     source_input = source_root.expanduser()
@@ -214,6 +216,8 @@ def create_recovery(
         "previous_image_ref": previous_image_ref,
         "previous_image_digest": previous_image_digest,
         "target_image_ref": target_image_ref,
+        "target_source_ref": target_source_ref or target_image_ref,
+        "target_source_revision": target_source_revision,
         "database_schema_version": int(str(manifest["database_schema_version"])),
         "backup_archive": archive.name,
         "backup_archive_sha256": _digest(archive),
@@ -255,6 +259,8 @@ def main() -> int:
     parser.add_argument("--previous-image-ref", required=True)
     parser.add_argument("--previous-image-digest", required=True)
     parser.add_argument("--target-image-ref", required=True)
+    parser.add_argument("--target-source-ref")
+    parser.add_argument("--target-source-revision")
     parser.add_argument("--deployment-contract", required=True)
     args = parser.parse_args()
 
@@ -266,6 +272,8 @@ def main() -> int:
         previous_image_ref=args.previous_image_ref,
         previous_image_digest=args.previous_image_digest,
         target_image_ref=args.target_image_ref,
+        target_source_ref=args.target_source_ref,
+        target_source_revision=args.target_source_revision,
         deployment_contract=args.deployment_contract,
         image_contract=image_contract,
     )

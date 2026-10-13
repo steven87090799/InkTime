@@ -165,12 +165,14 @@ case "$repository" in
   ''|*[!A-Za-z0-9._:/-]*) echo "NAS-UPDATE-ENV-002 invalid image repository" >&2; exit 2 ;;
 esac
 target_image_ref="${repository}:${release_tag}"
+target_source_ref="$target_image_ref"
 compose() (
   compose_environment_names=$(env | sed -n 's/^\(INKTIME_[A-Za-z0-9_]*\)=.*/\1/p')
   for compose_environment_name in $compose_environment_names; do
     unset "$compose_environment_name"
   done
   export INKTIME_IMAGE_TAG="$release_tag"
+  export INKTIME_IMAGE_REF="$target_image_ref"
   docker compose --env-file "$env_file" -f "$compose_file" "$@"
 )
 
@@ -210,6 +212,19 @@ resolved_compose_images=$(compose config --images | sort -u) || {
 }
 echo "Pulling deployment image ${target_image_ref}..."
 compose pull
+
+target_image_id=$(docker image inspect --format '{{.Id}}' "$target_source_ref") || {
+  echo "NAS-UPDATE-IDENTITY-001 cannot inspect pulled image ID" >&2; exit 2
+}
+printf '%s\n' "$target_image_id" | grep -Eq '^sha256:[0-9a-f]{64}$' || {
+  echo "NAS-UPDATE-IDENTITY-001 pulled image has no immutable image ID" >&2; exit 2
+}
+target_image_ref="$target_image_id"
+target_source_revision=$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$target_image_ref")
+resolved_compose_images=$(compose config --images | sort -u)
+[ "$resolved_compose_images" = "$target_image_ref" ] || {
+  echo "NAS-UPDATE-IDENTITY-001 services do not resolve to the pinned image" >&2; exit 2
+}
 
 image_contract=$(docker image inspect --format '{{ index .Config.Labels "io.inktime.nas-deployment-contract" }}' "$target_image_ref") || {
   echo "NAS-UPDATE-CONTRACT-001 cannot inspect pulled image contract" >&2; exit 2
@@ -354,6 +369,8 @@ PY
     --previous-image-ref "$previous_image_ref" \
     --previous-image-digest "$previous_image_digest" \
     --target-image-ref "$target_image_ref" \
+    --target-source-ref "$target_source_ref" \
+    --target-source-revision "$target_source_revision" \
     --deployment-contract "$deployment_contract") || {
       cleanup_new_recovery || true
       echo "NAS-UPDATE-RECOVERY-001 recovery point failed; existing containers and data were not replaced" >&2
@@ -383,7 +400,7 @@ if [ "$write_marker" -eq 1 ]; then
 fi
 
 echo "Recreating InkTime services; data and recovery point remain on the host if health checks fail..."
-if ! compose up -d --no-build --remove-orphans --wait --wait-timeout "${INKTIME_UPDATE_TIMEOUT_SECONDS:-180}"; then
+if ! compose up -d --no-build --pull never --remove-orphans --wait --wait-timeout "${INKTIME_UPDATE_TIMEOUT_SECONDS:-180}"; then
   echo "NAS-UPDATE-HEALTH-001 deployment did not become healthy; data=${data_path} recovery=${recovery_point} target=${target_image_ref}" >&2
   echo "Inspect 'docker compose --env-file <env> -f docker-compose.nas.yml logs'; preserve /data and recovery metadata, and do not downgrade across an unverified schema." >&2
   exit 1

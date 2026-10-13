@@ -90,8 +90,11 @@ def test_stable_latest_alias_and_prerelease_boundary_are_explicit():
 
     assert "type=raw,value=${{ steps.release.outputs.tag }}" in tags
     assert "type=sha,prefix=sha-" in tags
-    assert "value=latest" in tags
-    assert "steps.release.outputs.stable == 'true'" in tags
+    assert "value=latest" not in tags
+    guard = next(step for step in steps if step.get("id") == "alias")
+    assert guard["if"] == "steps.release.outputs.stable == 'true'"
+    assert "release_alias_guard.py" in guard["run"]
+    assert workflow["concurrency"]["group"] == "inktime-container-release"
     labels = metadata["with"]["labels"]
     assert "io.inktime.nas-deployment-contract=${{ steps.release.outputs.deployment_contract }}" in labels
     assert CONTRACT_PATH.read_text(encoding="utf-8").strip() == "3"
@@ -142,7 +145,7 @@ def test_nas_updater_pulls_before_no_build_recreate_and_never_deletes_volumes():
     updater = UPDATER_PATH.read_text(encoding="utf-8")
 
     assert "compose pull" in updater
-    assert "compose up -d --no-build --remove-orphans --wait" in updater
+    assert "compose up -d --no-build --pull never --remove-orphans --wait" in updater
     assert updater.index("compose pull") < updater.index("compose up -d --no-build")
     assert "docker image inspect" in updater
     assert "io.inktime.nas-deployment-contract" in updater

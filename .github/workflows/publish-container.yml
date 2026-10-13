@@ -6,7 +6,7 @@ name: Publish InkTime Container Image
       - "v*"
 
 concurrency:
-  group: inktime-container-release-${{ github.ref }}
+  group: inktime-container-release
   cancel-in-progress: false
 
 permissions:
@@ -134,7 +134,6 @@ jobs:
           tags: |
             type=raw,value=${{ steps.release.outputs.tag }}
             type=sha,prefix=sha-
-            type=raw,value=latest,enable=${{ steps.release.outputs.stable == 'true' }}
           labels: |
             org.opencontainers.image.title=InkTime
             org.opencontainers.image.description=InkTime photo analysis and e-paper memory platform
@@ -167,6 +166,28 @@ jobs:
           subject-name: ${{ env.IMAGE_NAME }}
           subject-digest: ${{ steps.push.outputs.digest }}
           push-to-registry: true
+
+      - id: alias
+        name: Guard stable latest against version regressions
+        if: steps.release.outputs.stable == 'true'
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          if docker buildx imagetools inspect "${IMAGE_NAME}:latest" --format '{{json .Image}}' > "${RUNNER_TEMP}/latest-image.json" 2> "${RUNNER_TEMP}/latest-image.err"; then
+            python scripts/ci/release_alias_guard.py --candidate "${RELEASE_TAG}" --current-image-json "${RUNNER_TEMP}/latest-image.json" >> "${GITHUB_OUTPUT}"
+          elif grep -Eqi 'manifest unknown|manifest.*not found' "${RUNNER_TEMP}/latest-image.err"; then
+            python scripts/ci/release_alias_guard.py --candidate "${RELEASE_TAG}" >> "${GITHUB_OUTPUT}"
+          else
+            echo "Cannot verify current latest identity; preserving alias." >&2
+            exit 1
+          fi
+
+      - name: Promote verified digest to stable latest
+        if: steps.alias.outputs.publish_latest == 'true'
+        env:
+          IMAGE_DIGEST: ${{ steps.push.outputs.digest }}
+        run: docker buildx imagetools create --tag "${IMAGE_NAME}:latest" "${IMAGE_NAME}@${IMAGE_DIGEST}"
 
       - name: Write release summary
         env:
