@@ -1,10 +1,35 @@
 from __future__ import annotations
 
 from PIL import Image
+import pytest
 
 from inktime.app.domain.analysis.scoring import SEMANTIC_SCORE_KIND
 from tests.conftest import create_admin, csrf, login
 from tests.unit.test_analysis_schema import valid_result
+
+
+@pytest.mark.parametrize("first_day,second_day", [("2026-10-12", "2026-10-13"),
+                                                ("2026-12-31", "2027-01-01"),
+                                                ("2028-02-28", "2028-02-29"),
+                                                ("2026-04-30", "2026-05-01")])
+def test_calendar_cache_and_background_pixels_share_the_frozen_display_date(app, tmp_path, monkeypatch, first_day, second_day):
+    from datetime import date
+    root = tmp_path / "calendar"
+    root.mkdir()
+    _candidate(app, root, "calendar-photo")
+    service = app.extensions["inktime_render_service"]
+    monkeypatch.setattr(service, "_today", lambda: date.fromisoformat(first_day))
+    first = service.preview_fingerprint("calendar-photo", layout="calendar")
+    assert first == service.preview_fingerprint("calendar-photo", layout="calendar")
+    first_image = service._render_plan_image(first["render_plan"])
+    monkeypatch.setattr(service, "_today", lambda: date.fromisoformat(second_day))
+    second = service.preview_fingerprint("calendar-photo", layout="calendar")
+    assert first != second
+    assert first["render_plan"]["calendar_display_date"] == first_day
+    assert second["render_plan"]["calendar_display_date"] == second_day
+    frozen_after_midnight = service._render_plan_image(first["render_plan"])
+    assert frozen_after_midnight.tobytes() == first_image.tobytes()
+    assert service._render_plan_image(second["render_plan"]).tobytes() != first_image.tobytes()
 
 
 def _candidate(app, root, photo_id: str, *, eligible: int = 1, lifecycle: str = "active"):

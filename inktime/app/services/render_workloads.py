@@ -359,6 +359,7 @@ def _prepare_library_preview_child(
         fit_mode=arguments.get("fit_mode"),
         primary_caption=arguments.get("primary_caption"),
         secondary_caption=arguments.get("secondary_caption"),
+        calendar_display_date=arguments.get("calendar_display_date"),
     )
     quantized = bool(arguments.get("quantized"))
     if quantized:

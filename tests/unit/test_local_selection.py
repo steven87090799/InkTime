@@ -5,8 +5,28 @@ import json
 from pathlib import Path
 
 from PIL import Image
+import pytest
 
 from inktime.app.services.local_selection import LocalSelectionPolicy
+
+
+@pytest.mark.parametrize("mode", ["local_only", "local_with_manual_ai", "disabled"])
+def test_local_candidate_years_filter_before_the_bounded_pool(app, tmp_path, mode):
+    root = tmp_path / "year-photos"
+    root.mkdir()
+    for index in range(21):
+        _candidate(app, root, f"other-{index}", 99, "07-28")
+    _candidate(app, root, "allowed", 70, "07-28")
+    with app.extensions["inktime_database"].transaction() as connection:
+        connection.execute("UPDATE photos SET captured_date='2018-07-28',captured_at='2018-07-28T10:00:00' WHERE id='allowed'")
+    settings = app.extensions["inktime_settings_repository"]
+    settings.update("analysis.execution_mode", mode, changed_by="test", source_ip="test")
+    settings.update("render.local_candidate_limit", 20, changed_by="test", source_ip="test")
+    service = app.extensions["inktime_render_service"]
+    selected = service.select_candidates_details(quantity=2, target_date=date(2026, 7, 28), candidate_years=[2018])
+    assert [row["id"] for row in selected] == ["allowed"]
+    assert service.select_candidates_details(quantity=2, target_date=date(2026, 7, 28), candidate_years=[1999]) == []
+    assert service.select_candidates_details(quantity=2, target_date=date(2026, 7, 28), candidate_years=[])
 
 
 def _candidate(app, root: Path, photo_id: str, score: float, month_day: str):

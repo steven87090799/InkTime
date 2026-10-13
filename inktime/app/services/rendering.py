@@ -330,6 +330,7 @@ class RenderService:
         return {
             "version": "render-plan-v1",
             "layout": layout_key,
+            "calendar_display_date": display_date.isoformat() if layout_key == "calendar" else None,
             "primary_photo_id": str(primary["id"]),
             "primary_sha256": str(primary["sha256"] or ""),
             "secondary_photo_id": str(secondary["id"]) if secondary is not None else None,
@@ -414,6 +415,7 @@ class RenderService:
                 ),
                 device_config=device_config,
                 orientation_metadata=orientation_metadata,
+                calendar_display_date=plan.get("calendar_display_date"),
             )
         except Exception as exc:
             if should_log_rate_limited(
@@ -941,7 +943,6 @@ class RenderService:
     def _adaptive_orientation_sql(frame_orientation: str) -> str:
         """Return a metadata-only opposite-orientation predicate for bounded SQL phases."""
         desired = pair_orientation(frame_orientation)
-        exif_swap = "CASE WHEN COALESCE(p.exif_orientation_original,p.orientation) IN (5,6,7,8) THEN 1 ELSE 0 END"
         override_swap = """
             CASE
               WHEN p.manual_orientation_rotation_cw IN (90,270) THEN 1
@@ -952,7 +953,7 @@ class RenderService:
               ELSE 0
             END
         """
-        swap = f"(({exif_swap}) + ({override_swap})) % 2"
+        swap = override_swap
         effective_width = f"CASE WHEN ({swap})=1 THEN p.height ELSE p.width END"
         effective_height = f"CASE WHEN ({swap})=1 THEN p.width ELSE p.height END"
         if desired == "portrait":
@@ -1370,6 +1371,7 @@ class RenderService:
         secondary_caption: dict[str, Any] | None = None,
         device_config: dict[str, Any] | None = None,
         orientation_metadata: list[dict[str, Any]] | None = None,
+        calendar_display_date: str | None = None,
     ) -> Image.Image:
         photo = self.ensure_photo_features(photo_id)
         path = safe_join(Path(photo["root_path"]), photo["relative_path"])
@@ -1537,7 +1539,7 @@ class RenderService:
                     )
                 )
 
-            today = self._today()
+            today = date.fromisoformat(calendar_display_date) if calendar_display_date else self._today()
             weather = self.weather.current() if self.weather and layout_key == "weather_sensor" else None
             indoor = self._latest_indoor() if layout_key == "weather_sensor" else None
             weather_location = str(self.settings.get("render.weather_location_name", "所在地"))
@@ -2470,6 +2472,7 @@ class RenderService:
                 orientation=str(self.settings.get("render.frame_orientation", "portrait")),
                 quantity=limit,
                 layout=str(self.settings.get("render.layout", "photo_info")),
+                candidate_years=candidate_years,
             )
             return result["selected"][:limit]
 

@@ -2,6 +2,25 @@ from __future__ import annotations
 
 from inktime.app.domain.photopainter.offline_schedule import OFFLINE_PREPARE_BOOTSTRAP_AT
 from tests.conftest import create_admin, csrf, login
+import pytest
+
+
+@pytest.mark.parametrize("lead", [0, 1, 120])
+def test_device_name_only_edit_preserves_prefetch_lead_and_config_version(client, app, lead):
+    create_admin(app)
+    login(client)
+    repository = app.extensions["inktime_device_repository"]
+    device_id, _ = repository.create("zero lead", delivery_mode="inktime_offline_schedule",
+                                     schedule_times=["08:00"], prefetch_lead_minutes=lead)
+    before = repository.get(device_id)
+    response = client.patch(f"/api/v1/devices/{device_id}", json={"name": "renamed"},
+                            headers={"X-CSRF-Token": csrf(client)})
+    assert response.status_code == 200
+    after = repository.get(device_id)
+    assert after["prefetch_lead_minutes"] == lead
+    assert after["config_version"] == before["config_version"]
+    page = client.get("/devices")
+    assert f'data-prefetch-lead="{lead}"'.encode() in page.data
 
 
 def test_device_adaptive_settings_are_independent_and_old_devices_fall_back(client, app):

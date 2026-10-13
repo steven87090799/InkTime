@@ -481,7 +481,7 @@ def update_device(device_id: str):
             "delivery_mode": existing["delivery_mode"],
             "offline_prefetch_allowed": bool(existing["offline_prefetch_allowed"]),
             "schedule_times": existing_schedule,
-            "prefetch_lead_minutes": int(existing["prefetch_lead_minutes"] or 5),
+            "prefetch_lead_minutes": int(existing["prefetch_lead_minutes"] if existing["prefetch_lead_minutes"] is not None else 5),
             "button_wake_action": str(existing["button_wake_action"] or "check_new"),
             "minimum_schedule_gap_minutes": int(
                 existing["minimum_schedule_gap_minutes"] or MINIMUM_SCHEDULE_GAP_MINUTES
