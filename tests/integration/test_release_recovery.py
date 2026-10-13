@@ -385,6 +385,7 @@ def test_display_history_keeps_metadata_while_old_payload_is_pruned_and_gc_is_id
         "fallback",
         "queue",
         "rollout",
+        "rollout_frozen_fallback",
         "device_assignment",
         "custom_assignment",
         "staged_publication",
@@ -424,6 +425,14 @@ def test_gc_preserves_every_active_release_reference(app, reference_kind):
             name="GC protection",
             user_id="test",
         )
+    elif reference_kind == "rollout_frozen_fallback":
+        candidate_id = _gc_candidate(app, status="published")
+        campaign = app.extensions["inktime_resilience_repository"].create_rollout(
+            release_id=candidate_id, name="frozen fallback", user_id="test",
+        )
+        with database.transaction() as connection:
+            connection.execute("INSERT INTO rollout_targets(rollout_id,device_id,rollback_release_id,updated_at) VALUES (?,?,?,?)",
+                               (campaign["campaign"]["id"], device_id, release_id, datetime.now(timezone.utc).isoformat()))
     elif reference_kind == "device_assignment":
         with database.session() as connection:
             connection.execute(

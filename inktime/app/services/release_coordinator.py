@@ -444,6 +444,7 @@ class ReleaseCoordinator:
                       WHERE rc.release_id=r.id OR rc.previous_release_id=r.id
                   )
                   AND NOT EXISTS (SELECT 1 FROM selection_decision_traces sdt WHERE sdt.release_id=r.id)
+                  AND NOT EXISTS (SELECT 1 FROM rollout_targets rt WHERE rt.rollback_release_id=r.id)
                 ORDER BY r.created_at,r.id
                 LIMIT ?
                 """,
@@ -499,6 +500,7 @@ class ReleaseCoordinator:
                                           WHERE rc.release_id=r.id OR rc.previous_release_id=r.id
                                       )
                                       AND NOT EXISTS (SELECT 1 FROM selection_decision_traces sdt WHERE sdt.release_id=r.id)
+                                      AND NOT EXISTS (SELECT 1 FROM rollout_targets rt WHERE rt.rollback_release_id=r.id)
                                     """,
                                     (release_id, cutoff),
                                 ).fetchone()

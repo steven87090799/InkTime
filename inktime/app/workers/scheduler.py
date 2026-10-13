@@ -252,6 +252,10 @@ class SchedulerRunner:
                 if release_gc is not None:
                     self._safe_step("release_gc", release_gc)
             self.last_release_reconcile_at = monotonic_now
+        rollout_repository = self.app.extensions.get("inktime_resilience_repository")
+        rollout_evaluator = getattr(rollout_repository, "evaluate_rollouts", None)
+        if callable(rollout_evaluator):
+            self._safe_step("rollout_evaluate", rollout_evaluator)
         if monotonic_now - self.last_operational_retention_at >= OPERATIONAL_RETENTION_INTERVAL_SECONDS:
             resilience = self.app.extensions.get("inktime_resilience_repository")
             if resilience is not None:

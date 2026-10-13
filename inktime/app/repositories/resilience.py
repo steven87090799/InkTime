@@ -408,7 +408,7 @@ class ResilienceRepository:
                 connection.execute(
                     "INSERT INTO activity_events(source,source_id,severity,component,event,message,photo_id,details_json,created_at) VALUES ('feedback',?,'info','resilience','feedback_written','使用者回饋已寫入',?,?,?)",
                     (
-                        f"{user_id}:{photo_id}:{kind}",
+                        f"{user_id}:{photo_id}:{kind}:{uuid4()}",
                         photo_id,
                         _json({"feedback_type": kind, "device_id": device_id}),
                         now,
@@ -1006,148 +1006,7 @@ class ResilienceRepository:
                                 item["release_id"],
                             ),
                         )
-            target = connection.execute(
-                "SELECT rollout_id FROM rollout_targets WHERE queue_item_id=?", (item_id,)
-            ).fetchone()
-            if target:
-                rollout_id = str(target["rollout_id"])
-                target_status = (
-                    "succeeded"
-                    if event == "DISPLAY_COMPLETED"
-                    else "failed"
-                    if event == "DISPLAY_FAILED"
-                    else "in_progress"
-                )
-                connection.execute(
-                    "UPDATE rollout_targets SET status=?,last_error_code=?,updated_at=? WHERE rollout_id=? AND device_id=?",
-                    (
-                        target_status,
-                        str(payload.get("error_code", ""))[:64] or None,
-                        now,
-                        rollout_id,
-                        device_id,
-                    ),
-                )
-                connection.execute(
-                    "INSERT INTO rollout_health_events(rollout_id,device_id,event_type,severity,error_code,details_json,created_at) VALUES (?,?,?,?,?,?,?)",
-                    (
-                        rollout_id,
-                        device_id,
-                        event,
-                        "error" if event == "DISPLAY_FAILED" else "info",
-                        str(payload.get("error_code", ""))[:64] or None,
-                        _json({"queue_item_id": item_id}),
-                        now,
-                    ),
-                )
-                failures = int(
-                    connection.execute(
-                        "SELECT COUNT(*) FROM rollout_targets WHERE rollout_id=? AND status='failed'",
-                        (rollout_id,),
-                    ).fetchone()[0]
-                )
-                if failures >= 2:
-                    connection.execute(
-                        "UPDATE device_content_queue_items SET status='CANCELLED',updated_at=? WHERE id IN (SELECT queue_item_id FROM rollout_targets WHERE rollout_id=? AND queue_item_id IS NOT NULL)",
-                        (now, rollout_id),
-                    )
-                    targets = connection.execute(
-                        "SELECT device_id FROM rollout_targets WHERE rollout_id=?", (rollout_id,)
-                    ).fetchall()
-                    rollback_ready = True
-                    for target_row in targets:
-                        rollback_device = str(target_row["device_id"])
-                        rollback_device_mode = connection.execute(
-                            "SELECT delivery_mode FROM devices WHERE id=?", (rollback_device,)
-                        ).fetchone()
-                        if rollback_device_mode and str(
-                            rollback_device_mode["delivery_mode"] or "legacy_online"
-                        ) == "inktime_offline_schedule":
-                            connection.execute(
-                                "UPDATE rollout_targets SET queue_item_id=NULL,status='rollback_skipped_incompatible_offline',last_error_code='ROLLBACK-005',updated_at=? WHERE rollout_id=? AND device_id=?",
-                                (now, rollout_id, rollback_device),
-                            )
-                            connection.execute(
-                                "INSERT INTO rollout_health_events(rollout_id,device_id,event_type,severity,error_code,details_json,created_at) VALUES (?,?,?,?,?,?,?)",
-                                (
-                                    rollout_id,
-                                    rollback_device,
-                                    "ROLLBACK_TARGET_SKIPPED",
-                                    "warning",
-                                    "ROLLBACK-005",
-                                    _json({"reason": "enhanced_offline_requires_offline_schedule"}),
-                                    now,
-                                ),
-                            )
-                            continue
-                        fallback = connection.execute(
-                            "SELECT last_known_good_release_id FROM device_content_queues WHERE device_id=?",
-                            (rollback_device,),
-                        ).fetchone()
-                        fallback_id = str(fallback["last_known_good_release_id"] or "") if fallback else ""
-                        if not fallback_id:
-                            rollback_ready = False
-                            continue
-                        existing = connection.execute(
-                            "SELECT id FROM device_content_queue_items WHERE device_id=? AND release_id=?",
-                            (rollback_device, fallback_id),
-                        ).fetchone()
-                        rollback_item = str(existing["id"]) if existing else str(uuid4())
-                        if not existing:
-                            position = int(
-                                connection.execute(
-                                    "SELECT COALESCE(MAX(position),0)+1 FROM device_content_queue_items WHERE device_id=?",
-                                    (rollback_device,),
-                                ).fetchone()[0]
-                            )
-                            connection.execute(
-                                "INSERT INTO device_content_queue_items(id,device_id,release_id,position,priority,status,created_at,updated_at) VALUES (?,?,?,?,1000,'READY',?,?)",
-                                (rollback_item, rollback_device, fallback_id, position, now, now),
-                            )
-                        connection.execute(
-                            "UPDATE rollout_targets SET queue_item_id=?,status='rollback_pending',updated_at=? WHERE rollout_id=? AND device_id=?",
-                            (rollback_item, now, rollout_id, rollback_device),
-                        )
-                    if rollback_ready:
-                        connection.execute(
-                            "UPDATE rollout_campaigns SET status='ROLLING_BACK',rollback_reason='ROLLBACK-001 連續兩台裝置顯示失敗',updated_at=? WHERE id=? AND status IN ('CANARY','OBSERVING','EXPANDING')",
-                            (now, rollout_id),
-                        )
-                        self._action(
-                            connection,
-                            rollout_id,
-                            None,
-                            "automatic_rollback",
-                            "ROLLBACK-001 連續兩台裝置顯示失敗",
-                        )
-                    else:
-                        connection.execute(
-                            "UPDATE rollout_campaigns SET status='FAILED',rollback_reason='ROLLBACK-002 找不到 Last Known Good',updated_at=? WHERE id=?",
-                            (now, rollout_id),
-                        )
-                        self._action(
-                            connection,
-                            rollout_id,
-                            None,
-                            "rollback_failed",
-                            "ROLLBACK-002 找不到 Last Known Good",
-                        )
-                elif event == "DISPLAY_COMPLETED":
-                    pending = int(
-                        connection.execute(
-                            "SELECT COUNT(*) FROM rollout_targets WHERE rollout_id=? AND status NOT IN ('succeeded','skipped_incompatible_offline','rollback_skipped_incompatible_offline')",
-                            (rollout_id,),
-                        ).fetchone()[0]
-                    )
-                    campaign = connection.execute(
-                        "SELECT status FROM rollout_campaigns WHERE id=?", (rollout_id,)
-                    ).fetchone()
-                    if pending == 0 and campaign and str(campaign["status"]) == "ROLLING_BACK":
-                        connection.execute(
-                            "UPDATE rollout_campaigns SET status='ROLLED_BACK',updated_at=? WHERE id=?",
-                            (now, rollout_id),
-                        )
-                        self._action(connection, rollout_id, None, "rollback_completed", None)
+            self._record_rollout_ack_locked(connection, item_id, device_id, event, payload, now)
         log_event(
             LOGGER,
             logging.INFO if event in {"DISPLAY_COMPLETED", "DISPLAY_FAILED"} else logging.DEBUG,
@@ -1538,6 +1397,213 @@ class ResilienceRepository:
             "gc_queue_items": int(queue_gc),
         }
 
+    @staticmethod
+    def _rollback_identity_locked(connection, device_id: str, candidate_id: str) -> str | None:
+        row = connection.execute(
+            """SELECT r.id FROM device_content_queues q JOIN devices d ON d.id=q.device_id
+               JOIN releases r ON r.id=q.last_known_good_release_id
+               WHERE q.device_id=? AND r.id<>? AND r.render_profile=d.panel_profile
+                 AND r.status IN ('published','superseded') AND r.reconciliation_status<>'payload_pruned'""",
+            (device_id, candidate_id),
+        ).fetchone()
+        return str(row[0]) if row else None
+
+    @staticmethod
+    def _rollout_delivery_locked(connection, device_id: str, release_id: str, now: str, priority: int, deadline: str) -> str:
+        connection.execute("INSERT OR IGNORE INTO device_content_queues(device_id,updated_at) VALUES (?,?)", (device_id, now))
+        existing = connection.execute(
+            "SELECT id FROM device_content_queue_items WHERE device_id=? AND release_id=? "
+            "AND status IN ('PENDING','READY','AVAILABLE','DOWNLOADED','ACKNOWLEDGED')",
+            (device_id, release_id),
+        ).fetchone()
+        if existing:
+            connection.execute("UPDATE device_content_queue_items SET priority=MAX(priority,?),ack_deadline=COALESCE(ack_deadline,?),updated_at=? WHERE id=?",
+                               (priority, deadline, now, existing[0]))
+            return str(existing[0])
+        identifier = str(uuid4())
+        position = connection.execute("SELECT COALESCE(MAX(position),0)+1 FROM device_content_queue_items WHERE device_id=?",
+                                      (device_id,)).fetchone()[0]
+        connection.execute(
+            "INSERT INTO device_content_queue_items(id,device_id,release_id,position,priority,status,ack_deadline,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,'READY',?,?,?)", (identifier, device_id, release_id, position, priority, deadline, now, now),
+        )
+        connection.execute("UPDATE device_content_queues SET queue_version=queue_version+1,next_queued_release_id=?,updated_at=? WHERE device_id=?",
+                           (release_id, now, device_id))
+        return identifier
+
+    def _start_rollback_locked(self, connection, rollout_id: str, now: str, reason: str, actor_id=None) -> None:
+        campaign = connection.execute("SELECT * FROM rollout_campaigns WHERE id=?", (rollout_id,)).fetchone()
+        if not campaign or campaign["status"] in {"ROLLING_BACK", "ROLLED_BACK", "COMPLETED", "FAILED", "CANCELLED"}:
+            return
+        connection.execute(
+            "UPDATE device_content_queue_items SET status='CANCELLED',updated_at=? "
+            "WHERE id IN (SELECT queue_item_id FROM rollout_targets WHERE rollout_id=?) "
+            "AND status IN ('PENDING','READY','AVAILABLE','DOWNLOADED','ACKNOWLEDGED')", (now, rollout_id),
+        )
+        targets = connection.execute(
+            "SELECT t.*,d.delivery_mode,d.panel_profile FROM rollout_targets t JOIN devices d ON d.id=t.device_id WHERE t.rollout_id=?",
+            (rollout_id,),
+        ).fetchall()
+        missing = not targets
+        for target in targets:
+            device_id = str(target["device_id"])
+            if str(target["delivery_mode"]) == "inktime_offline_schedule":
+                connection.execute("UPDATE rollout_targets SET status='rollback_skipped_incompatible_offline',updated_at=? WHERE id=?", (now, target["id"]))
+                continue
+            fallback = str(target["rollback_release_id"] or "")
+            valid = connection.execute(
+                "SELECT 1 FROM releases WHERE id=? AND render_profile=? AND status IN ('published','superseded') "
+                "AND reconciliation_status<>'payload_pruned'", (fallback, target["panel_profile"]),
+            ).fetchone() if fallback else None
+            if not valid:
+                missing = True
+                connection.execute("UPDATE rollout_targets SET status='rollback_failed',last_error_code='ROLLBACK-002',updated_at=? WHERE id=?",
+                                   (now, target["id"]))
+                continue
+            deadline = (datetime.fromisoformat(now) + timedelta(days=1)).isoformat()
+            item_id = self._rollout_delivery_locked(connection, device_id, fallback, now, 1000, deadline)
+            connection.execute("UPDATE rollout_targets SET queue_item_id=?,status='rollback_pending',last_error_code=NULL,updated_at=? WHERE id=?",
+                               (item_id, now, target["id"]))
+        status = "FAILED" if missing else "ROLLING_BACK"
+        detail = "ROLLBACK-002 缺少可驗證的回復身分" if missing else reason
+        connection.execute("UPDATE rollout_campaigns SET status=?,rollback_reason=?,updated_at=? WHERE id=?",
+                           (status, detail[:500], now, rollout_id))
+        self._action(connection, rollout_id, actor_id, "rollback_failed" if missing else "rollback_started", detail)
+
+    def _allocate_rollout_stage_locked(self, connection, campaign, stage, now: str) -> None:
+        config = json.loads(str(campaign["config_json"] or "{}"))
+        cohort = config.get("cohort_device_ids")
+        if cohort is None:
+            cohort = [str(row[0]) for row in connection.execute(
+                "SELECT d.id FROM devices d JOIN releases r ON r.id=? AND r.render_profile=d.panel_profile "
+                "WHERE d.enabled=1 ORDER BY d.id", (campaign["release_id"],),
+            )]
+            config["cohort_device_ids"] = cohort
+            connection.execute("UPDATE rollout_campaigns SET config_json=? WHERE id=?", (_json(config), campaign["id"]))
+        devices = connection.execute(
+            "SELECT d.id,d.delivery_mode FROM devices d JOIN releases r ON r.id=? AND r.render_profile=d.panel_profile "
+            "WHERE d.enabled=1 AND d.id IN (SELECT value FROM json_each(?)) ORDER BY d.id",
+            (campaign["release_id"], _json(cohort)),
+        ).fetchall()
+        online = [row for row in devices if row["delivery_mode"] != "inktime_offline_schedule"]
+        if not online:
+            raise ValueError("ROLLOUT-005 沒有可用的線上 cohort；Enhanced offline 需使用 offline schedule")
+        if int(stage["minimum_successful_devices"]) > len(online):
+            raise ValueError("ROLLOUT-002 最少成功裝置數超過可用 cohort")
+        for device in devices:
+            if device["delivery_mode"] == "inktime_offline_schedule":
+                connection.execute("INSERT OR IGNORE INTO rollout_targets(rollout_id,device_id,status,last_error_code,updated_at) "
+                                   "VALUES (?,?,'skipped_incompatible_offline','ROLLOUT-005',?)", (campaign["id"], device["id"], now))
+        count = min(len(online), max(int(stage["minimum_successful_devices"]), ceil(len(online) * int(stage["target_percent"]) / 100)))
+        for device in online[:count]:
+            conflict = connection.execute(
+                "SELECT 1 FROM rollout_targets t JOIN rollout_campaigns c ON c.id=t.rollout_id "
+                "WHERE t.device_id=? AND t.rollout_id<>? AND c.status IN ('CANARY','OBSERVING','EXPANDING','PAUSED','ROLLING_BACK') LIMIT 1",
+                (device["id"], campaign["id"]),
+            ).fetchone()
+            if conflict:
+                raise ValueError("ROLLOUT-002 裝置已有其他進行中的發布活動")
+        for device in online[:count]:
+            device_id = str(device["id"])
+            if connection.execute("SELECT 1 FROM rollout_targets WHERE rollout_id=? AND device_id=?", (campaign["id"], device_id)).fetchone():
+                continue
+            fallback = self._rollback_identity_locked(connection, device_id, str(campaign["release_id"]))
+            deadline = (datetime.fromisoformat(now) + timedelta(minutes=int(stage["ack_timeout_minutes"]))).isoformat()
+            item_id = self._rollout_delivery_locked(connection, device_id, str(campaign["release_id"]), now, 900, deadline)
+            connection.execute("INSERT INTO rollout_targets(rollout_id,device_id,status,queue_item_id,rollback_release_id,updated_at) "
+                               "VALUES (?,?,'pending',?,?,?)", (campaign["id"], device_id, item_id, fallback, now))
+        connection.execute("UPDATE rollout_stages SET status='active',started_at=? WHERE id=? AND status='pending'", (now, stage["id"]))
+
+    def _evaluate_rollout_locked(self, connection, rollout_id: str, now: str, *, approved: bool = False) -> bool:
+        campaign = connection.execute("SELECT * FROM rollout_campaigns WHERE id=?", (rollout_id,)).fetchone()
+        if not campaign or campaign["status"] not in {"CANARY", "OBSERVING", "EXPANDING", "ROLLING_BACK"}:
+            return False
+        # Rotate the bounded scheduler page even when a campaign awaits ACKs.
+        connection.execute("UPDATE rollout_campaigns SET updated_at=? WHERE id=?", (now, rollout_id))
+        if campaign["status"] == "ROLLING_BACK":
+            expired = connection.execute(
+                "SELECT 1 FROM rollout_targets t JOIN device_content_queue_items q ON q.id=t.queue_item_id "
+                "WHERE t.rollout_id=? AND t.status IN ('rollback_pending','in_progress') AND q.ack_deadline<=? LIMIT 1",
+                (rollout_id, now),
+            ).fetchone()
+            if expired:
+                connection.execute("UPDATE rollout_campaigns SET status='FAILED',rollback_reason='ROLLBACK-004 回復 ACK 逾時',updated_at=? WHERE id=?",
+                                   (now, rollout_id))
+                self._action(connection, rollout_id, None, "rollback_timeout", None)
+            return False
+        stage = connection.execute("SELECT * FROM rollout_stages WHERE rollout_id=? AND status='active' ORDER BY stage_number LIMIT 1", (rollout_id,)).fetchone()
+        if not stage:
+            return False
+        targets = connection.execute(
+            "SELECT t.status,t.last_error_code,q.status AS queue_status,q.ack_deadline FROM rollout_targets t "
+            "LEFT JOIN device_content_queue_items q ON q.id=t.queue_item_id "
+            "WHERE t.rollout_id=? AND t.status NOT IN ('skipped_incompatible_offline','rollback_skipped_incompatible_offline')",
+            (rollout_id,),
+        ).fetchall()
+        total = len(targets)
+        if not total:
+            return False
+        successes = sum(row["status"] == "succeeded" for row in targets)
+        timeouts = sum(row["status"] != "succeeded" and (row["queue_status"] == "EXPIRED" or "TIMEOUT" in str(row["last_error_code"] or "")
+                       or (bool(row["ack_deadline"]) and str(row["ack_deadline"]) <= now)) for row in targets)
+        failures = sum(row["status"] == "failed" and "TIMEOUT" not in str(row["last_error_code"] or "") for row in targets)
+        if failures / total > float(stage["maximum_failure_rate"]) or timeouts / total > float(stage["maximum_timeout_rate"]):
+            self._start_rollback_locked(connection, rollout_id, now, "ROLLBACK-001 Stage 健康門檻超標")
+            return False
+        ready = successes >= int(stage["minimum_successful_devices"]) and successes / total >= float(stage["minimum_ack_rate"])
+        if not ready:
+            return False
+        connection.execute("UPDATE rollout_campaigns SET status='OBSERVING',updated_at=? WHERE id=?", (now, rollout_id))
+        started = datetime.fromisoformat(str(stage["started_at"]))
+        if started.tzinfo is None:
+            started = started.replace(tzinfo=timezone.utc)
+        elapsed = datetime.fromisoformat(now) - started
+        if elapsed < timedelta(minutes=int(stage["minimum_observation_minutes"])) or (stage["manual_approval_required"] and not approved):
+            return False
+        next_stage = connection.execute("SELECT * FROM rollout_stages WHERE rollout_id=? AND stage_number>? AND status='pending' ORDER BY stage_number LIMIT 1",
+                                        (rollout_id, stage["stage_number"])).fetchone()
+        if next_stage:
+            try:
+                self._allocate_rollout_stage_locked(connection, campaign, next_stage, now)
+            except ValueError:
+                self._start_rollback_locked(connection, rollout_id, now, "ROLLBACK-001 下一 Stage cohort 不再可用")
+                return False
+        connection.execute("UPDATE rollout_stages SET status='completed',completed_at=? WHERE id=?", (now, stage["id"]))
+        connection.execute("UPDATE rollout_campaigns SET status=?,updated_at=? WHERE id=?", ("EXPANDING" if next_stage else "COMPLETED", now, rollout_id))
+        self._action(connection, rollout_id, None, "stage_advanced" if next_stage else "completed", None)
+        return True
+
+    def evaluate_rollouts(self, *, now: datetime | None = None, limit: int = 20) -> int:
+        current = (now or datetime.now(timezone.utc)).astimezone(timezone.utc).isoformat()
+        changed = 0
+        with self.database.transaction(operation="rollout_stage_evaluation") as connection:
+            rows = connection.execute("SELECT id FROM rollout_campaigns WHERE status IN ('CANARY','OBSERVING','EXPANDING','ROLLING_BACK') ORDER BY updated_at,id LIMIT ?",
+                                      (max(1, min(limit, 100)),)).fetchall()
+            for row in rows:
+                changed += int(self._evaluate_rollout_locked(connection, str(row[0]), current))
+        return changed
+
+    def _record_rollout_ack_locked(self, connection, item_id, device_id, event, payload, now):
+        targets = connection.execute("SELECT t.rollout_id,c.status FROM rollout_targets t JOIN rollout_campaigns c ON c.id=t.rollout_id WHERE t.queue_item_id=?",
+                                     (item_id,)).fetchall()
+        for target in targets:
+            rollout_id = str(target["rollout_id"])
+            if target["status"] not in {"CANARY", "OBSERVING", "EXPANDING", "PAUSED", "ROLLING_BACK"}:
+                continue
+            status = "succeeded" if event == "DISPLAY_COMPLETED" else "failed" if event == "DISPLAY_FAILED" else "in_progress"
+            connection.execute("UPDATE rollout_targets SET status=?,last_error_code=?,updated_at=? WHERE rollout_id=? AND device_id=?",
+                               (status, str(payload.get("error_code") or "")[:64] or None, now, rollout_id, device_id))
+            connection.execute("INSERT INTO rollout_health_events(rollout_id,device_id,event_type,severity,error_code,details_json,created_at) VALUES (?,?,?,?,?,?,?)",
+                               (rollout_id, device_id, event, "error" if status == "failed" else "info", str(payload.get("error_code") or "")[:64] or None, _json({"queue_item_id": item_id}), now))
+            if target["status"] == "ROLLING_BACK":
+                if status == "failed":
+                    connection.execute("UPDATE rollout_campaigns SET status='FAILED',rollback_reason='ROLLBACK-003 回復顯示失敗',updated_at=? WHERE id=?", (now, rollout_id))
+                elif status == "succeeded" and not connection.execute("SELECT 1 FROM rollout_targets WHERE rollout_id=? AND status NOT IN ('succeeded','rollback_skipped_incompatible_offline') LIMIT 1", (rollout_id,)).fetchone():
+                    connection.execute("UPDATE rollout_campaigns SET status='ROLLED_BACK',updated_at=? WHERE id=?", (now, rollout_id))
+                    self._action(connection, rollout_id, None, "rollback_completed", None)
+            else:
+                self._evaluate_rollout_locked(connection, rollout_id, now)
+
     def create_rollout(
         self, *, release_id: str, name: str, user_id: str, stages: list[dict[str, Any]] | None = None
     ) -> dict[str, Any]:
@@ -1548,6 +1614,10 @@ class ResilienceRepository:
             {"target_percent": 50},
             {"target_percent": 100},
         ]
+        for stage in defaults:
+            for key, default in (("maximum_failure_rate", 0.1), ("maximum_timeout_rate", 0.1), ("minimum_ack_rate", 0.9)):
+                if not 0 <= float(stage.get(key, default)) <= 1:
+                    raise ValueError("ROLLOUT-002 健康門檻必須介於 0 與 1")
         with self.database.transaction() as connection:
             if not connection.execute(
                 "SELECT 1 FROM releases WHERE id=? AND status='published' AND reconciliation_status!='payload_pruned'",
@@ -1560,7 +1630,7 @@ class ResilienceRepository:
             )
             for index, stage in enumerate(defaults, 1):
                 connection.execute(
-                    "INSERT INTO rollout_stages(rollout_id,stage_number,target_percent,minimum_observation_minutes,minimum_successful_devices,maximum_failure_rate,maximum_timeout_rate,minimum_ack_rate,manual_approval_required) VALUES (?,?,?,?,?,?,?,?,?)",
+                    "INSERT INTO rollout_stages(rollout_id,stage_number,target_percent,minimum_observation_minutes,minimum_successful_devices,maximum_failure_rate,maximum_timeout_rate,minimum_ack_rate,manual_approval_required,ack_timeout_minutes) VALUES (?,?,?,?,?,?,?,?,?,?)",
                     (
                         rollout_id,
                         index,
@@ -1571,6 +1641,7 @@ class ResilienceRepository:
                         float(stage.get("maximum_timeout_rate", 0.1)),
                         float(stage.get("minimum_ack_rate", 0.9)),
                         int(bool(stage.get("manual_approval_required", False))),
+                        max(1, min(int(stage.get("ack_timeout_minutes", 1440)), 10080)),
                     ),
                 )
             self._action(connection, rollout_id, user_id, "create", None)
@@ -1592,77 +1663,8 @@ class ResilienceRepository:
             ).fetchone()
             if not stage:
                 raise ValueError("ROLLOUT-001 發布活動沒有 Stage")
-            all_devices = connection.execute(
-                "SELECT d.id,d.delivery_mode FROM devices d JOIN releases r ON r.id=? AND r.render_profile=d.panel_profile WHERE d.enabled=1 ORDER BY d.id",
-                (campaign["release_id"],),
-            ).fetchall()
-            offline_devices = [
-                row for row in all_devices
-                if str(row["delivery_mode"] or "legacy_online") == "inktime_offline_schedule"
-            ]
-            devices = [
-                row for row in all_devices
-                if str(row["delivery_mode"] or "legacy_online") != "inktime_offline_schedule"
-            ]
-            if not devices:
-                raise ValueError("ROLLOUT-005 Enhanced offline 裝置只能透過 offline schedule rollout")
-            for device in offline_devices:
-                device_id = str(device["id"])
-                connection.execute(
-                    "INSERT OR REPLACE INTO rollout_targets(rollout_id,device_id,status,queue_item_id,last_error_code,updated_at) VALUES (?,?,?,NULL,?,?)",
-                    (rollout_id, device_id, "skipped_incompatible_offline", "ROLLOUT-005", now),
-                )
-                connection.execute(
-                    "INSERT INTO rollout_health_events(rollout_id,device_id,event_type,severity,error_code,details_json,created_at) VALUES (?,?,?,?,?,?,?)",
-                    (
-                        rollout_id,
-                        device_id,
-                        "ROLLOUT_TARGET_SKIPPED",
-                        "warning",
-                        "ROLLOUT-005",
-                        _json({"reason": "enhanced_offline_requires_offline_schedule"}),
-                        now,
-                    ),
-                )
-            target_count = min(
-                len(devices),
-                max(
-                    int(stage["minimum_successful_devices"]),
-                    ceil(len(devices) * int(stage["target_percent"]) / 100),
-                ),
-            )
-            for device in devices[:target_count]:
-                device_id = str(device["id"])
-                connection.execute(
-                    "INSERT OR IGNORE INTO device_content_queues(device_id,updated_at) VALUES (?,?)",
-                    (device_id, now),
-                )
-                existing = connection.execute(
-                    "SELECT id FROM device_content_queue_items WHERE device_id=? AND release_id=?",
-                    (device_id, campaign["release_id"]),
-                ).fetchone()
-                item_id = str(existing["id"]) if existing else str(uuid4())
-                if not existing:
-                    position = int(
-                        connection.execute(
-                            "SELECT COALESCE(MAX(position),0)+1 FROM device_content_queue_items WHERE device_id=?",
-                            (device_id,),
-                        ).fetchone()[0]
-                    )
-                    connection.execute(
-                        "INSERT INTO device_content_queue_items(id,device_id,release_id,position,priority,status,created_at,updated_at) VALUES (?,?,?,?,900,'READY',?,?)",
-                        (item_id, device_id, campaign["release_id"], position, now, now),
-                    )
-                connection.execute(
-                    "INSERT OR REPLACE INTO rollout_targets(rollout_id,device_id,status,queue_item_id,updated_at) VALUES (?,?, 'pending', ?, ?)",
-                    (rollout_id, device_id, item_id, now),
-                )
-            connection.execute(
-                "UPDATE rollout_stages SET status='active',started_at=? WHERE id=?", (now, stage["id"])
-            )
-            connection.execute(
-                "UPDATE rollout_campaigns SET status='CANARY',updated_at=? WHERE id=?", (now, rollout_id)
-            )
+            self._allocate_rollout_stage_locked(connection, campaign, stage, now)
+            connection.execute("UPDATE rollout_campaigns SET status='CANARY',updated_at=? WHERE id=?", (now, rollout_id))
             self._action(connection, rollout_id, actor_id, "start_canary", None)
         return self.rollout(rollout_id) or {}
 
@@ -1707,6 +1709,8 @@ class ResilienceRepository:
         self, rollout_id: str, *, target: str, actor_id: str, reason: str | None = None
     ) -> dict[str, Any]:
         target = target.upper()
+        advanced = False
+        now = utc_now()
         with self.database.transaction() as connection:
             campaign = connection.execute(
                 "SELECT * FROM rollout_campaigns WHERE id=?", (rollout_id,)
@@ -1716,14 +1720,42 @@ class ResilienceRepository:
             current = str(campaign["status"])
             if target not in ROLL_OUT_STATES.get(current, set()):
                 raise ValueError(f"ROLLOUT-001 {current} 不可轉為 {target}")
-            connection.execute(
-                "UPDATE rollout_campaigns SET status=?,rollback_reason=CASE WHEN ?='ROLLING_BACK' THEN ? ELSE rollback_reason END,updated_at=? WHERE id=?",
-                (target, target, (reason or "")[:500], utc_now(), rollout_id),
-            )
-            self._action(connection, rollout_id, actor_id, target.lower(), reason)
             if target == "ROLLING_BACK":
+                self._start_rollback_locked(connection, rollout_id, now, reason or "人工回復", actor_id)
+            elif target == "EXPANDING" and current != "PAUSED":
+                advanced = self._evaluate_rollout_locked(connection, rollout_id, now, approved=True)
+                if advanced:
+                    self._action(connection, rollout_id, actor_id, "approve", reason)
+            else:
+                config = json.loads(str(campaign["config_json"] or "{}"))
+                if target == "PAUSED":
+                    config["pause_started_at"] = now
+                elif current == "PAUSED" and config.get("pause_started_at"):
+                    paused = datetime.fromisoformat(config.pop("pause_started_at"))
+                    duration = max(timedelta(), datetime.fromisoformat(now) - paused)
+                    stages = connection.execute("SELECT id,started_at FROM rollout_stages WHERE rollout_id=? AND status='active'", (rollout_id,)).fetchall()
+                    for stage in stages:
+                        started = datetime.fromisoformat(str(stage["started_at"]))
+                        if started.tzinfo is None:
+                            started = started.replace(tzinfo=timezone.utc)
+                        connection.execute("UPDATE rollout_stages SET started_at=? WHERE id=?", ((started + duration).isoformat(), stage["id"]))
+                    items = connection.execute(
+                        "SELECT q.id,q.ack_deadline FROM device_content_queue_items q JOIN rollout_targets t ON t.queue_item_id=q.id "
+                        "WHERE t.rollout_id=? AND q.ack_deadline IS NOT NULL AND q.status IN ('PENDING','READY','AVAILABLE','DOWNLOADED','ACKNOWLEDGED')",
+                        (rollout_id,),
+                    ).fetchall()
+                    for item in items:
+                        deadline = datetime.fromisoformat(str(item["ack_deadline"]))
+                        connection.execute("UPDATE device_content_queue_items SET ack_deadline=? WHERE id=?",
+                                           ((deadline + duration).isoformat(), item["id"]))
                 connection.execute(
-                    "UPDATE device_content_queue_items SET status='CANCELLED',updated_at=? WHERE id IN (SELECT queue_item_id FROM rollout_targets WHERE rollout_id=? AND queue_item_id IS NOT NULL)",
-                    (utc_now(), rollout_id),
+                    "UPDATE rollout_campaigns SET status=?,config_json=?,updated_at=? WHERE id=?",
+                    (target, _json(config), now, rollout_id),
                 )
-        return self.rollout(rollout_id) or {}
+                self._action(connection, rollout_id, actor_id, target.lower(), reason)
+        if target == "EXPANDING" and current != "PAUSED" and not advanced:
+            raise ValueError("ROLLOUT-002 觀察時間或健康門檻尚未通過，未擴大發布")
+        result = self.rollout(rollout_id) or {}
+        if target == "ROLLING_BACK" and result.get("campaign", {}).get("status") == "FAILED":
+            raise ValueError("ROLLBACK-002 缺少可驗證的回復身分")
+        return result

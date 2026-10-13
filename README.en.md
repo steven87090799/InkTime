@@ -1,6 +1,6 @@
 # InkTime · Photo analysis and e-ink memory frames
 
-> Branch documentation updated on 2026-10-11 from `origin/main=7ef3e4f` and the no-code enrollment revision `47dcd51` in Draft PR #150. SQLite Migration 63, AI Schema v5, firmware 2.8.8 (pending merge and validation), Config Store v5 and NAS deployment contract 3 are separate versions. Check the deployed Git revision in Diagnostics; see the [source baseline](docs/reference/CURRENT_STATE_ZH_TW.md).
+> Branch documentation updated on 2026-10-11 from `origin/main=7ef3e4f` and the no-code enrollment revision `47dcd51` in Draft PR #150. SQLite Migration 64, AI Schema v5, firmware 2.8.8 (pending merge and validation), Config Store v5 and NAS deployment contract 3 are separate versions. Check the deployed Git revision in Diagnostics; see the [source baseline](docs/reference/CURRENT_STATE_ZH_TW.md).
 
 [繁體中文](README.md) · [Documentation map](docs/README.md) · [HTML manual](USER_MANUAL.html) · [Quick start](docs/getting-started/QUICK_START_ZH_TW.md)
 
