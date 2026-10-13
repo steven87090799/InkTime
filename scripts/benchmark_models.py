@@ -39,7 +39,7 @@ def main() -> int:
     parser.add_argument("--sample-count", type=int, default=3)
     parser.add_argument("--seed", default="inktime-benchmark-v1")
     parser.add_argument("--image-sides", default="512,1024,1600")
-    parser.add_argument("--prompt-profiles", default="default,advanced")
+    parser.add_argument("--prompt-profiles", default="default")
     parser.add_argument("--variants", default="off,on", choices=["off", "on", "off,on", "on,off"])
     parser.add_argument("--reasoning", default="none,low")
     parser.add_argument("--max-requests", type=int, default=40)

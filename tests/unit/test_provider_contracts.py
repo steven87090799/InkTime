@@ -62,6 +62,44 @@ class RepairFailureProvider(FakeContractProvider):
         raise TimeoutError("repair timeout")
 
 
+def test_level3_rejects_historical_schema_as_current_model_response():
+    from dataclasses import replace
+
+    class LegacyProvider(FakeContractProvider):
+        def analyze(self, **kwargs):
+            response = super().analyze(**kwargs)
+            body = json.loads(response.content)
+            body["schema_version"] = 4
+            return replace(response, content=json.dumps(body))
+
+        def repair_json(self, **kwargs):
+            response = super().repair_json(**kwargs)
+            body = json.loads(response.content)
+            body["schema_version"] = 4
+            return replace(response, content=json.dumps(body))
+
+    provider = LegacyProvider()
+    result = run_provider_contract(provider, model="provider/model", level=3)
+    assert result["ok"] is False
+    assert result["schema_valid"] is False
+
+
+def test_level3_repair_truncation_keeps_known_cost_but_never_passes():
+    from dataclasses import replace
+
+    class TruncatedRepairProvider(FakeContractProvider):
+        def repair_json(self, **kwargs):
+            return replace(super().repair_json(**kwargs), finish_reason="length")
+
+    provider = TruncatedRepairProvider(valid=False)
+    result = run_provider_contract(provider, model="provider/model", level=3)
+    assert result["ok"] is False
+    assert result["schema_valid"] is False
+    assert result["repair_requests"] == 1
+    assert result["production_acceptance"] is False
+    assert result["usage"]["provider_reported_cost"] == 0.08
+
+
 class AmbiguousRepairFailureProvider(FakeContractProvider):
     def repair_json(self, **kwargs):
         self.repair_calls.append(kwargs)
