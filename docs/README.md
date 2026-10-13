@@ -173,6 +173,7 @@
 - [`reports/CI_FIXES_20261013.md`](reports/CI_FIXES_20261013.md)：PR #159 CI 失敗原因、程式位置、修復方法與容器安全驗收界線。
 - [`reports/P1_FIXES_20261013.md`](reports/P1_FIXES_20261013.md)：上線前五項 P1 的原因、修復與驗證界線。
 - [`reports/P2_FIXES_20261013.md`](reports/P2_FIXES_20261013.md)：同分支 P2 接續修復逐項狀態，與 P1 分開追蹤。
+- [`reports/P3_FIXES_20261013.md`](reports/P3_FIXES_20261013.md)：15 項 P3 的原因、程式位置、修法與 CI／實機驗收界線。
 - [`reports/PERFORMANCE_REPORT.md`](reports/PERFORMANCE_REPORT.md)：100,000 筆效能測試紀錄；測試腳本會更新此檔。
 - [`archive/reports/FINAL_ONE_SHOT_HARDENING_AUDIT.md`](archive/reports/FINAL_ONE_SHOT_HARDENING_AUDIT.md)：歷史 PR #53 的 P1、Provider、AI、Release、Container 與 hosted CI 交接證據。
 
