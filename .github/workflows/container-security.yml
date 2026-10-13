@@ -270,6 +270,9 @@ jobs:
             inktime:ci
           status=$?
           set -e
+          if [ -f "artifacts/inktime-trivy-${GITHUB_SHA}.json" ]; then
+            python scripts/ci/trivy_report_summary.py "artifacts/inktime-trivy-${GITHUB_SHA}.json"
+          fi
           # Convert the already-produced JSON locally; do not scan the image a
           # second time just to create the human-readable artifact.
           docker run --rm \

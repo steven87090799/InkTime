@@ -30,12 +30,13 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 # systemd/udev libraries are not needed by InkTime and are removed below.
 # Keep the reviewed forky SQLite dependency set while refreshing security fixes.
 ARG DEBIAN_SNAPSHOT=20260915T000000Z
-ARG DEBIAN_SECURITY_SNAPSHOT=20261003T000000Z
+ARG DEBIAN_RUNTIME_SNAPSHOT=20261012T000000Z
+ARG DEBIAN_SECURITY_SNAPSHOT=20261012T000000Z
 RUN set -eux; \
     rm -f /etc/apt/sources.list.d/debian.sources; \
     printf '%s\n' \
-        "deb [check-valid-until=no] https://snapshot.debian.org/archive/debian/${DEBIAN_SNAPSHOT}/ trixie main" \
-        "deb [check-valid-until=no] https://snapshot.debian.org/archive/debian/${DEBIAN_SNAPSHOT}/ trixie-updates main" \
+        "deb [check-valid-until=no] https://snapshot.debian.org/archive/debian/${DEBIAN_RUNTIME_SNAPSHOT}/ trixie main" \
+        "deb [check-valid-until=no] https://snapshot.debian.org/archive/debian/${DEBIAN_RUNTIME_SNAPSHOT}/ trixie-updates main" \
         "deb [check-valid-until=no] https://snapshot.debian.org/archive/debian-security/${DEBIAN_SECURITY_SNAPSHOT}/ trixie-security main" \
         > /etc/apt/sources.list; \
     printf '%s\n' "deb [check-valid-until=no] https://snapshot.debian.org/archive/debian/${DEBIAN_SNAPSHOT}/ forky main" \
@@ -52,6 +53,7 @@ RUN set -eux; \
     apt-get update; \
     DEBIAN_FRONTEND=noninteractive apt-get install --no-install-recommends --only-upgrade -y \
         bsdutils \
+        gzip \
         libblkid1 \
         liblastlog2-2 \
         libmount1 \
@@ -64,7 +66,12 @@ RUN set -eux; \
         mount \
         openssl \
         openssl-provider-legacy \
+        perl-base \
         util-linux; \
+    gzip_version="$(dpkg-query -W -f='${Version}' gzip)"; \
+    dpkg --compare-versions "${gzip_version}" ge '1.13-1+deb13u1'; \
+    perl_version="$(dpkg-query -W -f='${Version}' perl-base)"; \
+    dpkg --compare-versions "${perl_version}" ge '5.40.1-6+deb13u1'; \
     pcre2_version="$(dpkg-query -W -f='${Version}' libpcre2-8-0)"; \
     dpkg --compare-versions "${pcre2_version}" ge '10.46-1~deb13u3'; \
     for openssl_package in libssl3t64 openssl openssl-provider-legacy; do \
