@@ -350,6 +350,11 @@ jobs:
           -m "not performance"
           --ignore=tests/unit/test_migrations.py
           tests/unit tests/security tests/integration
+      - name: Ten-thousand and hundred-thousand photo scale contracts
+        if: ${{ needs.changes.outputs.run_python312_full == 'true' }}
+        run: |
+          pytest -s tests/performance/test_scanner_scale.py --junitxml=artifacts/scanner-scale.xml
+          python scripts/performance_100k.py --output artifacts/performance-100k.md
       - name: Summarize full-suite timings
         if: ${{ always() && needs.changes.outputs.run_python312_full == 'true' }}
         run: |
@@ -363,6 +368,8 @@ jobs:
           path: |
             artifacts/python-full.xml
             artifacts/python-timings.md
+            artifacts/scanner-scale.xml
+            artifacts/performance-100k.md
           if-no-files-found: ignore
 
       - name: Upload paired photo rendering previews
