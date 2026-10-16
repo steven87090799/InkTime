@@ -4770,6 +4770,12 @@ static bool downloadOfflineScheduleAndFrames(Config &cfg, bool targetNext = fals
   const JsonVariantConst rawScheduleVersion = schedule["offline_schedule_version"];
   const JsonVariantConst rawTargetStartEpoch = schedule["target_start_epoch"];
   const JsonVariantConst rawTargetEndEpoch = schedule["target_end_epoch"];
+  if (jsonError || schedule.overflowed()) {
+    lastDeviceErrorCode = "DEVICE-OFFLINE-SCHEDULE-JSON";
+    lastDeviceErrorMessage = String("離線排程 JSON 解析失敗: ") + jsonError.c_str()
+      + "; overflow=" + String(schedule.overflowed() ? 1 : 0);
+    return false;
+  }
   if (jsonError || schedule.overflowed() || responseTarget != (targetNext ? "next" : "current")
       || !schema.is<int32_t>() || schema.is<bool>()
       || schema.as<int32_t>() != 1 || deliveryMode != "inktime_offline_schedule"
@@ -4790,6 +4796,26 @@ static bool downloadOfflineScheduleAndFrames(Config &cfg, bool targetNext = fals
       || rawTargetEndEpoch.as<int64_t>() <= rawTargetStartEpoch.as<int64_t>()) {
     lastDeviceErrorCode = "DEVICE-OFFLINE-SCHEDULE-SCHEMA";
     lastDeviceErrorMessage = "離線排程 schema、日期或快照欄位不相容";
+    // Report field names only: device credentials and response contents stay private.
+    if (responseTarget != (targetNext ? "next" : "current")) lastDeviceErrorMessage += "; target";
+    if (!schema.is<int32_t>() || schema.is<bool>() || schema.as<int32_t>() != 1)
+      lastDeviceErrorMessage += "; schema_version";
+    if (deliveryMode != "inktime_offline_schedule") lastDeviceErrorMessage += "; delivery_mode";
+    if (!rawSlots.is<JsonArrayConst>()) lastDeviceErrorMessage += "; slots";
+    if (targetLocalDate.isEmpty() || (!targetDate.isEmpty() && targetDate != targetLocalDate))
+      lastDeviceErrorMessage += "; target_date";
+    if (timezoneName.isEmpty() || timezoneName.length() > 64U) lastDeviceErrorMessage += "; timezone";
+    if (scheduleId.isEmpty() || !inktime::boundedText(scheduleId.c_str(), inktime::kQueueIdentifierMaxBytes))
+      lastDeviceErrorMessage += "; schedule_id";
+    if (panelProfile.isEmpty() || buttonWakeAction.isEmpty()) lastDeviceErrorMessage += "; profile/button";
+    if (!validSyncStrategy(syncStrategy, syncTime)) lastDeviceErrorMessage += "; sync";
+    if (!rawConfigVersion.is<uint32_t>() || rawConfigVersion.is<bool>()) lastDeviceErrorMessage += "; config_version";
+    if (!rawRotation.is<int32_t>() || rawRotation.is<bool>()) lastDeviceErrorMessage += "; rotation";
+    if (!rawScheduleVersion.is<int32_t>() || rawScheduleVersion.is<bool>() || rawScheduleVersion.as<int32_t>() < 0)
+      lastDeviceErrorMessage += "; offline_schedule_version";
+    if (!rawTargetStartEpoch.is<int64_t>() || rawTargetStartEpoch.is<bool>() || rawTargetStartEpoch.as<int64_t>() <= 0
+        || !rawTargetEndEpoch.is<int64_t>() || rawTargetEndEpoch.is<bool>()
+        || rawTargetEndEpoch.as<int64_t>() <= rawTargetStartEpoch.as<int64_t>()) lastDeviceErrorMessage += "; epochs";
     return false;
   }
   const JsonArrayConst slots = rawSlots.as<JsonArrayConst>();
@@ -6089,7 +6115,9 @@ bool downloadDailyPhotoBin(Config &cfg) {
     if (userButtonWake && cfg.button_wake_action == "check_new") {
       // A button check may replace the active schedule, but a missing or
       // unavailable remote schedule must leave the cached formal day usable.
-      (void)downloadOfflineScheduleAndFrames(cfg);
+      const bool downloaded = downloadOfflineScheduleAndFrames(cfg);
+      const String downloadErrorCode = lastDeviceErrorCode;
+      const String downloadErrorMessage = lastDeviceErrorMessage;
       if (offlineDeliveryModeMismatchDetected) {
         currentPrefetchOnly = false;
         const bool latest = downloadLatestPhotoBin(cfg);
@@ -6097,7 +6125,12 @@ bool downloadDailyPhotoBin(Config &cfg) {
         return latest;
       }
       currentPrefetchOnly = false;
-      return loadOfflineScheduledLocalFrame(cfg, time(nullptr), false);
+      const bool loaded = loadOfflineScheduledLocalFrame(cfg, time(nullptr), false);
+      if (!loaded && !downloaded && !downloadErrorCode.isEmpty()) {
+        lastDeviceErrorCode = downloadErrorCode;
+        lastDeviceErrorMessage = downloadErrorMessage;
+      }
+      return loaded;
     }
     if (timerRequestedNetwork || offlinePrefetchWake(cfg, time(nullptr))) {
       const time_t wakeEpoch = time(nullptr);
