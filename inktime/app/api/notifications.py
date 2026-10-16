@@ -43,10 +43,11 @@ def save_webhook_secret():
 def test_notification():
     service = current_app.extensions["inktime_notification_service"]
     notification_id = service.create_test(created_by=str(g.user["id"]))
-    result = service.deliver_pending(limit=10)
-    row = next((row for row in service.list(20) if int(row["id"]) == notification_id), None)
+    outcome = service.deliver_one(notification_id)
+    status = str(outcome["status"])
+    result = {key: int(status == key) for key in ("delivered", "retrying", "failed", "disabled")}
     return {
         "id": notification_id,
-        "webhook_status": str(row["webhook_status"]) if row else "unknown",
+        "webhook_status": status,
         "delivery": result,
     }, 200

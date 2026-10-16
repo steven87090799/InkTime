@@ -22,7 +22,7 @@ def authenticate_device_request(
     raw_version = request.headers.get("X-InkTime-Credential-Version")
     credential_version = None
     if raw_version is not None:
-        if len(raw_version) > 12 or not raw_version.isdigit():
+        if len(raw_version) > 12 or not raw_version.isascii() or not raw_version.isdecimal():
             raise Unauthorized(description="DEVICE-001 裝置驗證失敗")
         credential_version = int(raw_version)
     selected_repository = repository or current_app.extensions["inktime_device_repository"]

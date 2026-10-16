@@ -724,6 +724,9 @@ class AtomicReleasePublisher:
                 and isinstance(options, dict)
                 and str(options.get("idempotency_key") or "") == idempotency_key
             ):
+                if DeviceTestReleaseStore(self.root).references_release_any(release_id):
+                    _LOGGER.info("Preserving referenced or uncertain device-test release during stale-owner cleanup")
+                    return
                 shutil.rmtree(release, ignore_errors=True)
                 digest = sha256(idempotency_key.encode("utf-8")).hexdigest()
                 self._unlink_managed_index(
@@ -901,9 +904,29 @@ class AtomicReleasePublisher:
                 if release_id is None:
                     path.unlink(missing_ok=True)
                     continue
-                temporary = self.root / f".{name}.restore.tmp"
-                temporary.write_text(release_id, encoding="utf-8")
-                temporary.replace(path)
+                self._write_pointer(name, release_id)
+            fsync_directory(self.root)
+
+    def _write_pointer(self, name: str, release_id: str) -> None:
+        if name != "latest":
+            if not name.startswith("latest."):
+                raise ValueError("RENDER-010 Pointer 名稱不合法")
+            get_display_profile(name.removeprefix("latest."))
+        if _RELEASE_ID.fullmatch(release_id) is None:
+            raise ValueError("RENDER-010 Pointer Release ID 不合法")
+        temporary = None
+        try:
+            with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=self.root,
+                                             prefix=f".{name}.", suffix=".tmp", delete=False) as handle:
+                temporary = Path(handle.name)
+                handle.write(release_id)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, self.root / name)
+            fsync_directory(self.root)
+        finally:
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
 
     def activate_manifests(self, manifests: builtin_list[dict]) -> None:
         if not manifests:
@@ -913,14 +936,10 @@ class AtomicReleasePublisher:
                 release_id = str(manifest["release_id"])
                 profile_key = str(manifest["render_profile"])
                 self.validate(release_id)
-                temporary = self.root / f".latest.{profile_key}.tmp"
-                temporary.write_text(release_id, encoding="utf-8")
-                temporary.replace(self.root / f"latest.{profile_key}")
+                self._write_pointer(f"latest.{profile_key}", release_id)
             # 保留舊版只讀取 latest 的相容契約；以第一個 Profile 為正式預設。
             release_id = str(manifests[0]["release_id"])
-            temporary = self.root / ".latest.tmp"
-            temporary.write_text(release_id, encoding="utf-8")
-            temporary.replace(self.root / "latest")
+            self._write_pointer("latest", release_id)
 
     def mark_orphan(self, release_id: str, reason: str) -> None:
         with release_metadata_guard(self.root):
@@ -1077,18 +1096,10 @@ class AtomicReleasePublisher:
 
     def rollback(self, release_id: str) -> None:
         with release_metadata_guard(self.root):
-            target = self.root / release_id / "manifest.json"
-            if not target.is_file() or target.parent.parent != self.root:
-                raise KeyError(release_id)
-            temporary = self.root / ".latest.tmp"
-            temporary.write_text(release_id, encoding="utf-8")
-            temporary.replace(self.root / "latest")
-            manifest = json.loads(target.read_text(encoding="utf-8"))
-            profile_key = str(manifest.get("render_profile", "safe_4c"))
-            get_display_profile(profile_key)
-            profile_temporary = self.root / f".latest.{profile_key}.tmp"
-            profile_temporary.write_text(release_id, encoding="utf-8")
-            profile_temporary.replace(self.root / f"latest.{profile_key}")
+            manifest = self.validate(release_id)
+            if manifest.get("release_kind", "formal") != "formal":
+                raise ValueError("RENDER-010 測試 Release 不能設為正式版本")
+            self.activate_manifests([manifest])
 
 
 class DeviceTestReleaseStore:

@@ -971,6 +971,38 @@ class JobRepository:
                 (job_id, event, message, json.dumps(details or {}, ensure_ascii=False), utc_now()),
             )
 
+    def fail_invalid_settings(self, job_id: str) -> bool:
+        """Quarantine malformed jobs without taking ownership of in-flight work."""
+        now = utc_now()
+        with self.database.transaction() as connection:
+            cursor = connection.execute(
+                """UPDATE jobs SET status='failed',completed_at=?,heartbeat_at=?
+                   WHERE id=? AND status IN ('running','retrying')
+                   AND NOT EXISTS (
+                       SELECT 1 FROM job_items WHERE job_id=jobs.id AND status='running'
+                   )""",
+                (now, now, job_id),
+            )
+            if not cursor.rowcount:
+                return False
+            connection.execute(
+                """UPDATE job_items SET status='failed',completed_at=?,error_code='JOB-001',
+                   worker_id=NULL,lease_until=NULL,dead_lettered_at=?
+                   WHERE job_id=? AND status IN ('pending','retrying')""",
+                (now, now, job_id),
+            )
+            connection.execute(
+                """UPDATE jobs SET failed_items=(
+                       SELECT COUNT(*) FROM job_items WHERE job_id=? AND status='failed'
+                   ) WHERE id=?""",
+                (job_id, job_id),
+            )
+            connection.execute(
+                "INSERT INTO job_events(job_id,event,message,details_json,created_at) VALUES (?,?,?,?,?)",
+                (job_id, "invalid_settings", "JOB-001 工作設定不合法，已停止且未送出新請求", "{}", now),
+            )
+        return True
+
     def transition(self, job_id: str, from_statuses: set[str], to_status: str, event: str) -> bool:
         now = utc_now()
         placeholders = ",".join("?" for _ in from_statuses)
@@ -1530,6 +1562,9 @@ class JobRepository:
                     """,
                     (now, job_id),
                 )
+                if cursor.rowcount == 0:
+                    connection.execute("COMMIT")
+                    return 0
                 connection.execute(
                     "UPDATE jobs SET status='pending', failed_items=0, completed_at=NULL WHERE id=? AND status IN ('failed','completed_with_errors')",
                     (job_id,),

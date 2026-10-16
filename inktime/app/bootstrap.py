@@ -387,6 +387,7 @@ def bootstrap_services(
                 settings_repository,
                 usage_repository,
                 budget_service,
+                analysis_service,
             ),
             "inktime_font_manager": font_manager,
             "inktime_location_resolver": location_resolver,

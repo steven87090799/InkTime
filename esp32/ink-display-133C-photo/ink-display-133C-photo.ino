@@ -233,6 +233,7 @@ String htmlEscape(const String &s) {
     else if (c == '<')  out += F("&lt;");
     else if (c == '>')  out += F("&gt;");
     else if (c == '"')  out += F("&quot;");
+    else if (c == '\'') out += F("&#39;");
     else                out += c;
   }
   return out;

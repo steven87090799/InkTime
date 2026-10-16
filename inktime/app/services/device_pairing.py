@@ -236,7 +236,7 @@ class DevicePairingService:
         timezone_name = cls._validate_text(source.get("timezone", "Asia/Taipei"), "timezone", 64)
         try:
             ZoneInfo(timezone_name)
-        except ZoneInfoNotFoundError as exc:
+        except (ZoneInfoNotFoundError, ValueError) as exc:
             raise DevicePairingError("timezone 不是有效的 IANA 時區", error_code="PAIR-004") from exc
         schedule = cls._validate_text(source.get("schedule", "08:00"), "schedule", 5, required=True)
         if not TIME_PATTERN.fullmatch(schedule):

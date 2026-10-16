@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import json
 import os
+from hashlib import sha256
+
+import pytest
 
 from PIL import Image
 
@@ -29,6 +32,55 @@ def make_scanner(app, tmp_path):
         ThumbnailCache(tmp_path / "cache"),
     )
     return scanner, preprocessor
+
+
+def test_same_canonical_library_lock_blocks_second_scan_and_releases_on_failure(app, tmp_path, monkeypatch):
+    root = tmp_path / "locked"
+    root.mkdir()
+    scanner, _ = make_scanner(app, tmp_path)
+    identity = sha256(os.path.normcase(str(root.resolve())).encode("utf-8")).hexdigest()
+    lock = scanner.repository.database.try_acquire_operation_lock("photo-scan-" + identity)
+    assert lock is not None
+    try:
+        with pytest.raises(RuntimeError, match="SCAN-005"):
+            scanner.scan("same", root / ".", build_thumbnails=False)
+    finally:
+        lock.close()
+    def fail(*args, **kwargs):
+        raise RuntimeError("synthetic scanner failure")
+    monkeypatch.setattr(scanner, "_scan_locked", fail)
+    with pytest.raises(RuntimeError, match="synthetic"):
+        scanner.scan("same", root)
+    recovered = scanner.repository.database.try_acquire_operation_lock("photo-scan-" + identity)
+    assert recovered is not None
+    recovered.close()
+
+
+def test_older_scan_cannot_mark_present_photos_missing_after_newer_scan_overwrites_marker(app, tmp_path):
+    repository = PhotoRepository(app.extensions["inktime_database"])
+    root = tmp_path / "interleaved"
+    root.mkdir()
+    for index in range(20):
+        (root / f"present-{index}.jpg").write_bytes(b"synthetic-presence-fixture")
+    library = repository.ensure_library("interleaved", root)
+    with repository.database.transaction() as connection:
+        connection.executemany("INSERT INTO photos(id,library_id,relative_path,status,lifecycle_status,created_at,updated_at) "
+                               "VALUES (?,?,?,'preprocessed','active','2020-01-01','2020-01-01')",
+                               [(f"interleaved-{index}", library, f"present-{index}.jpg") for index in range(20)])
+    options = {"mode": "incremental", "trigger_source": "manual", "missing_threshold_ratio": 0.1}
+    first = repository.begin_scan(library, root, **options)
+    identifiers = [f"interleaved-{index}" for index in range(20)]
+    repository.mark_seen_batch(first, identifiers)
+    second = repository.begin_scan(library, root, **options)
+    repository.mark_seen_batch(second, identifiers[:1])
+    result = repository.finish_scan(first, counts={"checked": 20}, full_census=True, cancelled=False, major_io_errors=0)
+    assert result["warning_code"] == "SCAN-MISSING-004"
+    assert result["missing_marked_count"] == 0
+    assert repository.finish_scan(first, counts={}, full_census=True, cancelled=False, major_io_errors=0) == result
+    repository.finish_scan(second, counts={}, full_census=False, cancelled=True, major_io_errors=0)
+    with repository.database.session() as connection:
+        assert connection.execute("SELECT COUNT(*) FROM photos WHERE library_id=? AND lifecycle_status='active'", (library,)).fetchone()[0] == 20
+    assert all((root / f"present-{index}.jpg").is_file() for index in range(20))
 
 
 def test_unchanged_photo_skips_features_and_changed_content_invalidates_analysis(app, tmp_path):

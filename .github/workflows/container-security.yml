@@ -247,27 +247,69 @@ jobs:
             -v "${PWD}/artifacts:/artifacts" \
             anchore/syft:v1.18.1 inktime:ci \
             -o "cyclonedx-json=/artifacts/inktime-sbom-${GITHUB_SHA}.json"
+      - name: Validate machine-readable Trivy exception expirations
+        run: python scripts/ci/validate_trivy_exceptions.py
       - name: Scan image for HIGH and CRITICAL vulnerabilities
         id: trivy
         shell: bash
         run: |
+          image_id=$(docker image inspect --format '{{.Id}}' inktime:ci)
+          mkdir -p .cache/trivy
           set +e
           # Use official registries: mirror.gcr.io can return 403, which does
           # not trigger Trivy's automatic fallback for transient 429/5xx errors.
           docker run --rm \
             -v /var/run/docker.sock:/var/run/docker.sock \
             -v "${PWD}/artifacts:/artifacts" \
+            -v "${PWD}/.cache/trivy:/root/.cache/trivy" \
             -v "${PWD}/.trivyignore:/trivyignore:ro" \
             aquasec/trivy:0.60.0 image \
             --db-repository ghcr.io/aquasecurity/trivy-db:2,public.ecr.aws/aquasecurity/trivy-db:2 \
             --format json \
-            --output "/artifacts/inktime-trivy-${GITHUB_SHA}.json" \
+            --output "/artifacts/inktime-trivy-raw-${GITHUB_SHA}.json" \
+            --list-all-pkgs \
             --ignorefile /trivyignore \
             --severity HIGH,CRITICAL \
             --exit-code 1 \
-            inktime:ci
+            "$image_id"
           status=$?
           set -e
+          raw_report="artifacts/inktime-trivy-raw-${GITHUB_SHA}.json"
+          if [ ! -f "$raw_report" ]; then exit 1; fi
+          python scripts/ci/trivy_report_summary.py "$raw_report"
+          if [ "$status" -eq 0 ]; then
+            cp "$raw_report" "artifacts/inktime-trivy-${GITHUB_SHA}.json"
+          elif [ "$status" -eq 1 ]; then
+            # Trixie's advisory feed lacks FixedVersion for these upstream
+            # fixes. Attest only exact reviewed binary + source versions from
+            # this image, retaining the unfiltered scan for independent review.
+            set +e
+            python scripts/ci/debian_fixed_vex.py "$raw_report" \
+              "artifacts/inktime-fixed-${GITHUB_SHA}.vex.json" --image-id "$image_id"
+            vex_status=$?
+            set -e
+            if [ "$vex_status" -ne 0 ]; then exit 1; fi
+            set +e
+            docker run --rm \
+              -v /var/run/docker.sock:/var/run/docker.sock \
+              -v "${PWD}/artifacts:/artifacts" \
+              -v "${PWD}/.cache/trivy:/root/.cache/trivy" \
+              -v "${PWD}/.trivyignore:/trivyignore:ro" \
+              aquasec/trivy:0.60.0 image \
+              --skip-db-update --skip-java-db-update \
+              --format json --list-all-pkgs --show-suppressed \
+              --output "/artifacts/inktime-trivy-${GITHUB_SHA}.json" \
+              --vex "/artifacts/inktime-fixed-${GITHUB_SHA}.vex.json" \
+              --ignorefile /trivyignore --severity HIGH,CRITICAL --exit-code 1 \
+              "$image_id"
+            status=$?
+            set -e
+          else
+            exit "$status"
+          fi
+          if [ -f "artifacts/inktime-trivy-${GITHUB_SHA}.json" ]; then
+            python scripts/ci/trivy_report_summary.py "artifacts/inktime-trivy-${GITHUB_SHA}.json"
+          fi
           # Convert the already-produced JSON locally; do not scan the image a
           # second time just to create the human-readable artifact.
           docker run --rm \

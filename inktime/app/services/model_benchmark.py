@@ -31,7 +31,7 @@ from inktime.app.domain.photos.preprocessing import PhotoPreprocessor
 from inktime.app.domain.photos.quality_policy import local_candidate_score, evaluate_local_quality
 from inktime.app.domain.analysis.content_filter import evaluate_content_filter
 from inktime.app.domain.analysis.plan import normalize_reasoning_effort
-from inktime.app.domain.analysis.schema import AnalysisValidationError, validate_analysis_result
+from inktime.app.domain.analysis.schema import AnalysisValidationError, validate_model_response
 from inktime.app.domain.analysis.scoring import (
     FAVORITE_SPECIAL_LEVEL_BOOST,
     DEFAULT_RANKING_WEIGHTS,
@@ -132,6 +132,7 @@ def _caption_controls(variants_enabled: bool) -> dict[str, Any]:
         "copy_banned_words": [],
         "copy_banned_patterns": [],
         "copy_custom_rules": "",
+        "side_caption_custom_rules": "以具體場景中的光線或動作描寫短文，避免空泛抽象詞。",
         "caption_variants_enabled": variants_enabled,
     }
 
@@ -581,6 +582,7 @@ class ModelBenchmarkService:
                                     options=dict(normalized_options),
                                 )
                             )
+        axes = list({axis.label: axis for axis in axes}.values())
         if not axes or len(axes) > 96:
             raise BenchmarkError("Benchmark axes 必須介於 1 到 96 組")
         return axes
@@ -641,6 +643,8 @@ class ModelBenchmarkService:
         report: dict[str, Any] = {
             "benchmark_version": "model-benchmark-v2",
             "mode": "offline-contract",
+            "production_acceptance": False,
+            "contract_scope": "request_size_only_no_model_answers",
             "seed": seed,
             "sample_count": sample_count,
             "selected_count": 0,
@@ -725,6 +729,8 @@ class ModelBenchmarkService:
         report: dict[str, Any] = {
             "benchmark_version": "model-benchmark-v2",
             "mode": "live-quality",
+            "production_acceptance": False,
+            "contract_scope": "extended_diagnostic_2048_or_3072_tokens_with_optional_paid_repair",
             "seed": seed,
             "sample_count": sample_count,
             "selected_count": 0,
@@ -828,7 +834,9 @@ class ModelBenchmarkService:
                                 report["stopped_by_budget"] = True
                             assert_complete_response(response)
                             try:
-                                validated_result = validate_analysis_result(response.content)
+                                validated_result = validate_model_response(
+                                    response.content, caption_controls=getattr(provider, "caption_controls", None)
+                                )
                                 metrics["success_count"] += 1
                                 first_pass_success += 1
                             except AnalysisValidationError:
@@ -869,7 +877,10 @@ class ModelBenchmarkService:
                                     if not repair_cost_known:
                                         report["stopped_by_budget"] = True
                                     try:
-                                        validated_result = validate_analysis_result(repair_response.content)
+                                        assert_complete_response(repair_response)
+                                        validated_result = validate_model_response(
+                                            repair_response.content, caption_controls=getattr(provider, "caption_controls", None)
+                                        )
                                         assert_semantic_repair_integrity(
                                             semantic_snapshot, validated_result
                                         )
@@ -994,6 +1005,7 @@ def markdown_report(report: dict[str, Any]) -> str:
         "# InkTime Model Benchmark",
         "",
         f"- Mode: `{report['mode']}`",
+        "- Production acceptance: no. Live diagnostics may use larger token caps and an extra paid text repair; use the single-photo test for the current production contract.",
         f"- Seed: `{report['seed']}`",
         f"- Dataset: `{report['dataset_source']}`",
         f"- Network invocations: `{report['network_invocations']}`",

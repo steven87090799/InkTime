@@ -559,6 +559,19 @@ def test_usable_route_excludes_openrouter_with_short_global_model(app):
     assert service.build_router(service.usable_route_snapshot()) is None
 
 
+@pytest.mark.parametrize("model", ["openai/gpt-6-luna", "anthropic/claude-haiku-5.5"])
+def test_openrouter_analysis_route_ignores_retired_repair_model(app, model):
+    settings = app.extensions["inktime_settings_repository"]
+    settings.update("model.analysis_model", model, changed_by="test", source_ip="127.0.0.1")
+    assert settings.get("model.repair_model") == "gpt-4o-mini"
+    provider_id = app.extensions["inktime_provider_repository"].save(
+        {"name": "router", "kind": "openrouter", "base_url": "https://openrouter.ai/api/v1",
+         "api_key": "fixture-key", "enabled": True}, user_id="test",
+    )
+    routes = app.extensions["inktime_provider_service"].usable_route_snapshot()
+    assert provider_id in {route["provider_id"] for route in routes}
+
+
 def test_operational_provider_edits_preserve_legacy_cache_identity(app):
     repository = app.extensions["inktime_provider_repository"]
     service = app.extensions["inktime_provider_service"]

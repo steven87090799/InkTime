@@ -214,6 +214,25 @@ def _publish_preencoded_test(
     )
 
 
+@pytest.mark.parametrize("reference", ["assigned", "snapshot_incomplete", "unassigned"])
+def test_stale_owner_discards_only_unreferenced_device_test_release(tmp_path, monkeypatch, reference):
+    from inktime.app.domain.rendering.release import DeviceTestReleaseStore
+
+    publisher = AtomicReleasePublisher(tmp_path / "releases")
+    manifest = _publish_preencoded_test(publisher, tmp_path, idempotency_key="stale-owner")
+    store = DeviceTestReleaseStore(publisher.root)
+    if reference == "assigned":
+        store.assign("new-owner", manifest["release_id"], profile_key="safe_4c", delivery="next_wake",
+                     one_time=True, restore_formal=True)
+    elif reference == "snapshot_incomplete":
+        monkeypatch.setattr(DeviceTestReleaseStore, "_reference_snapshot_locked",
+                            lambda self, **kwargs: (frozenset(), False, 0))
+    publisher.discard_unassigned_device_test(manifest["release_id"], "stale-owner")
+    assert (publisher.root / manifest["release_id"]).exists() is (reference != "unassigned")
+    if reference != "unassigned":
+        assert publisher.find_device_test_by_idempotency("stale-owner") == manifest
+
+
 def test_legacy_device_test_idempotency_is_backfilled_once_and_reused(monkeypatch, tmp_path):
     root = tmp_path / "releases"
     publisher = AtomicReleasePublisher(root)

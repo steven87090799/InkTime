@@ -34,11 +34,8 @@ def orientation_matches(size: tuple[int, int], desired: str) -> bool:
 
 def effective_dimensions(photo: dict[str, Any]) -> tuple[int, int]:
     """Resolve metadata dimensions through EXIF plus the existing visual override contract."""
-    width, height = dimensions_after_exif(
-        int(photo.get("width") or 0),
-        int(photo.get("height") or 0),
-        original_exif_orientation(photo),
-    )
+    # Stored scanner dimensions already describe EXIF-transposed pixels.
+    width, height = int(photo.get("width") or 0), int(photo.get("height") or 0)
     effective = resolve_effective_orientation(
         exif_orientation=original_exif_orientation(photo),
         manual_rotation_cw=photo.get("manual_orientation_rotation_cw"),

@@ -12,6 +12,7 @@
     verifications: 0,
     errors: 0,
     lastFrameKey: '',
+    failedFrameKey: '',
     lastReleaseId: '',
     lastLogKey: '',
     manifest: null,
@@ -182,10 +183,7 @@
       image.data[offset + 3] = 255;
       counts.set(code, (counts.get(code) || 0) + 1);
     }
-    elements.canvas.width = width;
-    elements.canvas.height = height;
-    elements.canvas.getContext('2d', {alpha: false}).putImageData(image, 0, 0);
-    return {counts, palette, pixelCount};
+    return {counts, palette, pixelCount, image, width, height};
   }
 
   function renderPalette({counts, palette, pixelCount}) {
@@ -248,8 +246,6 @@
     const file = files[frameIndex];
     if (!file || !file.name || !file.sha256) throw new Error('Manifest 畫面檔案不完整');
     state.switching = true;
-    state.manifest = manifest;
-    state.frameIndex = frameIndex;
     updateNavigation();
     setConnection('receiving', '接收中');
     elements.device.classList.add('refreshing');
@@ -268,8 +264,17 @@
         payloadResponse.headers.get('X-InkTime-Payload-SHA256'),
       );
       const decoded = decodeFrame(buffer, manifest);
+      if (!Number.isFinite(Date.parse(manifest.created_at))) throw new Error('Manifest 建立時間不合法');
+      const context = elements.canvas.getContext('2d', {alpha: false});
+      if (!context) throw new Error('瀏覽器無法顯示解碼畫面');
+      elements.canvas.width = decoded.width;
+      elements.canvas.height = decoded.height;
+      context.putImageData(decoded.image, 0, 0);
       renderPalette(decoded);
       updateReceipt(manifest, file, verification, frameIndex);
+      state.manifest = manifest;
+      state.frameIndex = frameIndex;
+      state.failedFrameKey = '';
       if (newRelease) state.releases += 1;
       state.lastReleaseId = manifest.release_id;
       state.lastFrameKey = `${manifest.release_id}:${file.name}:${file.sha256}`;
@@ -280,6 +285,9 @@
       setConnection('synced', '已同步');
       updateStats();
       debug('info', `第 ${frameIndex + 1} 張 BIN、SHA-256 與 ${manifest.pixel_format} 解碼完成。`);
+    } catch (error) {
+      state.failedFrameKey = `${manifest.release_id}:${file.name}:${file.sha256}`;
+      throw error;
     } finally {
       state.switching = false;
       updateNavigation();
@@ -316,14 +324,16 @@
       }
       if (!manifestResponse.ok) throw new Error(await responseMessage(manifestResponse));
       const manifest = await manifestResponse.json();
-      if (manifest.release_id === state.lastReleaseId) {
-        setConnection('synced', '已同步');
+      const currentFile = manifest.files?.[state.frameIndex];
+      const currentKey = currentFile ? `${manifest.release_id}:${currentFile.name}:${currentFile.sha256}` : '';
+      if (manifest.release_id === state.lastReleaseId && currentKey === state.lastFrameKey) {
+        if (!state.failedFrameKey && !state.switching) setConnection('synced', '已同步');
         elements.stats.latency.textContent = `${Math.round(performance.now() - pollStarted)} ms`;
         debug('info', `Release ${manifest.release_id} 沒有變更。`, `unchanged:${manifest.release_id}`);
         return;
       }
       debug('info', `收到新 Manifest ${manifest.release_id}，從第 1 張開始顯示。`);
-      await displayFrame(manifest, 0, {newRelease: true});
+      await displayFrame(manifest, 0, {newRelease: manifest.release_id !== state.lastReleaseId});
       elements.stats.latency.textContent = `${Math.round(performance.now() - pollStarted)} ms`;
     } catch (error) {
       state.errors += 1;

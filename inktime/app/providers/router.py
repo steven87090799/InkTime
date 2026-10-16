@@ -44,6 +44,7 @@ class ProviderChannel:
     model: str | None = None
     shared_quota: Any = None
     request_token_reserve: int = 8512
+    analysis_revision: str = ""
     semaphore: threading.BoundedSemaphore = field(init=False)
     request_times: deque = field(default_factory=deque)
     token_events: deque = field(default_factory=deque)

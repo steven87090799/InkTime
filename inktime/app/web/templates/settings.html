@@ -250,6 +250,7 @@
       const dependencies = JSON.parse(card.dataset.dependencies || '[]');
       const active = dependencies.every(rule => {
         const value = read(rule.key);
+        if (Array.isArray(rule.one_of)) return rule.one_of.some(candidate => equal(value, candidate));
         return Object.prototype.hasOwnProperty.call(rule,'equals') ? equal(value, rule.equals) : !equal(value, rule.not_equals);
       });
       card.classList.toggle('dependency-inactive', !active);
@@ -363,7 +364,7 @@
     validation('');
     const data = await request('/api/v1/settings',{
       method:'POST',
-      headers:{'Content-Type':'application/json','X-InkTime-Change-Reason':document.getElementById('change-reason').value,'X-InkTime-Confirm-Risk':confirmRisk?'true':'false','X-InkTime-Setting-Revisions':JSON.stringify(Object.fromEntries(cards.filter(card=>dirty.has(card.dataset.key)).map(card=>[card.dataset.key,card.dataset.revision])))},
+      headers:{'Content-Type':'application/json','X-InkTime-Change-Reason':encodeURIComponent(document.getElementById('change-reason').value),'X-InkTime-Change-Reason-Encoding':'percent-utf8','X-InkTime-Confirm-Risk':confirmRisk?'true':'false','X-InkTime-Setting-Revisions':JSON.stringify(Object.fromEntries(cards.filter(card=>dirty.has(card.dataset.key)).map(card=>[card.dataset.key,card.dataset.revision])))},
       body:JSON.stringify(Object.fromEntries(dirty))
     });
     dirty.forEach((_value,key) => baseline.set(key,read(key)));

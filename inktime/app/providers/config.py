@@ -277,13 +277,19 @@ def validate_base_url(
 
 
 def model_request_capabilities(kind: str, model: str) -> dict:
-    """Native OpenAI wire policy; do not impose it on compatible hosts."""
+    """Provider-specific wire policy; do not impose native rules on compatible hosts."""
     value = str(model).casefold()
     native = kind == "openai"
     o_series = native and bool(re.match(r"^o[1-9](?:-|$)", value))
     modern_gpt = native and bool(re.match(r"^gpt-[56](?:[.-]|$)", value))
     gpt_reasoning = modern_gpt and "-chat" not in value
     original_gpt5 = native and bool(re.fullmatch(r"gpt-5(?:-mini|-nano)?(?:-\d{4}-\d{2}-\d{2})?", value))
+    # OpenRouter endpoint capability snapshots (2026-10-13) omit temperature
+    # for these models. Keep require_parameters enabled rather than silently
+    # routing a request with unsupported optional sampling parameters.
+    openrouter_fixed_sampling = kind == "openrouter" and value.partition(":")[0] in {
+        "openai/gpt-6-luna", "anthropic/claude-haiku-5.5",
+    }
     mandatory_reasoning = o_series or (native and (
         original_gpt5 or value.startswith(("gpt-6-astra", "gpt-6.1-sol"))
         or "-pro" in value or "-codex" in value
@@ -292,7 +298,7 @@ def model_request_capabilities(kind: str, model: str) -> dict:
     text_only = native and bool(re.match(r"^(?:o1-mini|o3-mini)(?:-|$)", value))
     return {
         "token_parameter": "max_completion_tokens" if o_series or modern_gpt else "max_tokens",
-        "temperature": not o_series and not original_gpt5,
+        "temperature": not o_series and not original_gpt5 and not openrouter_fixed_sampling,
         "vision": not text_only,
         "reasoning": o_series or gpt_reasoning,
         "reasoning_none": not mandatory_reasoning,

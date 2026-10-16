@@ -107,7 +107,7 @@ def _validated_device_fields(
     timezone_name = str(payload.get("timezone", defaults.get("timezone", "Asia/Taipei")))
     try:
         ZoneInfo(timezone_name)
-    except ZoneInfoNotFoundError:
+    except (ZoneInfoNotFoundError, ValueError):
         abort(400, description="DEVICE-003 時區不是有效的 IANA 時區")
     try:
         rotation = json_int(
@@ -481,7 +481,7 @@ def update_device(device_id: str):
             "delivery_mode": existing["delivery_mode"],
             "offline_prefetch_allowed": bool(existing["offline_prefetch_allowed"]),
             "schedule_times": existing_schedule,
-            "prefetch_lead_minutes": int(existing["prefetch_lead_minutes"] or 5),
+            "prefetch_lead_minutes": int(existing["prefetch_lead_minutes"] if existing["prefetch_lead_minutes"] is not None else 5),
             "button_wake_action": str(existing["button_wake_action"] or "check_new"),
             "minimum_schedule_gap_minutes": int(
                 existing["minimum_schedule_gap_minutes"] or MINIMUM_SCHEDULE_GAP_MINUTES
@@ -1051,7 +1051,7 @@ def release_file(release_id: str, filename: str):
             abort(410, description="DEVICE-010 Release Payload 已依保留政策移除")
         abort(404, description="DEVICE-002 Release 或檔案不存在")
     try:
-        payload, entry = service.read_payload(authorization, filename)
+        payload, entry = service.read_payload(authorization, filename, allow_multiple=True)
     except (FileNotFoundError, UnsafePathError):
         _repository().record_download(device["id"], release_id, False)
         abort(404, description="DEVICE-002 Release 或檔案不存在")

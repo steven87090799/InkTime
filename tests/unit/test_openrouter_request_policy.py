@@ -95,6 +95,27 @@ def test_openrouter_analysis_and_repair_share_privacy_routing_usage_and_sticky_p
     assert analysis["session_id"] == repair["session_id"]
 
 
+@pytest.mark.parametrize("model", [
+    "openai/gpt-6-luna", "anthropic/claude-haiku-5.5", "openai/gpt-6-luna:floor",
+])
+def test_openrouter_fixed_sampling_preserves_strict_analysis_and_repair_contract(tmp_path, model):
+    image = tmp_path / "synthetic.jpg"
+    image.write_bytes(b"synthetic image")
+    provider = _provider(options={"require_parameters": True, "data_collection": "deny"})
+    body = provider.build_analysis_request_body(
+        image_path=image, model=model, detail="high", stage="single", max_tokens=512,
+        reasoning_effort="none",
+    )
+    provider.repair_json(invalid_content="{}", validation_error="schema", model=model, stage="single")
+    for request_body in (body, provider.captured_body):
+        assert "temperature" not in request_body
+        assert request_body["provider"]["require_parameters"] is True
+        assert request_body["provider"]["data_collection"] == "deny"
+        assert request_body["reasoning"] == {"effort": "none"}
+        assert request_body["response_format"]["type"] == "json_schema"
+    assert body["max_tokens"] == 512
+
+
 def test_openrouter_analysis_explicitly_disables_reasoning_when_requested(tmp_path: Path):
     image = tmp_path / "synthetic.jpg"
     image.write_bytes(b"synthetic image")

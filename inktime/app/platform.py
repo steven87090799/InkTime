@@ -70,6 +70,8 @@ def configure_web_application(
     app.extensions["inktime_service_container"] = container
     app.extensions["inktime_platform_initialized"] = True
     app.secret_key = container.session_secret
+    from inktime.app.session_policy import SettingsSessionInterface
+    app.session_interface = SettingsSessionInterface()
     app.config.update(
         SESSION_COOKIE_HTTPONLY=True,
         SESSION_COOKIE_SAMESITE="Strict",

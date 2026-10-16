@@ -1,5 +1,8 @@
+import argparse
 from pathlib import Path
 import re
+import shutil
+import subprocess
 
 import yaml
 
@@ -90,8 +93,11 @@ def test_stable_latest_alias_and_prerelease_boundary_are_explicit():
 
     assert "type=raw,value=${{ steps.release.outputs.tag }}" in tags
     assert "type=sha,prefix=sha-" in tags
-    assert "value=latest" in tags
-    assert "steps.release.outputs.stable == 'true'" in tags
+    assert "value=latest" not in tags
+    guard = next(step for step in steps if step.get("id") == "alias")
+    assert guard["if"] == "steps.release.outputs.stable == 'true'"
+    assert "release_alias_guard.py" in guard["run"]
+    assert workflow["concurrency"]["group"] == "inktime-container-release"
     labels = metadata["with"]["labels"]
     assert "io.inktime.nas-deployment-contract=${{ steps.release.outputs.deployment_contract }}" in labels
     assert CONTRACT_PATH.read_text(encoding="utf-8").strip() == "3"
@@ -104,7 +110,7 @@ def test_nas_compose_is_pull_only_and_keeps_data_and_photos_external():
     assert set(services) == {"inktime-web", "inktime-worker", "inktime-scheduler"}
     for service in services.values():
         assert "build" not in service
-        assert service["image"].startswith("${INKTIME_IMAGE_REPOSITORY")
+        assert service["image"] == "${INKTIME_IMAGE_REF:-${INKTIME_IMAGE_REPOSITORY:-ghcr.io/steven87090799/inktime}:${INKTIME_IMAGE_TAG:-latest}}"
         assert service["pull_policy"] == "always"
         assert service["restart"] == "unless-stopped"
         assert service["read_only"] is True
@@ -142,7 +148,7 @@ def test_nas_updater_pulls_before_no_build_recreate_and_never_deletes_volumes():
     updater = UPDATER_PATH.read_text(encoding="utf-8")
 
     assert "compose pull" in updater
-    assert "compose up -d --no-build --remove-orphans --wait" in updater
+    assert "compose up -d --no-build --pull never --remove-orphans --wait" in updater
     assert updater.index("compose pull") < updater.index("compose up -d --no-build")
     assert "docker image inspect" in updater
     assert "io.inktime.nas-deployment-contract" in updater
@@ -186,6 +192,47 @@ def test_nas_updater_pulls_before_no_build_recreate_and_never_deletes_volumes():
     assert contract_path in RUNNER_SUITE_TEST_PATHS["ci_routing_contracts"]
 
 
+def test_nas_recovery_invocation_accepts_original_contract_3_cli():
+    updater = UPDATER_PATH.read_text(encoding="utf-8")
+    command = updater.split("recovery_output=$(", 1)[1].split(") || {", 1)[0]
+    image_id = "sha256:" + "b" * 64
+    source_ref = "registry.example/inktime:v1.1.0"
+    source_revision = "c" * 40
+    shell = shutil.which("sh")
+    assert shell, "Hosted NAS recovery invocation contract requires sh"
+    result = subprocess.run(  # noqa: S603 -- repository-owned fragment, fixed fixtures and stubbed docker
+        [shell, "-c", 'docker() { printf \'%s\\n\' "$@"; }\n' + command],
+        env={
+            "data_path": "/srv/data with spaces",
+            "recovery_dir": "/srv/data with spaces/backups/recovery",
+            "previous_image_ref": "registry.example/inktime:v1.0.0",
+            "previous_image_digest": "sha256:" + "a" * 64,
+            "target_image_ref": image_id,
+            "target_source_ref": source_ref,
+            "target_source_revision": source_revision,
+            "deployment_contract": "3",
+        },
+        check=True, capture_output=True, text=True, timeout=30,
+    )
+    invocation = result.stdout.splitlines()
+    helper_index = invocation.index("scripts/create_update_recovery.py")
+    # This is the public CLI supported by contract-3 images before PR #159.
+    legacy_parser = argparse.ArgumentParser(allow_abbrev=False)
+    for option in (
+        "--source-root", "--destination-root", "--staged-snapshot",
+        "--previous-image-ref", "--previous-image-digest",
+        "--target-image-ref", "--deployment-contract",
+    ):
+        legacy_parser.add_argument(option, required=True)
+    parsed = legacy_parser.parse_args(invocation[helper_index + 1:])
+
+    assert parsed.target_image_ref == image_id
+    assert invocation[helper_index - 2:helper_index] == [image_id, "python"]
+    assert f"INKTIME_UPDATE_TARGET_SOURCE_REF={source_ref}" in invocation[:helper_index]
+    assert f"INKTIME_UPDATE_TARGET_SOURCE_REVISION={source_revision}" in invocation[:helper_index]
+    assert "type=bind,source=/srv/data with spaces,target=/source,readonly" in invocation
+
+
 def test_update_recovery_validates_staged_snapshot_and_excludes_payload_copies():
     recovery = RECOVERY_PATH.read_text(encoding="utf-8")
 
@@ -225,7 +272,9 @@ def test_hosted_ci_runs_real_nas_updater_a_to_b_and_negative_safety_cases():
     assert "build_push v1.0.0-ci-a" in script
     assert "build_push v1.0.0-ci-b" in script
     assert "run_updater --initialize v1.0.0-ci-a" in script
-    assert "run_updater v1.0.0-ci-b" in script
+    assert '"$updater" v1.0.0-ci-b "$env_file"' in script
+    assert 'assert_runtime_contract v1.0.0-ci-b "$image_b_id"' in script
+    assert "NAS_RACE_TARGET=" in script
     assert "NAS-UPDATE-PATH-002" in script
     assert "NAS-UPDATE-PATH-006" in script
     assert "NAS-UPDATE-PATH-003" in script

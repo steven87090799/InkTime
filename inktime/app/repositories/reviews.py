@@ -37,6 +37,20 @@ def _json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
+def _preferred_analysis_sql(photo_expression: str) -> str:
+    """One source-aware identity for projections, counts and review writes.
+
+    photo_expression is a fixed server expression or a bound SQL placeholder.
+    """
+    if photo_expression not in {"p.id", "pa.photo_id", "?"}:
+        raise ValueError("Unsupported preferred analysis SQL expression")
+    return (
+        "(SELECT preferred.id FROM photo_analysis preferred WHERE preferred.photo_id=" + photo_expression  # noqa: S608 -- allowlisted server expression; values bound separately
+        + " ORDER BY CASE preferred.score_kind WHEN 'semantic' THEN 0 WHEN 'local_quality' THEN 1 ELSE 2 END,"
+        "preferred.created_at DESC,preferred.id DESC LIMIT 1)"
+    )
+
+
 def _like(value: str) -> str:
     return str(value).replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
@@ -178,19 +192,7 @@ class ReviewRepository:
             WITH latest_analysis AS (
                 SELECT pa.*
                 FROM photo_analysis pa
-                WHERE pa.id=(
-                    SELECT preferred.id FROM photo_analysis preferred
-                    WHERE preferred.photo_id=pa.photo_id
-                    ORDER BY
-                        CASE preferred.score_kind
-                            WHEN 'semantic' THEN 0
-                            WHEN 'local_quality' THEN 1
-                            ELSE 2
-                        END,
-                        preferred.created_at DESC,
-                        preferred.id DESC
-                    LIMIT 1
-                )
+                WHERE pa.id=__PREFERRED_ANALYSIS__
             )
             SELECT p.id,p.library_id,p.width,p.height,p.format,p.sha256,p.favorite,p.eligible,
                    p.exclusion_status,p.reject_reason,p.reject_rule,p.reject_details_json,
@@ -220,7 +222,7 @@ class ReviewRepository:
             LEFT JOIN latest_analysis a ON a.photo_id=p.id
             LEFT JOIN photo_reviews decision ON decision.photo_id=p.id AND decision.analysis_id IS NULL
             LEFT JOIN photo_reviews feedback ON feedback.photo_id=p.id AND feedback.analysis_id=a.id
-        """
+        """.replace("__PREFERRED_ANALYSIS__", _preferred_analysis_sql("pa.photo_id"))
 
     @staticmethod
     def _row(row: Any) -> dict[str, Any]:
@@ -293,7 +295,7 @@ class ReviewRepository:
             total = int(
                 connection.execute(
                     f"SELECT COUNT(*) FROM photos p "  # noqa: S608 -- clauses are fixed above
-                    "LEFT JOIN photo_analysis a ON a.id=(SELECT MAX(id) FROM photo_analysis WHERE photo_id=p.id) "
+                    f"LEFT JOIN photo_analysis a ON a.id={_preferred_analysis_sql('p.id')} "
                     "LEFT JOIN photo_reviews decision ON decision.photo_id=p.id AND decision.analysis_id IS NULL "
                     "LEFT JOIN photo_reviews feedback ON feedback.photo_id=p.id AND feedback.analysis_id=a.id "
                     f"WHERE {where}",
@@ -303,7 +305,7 @@ class ReviewRepository:
             states = connection.execute(
                 "SELECT CASE WHEN decision.id IS NOT NULL THEN decision.review_state "  # noqa: S608 -- clauses are fixed above
                 "ELSE COALESCE(feedback.review_state,'unreviewed') END AS state,COUNT(*) AS count FROM photos p "  # noqa: S608 -- clauses are fixed above
-                "LEFT JOIN photo_analysis a ON a.id=(SELECT MAX(id) FROM photo_analysis WHERE photo_id=p.id) "
+                f"LEFT JOIN photo_analysis a ON a.id={_preferred_analysis_sql('p.id')} "
                 "LEFT JOIN photo_reviews decision ON decision.photo_id=p.id AND decision.analysis_id IS NULL "
                 "LEFT JOIN photo_reviews feedback ON feedback.photo_id=p.id AND feedback.analysis_id=a.id "
                 f"WHERE {where} GROUP BY state",  # noqa: S608 -- clauses are fixed above
@@ -317,7 +319,7 @@ class ReviewRepository:
                 "COALESCE(SUM(CASE WHEN p.eligible=0 AND p.reject_rule='content-filter' THEN 1 ELSE 0 END),0) AS content_excluded,"
                 "COALESCE(SUM(CASE WHEN COALESCE(CASE WHEN decision.id IS NOT NULL THEN decision.candidate_pool ELSE feedback.candidate_pool END,0)=1 THEN 1 ELSE 0 END),0) AS candidate_pool "
                 "FROM photos p "
-                "LEFT JOIN photo_analysis a ON a.id=(SELECT MAX(id) FROM photo_analysis WHERE photo_id=p.id) "
+                f"LEFT JOIN photo_analysis a ON a.id={_preferred_analysis_sql('p.id')} "
                 "LEFT JOIN photo_reviews decision ON decision.photo_id=p.id AND decision.analysis_id IS NULL "
                 "LEFT JOIN photo_reviews feedback ON feedback.photo_id=p.id AND feedback.analysis_id=a.id "
                 f"WHERE {where}",
@@ -348,7 +350,7 @@ class ReviewRepository:
         where = " AND ".join(clauses)
         base = (
             " FROM photos p "
-            "LEFT JOIN photo_analysis a ON a.id=(SELECT MAX(id) FROM photo_analysis WHERE photo_id=p.id) "
+            f"LEFT JOIN photo_analysis a ON a.id={_preferred_analysis_sql('p.id')} "
             "LEFT JOIN photo_reviews decision ON decision.photo_id=p.id AND decision.analysis_id IS NULL "
             "LEFT JOIN photo_reviews feedback ON feedback.photo_id=p.id AND feedback.analysis_id=a.id "
         )
@@ -424,7 +426,7 @@ class ReviewRepository:
             if photo is None or str(photo["lifecycle_status"]) in {"deleted", "archived"}:
                 raise KeyError(photo_id)
             latest = connection.execute(
-                "SELECT MAX(id) AS id FROM photo_analysis WHERE photo_id=?", (photo_id,)
+                "SELECT " + _preferred_analysis_sql("?") + " AS id", (photo_id,)
             ).fetchone()
             latest_analysis_id = int(latest["id"]) if latest and latest["id"] is not None else None
             decision = connection.execute(
@@ -500,7 +502,7 @@ class ReviewRepository:
                 type(requested_analysis_id) is not int or requested_analysis_id < 0
             ):
                 raise ValueError("REVIEW-001 analysis_id 必須是非負整數")
-            if requested_analysis_id is not None and requested_analysis_id != latest_analysis_id:
+            if "analysis_id" in payload and requested_analysis_id != latest_analysis_id:
                 raise ReviewConflictError(self._current_from_row(logical_current))
             if int(logical_current["version"]) != int(expected_version):
                 raise ReviewConflictError(self._current_from_row(logical_current))

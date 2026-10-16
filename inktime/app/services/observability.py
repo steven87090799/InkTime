@@ -539,20 +539,26 @@ class ObservabilityService:
                 self.recover("device", "DEVICE-CONFIG-ACK-OVERDUE", "裝置設定 ACK 已完成", subject=device)
 
     def alert(self, component, code, message, *, job_id=None, severity="WARNING", subject="", details=None):
+        severity = str(severity).upper()
+        priorities = {"DEBUG": 0, "INFO": 1, "WARNING": 2, "ERROR": 3, "CRITICAL": 4}
         now = self._now().isoformat()
         fp = hashlib.sha256(f"{component}:{code}:{subject or job_id or ''}".encode()).hexdigest()
         clean_details = redact(details or {})
         recorded = False
-        with self.database.session() as c:
+        with self.database.transaction(operation="observability_alert") as c:
             found = c.execute(
-                "SELECT id,last_seen_at FROM job_errors WHERE fingerprint=? AND resolved_at IS NULL", (fp,)
+                "SELECT id,last_seen_at,severity FROM job_errors WHERE fingerprint=? AND resolved_at IS NULL", (fp,)
             ).fetchone()
             if found:
                 seen = self._parse(found["last_seen_at"]) or self._now()
-                if self._now() - seen >= self._ALERT_INTERVAL:
+                previous = str(found["severity"]).upper()
+                escalation = priorities.get(severity, 0) > priorities.get(previous, 0)
+                if not escalation:
+                    severity = previous
+                if escalation or self._now() - seen >= self._ALERT_INTERVAL:
                     c.execute(
-                        "UPDATE job_errors SET occurrences=occurrences+1,last_seen_at=?,message=? WHERE id=?",
-                        (now, redact_text(message)[:1000], found["id"]),
+                        "UPDATE job_errors SET occurrences=occurrences+1,last_seen_at=?,message=?,severity=? WHERE id=?",
+                        (now, redact_text(message)[:1000], severity.lower(), found["id"]),
                     )
                     recorded = True
             else:
@@ -598,15 +604,15 @@ class ObservabilityService:
             if last and now - last < timedelta(hours=1):
                 return
             c.execute(
-                "DELETE FROM activity_events WHERE id IN (SELECT id FROM activity_events WHERE severity='DEBUG' AND created_at<? ORDER BY id LIMIT ?)",
+                "DELETE FROM activity_events WHERE id IN (SELECT id FROM activity_events WHERE severity COLLATE NOCASE='DEBUG' AND created_at<? ORDER BY id LIMIT ?)",
                 (debug_cutoff, self._BATCH_SIZE),
             )
             c.execute(
-                "DELETE FROM activity_events WHERE id IN (SELECT id FROM activity_events WHERE severity='INFO' AND created_at<? ORDER BY id LIMIT ?)",
+                "DELETE FROM activity_events WHERE id IN (SELECT id FROM activity_events WHERE severity COLLATE NOCASE='INFO' AND created_at<? ORDER BY id LIMIT ?)",
                 (cutoff, self._BATCH_SIZE),
             )
             c.execute(
-                "DELETE FROM activity_events WHERE id IN (SELECT a.id FROM activity_events a WHERE a.severity IN ('WARNING','ERROR') AND a.created_at<? AND NOT EXISTS (SELECT 1 FROM job_errors e WHERE e.error_code=a.error_code AND e.resolved_at IS NULL) ORDER BY a.id LIMIT ?)",
+                "DELETE FROM activity_events WHERE id IN (SELECT a.id FROM activity_events a WHERE a.severity COLLATE NOCASE IN ('WARNING','ERROR') AND a.created_at<? AND NOT EXISTS (SELECT 1 FROM job_errors e WHERE e.error_code=a.error_code AND e.resolved_at IS NULL) ORDER BY a.id LIMIT ?)",
                 (cutoff, self._BATCH_SIZE),
             )
             c.execute("DELETE FROM job_errors WHERE resolved_at IS NOT NULL AND last_seen_at<?", (cutoff,))
@@ -614,12 +620,12 @@ class ObservabilityService:
             if count > max_rows:
                 budget = min(self._BATCH_SIZE, count - max_rows)
                 deleted = c.execute(
-                    "DELETE FROM activity_events WHERE id IN (SELECT id FROM activity_events WHERE severity='DEBUG' ORDER BY id LIMIT ?)",
+                    "DELETE FROM activity_events WHERE id IN (SELECT id FROM activity_events WHERE severity COLLATE NOCASE='DEBUG' ORDER BY id LIMIT ?)",
                     (budget,),
                 ).rowcount
                 if deleted < budget:
                     c.execute(
-                        "DELETE FROM activity_events WHERE id IN (SELECT id FROM activity_events WHERE severity='INFO' ORDER BY id LIMIT ?)",
+                        "DELETE FROM activity_events WHERE id IN (SELECT id FROM activity_events WHERE severity COLLATE NOCASE='INFO' ORDER BY id LIMIT ?)",
                         (budget - deleted,),
                     )
                 remaining = int(c.execute("SELECT COUNT(*) FROM activity_events").fetchone()[0])

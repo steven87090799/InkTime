@@ -208,7 +208,7 @@ def test_pair_selection_never_repeats_a_photo(app, monkeypatch):
     monkeypatch.setattr(
         LocalSelectionPolicy,
         "ranked",
-        lambda self, *, target, orientation, limit=None, excluded_ids=None: [
+        lambda self, *, target, orientation, limit=None, excluded_ids=None, candidate_years=None: [
             dict(row) for row in ranked
         ],
     )
@@ -417,7 +417,7 @@ def test_upgrade_repairs_document_payloads_without_rewriting_prose(tmp_path, mon
             "UPDATE data_retention_policies SET dry_run=0,updated_at=datetime('now') WHERE data_type='shadow_preview'"
         )
     monkeypatch.setattr(migrations, "MIGRATIONS", all_migrations)
-    assert migrations.migrate(database) == list(range(previous_version + 1, 64))
+    assert migrations.migrate(database) == list(range(previous_version + 1, max(m.version for m in migrations.MIGRATIONS) + 1))
     assert migrations.migrate(database) == []
     with database.session() as connection:
         row = connection.execute("SELECT * FROM photo_analysis WHERE photo_id='p'").fetchone()

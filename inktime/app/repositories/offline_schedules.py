@@ -21,6 +21,7 @@ from inktime.app.domain.photopainter.offline_schedule import (
     OFFLINE_PREPARE_BOOTSTRAP_AT,
     normalize_sync_strategy,
     local_slot_datetime,
+    resolved_slot_datetimes,
     offline_prepare_plan,
     offline_schedule_capability_is_usable,
     resolve_offline_schedule_max_slots,
@@ -981,6 +982,8 @@ class OfflineScheduleRepository:
                 )
                 if len(normalized_release_ids) != len(configured_times):
                     raise ValueError("DEVICE-008 Release 數量必須等於裝置 schedule_times 數量")
+                resolved_starts = resolved_slot_datetimes(day, configured_times, str(device["timezone"]),
+                                                         minimum_gap_minutes=minimum_gap_minutes, maximum_slots=maximum_slots)
                 playlist_version = self.playlist_version(
                     device_id=device_id,
                     target_date=day.isoformat(),
@@ -1132,7 +1135,7 @@ class OfflineScheduleRepository:
                     ).fetchone()
                     if duplicate:
                         raise ValueError("QUEUE-005 Release 已存在於裝置 Queue 歷史，不可重複使用")
-                    show_at = self._show_at(day, slot, str(device["timezone"]))
+                    show_at = resolved_starts[slot_index].isoformat()
                     deadline = deadlines[slot_index]
                     # Download authorization must cover every payload in a
                     # current authoritative day schedule through the device's

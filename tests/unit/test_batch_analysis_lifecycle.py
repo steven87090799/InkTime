@@ -216,6 +216,10 @@ def _prepare_photos(app, tmp_path, count=3):
 
 
 def _wire_fake(app, fake):
+    # Batch lifecycle fixtures explicitly opt into manual paid analysis.
+    app.extensions["inktime_settings_repository"].update(
+        "analysis.execution_mode", "local_with_manual_ai", changed_by="test", source_ip="127.0.0.1"
+    )
     service = app.extensions["inktime_batch_analysis_service"]
     providers = app.extensions["inktime_provider_repository"]
     provider_service = app.extensions["inktime_provider_service"]
@@ -238,14 +242,6 @@ def _wire_fake(app, fake):
     providers.list = lambda: [
         {"id": "fake-batch", "name": "Fake Batch", "enabled": 1, "supports_batch": 1, "priority": 1}
     ]
-    providers.pricing = lambda _provider_id: {
-        "gpt-5.6-luna": {
-            "input_per_million": 0.2,
-            "cached_input_per_million": 0.02,
-            "output_per_million": 1.2,
-            "batch_multiplier": 0.5,
-        }
-    }
     provider_config = providers.get("fake-batch", include_secret=True)
     provider_snapshot = [
         {
@@ -259,6 +255,178 @@ def _wire_fake(app, fake):
     provider_service.usable_route_snapshot = lambda: provider_snapshot
     provider_service.build_router = lambda *args, **kwargs: fake
     return service
+
+
+@pytest.mark.parametrize("mode", ["disabled", "local_only"])
+def test_batch_disabled_modes_reject_before_preparation_or_network(app, monkeypatch, mode):
+    fake = FakeBatchProvider()
+    service = _wire_fake(app, fake)
+    app.extensions["inktime_settings_repository"].update(
+        "analysis.execution_mode", mode, changed_by="test", source_ip="127.0.0.1"
+    )
+    monkeypatch.setattr(service, "_plan", lambda: pytest.fail("must reject before plan or DB writes"))
+    with pytest.raises(BatchLifecycleError) as error:
+        service.submit()
+    assert error.value.code == "BATCH-EXECUTION-MODE"
+    assert fake.batch_counter == 0
+    assert fake.custom_ids == []
+    assert service.batches.list(limit=100) == []
+
+
+@pytest.mark.parametrize("mode", ["local_with_manual_ai", "automatic_ai"])
+def test_batch_allowed_modes_submit_once(app, tmp_path, mode):
+    _prepare_photos(app, tmp_path, count=1)
+    fake = FakeBatchProvider()
+    service = _wire_fake(app, fake)
+    app.extensions["inktime_settings_repository"].update(
+        "analysis.execution_mode", mode, changed_by="test", source_ip="127.0.0.1"
+    )
+    result = service.submit(scope="sample", sample_count=1)
+    assert len(result["batch_ids"]) == 1
+    assert fake.batch_counter == 1
+
+
+@pytest.mark.parametrize("boundary", ["prepared", "uploaded"])
+def test_batch_mode_changed_by_other_process_blocks_next_paid_side_effect(app, tmp_path, monkeypatch, boundary):
+    _prepare_photos(app, tmp_path, count=1)
+    fake = FakeBatchProvider()
+    service = _wire_fake(app, fake)
+    settings = app.extensions["inktime_settings_repository"]
+    settings.get_many(["analysis.execution_mode", "analysis.ai_mode", "analysis.prefilter_enabled"])
+
+    def disable_without_invalidating_local_cache():
+        with app.extensions["inktime_database"].transaction() as connection:
+            connection.execute(
+                "UPDATE settings SET value_json=? WHERE key='analysis.execution_mode'", ('"disabled"',)
+            )
+
+    if boundary == "prepared":
+        original = service._prepare_shards
+
+        def prepare_then_disable(*args, **kwargs):
+            result = original(*args, **kwargs)
+            disable_without_invalidating_local_cache()
+            return result
+
+        monkeypatch.setattr(service, "_prepare_shards", prepare_then_disable)
+    else:
+        original_upload = fake.upload_batch_file
+
+        def upload_then_disable(path):
+            result = original_upload(path)
+            disable_without_invalidating_local_cache()
+            return result
+
+        monkeypatch.setattr(fake, "upload_batch_file", upload_then_disable)
+    result = service.submit(scope="sample", sample_count=1)
+    assert result["batch_ids"] == []
+    assert result["submission_status"] == "needs_attention"
+    assert result["not_submitted_batch_ids"] == result["prepared_batch_ids"]
+    assert fake.batch_counter == 0
+    batch = service.batches.get(result["prepared_batch_ids"][0])
+    assert batch["last_error_code"] == "BATCH-EXECUTION-MODE"
+    if boundary == "prepared":
+        assert fake.custom_ids == []
+    else:
+        assert batch["input_file_id"] == "file-input"
+        assert batch["status"] == "cleanup_pending"
+
+
+def test_batch_disabled_mode_still_imports_and_cleans_submitted_results(app, tmp_path):
+    _prepare_photos(app, tmp_path, count=1)
+    fake = FakeBatchProvider()
+    service = _wire_fake(app, fake)
+    result = service.submit(scope="sample", sample_count=1)
+    app.extensions["inktime_settings_repository"].update(
+        "analysis.execution_mode", "disabled", changed_by="test", source_ip="127.0.0.1"
+    )
+    batch_id = result["batch_ids"][0]
+    assert service.poll_due(limit=10)["polled"] == 1
+    service.import_batch(batch_id)
+    assert fake.batch_counter == 1
+    assert fake.downloads == 1
+    assert "file-input" in fake.deleted
+    assert "file-output" in fake.deleted
+
+
+@pytest.mark.parametrize("estimated,actual", [(1.0, None), (None, None), (None, 0.0), (1.0, 0.75)])
+def test_batch_served_model_controls_receipt_and_unknown_cost_display(app, tmp_path, monkeypatch, estimated, actual):
+    _prepare_photos(app, tmp_path, count=1)
+    fake = FakeBatchProvider()
+    service = _wire_fake(app, fake)
+    batch_id = service.submit(scope="sample", sample_count=1)["batch_ids"][0]
+    requested = service.batches.get(batch_id)["model"]
+    original_download = fake.download_file_content
+
+    def download_with_served_model(file_id, destination):
+        path = original_download(file_id, destination)
+        lines = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+        for line in lines:
+            body = line["response"]["body"]
+            body["model"] = "served-model"
+            if actual is not None:
+                body["usage"]["cost"] = actual
+        path.write_text("\n".join(json.dumps(line) for line in lines) + "\n", encoding="utf-8")
+        return path
+
+    estimated_models = []
+
+    def estimate(model, usage):
+        estimated_models.append(model)
+        return estimated if model == "served-model" else 0.1
+
+    monkeypatch.setattr(fake, "download_file_content", download_with_served_model)
+    monkeypatch.setattr(fake, "estimate_batch_cost", estimate)
+    service.poll_due(limit=10)
+    assert service.import_batch(batch_id)["success"] == 1
+    with service.database.session() as connection:
+        receipt = connection.execute("SELECT * FROM api_usage WHERE batch_id=?", (batch_id,)).fetchone()
+    assert receipt["model"] == "served-model"
+    assert receipt["estimated_cost"] == estimated
+    assert receipt["actual_cost"] == actual
+    assert requested not in estimated_models
+    detail = service.get_detail(batch_id)
+    known = actual if actual is not None else estimated
+    assert detail["cost_complete"] is (known is not None)
+    assert detail["average_cost"] == known
+    assert detail["per_thousand_cost"] == (known * 1000 if known is not None else None)
+    assert detail["items"][0]["display_cost"] == known
+    assert detail["unknown_cost_items"] == int(known is None)
+
+
+@pytest.mark.parametrize("blocker", [None, "missing", "unknown"])
+def test_batch_repricing_settles_terminal_reserve_only_after_complete_evidence(app, tmp_path, monkeypatch, blocker):
+    _prepare_photos(app, tmp_path, count=2)
+    fake = FakeBatchProvider()
+    service = _wire_fake(app, fake)
+    batch_id = service.submit(scope="sample", sample_count=2)["batch_ids"][0]
+    monkeypatch.setattr(fake, "estimate_batch_cost", lambda model, usage: None)
+    service.poll_due(limit=10)
+    service.import_batch(batch_id)
+    batch = service.batches.get(batch_id)
+    first = service.batches.items(batch_id)[0]
+    if blocker == "missing":
+        service.batches.update_item(first["id"], status="retry_pending")
+    elif blocker == "unknown":
+        with service.database.transaction() as connection:
+            connection.execute("UPDATE api_usage SET usage_complete=0 WHERE batch_item_id=?", (first["id"],))
+    provider_repository = app.extensions["inktime_provider_repository"]
+    provider_repository.save_pricing(batch["provider_id"], {
+        "model": batch["model"], "input_per_million": 10.0,
+        "cached_input_per_million": 1.0, "output_per_million": 20.0,
+        "batch_multiplier": 0.5, "enabled": True,
+    })
+    with service.database.session() as connection:
+        state = connection.execute("SELECT state FROM budget_reservations WHERE id=?", ("batch:" + batch_id,)).fetchone()[0]
+    assert state == ("released" if blocker is None else "active")
+    detail = service.get_detail(batch_id)
+    assert detail["cost_complete"] is (blocker != "unknown")
+    if blocker != "unknown":
+        assert detail["known_cost"] == pytest.approx(0.0014)
+        assert service.batches.get(batch_id)["actual_cost"] == pytest.approx(0.0014)
+    assert service.batches.settle_terminal_costs(batch_id=batch_id) == 0
+    service._finish(batch_id)
+    assert service.batches.get(batch_id)["status"] == "completed"
 
 
 def _prepare_terminal_import_case(app, tmp_path, status: str, cleanup_status: str, *, remote_files: bool):

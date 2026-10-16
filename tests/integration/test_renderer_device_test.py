@@ -463,7 +463,9 @@ def test_preview_fingerprint_tracks_all_render_versions(app, tmp_path, monkeypat
 
     def key(**kwargs):
         return app.extensions["inktime_render_cache"].fingerprint(
-            service.preview_fingerprint(primary, secondary_photo_id=secondary, **kwargs)
+            service.preview_fingerprint(
+                primary, secondary_photo_id=secondary, **{"layout": "photo_pair_caption", **kwargs}
+            )
         )
 
     baseline = key()

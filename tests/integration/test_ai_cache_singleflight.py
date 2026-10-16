@@ -4,6 +4,56 @@ from concurrent.futures import ThreadPoolExecutor
 from threading import Barrier
 
 
+def test_fallback_cache_tracks_selected_channel_behavior_revision(app, tmp_path, monkeypatch):
+    from contextlib import nullcontext
+    from PIL import Image
+    from inktime.app.providers.router import FailoverVisionProvider, ProviderChannel
+    from tests.unit.test_batch_analysis_lifecycle import _prepare_photos
+    from tests.unit.test_scoring import LabProvider
+
+    photo_id = _prepare_photos(app, tmp_path, count=1)[0]
+    service = app.extensions["inktime_analysis_service"]
+    app.extensions["inktime_settings_repository"].update(
+        "analysis.execution_mode", "local_with_manual_ai", changed_by="test", source_ip="test"
+    )
+    monkeypatch.setattr(service, "process_boundary", None)
+    with service.photos.database.session() as connection:
+        photo = connection.execute("SELECT * FROM photos WHERE id=?", (photo_id,)).fetchone()
+    primary = LabProvider()
+    primary.name = "primary"
+    fallback = LabProvider()
+    fallback.name = "fallback"
+    channel = ProviderChannel(fallback, priority=2, analysis_revision="old-endpoint")
+    router = FailoverVisionProvider([ProviderChannel(primary, priority=1), channel])
+    calls = []
+    original = service._perform_uncached_model_call
+
+    def external_call(**kwargs):
+        name = kwargs["selected_channel"].provider.name
+        if name == "primary":
+            raise ValueError("VLM-005 pre-dispatch primary failure")
+        calls.append(name)
+        return original(**kwargs)
+
+    monkeypatch.setattr(service, "_perform_uncached_model_call", external_call)
+    image = tmp_path / "synthetic.jpg"
+    Image.new("RGB", (64, 64), "orange").save(image)
+    parameters = dict(provider=router, image_factory=lambda: nullcontext(image),
+                      model="vision", detail="high", stage="single", job_id=None,
+                      photo_id=photo_id, content_sha256=photo["sha256"], schema_kind="full",
+                      caption_controls=None, prompt_version="test-v5", vision_input={"max_side": 1024},
+                      provider_prompt_contract_sha256="primary-contract")
+    first = service._model_call(**parameters)
+    cached = service._model_call(**parameters)
+    assert cached[3] is True
+    assert first[6] == cached[6]
+    channel.analysis_revision = "new-endpoint"
+    changed = service._model_call(**parameters)
+    assert changed[3] is False
+    assert changed[6] != first[6]
+    assert calls == ["fallback", "fallback"]
+
+
 def test_ai_cache_reservation_has_one_owner_and_failed_lease_recovers(app):
     repository = app.extensions["inktime_photo_repository"]
     barrier = Barrier(2)

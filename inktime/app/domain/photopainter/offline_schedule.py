@@ -192,7 +192,7 @@ def offline_prepare_plan(
     except (TypeError, ValueError, ZoneInfoNotFoundError) as exc:
         raise ValueError("DEVICE-008 裝置 IANA 時區不合法") from exc
     current = now if now.tzinfo is not None else now.replace(tzinfo=timezone.utc)
-    local_now = current.astimezone(zone)
+    local_now = current.astimezone(timezone.utc)
     strategy, normalized_sync_time = normalize_sync_strategy(sync_strategy, sync_time)
     slots = validate_offline_schedule(
         list(schedule_times),
@@ -205,15 +205,16 @@ def offline_prepare_plan(
     lead_and_margin = timedelta(minutes=prefetch_lead_minutes + server_margin_minutes)
 
     def slot_at(target: date, slot: str) -> datetime:
-        return local_slot_datetime(target, slot, zone)
+        return resolved_slot_datetimes(target, slots, zone, minimum_gap_minutes=minimum_gap_minutes,
+                                       maximum_slots=maximum_slots)[slots.index(slot)]
 
     def technical_deadline(target: date) -> datetime:
         if strategy == "fixed_daily":
             assert normalized_sync_time is not None
-            return local_slot_datetime(target, normalized_sync_time, zone)
+            return local_slot_datetime(target, normalized_sync_time, zone).astimezone(timezone.utc)
         return slot_at(target, slots[0]) - lead_and_margin
 
-    today = local_now.date()
+    today = current.astimezone(zone).date()
     due: list[date] = []
     if today.isoformat() not in skipped:
         today_technical = technical_deadline(today)
@@ -223,7 +224,7 @@ def offline_prepare_plan(
             due.append(today)
     tomorrow = today + timedelta(days=1)
     if tomorrow.isoformat() not in skipped:
-        handoff = local_slot_datetime(today, f"{future_prepare_hour_local:02d}:00", zone)
+        handoff = local_slot_datetime(today, f"{future_prepare_hour_local:02d}:00", zone).astimezone(timezone.utc)
         if local_now >= min(technical_deadline(tomorrow), handoff):
             due.append(tomorrow)
 
@@ -243,7 +244,7 @@ def offline_prepare_plan(
             continue
         handoff = local_slot_datetime(
             target - timedelta(days=1), f"{future_prepare_hour_local:02d}:00", zone
-        )
+        ).astimezone(timezone.utc)
         candidate = min(technical, handoff)
         next_deadline = local_now if local_now >= candidate else candidate
         break
@@ -294,6 +295,29 @@ def local_slot_datetime(
     raise ValueError("DEVICE-008 local slot 無法正規化為有效 timezone epoch")
 
 
+def resolved_slot_datetimes(
+    target_date: date, values: list[str], timezone_name: str | ZoneInfo, *,
+    minimum_gap_minutes: int = MINIMUM_SCHEDULE_GAP_MINUTES, maximum_slots: int = MAX_OFFLINE_SLOTS,
+) -> list[datetime]:
+    """Resolve a day in UTC; defer DST collisions by the configured minimum gap.
+
+    Keep every slot and its release identity. The earlier fold occurs once;
+    nonexistent wall times move forward, with subsequent collisions deferred.
+    Refuse a resolution that would cross the target day's boundary.
+    """
+    schedule = validate_offline_schedule(values, maximum=maximum_slots, minimum_gap_minutes=minimum_gap_minutes)
+    zone = timezone_name if isinstance(timezone_name, ZoneInfo) else ZoneInfo(timezone_name)
+    result: list[datetime] = []
+    for slot in schedule:
+        instant = local_slot_datetime(target_date, slot, zone).astimezone(timezone.utc)
+        if result:
+            instant = max(instant, result[-1] + timedelta(minutes=minimum_gap_minutes))
+        if instant.astimezone(zone).date() != target_date:
+            raise ValueError("DEVICE-008 DST 正規化超出目標日期；請調整該日排程")
+        result.append(instant)
+    return result
+
+
 def prefetch_slots(
     values: list[str], *, lead_minutes: int = 5, minimum_gap_minutes: int = MINIMUM_SCHEDULE_GAP_MINUTES
 ) -> list[tuple[str, str]]:
@@ -333,10 +357,10 @@ def slot_deadlines(
         maximum=resolve_offline_schedule_max_slots({"offline_schedule_max_slots": maximum_slots}),
         minimum_gap_minutes=minimum_gap_minutes,
     )
-    starts: list[datetime] = []
-    for slot in schedule:
-        starts.append(local_slot_datetime(target_date, slot, timezone_name))
-    first_next_day = local_slot_datetime(target_date + timedelta(days=1), schedule[0], timezone_name)
+    starts = resolved_slot_datetimes(target_date, schedule, timezone_name,
+                                    minimum_gap_minutes=minimum_gap_minutes, maximum_slots=maximum_slots)
+    first_next_day = resolved_slot_datetimes(target_date + timedelta(days=1), schedule, timezone_name,
+                                             minimum_gap_minutes=minimum_gap_minutes, maximum_slots=maximum_slots)[0]
     following = starts[1:] + [first_next_day]
     return [
         (next_start + timedelta(minutes=grace_minutes)).astimezone(ZoneInfo("UTC")).isoformat()
@@ -361,6 +385,7 @@ def next_sync_epoch(
     strategy, normalized_sync_time = normalize_sync_strategy(sync_strategy, sync_time)
     zone = ZoneInfo(timezone_name)
     local = now.astimezone(zone)
+    current_utc = now.astimezone(timezone.utc)
     slots = validate_offline_schedule(
         schedule,
         maximum=resolve_offline_schedule_max_slots({"offline_schedule_max_slots": maximum_slots}),
@@ -371,20 +396,20 @@ def next_sync_epoch(
         target_date = local.date() + timedelta(days=day_offset)
         if strategy == "fixed_daily":
             assert normalized_sync_time is not None
-            candidate = local_slot_datetime(target_date, normalized_sync_time, zone)
-            if candidate > local:
+            candidate = local_slot_datetime(target_date, normalized_sync_time, zone).astimezone(timezone.utc)
+            if candidate > current_utc:
                 candidates.append(candidate)
             continue
-        for slot in slots:
-            candidate = local_slot_datetime(target_date, slot, zone)
+        for candidate in resolved_slot_datetimes(target_date, slots, zone,
+                                                minimum_gap_minutes=minimum_gap_minutes, maximum_slots=maximum_slots):
             sync_at = candidate - timedelta(minutes=int(lead_minutes))
-            if sync_at > local:
+            if sync_at > current_utc:
                 candidates.append(sync_at)
-            elif candidate > local and not candidates:
+            elif candidate > current_utc and not candidates:
                 # A display boundary is already inside the lead window.  The
                 # correct action is an immediate wake, never a stale 24-hour
                 # relative timer.
-                candidates.append(local)
+                candidates.append(current_utc)
     if not candidates:
         raise ValueError("DEVICE-008 找不到下一個網路同步時刻")
     return int(min(candidates).timestamp())

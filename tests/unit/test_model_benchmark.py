@@ -28,6 +28,32 @@ def _axes():
     )
 
 
+def test_benchmark_profiles_have_distinct_supported_wire_contracts_and_duplicate_axes_are_removed(tmp_path):
+    axes = ModelBenchmarkService.build_axes(
+        provider="openrouter", models=["openai/gpt-6-luna", "openai/gpt-6-luna"],
+        image_sides=[512], prompt_profiles=["default", "advanced"],
+        variants=[False], reasoning_efforts=["none"],
+    )
+    assert len(axes) == 2
+    image = tmp_path / "benchmark.jpg"
+    Image.new("RGB", (64, 64), "orange").save(image)
+    service = ModelBenchmarkService()
+    bodies = []
+    for axis in axes:
+        provider = service._provider(axis)
+        try:
+            body = provider.build_analysis_request_body(
+                image_path=image, model=axis.model, detail="high", stage="single", max_tokens=2048,
+                reasoning_effort="none",
+            )
+            body.pop("session_id", None)
+            bodies.append(body)
+        finally:
+            provider.close()
+    assert bodies[0] != bodies[1]
+    assert "side_caption 自訂規則" in bodies[1]["messages"][0]["content"]
+
+
 def _golden_expected():
     return {
         "memory_score": 80,

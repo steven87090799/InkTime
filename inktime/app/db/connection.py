@@ -327,15 +327,21 @@ class Database:
 
     @contextmanager
     def transaction(
-        self, *, immediate: bool = True, operation: str = "repository_write"
+        self, *, immediate: bool = True, operation: str = "repository_write", schema_rebuild: bool = False
     ) -> Iterator[sqlite3.Connection]:
         """所有多步驟寫入共用的 rollback-safe 交易入口。"""
 
+        if schema_rebuild and operation != "schema_migration":
+            raise ValueError("Schema rebuild is restricted to migrations")
         with self.session() as connection:
             started = time.monotonic()
+            if schema_rebuild:
+                connection.execute("PRAGMA foreign_keys=OFF")
             connection.execute("BEGIN IMMEDIATE" if immediate else "BEGIN")
             try:
                 yield connection
+                if schema_rebuild and connection.execute("PRAGMA foreign_key_check").fetchone() is not None:
+                    raise sqlite3.IntegrityError("Schema migration failed foreign key validation")
             except Exception as exc:
                 if connection.in_transaction:
                     connection.execute("ROLLBACK")

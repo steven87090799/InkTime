@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 
 from PIL import Image
+import pytest
 
 from tests.conftest import create_admin, csrf, login
 
@@ -34,6 +35,55 @@ def _ack(client, token: str, item_id: str, version: int, event: str, key: str):
         headers={"Authorization": f"Bearer {token}"},
         json={"queue_item_id": item_id, "queue_version": version, "event": event, "idempotency_key": key},
     )
+
+
+def _rollout_display(client, token: str, item_id: str, key: str, *, failed: bool = False):
+    response = client.get("/api/device/v1/queue/manifest", headers={"Authorization": f"Bearer {token}"})
+    assert response.status_code == 200
+    manifest = response.get_json()
+    item = next(item for item in manifest["items"] if item["queue_item_id"] == item_id)
+    assert client.get(item["download_url"], headers={"Authorization": f"Bearer {token}"}).status_code == 200
+    events = ("MANIFEST_RECEIVED", "DOWNLOAD_COMPLETED", "HASH_VERIFIED", "DISPLAY_FAILED" if failed else "DISPLAY_COMPLETED")
+    for index, event in enumerate(events):
+        response = _ack(client, token, item_id, manifest["queue_version"], event, f"{key}-{index}")
+        assert response.status_code == 200
+    return response
+
+
+@pytest.mark.parametrize("kind", ["LIKE", "NEVER_SHOW", "RESTORE"])
+def test_repeated_photo_feedback_commits_a_new_audit_event(client, app, kind):
+    create_admin(app)
+    login(client)
+    _seed_photo(app, "repeat-feedback")
+    for value in (1.0, 0.5):
+        response = client.post("/api/feedback", json={"photo_id": "repeat-feedback", "feedback_type": kind, "value": value},
+                               headers={"X-CSRF-Token": csrf(client)})
+        assert response.status_code == 201
+    with app.extensions["inktime_database"].session() as connection:
+        assert connection.execute("SELECT COUNT(*) FROM activity_events WHERE source='feedback'").fetchone()[0] == 2
+        assert connection.execute("SELECT value FROM photo_feedback WHERE photo_id=? AND feedback_type=?",
+                                  ("repeat-feedback", kind)).fetchone()[0] == 0.5
+
+
+@pytest.mark.parametrize("status", ["DISPLAYED", "FAILED", "CANCELLED"])
+def test_terminal_queue_item_can_be_queued_as_a_new_delivery_without_losing_history(app, status):
+    _seed_photo(app)
+    release = _published_release(app)
+    device_id, _ = app.extensions["inktime_device_repository"].create("requeue")
+    repository = app.extensions["inktime_resilience_repository"]
+    repository.ensure_queue(device_id)
+    first = repository.enqueue_release(device_id=device_id, release_id=release["release_id"])
+    with repository.database.transaction() as connection:
+        connection.execute("UPDATE device_content_queue_items SET status=? WHERE id=?", (status, first["id"]))
+        connection.execute("INSERT INTO device_content_queue_events(queue_item_id,device_id,event_type,created_at) VALUES (?,?,'history',datetime('now'))",
+                           (first["id"], device_id))
+    second = repository.enqueue_release(device_id=device_id, release_id=release["release_id"])
+    assert second["id"] != first["id"]
+    assert repository.enqueue_release(device_id=device_id, release_id=release["release_id"])["id"] == second["id"]
+    with repository.database.session() as connection:
+        assert connection.execute("SELECT status FROM device_content_queue_items WHERE id=?", (first["id"],)).fetchone()[0] == status
+        assert connection.execute("SELECT COUNT(*) FROM device_content_queue_events WHERE queue_item_id=?", (first["id"],)).fetchone()[0] == 1
+        assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
 
 
 def test_feedback_success_response_matches_committed_database_record(client, app):
@@ -336,7 +386,8 @@ def test_queue_ack_rejects_string_skip_boolean(client, app):
     assert response.status_code == 400
 
 
-def test_canary_failure_creates_last_known_good_rollback_queue(client, app):
+@pytest.mark.parametrize("mode", ["automatic", "manual", "timeout"])
+def test_canary_failure_creates_last_known_good_rollback_queue(client, app, mode):
     create_admin(app)
     login(client)
     _seed_photo(app)
@@ -344,12 +395,18 @@ def test_canary_failure_creates_last_known_good_rollback_queue(client, app):
     second_id, second_token = app.extensions["inktime_device_repository"].create("Canary B")
     last_known_good = _published_release(app)
     canary_release = _published_release(app)
+    repository = app.extensions["inktime_resilience_repository"]
+    for device_id in (first_id, second_id):
+        repository.ensure_queue(device_id)
+    history_ids = [repository.enqueue_release(device_id=device_id, release_id=last_known_good["release_id"])["id"]
+                   for device_id in (first_id, second_id)]
     with app.extensions["inktime_database"].transaction() as connection:
         for device_id in (first_id, second_id):
             connection.execute(
-                "INSERT INTO device_content_queues(device_id,last_known_good_release_id,updated_at) VALUES (?,?,datetime('now'))",
-                (device_id, last_known_good["release_id"]),
+                "UPDATE device_content_queues SET last_known_good_release_id=? WHERE device_id=?",
+                (last_known_good["release_id"], device_id),
             )
+            connection.execute("UPDATE device_content_queue_items SET status='DISPLAYED' WHERE device_id=?", (device_id,))
     created = client.post(
         "/api/rollouts",
         json={
@@ -366,15 +423,20 @@ def test_canary_failure_creates_last_known_good_rollback_queue(client, app):
     assert started.status_code == 200
     targets = started.get_json()["targets"]
     tokens = {first_id: first_token, second_id: second_token}
-    for target in targets:
+    if mode == "manual":
+        response = client.post(f"/api/rollouts/{rollout_id}/rollback", json={}, headers={"X-CSRF-Token": csrf(client)})
+        assert response.status_code == 200
+    elif mode == "timeout":
+        repository.evaluate_rollouts(now=datetime.now(timezone.utc) + timedelta(days=2))
+    else:
+        target = targets[0]
         assert (
-            _ack(
+            _rollout_display(
                 client,
                 tokens[target["device_id"]],
                 target["queue_item_id"],
-                0,
-                "DISPLAY_FAILED",
                 f"failed-{target['device_id']}",
+                failed=True,
             ).status_code
             == 200
         )
@@ -383,12 +445,100 @@ def test_canary_failure_creates_last_known_good_rollback_queue(client, app):
     assert {target["status"] for target in rolling["targets"]} == {"rollback_pending"}
     with app.extensions["inktime_database"].session() as connection:
         rollback_items = connection.execute(
-            "SELECT release_id,priority,status FROM device_content_queue_items WHERE device_id IN (?,?) AND release_id=?",
+            "SELECT release_id,priority,status FROM device_content_queue_items WHERE device_id IN (?,?) AND release_id=? AND status='READY'",
             (first_id, second_id, last_known_good["release_id"]),
         ).fetchall()
     assert {(row["release_id"], row["priority"], row["status"]) for row in rollback_items} == {
         (last_known_good["release_id"], 1000, "READY")
     }
+    assert len(rollback_items) == 2
+    assert all(target["queue_item_id"] not in history_ids for target in rolling["targets"])
+    with repository.database.session() as connection:
+        assert all(connection.execute("SELECT status FROM device_content_queue_items WHERE id=?", (item_id,)).fetchone()[0] == "DISPLAYED"
+                   for item_id in history_ids)
+    for target in rolling["targets"]:
+        response = _rollout_display(client, tokens[target["device_id"]], target["queue_item_id"], f"rollback-{target['device_id']}")
+        assert response.status_code == 200
+    assert repository.rollout(rollout_id)["campaign"]["status"] == "ROLLED_BACK"
+
+
+def test_rollout_expands_only_after_observation_and_approval_and_resumes_idempotently(client, app):
+    from inktime.app.repositories.resilience import ResilienceRepository
+
+    create_admin(app)
+    login(client)
+    _seed_photo(app)
+    devices = dict(app.extensions["inktime_device_repository"].create(f"stage-{index}") for index in range(4))
+    release = _published_release(app)
+    repository = app.extensions["inktime_resilience_repository"]
+    campaign = repository.create_rollout(release_id=release["release_id"], name="two stages", user_id="test", stages=[
+        {"target_percent": 50, "minimum_successful_devices": 2, "minimum_observation_minutes": 1,
+         "manual_approval_required": True},
+        {"target_percent": 100, "minimum_observation_minutes": 1},
+    ])
+    identifier = campaign["campaign"]["id"]
+    started = repository.start_rollout(identifier, actor_id="test")
+    assert len(started["targets"]) == 2
+    for target in started["targets"]:
+        assert _rollout_display(client, devices[target["device_id"]], target["queue_item_id"],
+                    f"stage-one-{target['device_id']}").status_code == 200
+    assert repository.rollout(identifier)["campaign"]["status"] == "OBSERVING"
+    assert client.post(f"/api/rollouts/{identifier}/approve", json={}, headers={"X-CSRF-Token": csrf(client)}).status_code == 409
+    future = datetime.now(timezone.utc) + timedelta(minutes=2)
+    assert repository.evaluate_rollouts(now=future) == 0  # Manual approval is still required.
+    with repository.database.transaction() as connection:
+        connection.execute("UPDATE rollout_stages SET started_at=? WHERE rollout_id=? AND status='active'",
+                           ((datetime.now(timezone.utc) - timedelta(minutes=2)).isoformat(), identifier))
+    approved = client.post(f"/api/rollouts/{identifier}/approve", json={}, headers={"X-CSRF-Token": csrf(client)})
+    assert approved.status_code == 200
+    expanded = approved.get_json()
+    assert len(expanded["targets"]) == 4
+    assert expanded["campaign"]["status"] == "EXPANDING"
+    assert [stage["status"] for stage in expanded["stages"]] == ["completed", "active"]
+    old_ids = {target["queue_item_id"] for target in started["targets"]}
+    for target in expanded["targets"]:
+        if target["queue_item_id"] not in old_ids:
+            assert _rollout_display(client, devices[target["device_id"]], target["queue_item_id"],
+                        f"stage-two-{target['device_id']}").status_code == 200
+    restarted = ResilienceRepository(repository.database)
+    assert restarted.evaluate_rollouts(now=future) == 1
+    assert restarted.evaluate_rollouts(now=future) == 0
+    assert restarted.rollout(identifier)["campaign"]["status"] == "COMPLETED"
+    with repository.database.session() as connection:
+        assert connection.execute("SELECT COUNT(*) FROM device_content_queue_items WHERE release_id=?", (release["release_id"],)).fetchone()[0] == 4
+
+
+def test_rollout_pause_excludes_paused_time_and_missing_fallback_is_explicit(client, app, monkeypatch):
+    import inktime.app.repositories.resilience as module
+
+    create_admin(app)
+    login(client)
+    _seed_photo(app)
+    device_id, token = app.extensions["inktime_device_repository"].create("paused")
+    release = _published_release(app)
+    repository = app.extensions["inktime_resilience_repository"]
+    campaign = repository.create_rollout(release_id=release["release_id"], name="paused", user_id="test",
+                                         stages=[{"target_percent": 100, "minimum_observation_minutes": 10}])
+    identifier = campaign["campaign"]["id"]
+    start = datetime.now(timezone.utc)
+    monkeypatch.setattr(module, "utc_now", lambda: start.isoformat())
+    started = repository.start_rollout(identifier, actor_id="test")
+    assert _rollout_display(client, token, started["targets"][0]["queue_item_id"], "paused-ack").status_code == 200
+    repository.transition_rollout(identifier, target="PAUSED", actor_id="test")
+    assert repository.evaluate_rollouts(now=start + timedelta(hours=1)) == 0
+    resumed_at = start + timedelta(hours=1)
+    monkeypatch.setattr(module, "utc_now", lambda: resumed_at.isoformat())
+    repository.transition_rollout(identifier, target="OBSERVING", actor_id="test")
+    assert repository.evaluate_rollouts(now=resumed_at + timedelta(minutes=9)) == 0
+    assert datetime.fromisoformat(repository.rollout(identifier)["stages"][0]["started_at"]) == resumed_at
+    response = client.post(f"/api/rollouts/{identifier}/rollback", json={}, headers={"X-CSRF-Token": csrf(client)})
+    assert response.status_code == 409
+    failed = repository.rollout(identifier)
+    assert failed["campaign"]["status"] == "FAILED"
+    assert failed["targets"][0]["status"] == "rollback_failed"
+    assert failed["targets"][0]["rollback_release_id"] is None
+    with repository.database.session() as connection:
+        assert connection.execute("SELECT COUNT(*) FROM device_content_queue_items WHERE device_id=?", (device_id,)).fetchone()[0] == 1
 
 
 def test_rollout_skips_enhanced_offline_devices_without_online_queue_items(client, app):

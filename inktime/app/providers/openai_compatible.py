@@ -438,7 +438,7 @@ class OpenAICompatibleProvider(VisionProvider):
         usage: dict[str, Any] = usage_value if isinstance(usage_value, dict) else {}
         details_value = usage.get("prompt_tokens_details") or usage.get("input_tokens_details")
         details = details_value if isinstance(details_value, dict) else {}
-        completion_value = usage.get("completion_tokens_details")
+        completion_value = usage.get("completion_tokens_details") or usage.get("output_tokens_details")
         completion_details = completion_value if isinstance(completion_value, dict) else {}
         def token_count(value: Any) -> int | None:
             # Wire token counts are non-negative JSON integers, never booleans,
@@ -452,7 +452,7 @@ class OpenAICompatibleProvider(VisionProvider):
         cache_write_count = token_count(details.get("cache_write_tokens", usage.get("cache_write_tokens", 0)))
         detail_objects_valid = all(
             usage.get(key) is None or isinstance(usage[key], dict)
-            for key in ("prompt_tokens_details", "input_tokens_details", "completion_tokens_details")
+            for key in ("prompt_tokens_details", "input_tokens_details", "completion_tokens_details", "output_tokens_details")
         )
         counts_valid = (
             detail_objects_valid and input_count is not None and output_count is not None

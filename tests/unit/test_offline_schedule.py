@@ -17,6 +17,7 @@ from inktime.app.domain.photopainter.offline_schedule import (
     local_slot_datetime,
     prefetch_slots,
     resolve_offline_schedule_max_slots,
+    resolved_slot_datetimes,
     slot_deadlines,
     validate_offline_schedule,
 )
@@ -219,6 +220,21 @@ def test_dst_slot_epochs_are_deterministic_for_fold_and_gap():
         "2026-03-08T07:45:00+00:00",
         "2026-03-09T05:45:00+00:00",
     ]
+
+
+def test_dst_gap_collision_preserves_slots_with_strict_utc_spacing():
+    starts = resolved_slot_datetimes(date(2026, 3, 8), ["02:30", "03:30"], "America/New_York", minimum_gap_minutes=30)
+    assert [value.isoformat() for value in starts] == ["2026-03-08T07:30:00+00:00", "2026-03-08T08:00:00+00:00"]
+    assert slot_deadlines(date(2026, 3, 8), ["02:30", "03:30"], "America/New_York", minimum_gap_minutes=30)[0] == "2026-03-08T08:15:00+00:00"
+
+
+@pytest.mark.parametrize("strategy", ["first_display_lead", "fixed_daily"])
+def test_second_dst_fold_never_returns_a_past_sync(strategy):
+    now = datetime(2026, 11, 1, 1, 10, tzinfo=ZoneInfo("America/New_York"), fold=1)
+    result = next_sync_epoch(now=now, schedule=["01:30"], timezone_name="America/New_York",
+                             sync_strategy=strategy, sync_time="01:30" if strategy == "fixed_daily" else None)
+    assert result == int(datetime(2026, 11, 2, 6, 30, tzinfo=timezone.utc).timestamp())
+    assert result > int(now.timestamp())
 
 
 def test_next_prepare_deadline_is_bounded_and_skips_committed_target():
