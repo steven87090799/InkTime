@@ -186,8 +186,8 @@ class AtomicReleasePublisher:
         temporary = self.root / f".{release_id}.tmp"
         final = self.root / release_id
         temporary.mkdir(mode=0o750)
-        effective_strength = 1.0 if dither in {"gooddisplay", "photo_smooth"} else float(dither_strength)
-        effective_color_distance = "rgb" if dither in {"gooddisplay", "photo_smooth"} else color_distance
+        effective_strength = 1.0 if dither in {"gooddisplay", "photo_smooth", "warm_vivid_c"} else float(dither_strength)
+        effective_color_distance = "rgb" if dither in {"gooddisplay", "photo_smooth", "warm_vivid_c"} else color_distance
         files = []
         output_palette = profile.colors
         try:

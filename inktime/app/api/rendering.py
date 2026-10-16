@@ -28,6 +28,7 @@ from inktime.app.domain.rendering import (
     resolve_layout_geometry,
 )
 from inktime.app.repositories.jobs import PreviewCapacityError
+from inktime.app.repositories.settings import SETTING_DEFINITIONS
 from inktime.app.services.rendering import (
     FIT_MODES,
     FRAME_ORIENTATIONS,
@@ -78,6 +79,9 @@ def rendering_page():
         profiles=profile_summaries(),
         current_profile=str(settings.get("render.profile", "safe_4c")),
         current_dither=str(settings.get("render.dither", "floyd_steinberg")),
+        current_dither_label=SETTING_DEFINITIONS["render.dither"]["choice_labels"].get(
+            str(settings.get("render.dither", "floyd_steinberg")), "自訂"
+        ),
         dither_strength=float(settings.get("render.dither_strength", 1.0)),
         color_distance=str(settings.get("render.color_distance", "oklab")),
         show_location=bool(settings.get("render.show_location", True)),

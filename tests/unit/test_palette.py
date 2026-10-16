@@ -1,8 +1,39 @@
 from __future__ import annotations
 
+import itertools
+import json
+from pathlib import Path
+
 from PIL import Image
 
 from inktime.app.domain.rendering import DITHER_ALGORITHMS, encode_image, get_display_profile
+from inktime.app.domain.rendering.palette import _warm_vivid_c, _waveshare_six_color_index
+from inktime.app.domain.rendering.system_presets import DEFAULT_RENDER_DITHER, SYSTEM_PRESETS
+
+
+def test_warm_vivid_c_matches_the_physically_accepted_official_web_pipeline():
+    fixture = json.loads((Path(__file__).parents[1] / "fixtures/warm_vivid_c_official_web.json").read_text())
+    image = Image.new("RGB", tuple(fixture["size"]))
+    image.putdata([tuple(pixel) for pixel in fixture["source_rgb"]])
+    before = image.tobytes()
+    encoded = encode_image(image, profile_key="gdep073e01_6c", dither="warm_vivid_c")
+    assert encoded.payload.hex() == fixture["indexed4_hex"]
+    assert image.tobytes() == before
+    assert _warm_vivid_c(Image.new("RGB", (2, 2), "white")).getpixel((0, 0)) == (255, 255, 255)
+
+
+def test_waveshare_nearest_color_preserves_rgb_distance_and_tie_breaks():
+    palette = ((0, 0, 0), (255, 255, 255), (255, 255, 0),
+               (255, 0, 0), (0, 0, 255), (0, 255, 0))
+    for pixel in itertools.product((0, 63, 64, 127, 128, 191, 192, 255), repeat=3):
+        expected = min(range(6), key=lambda i, pixel=pixel: sum((a - b) ** 2 for a, b in zip(pixel, palette[i])))
+        assert _waveshare_six_color_index(*pixel) == expected
+
+
+def test_warm_default_preserves_the_original_system_preset():
+    assert DEFAULT_RENDER_DITHER == "warm_vivid_c"
+    assert SYSTEM_PRESETS["warm_vivid_c"]["settings"]["render.dither"] == "warm_vivid_c"
+    assert SYSTEM_PRESETS["gooddisplay_spectra6"]["settings"]["render.dither"] == "gooddisplay"
 
 
 GOODDISPLAY_PALETTE = (

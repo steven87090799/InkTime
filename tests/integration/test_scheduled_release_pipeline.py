@@ -8,6 +8,43 @@ from inktime.app.domain.analysis.scoring import SEMANTIC_SCORE_KIND
 from tests.unit.test_analysis_schema import valid_result
 
 
+@pytest.mark.parametrize("available", [24, 23])
+def test_two_hour_offline_pair_schedule_keeps_two_distinct_sources_per_frame(app, monkeypatch, available):
+    times = [f"{hour:02d}:00" for hour in range(0, 24, 2)]
+    device_id, _ = app.extensions["inktime_device_repository"].create(
+        "Two-hour paired frame", panel_profile="gdep073e01_6c",
+        delivery_mode="inktime_offline_schedule", offline_prefetch_allowed=True,
+        schedule_times=times, offline_schedule_max_slots=16,
+        frame_orientation="landscape", layout_mode="photo_pair", fit_mode="contain",
+    )
+    service = app.extensions["inktime_display_preparation_service"]
+    requested = []
+    published = []
+
+    def candidates(quantity, **kwargs):
+        requested.append(quantity)
+        return [{"id": f"source-{i}"} for i in range(available)]
+
+    def publish(photo_ids, *args, **kwargs):
+        published.append(photo_ids)
+        return {"release_id": f"20261017-000000-{len(published):06d}"}
+
+    monkeypatch.setattr(service.render_service, "select_candidates_details", candidates)
+    monkeypatch.setattr(service.render_service, "publish", publish)
+    monkeypatch.setattr(service.offline_schedules, "prepare_day", lambda **kwargs: {
+        "schedule": {"schedule_times": times}, "slots": [{"time": time} for time in times],
+    })
+    result = service.prepare_device_day(device_id=device_id, target_date="2026-10-17", created_by="test")
+    assert requested == [24]
+    if available == 24:
+        assert result["status"] == "ready"
+        assert len(published) == 12 and all(len(ids) == 2 for ids in published)
+        assert len({id for ids in published for id in ids}) == 24
+    else:
+        assert result["outcome"] == "no_content"
+        assert published == []
+
+
 def test_schedule_resolves_devices_limits_years_and_commits_history_after_publish(app, tmp_path):
     app.extensions["inktime_settings_repository"].update(
         "analysis.execution_mode", "automatic_ai", changed_by="test", source_ip="127.0.0.1"

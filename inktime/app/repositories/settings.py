@@ -961,14 +961,15 @@ SETTING_DEFINITIONS: dict[str, dict[str, Any]] = {
     },
     "render.dither": {
         "category": "渲染設定",
-        "default": "gooddisplay",
+        "default": "warm_vivid_c",
         "type": "string",
-        "description": "有限色電子紙的抖動算法；可選 GDEP 原廠相容或減少色塊與雜點的照片平滑模式",
-        "risk": "原廠相容與照片平滑固定使用標準強度；照片平滑可能略微柔化極細線條",
+        "description": "電子紙色彩模式；預設 C 微暖增豔，也可保留原版或選擇其他抖色方式",
+        "risk": "C 微暖增豔與原廠相容固定使用標準強度；底片或已調色照片可切回原版",
         "choices": [
             "none",
             "floyd_steinberg",
             "gooddisplay",
+            "warm_vivid_c",
             "photo_smooth",
             "atkinson",
             "bayer4",
@@ -980,7 +981,8 @@ SETTING_DEFINITIONS: dict[str, dict[str, Any]] = {
         "choice_labels": {
             "none": "不抖動",
             "floyd_steinberg": "Floyd–Steinberg（InkTime）",
-            "gooddisplay": "Good Display 原廠相容",
+            "gooddisplay": "原版（Good Display 原廠相容）",
+            "warm_vivid_c": "C 微暖增豔（預設）",
             "photo_smooth": "照片平滑（減少色塊／雜點）",
             "atkinson": "Atkinson（較柔和）",
             "bayer4": "Bayer 4×4（規律顆粒）",

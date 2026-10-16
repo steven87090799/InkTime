@@ -35,7 +35,7 @@
   <article><span>目前 Profile</span><strong>{{ active.label if active else current_profile }}</strong></article>
   <article><span>輸出格式</span><strong>{{ active.pixel_format if active else '未知' }}</strong></article>
   <article><span>單張大小</span><strong>{{ '{:,}'.format(active.bytes_per_image) if active else '—' }} bytes</strong></article>
-  <article><span>抖動／色差</span><strong>{{ current_dither }}／{{ color_distance }}</strong><small>強度 {{ dither_strength }}</small></article>
+  <article><span>色彩模式</span><strong>{{ current_dither_label }}</strong><small>強度 {{ dither_strength }}</small></article>
 </section>
 
 <section class="panel frame-layout-panel">

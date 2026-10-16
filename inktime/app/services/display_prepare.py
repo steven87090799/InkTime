@@ -409,13 +409,16 @@ class DisplayPreparationService:
                 "slots": existing["slots"],
             }
 
+        layout = str(device["layout_mode"] or self.render_service.settings.get("render.layout", "photo_info"))
+        photos_per_frame = 2 if layout in {"photo_pair", "photo_pair_caption"} else 1
+        required_candidates = len(schedule_times) * photos_per_frame
         candidates = self.render_service.select_candidates_details(
-            len(schedule_times), target_date=target
+            required_candidates, target_date=target
         )
         unique_candidates = list(
             dict((str(row["id"]), row) for row in candidates).values()
         )
-        if len(unique_candidates) < len(schedule_times):
+        if len(unique_candidates) < required_candidates:
             outcome = self.offline_schedules.record_terminal_outcome(
                 device_id=device_id,
                 target_date=target.isoformat(),
@@ -443,9 +446,10 @@ class DisplayPreparationService:
         release_ids: list[str] = []
         try:
             for slot_index, _slot in enumerate(schedule_times):
-                candidate = unique_candidates[slot_index]
+                start = slot_index * photos_per_frame
+                frame_candidates = unique_candidates[start:start + photos_per_frame]
                 result = self.render_service.publish(
-                    [str(candidate["id"])],
+                    [str(candidate["id"]) for candidate in frame_candidates],
                     created_by,
                     # Preparation reserves and downloads a formal frame; it
                     # is not evidence that the panel displayed it.
