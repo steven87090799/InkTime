@@ -486,6 +486,22 @@ static bool validSyncStrategy(const String &strategy, const String &syncTime) {
   return !syncTime.isEmpty() && validSyncTime(syncTime);
 }
 
+static DeserializationError readDeviceHttpJson(
+    HTTPClient &http, JsonDocument &document, size_t maximumBytes) {
+  const int expected = http.getSize();
+  if (expected <= 0 || static_cast<size_t>(expected) > maximumBytes) {
+    return DeserializationError(DeserializationError::InvalidInput);
+  }
+  // TLS headers and body can arrive separately. HTTPClient's body reader
+  // retries transient empty reads; parsing its raw stream can report EmptyInput.
+  // Bound allocation first and reject truncated bodies before parsing any JSON.
+  const String body = http.getString();
+  if (body.length() != static_cast<size_t>(expected)) {
+    return DeserializationError(DeserializationError::IncompleteInput);
+  }
+  return deserializeJson(document, body);
+}
+
 static bool applyRemoteSchedule(JsonObject remoteConfig, int schemaVersion, Config &candidate) {
   if (schemaVersion < 3) {
     inktime::OfflineSlot legacy = {};
@@ -3349,7 +3365,7 @@ static bool checkRepairPermission(Config &cfg) {
     return false;
   }
   JsonDocument response;
-  const DeserializationError jsonError = deserializeJson(response, http.getStream());
+  const DeserializationError jsonError = readDeviceHttpJson(http, response, 2048U);
   http.end();
   const String statusValue = response["status"] | "";
   const String authorizedDeviceId = response["device_id"] | "";
@@ -3418,7 +3434,7 @@ static bool confirmPairingCredential(Config &cfg, const String &base) {
     return false;
   }
   JsonDocument response;
-  const DeserializationError jsonError = deserializeJson(response, http.getStream());
+  const DeserializationError jsonError = readDeviceHttpJson(http, response, 4096U);
   http.end();
   const String statusValue = response["status"] | "";
   const String confirmedDeviceId = response["device_id"] | "";
@@ -3498,7 +3514,7 @@ static bool claimPairingCredential(Config &cfg, const String &base) {
       return false;
     }
     JsonDocument response;
-    const DeserializationError jsonError = deserializeJson(response, http.getStream());
+    const DeserializationError jsonError = readDeviceHttpJson(http, response, 8192U);
     http.end();
     const String secret = response["device_secret"] | "";
     const JsonVariantConst versionValue = response["credential_version"];
@@ -3621,7 +3637,7 @@ static bool performAutomaticPairing(Config &cfg) {
     return false;
   }
   JsonDocument requestResponse;
-  const DeserializationError requestJsonError = deserializeJson(requestResponse, requestHttp.getStream());
+  const DeserializationError requestJsonError = readDeviceHttpJson(requestHttp, requestResponse, 8192U);
   requestHttp.end();
   const String pairingId = requestResponse["pairing_id"] | "";
   const String pairingCode = requestResponse["pairing_code"] | "";
@@ -3821,7 +3837,7 @@ static bool postQueueAckBatch(
     if (status == HTTP_CODE_OK && responseLength > 0 && responseLength <= 12 * 1024
         && responseContentType.startsWith("application/json")) {
       JsonDocument response;
-      const DeserializationError responseError = deserializeJson(response, ackHttp.getStream());
+      const DeserializationError responseError = readDeviceHttpJson(ackHttp, response, 12U * 1024U);
       const String responseStatus = response["status"] | "";
       const JsonArrayConst results = response["results"].as<JsonArrayConst>();
       const bool responseValid = !responseError && !response.overflowed()
@@ -4218,7 +4234,7 @@ bool downloadLatestPhotoBin(Config &cfg) {
   }
 
   JsonDocument manifest;
-  DeserializationError jsonError = deserializeJson(manifest, manifestHttp.getStream());
+  DeserializationError jsonError = readDeviceHttpJson(manifestHttp, manifest, 65536U);
   manifestHttp.end();
   int schemaVersion = manifest["schema_version"] | 0;
   String pixelFormat = manifest["pixel_format"] | "";
@@ -4661,7 +4677,7 @@ static bool downloadOfflineScheduleAndFrames(Config &cfg, bool targetNext = fals
   if (status == HTTP_CODE_CONFLICT && length > 0 && length <= 4096
       && contentType.startsWith("application/json")) {
     JsonDocument mismatch;
-    const DeserializationError mismatchError = deserializeJson(mismatch, scheduleHttp.getStream());
+    const DeserializationError mismatchError = readDeviceHttpJson(scheduleHttp, mismatch, 8192U);
     const String mismatchName = mismatch["error"] | "";
     const String mismatchCode = mismatch["error_code"] | "";
     scheduleHttp.end();
@@ -4680,7 +4696,7 @@ static bool downloadOfflineScheduleAndFrames(Config &cfg, bool targetNext = fals
   if (status == HTTP_CODE_NOT_FOUND && length > 0 && length <= 4096
       && contentType.startsWith("application/json")) {
     JsonDocument notReady;
-    const DeserializationError notReadyError = deserializeJson(notReady, scheduleHttp.getStream());
+    const DeserializationError notReadyError = readDeviceHttpJson(scheduleHttp, notReady, 8192U);
     scheduleHttp.end();
     const String errorName = notReady["error"] | "";
     const String notReadyTarget = notReady["target"] | "";
@@ -4751,7 +4767,7 @@ static bool downloadOfflineScheduleAndFrames(Config &cfg, bool targetNext = fals
     return false;
   }
   JsonDocument schedule;
-  const DeserializationError jsonError = deserializeJson(schedule, scheduleHttp.getStream());
+  const DeserializationError jsonError = readDeviceHttpJson(scheduleHttp, schedule, 32768U);
   scheduleHttp.end();
   const JsonVariantConst schema = schedule["schema_version"];
   const JsonVariantConst rawSlots = schedule["slots"];
@@ -5237,7 +5253,7 @@ static QueueDownloadResult downloadQueuePhotoBin(Config &cfg) {
   }
 
   JsonDocument manifest;
-  const DeserializationError jsonError = deserializeJson(manifest, manifestHttp.getStream());
+  const DeserializationError jsonError = readDeviceHttpJson(manifestHttp, manifest, 65536U);
   manifestHttp.end();
   const JsonVariantConst schema = manifest["schema_version"];
   const JsonVariantConst version = manifest["queue_version"];
