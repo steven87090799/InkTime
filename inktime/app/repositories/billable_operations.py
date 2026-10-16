@@ -5,6 +5,7 @@ from uuid import uuid4
 
 from inktime.app.db import Database
 from inktime.app.providers.base import ProviderCallTrace, ProviderResponse, Usage
+from inktime.app.repositories.analysis_reservations import assert_no_batch_content_owner
 
 
 class UnreconciledOperationError(RuntimeError):
@@ -27,11 +28,14 @@ class BillableOperationRepository:
                 (content_sha256, datetime.now(timezone.utc).isoformat()),
             ).fetchone():
                 raise UnreconciledOperationError("先前 Vision 請求狀態未知；須先對帳，不得自動重新送圖")
-            return connection.execute(
+            saved = connection.execute(
                 "SELECT 1 FROM billable_operations WHERE request_fingerprint=? "
                 "AND (state='response' OR (? AND state='completed')) LIMIT 1",
                 (request_fingerprint, int(reuse_completed)),
             ).fetchone() is not None
+            if not saved:
+                assert_no_batch_content_owner(connection, content_sha256)
+            return saved
 
     def begin(self, content_sha256: str, request_fingerprint: str, *, reuse_completed: bool = False, context: dict | None = None) -> tuple[str, ProviderResponse | None]:
         now = datetime.now(timezone.utc).isoformat()
@@ -59,6 +63,7 @@ class BillableOperationRepository:
                 if payload.get("call_trace"):
                     payload["call_trace"] = ProviderCallTrace(**payload["call_trace"])
                 return str(saved["id"]), ProviderResponse(**payload)
+            assert_no_batch_content_owner(connection, content_sha256)
             operation_id = str(uuid4())
             connection.execute(
                 "INSERT INTO billable_operations(id,content_sha256,request_fingerprint,state,created_at,updated_at,resolution_note) "

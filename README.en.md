@@ -1,6 +1,6 @@
 # InkTime · Photo analysis and e-ink memory frames
 
-> Branch documentation updated on 2026-10-11 from `origin/main=7ef3e4f` and the no-code enrollment revision `47dcd51` in Draft PR #150. SQLite Migration 68, AI Schema v5, firmware 2.8.8 (pending merge and validation), Config Store v5 and NAS deployment contract 3 are separate versions. Check the deployed Git revision in Diagnostics; see the [source baseline](docs/reference/CURRENT_STATE_ZH_TW.md).
+> Branch documentation updated on 2026-10-17 from `origin/main=80f3121` for PR #162. SQLite Migration 69, AI Schema v5, firmware 2.8.9 (HTTP JSON reception fix; not flashed), Config Store v5 and NAS deployment contract 3 are separate versions. Check the deployed Git revision in Diagnostics; see the [source baseline](docs/reference/CURRENT_STATE_ZH_TW.md).
 
 [繁體中文](README.md) · [Documentation map](docs/README.md) · [HTML manual](USER_MANUAL.html) · [Quick start](docs/getting-started/QUICK_START_ZH_TW.md)
 
@@ -296,7 +296,7 @@ Example PCB:
 
 ## Build and Flash
 
-The shared 7C/PhotoPainter source currently declares firmware **2.8.8**. Use the exact Hosted CI profile, pinned dependencies and repository-owned partition table described in the [ESP32 guide](docs/devices/ESP32_GUIDE_ZH_TW.md).
+The shared 7C/PhotoPainter source currently declares firmware **2.8.9**. Use the exact Hosted CI profile, pinned dependencies and repository-owned partition table described in the [ESP32 guide](docs/devices/ESP32_GUIDE_ZH_TW.md).
 
 PhotoPainter Rev2.0 requires 16 MiB flash, 8 MiB OPI PSRAM, TG28 ALDO4 power handling and its own GPIO map. Read the [compact safety contract](docs/devices/PHOTOPAINTER_SAFETY_CONTRACT.md) and the exact flashing/recovery sections of the [PhotoPainter guide](docs/devices/WAVESHARE_PHOTOPAINTER_ZH_TW.md) before flashing. Keep ALDO3 / Audio_VCC powered; unpowered audio codecs can clamp the shared I2C bus. Preserve a full local flash backup; an app-only binary belongs at `0x10000`, never `0x0`. GPIO0 remains BOOT and GPIO5 remains the factory PWR button.
 

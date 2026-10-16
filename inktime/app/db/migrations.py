@@ -2479,6 +2479,21 @@ MIGRATIONS = (
             "WHERE key='batch.local_retention_days' AND value_json='7'",
         ),
     ),
+    Migration(
+        69,
+        "索引大型照片庫並保存明確失敗項目重試授權",
+        (
+            "CREATE INDEX idx_photos_batch_candidate_page ON photos("
+            "eligible,lifecycle_status,-COALESCE(local_candidate_score,-1),COALESCE(captured_at,created_at),id) "
+            "WHERE local_features_status='complete' AND COALESCE(never_upload,0)=0",
+            "CREATE TABLE analysis_batch_retry_authorizations("
+            "authorization_id TEXT NOT NULL,source_item_id TEXT NOT NULL REFERENCES analysis_batch_items(id) ON DELETE RESTRICT,"
+            "content_sha256 TEXT NOT NULL,retry_job_id TEXT REFERENCES jobs(id) ON DELETE RESTRICT,"
+            "approved_by TEXT,created_at TEXT NOT NULL,PRIMARY KEY(authorization_id,source_item_id))",
+            "CREATE INDEX idx_batch_retry_job_content ON analysis_batch_retry_authorizations(retry_job_id,content_sha256,source_item_id)",
+            "CREATE INDEX idx_batch_retry_authorization_content ON analysis_batch_retry_authorizations(authorization_id,content_sha256)",
+        ),
+    ),
 )
 
 

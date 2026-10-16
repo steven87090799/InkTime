@@ -1,15 +1,15 @@
 # InkTime 現行版本與功能基線
 
-本分支更新日期：2026-10-11；基底為 `origin/main=7ef3e4f`，接續免配對碼版本 `47dcd51`（Draft PR #150）。下表 PhotoPainter `2.8.8` 是本分支 F01/F02 修復的原碼版本，尚待合併／Hosted 驗證，不表示已部署或刷機；部署中的版本請從「診斷」核對 Git revision。
+本分支更新日期：2026-10-17；基底為 `origin/main=80f3121`，NAS 可靠性修復見 PR #162。下表 PhotoPainter `2.8.9` 包含完整 HTTP JSON 接收修復，仍須以該提交的 Hosted CI 結果確認編譯；原碼版本不表示已部署或刷機。部署中的版本請從「診斷」核對 Git revision，實體裝置則核對回報的韌體版本。
 
 ## 版本不是同一個數字
 
 | 項目 | 原始碼值 | 權威來源 |
 |---|---|---|
 | Python 套件 | `2.0.0.dev0`，部署／CI 支援 Python 3.12（`>=3.12,<3.13`） | [`inktime/_version.py`](../../inktime/_version.py)、[`pyproject.toml`](../../pyproject.toml) |
-| SQLite Migration | 連續 `1–68`；64–66 保護配送／渲染輸入並支援雙圖附說明，67 索引活動清理，68 永久保存照片內容版本與模型證據；保留歷史／外鍵 | [`migrations.py`](../../inktime/app/db/migrations.py) |
+| SQLite Migration | 連續 `1–69`；64–66 保護配送／渲染輸入並支援雙圖附說明，67 索引活動清理，68 永久保存照片內容版本與模型證據，69 加入 Batch 候選分頁索引與逐項失敗重試授權；保留歷史／外鍵 | [`migrations.py`](../../inktime/app/db/migrations.py) |
 | AI Analysis Schema | 嚴格 v5；保留 v4 相容閱讀與既有結果，不為精簡欄位重新付費 | [`plan.py`](../../inktime/app/domain/analysis/plan.py)、[`schema.py`](../../inktime/app/domain/analysis/schema.py) |
-| ESP32 7C／PhotoPainter 韌體 | `2.8.8`（本分支） | [`ink-display-7C-photo.ino`](../../esp32/ink-display-7C-photo/ink-display-7C-photo.ino) |
+| ESP32 7C／PhotoPainter 韌體 | `2.8.9`（本分支；未刷機） | [`ink-display-7C-photo.ino`](../../esp32/ink-display-7C-photo/ink-display-7C-photo.ino) |
 | ESP32 Config Store payload | v5，讀取 v1–v5；舊容量 12、新 payload 24 slots read compatibility | [`device_config_store_core.h`](../../esp32/ink-display-7C-photo/device_config_store_core.h) |
 | PhotoPainter Enhanced storage | Internal FFat；40 formal frames hard limit；16 offline slots/day capability；microSD not required | [`photopainter_support.cpp`](../../esp32/ink-display-7C-photo/photopainter_support.cpp)、[partition table](../../esp32/ink-display-7C-photo/inktime_photopainter_3M_16MB.csv) |
 | 設定匯出格式 | v1 | [`settings.py`](../../inktime/app/repositories/settings.py) |

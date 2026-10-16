@@ -807,6 +807,10 @@ class OpenAICompatibleProvider(VisionProvider):
                     save_model_transport_response(Database(Path(upload_guard["database_path"])),
                                                   upload_guard["operation_id"], received.text)
 
+            # Archiving inputs can involve slow NAS writes/fsync. Recheck mutable
+            # consent after that work, immediately before handing off to transport.
+            if upload_guard is not None:
+                assert_upload_allowed(**upload_guard)
             response = self._send(
                 "POST",
                 "/chat/completions",
