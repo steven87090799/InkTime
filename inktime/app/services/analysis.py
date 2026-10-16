@@ -38,6 +38,7 @@ from inktime.app.domain.analysis.scoring import (
 )
 from inktime.app.domain.analysis.schema import normalize_caption_controls, validate_model_response
 from inktime.app.domain.photos import ThumbnailCache
+from inktime.app.domain.photos.formats import assert_source_content
 from inktime.app.domain.photos.quality_policy import (
     FEATURE_VERSION,
     evaluate_local_quality,
@@ -1427,6 +1428,7 @@ class PhotoAnalysisService:
         source = safe_join(Path(photo["root_path"]), str(photo["relative_path"]), decode_url=False)
         if not source.is_file():
             raise FileNotFoundError("SCAN-001 找不到照片檔案")
+        assert_source_content(source, photo["sha256"])
         photo = self._ensure_e6_suitability(photo_id, photo, source)
         analysis_spec = dict(analysis_plan or {})
         if not analysis_spec:

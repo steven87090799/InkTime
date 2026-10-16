@@ -612,6 +612,30 @@ def test_concurrent_requests_share_one_provider_call_and_thumbnail(app, tmp_path
     assert {result["stage"] for result in results} == {"single", "cache"}
 
 
+def test_source_replacement_with_same_size_and_mtime_cannot_reuse_old_analysis(app, tmp_path):
+    import os
+    from inktime.app.domain.photos.formats import ImageSourceError
+
+    photo_id = _scan(app, tmp_path)[0]
+    _setting(app, "analysis.ai_mode", "eligible")
+    _setting(app, "analysis.prefilter_enabled", False)
+    provider = CountingProvider()
+    service = app.extensions["inktime_analysis_service"]
+    arguments = dict(photo_id=photo_id, job_id=None, provider=provider, strategy="single", high_model="test")
+    service.analyze_photo(**arguments)
+    source = tmp_path / "photos" / "photo.jpg"
+    original = source.stat()
+    payload = bytearray(source.read_bytes())
+    payload[10] ^= 1
+    source.write_bytes(payload)
+    os.utime(source, ns=(original.st_atime_ns, original.st_mtime_ns))
+    assert source.stat().st_size == original.st_size
+    with pytest.raises(ImageSourceError) as error:
+        service.analyze_photo(**arguments)
+    assert error.value.code == "THUMB-004"
+    assert provider.analyze_calls == 1
+
+
 def test_concurrent_force_requests_share_one_fresh_generation(app, tmp_path):
     actor = create_admin(app)
     photo_id = _scan(app, tmp_path)[0]

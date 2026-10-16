@@ -17,7 +17,7 @@ from inktime.app.core.logging import log_event, should_log_rate_limited
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
 from inktime.app.core.paths import safe_join
-from inktime.app.domain.photos.formats import load_rgb
+from inktime.app.domain.photos.formats import assert_source_content, load_rgb
 from inktime.app.db import Database
 from inktime.app.domain.photos import LocationResolver, parse_photo_date
 from inktime.app.domain.rendering import (
@@ -422,6 +422,8 @@ class RenderService:
                 device_config=device_config,
                 orientation_metadata=orientation_metadata,
                 calendar_display_date=plan.get("calendar_display_date"),
+                expected_primary_sha256=plan.get("primary_sha256"),
+                expected_secondary_sha256=plan.get("secondary_sha256"),
             )
         except Exception as exc:
             if should_log_rate_limited(
@@ -1301,6 +1303,7 @@ class RenderService:
         path = safe_join(Path(photo["root_path"]), photo["relative_path"], decode_url=False)
         if not path.is_file():
             return photo
+        assert_source_content(path, photo["sha256"])
         return self._ensure_render_features(photo, path)
 
     @staticmethod
@@ -1331,7 +1334,8 @@ class RenderService:
     ) -> tuple[Image.Image, EffectiveOrientation]:
         """Bound source decoding before EXIF normalization and final fitting."""
         decode_size = (max(1, target_size[0]) * 2, max(1, target_size[1]) * 2) if target_size else 1600
-        image = load_rgb(path, decode_size)
+        expected = str(dict(photo).get("sha256") or "")
+        image = load_rgb(path, decode_size, expected_content_sha256=expected if len(expected) == 64 else None)
         effective = self._orientation_for(photo)
         if effective.rotation_degrees:
             image = image.rotate(-effective.rotation_degrees, expand=True)
@@ -1374,6 +1378,11 @@ class RenderService:
     def _date_label(captured: date | None) -> str:
         return f"{captured.year}年{captured.month}月{captured.day}日" if captured else ""
 
+    @staticmethod
+    def _require_frozen_content(photo, expected_sha256: str | None) -> None:
+        if expected_sha256 is not None and str(photo["sha256"] or "") != expected_sha256:
+            raise ValueError("RENDER-INPUT-CHANGED 照片內容已變更；請重新預覽，避免舊文句配到新照片")
+
     def _calendar(self, canvas: Image.Image, fonts, today: date, start_y: int = 75) -> None:
         draw = ImageDraw.Draw(canvas)
         weekdays = "一二三四五六日"
@@ -1412,8 +1421,11 @@ class RenderService:
         device_config: dict[str, Any] | None = None,
         orientation_metadata: list[dict[str, Any]] | None = None,
         calendar_display_date: str | None = None,
+        expected_primary_sha256: str | None = None,
+        expected_secondary_sha256: str | None = None,
     ) -> Image.Image:
         photo = self.ensure_photo_features(photo_id)
+        self._require_frozen_content(photo, expected_primary_sha256)
         path = safe_join(Path(photo["root_path"]), photo["relative_path"], decode_url=False)
         location = self.location_name(photo)
         captured = self._captured_date(photo["captured_at"])
@@ -1494,6 +1506,7 @@ class RenderService:
                     if second_row is None:
                         layout_key = "photo_info"
                     else:
+                        self._require_frozen_content(second_row, expected_secondary_sha256)
                         today = self._today()
                         caption_records = self._caption_records([photo, second_row], today)
                         first_record = self._bound_caption_record(
@@ -1641,6 +1654,7 @@ class RenderService:
                 if not secondary_photo_id:
                     raise ValueError("RENDER-005 雙照片各自一句話需要第二張照片")
                 second_photo = self.ensure_photo_features(secondary_photo_id)
+                self._require_frozen_content(second_photo, expected_secondary_sha256)
                 second_path = safe_join(Path(second_photo["root_path"]), second_photo["relative_path"], decode_url=False)
                 second_source, second_orientation = self._load_oriented_photo(
                     second_photo, second_path, target_size=(frame_width, frame_height)

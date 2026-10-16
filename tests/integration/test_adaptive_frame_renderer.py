@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from hashlib import sha256
 import os
 
 from PIL import Image, ImageDraw
@@ -335,6 +336,26 @@ def test_every_pair_mode_draws_both_photo_captions_and_smaller_capture_dates(
     assert plan["secondary_caption"]["capture_date"] == "2021-12-31"
     assert all(size <= 14 for text, size in calls if "年" in text or "月" in text)
     assert all(size >= 18 for text, size in calls if "A" in text or "B" in text)
+
+
+@pytest.mark.parametrize("layout", ("photo_pair", "photo_pair_caption", "adaptive_memory"))
+@pytest.mark.parametrize("changed_photo", ("a", "b"))
+def test_frozen_pair_plan_rejects_replaced_content_even_when_photo_id_is_unchanged(app, tmp_path, layout, changed_photo):
+    root = tmp_path / "frozen-content"
+    root.mkdir()
+    database = app.extensions["inktime_database"]
+    for photo_id in ("a", "b"):
+        _analyzed_photo(app, root, photo_id, (900, 1600), "2024-07-01T10:00:00+00:00")
+        with database.transaction() as connection:
+            connection.execute("UPDATE photos SET sha256=? WHERE id=?", (sha256((root / f"{photo_id}.jpg").read_bytes()).hexdigest(), photo_id))
+    service = app.extensions["inktime_render_service"]
+    plan = service.resolve_render_plan("a", layout=layout, secondary_photo_id="b", orientation="landscape")
+    source = root / f"{changed_photo}.jpg"
+    Image.new("RGB", (900, 1600), "#dc8054").save(source)
+    with database.transaction() as connection:
+        connection.execute("UPDATE photos SET sha256=? WHERE id=?", (sha256(source.read_bytes()).hexdigest(), changed_photo))
+    with pytest.raises(ValueError, match="RENDER-INPUT-CHANGED"):
+        service._render_plan_image(plan)
 
 
 @pytest.mark.parametrize("layout", ("photo_pair", "photo_pair_caption", "adaptive_memory"))
