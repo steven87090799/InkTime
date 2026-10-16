@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import os
 
 from PIL import Image, ImageDraw
 import pytest
@@ -320,6 +321,10 @@ def test_every_pair_mode_draws_both_photo_captions_and_smaller_capture_dates(
 
     monkeypatch.setattr(ImageDraw.ImageDraw, "text", capture_text)
     image = service._render_plan_image(plan)
+    if artifact_dir := os.environ.get("INKTIME_RENDER_ARTIFACT_DIR"):
+        destination = Path(artifact_dir)
+        destination.mkdir(parents=True, exist_ok=True)
+        image.save(destination / f"{layout}-{orientation}.png")
     assert image.size == (480, 800)
     painted = "".join(text for text, _size in calls)
     for caption in ("A側相框回憶文字", "B側相框回憶文字"):
