@@ -21,7 +21,7 @@ def test_upgrade_preserves_device_identity_queue_history_and_children(tmp_path, 
     _seed_queue_event(database, item, device_id, "2020-01-01T00:00:00+00:00", "v63")
     before = dict(devices.get(device_id))
     monkeypatch.setattr(migrations, "MIGRATIONS", full)
-    assert migrations.migrate(database) == list(range(64, migrations.CURRENT_SCHEMA_VERSION + 1))
+    assert migrations.migrate(database) == [migration.version for migration in full if migration.version >= 64]
     assert dict(devices.get(device_id)) == before
     with database.session() as connection:
         assert connection.execute("SELECT COUNT(*) FROM device_content_queue_events WHERE queue_item_id=?", (item,)).fetchone()[0] == 1
@@ -52,7 +52,7 @@ def test_v65_upgrade_adds_caption_layout_and_preserves_tokens_children_and_schem
         connection.execute("CREATE TRIGGER v65_device_name_change AFTER UPDATE OF name ON devices "
                            "BEGIN INSERT INTO device_name_audit VALUES(NEW.id,NEW.name); END")
     monkeypatch.setattr(migrations, "MIGRATIONS", full)
-    assert migrations.migrate(database) == list(range(66, migrations.CURRENT_SCHEMA_VERSION + 1))
+    assert migrations.migrate(database) == [migration.version for migration in full if migration.version >= 66]
     assert dict(devices.get(device_id)) == before
     with database.session() as connection:
         assert connection.execute("SELECT name FROM v65_device_names WHERE id=?", (device_id,)).fetchone()[0] == before["name"]
