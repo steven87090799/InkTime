@@ -925,7 +925,7 @@ class PhotoAnalysisService:
             )
             # The only owner generates a JPEG, after both cache checks.
             with image_factory() as image:
-                result, raw, cost, usage, latency = self._perform_uncached_model_call(
+                result, raw, cost, usage, latency, checkpoint_reused = self._perform_uncached_model_call(
                     provider=provider,
                     selected_channel=selected_channel,
                     image=image,
@@ -1042,7 +1042,7 @@ class PhotoAnalysisService:
             result,
             raw,
             cost,
-            False,
+            checkpoint_reused,
             actual_provider,
             model,
             request_fingerprint,
@@ -1077,7 +1077,7 @@ class PhotoAnalysisService:
         provider_request_context_id: str,
         trace_id: str | None,
         reuse_completed: bool = True,
-    ) -> tuple[dict, str, float, Usage, int]:
+    ) -> tuple[dict, str, float, Usage, int, bool]:
         started_at = datetime.now(timezone.utc).isoformat()
         started_perf = time.perf_counter()
         settings = self.budgets.settings if self.budgets else self.settings
@@ -1095,6 +1095,7 @@ class PhotoAnalysisService:
         operation_id, checkpoint = operations.begin(content_sha256, vision_request_fingerprint,
             reuse_completed=reuse_completed,
             context={"provider": actual_call_provider.name, "model": model, "photo_id": photo_id, "job_id": job_id})
+        completed_checkpoint = checkpoint is not None and operations.is_completed(operation_id)
         if checkpoint is None and self.budgets:
             try:
                 self.budgets.reserve(
@@ -1396,14 +1397,15 @@ class PhotoAnalysisService:
         return (
             result,
             raw,
-            total_cost,
-            Usage(
+            0.0 if completed_checkpoint else total_cost,
+            Usage() if completed_checkpoint else Usage(
                 total_input_tokens,
                 total_output_tokens,
                 total_cached_tokens,
                 total_reasoning_tokens,
             ),
             latency,
+            completed_checkpoint,
         )
 
     def analyze_photo(

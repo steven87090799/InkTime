@@ -74,6 +74,11 @@ class BillableOperationRepository:
                 (json.dumps(asdict(response), ensure_ascii=False), datetime.now(timezone.utc).isoformat(), operation_id),
             )
 
+    def is_completed(self, operation_id: str) -> bool:
+        with self.database.session() as connection:
+            row = connection.execute("SELECT state FROM billable_operations WHERE id=?", (operation_id,)).fetchone()
+        return row is not None and row["state"] == "completed"
+
     def finish(self, operation_id: str, *, not_sent: bool = False) -> None:
         with self.database.transaction() as connection:
             connection.execute(

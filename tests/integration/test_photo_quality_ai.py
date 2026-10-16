@@ -612,6 +612,29 @@ def test_concurrent_requests_share_one_provider_call_and_thumbnail(app, tmp_path
     assert {result["stage"] for result in results} == {"single", "cache"}
 
 
+def test_paid_result_is_recovered_without_network_or_new_job_cost_after_cache_loss(app, tmp_path):
+    photo_id = _scan(app, tmp_path)[0]
+    _setting(app, "analysis.ai_mode", "eligible")
+    _setting(app, "analysis.prefilter_enabled", False)
+    provider = CountingProvider()
+    service = app.extensions["inktime_analysis_service"]
+    arguments = dict(photo_id=photo_id, job_id=None, provider=provider, strategy="single", high_model="test")
+    first = service.analyze_photo(**arguments)
+    assert first["_actual_cost"] > 0
+    database = app.extensions["inktime_database"]
+    with database.transaction() as connection:
+        connection.execute("DELETE FROM photo_analysis WHERE photo_id=?", (photo_id,))
+        connection.execute("DELETE FROM ai_analysis_cache")
+    recovered = service.analyze_photo(**arguments)
+    assert recovered["stage"] == "cache"
+    assert recovered["_actual_cost"] == 0
+    assert recovered["analysis"] == first["analysis"]
+    assert provider.analyze_calls == 1
+    with database.session() as connection:
+        assert connection.execute("SELECT COUNT(*) FROM billable_operations").fetchone()[0] == 1
+        assert connection.execute("SELECT COUNT(*) FROM api_usage").fetchone()[0] == 1
+
+
 def test_source_replacement_with_same_size_and_mtime_cannot_reuse_old_analysis(app, tmp_path):
     import os
     from inktime.app.domain.photos.formats import ImageSourceError
