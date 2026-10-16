@@ -166,7 +166,10 @@ def optional_json_float(
     value = payload[field]
     if type(value) not in {int, float}:
         raise _message(error_prefix, field, "必須是有限數字")
-    resolved = float(value)
+    try:
+        resolved = float(value)
+    except OverflowError as exc:
+        raise _message(error_prefix, field, "必須是有限數字") from exc
     if not math.isfinite(resolved):
         raise _message(error_prefix, field, "必須是有限數字")
     if not minimum <= resolved <= maximum:
@@ -192,7 +195,10 @@ def json_float(
         value = payload[field]
     if type(value) not in {int, float}:
         raise _message(error_prefix, field, "必須是有限數字")
-    resolved = float(value)
+    try:
+        resolved = float(value)
+    except OverflowError as exc:
+        raise _message(error_prefix, field, "必須是有限數字") from exc
     if not math.isfinite(resolved):
         raise _message(error_prefix, field, "必須是有限數字")
     if minimum is not None and resolved < minimum:

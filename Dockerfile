@@ -24,18 +24,19 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     INKTIME_HOST=0.0.0.0 \
     INKTIME_PORT=8765
 
-# The pinned Python image may lag Debian security rebuilds. Debian trixie
-# currently postpones the SQLite FTS5 fix, so take only that runtime library
-# from Debian forky, where the fixed package is available. The base image's
-# systemd/udev libraries are not needed by InkTime and are removed below.
-# Keep the reviewed forky SQLite dependency set while refreshing security fixes.
-ARG DEBIAN_SNAPSHOT=20260915T000000Z
-ARG DEBIAN_SECURITY_SNAPSHOT=20261003T000000Z
+# Trixie has no fixed packages for the remaining util-linux, ACL, ncurses
+# and Archive::Tar findings. Use signed, dated Debian packages for those
+# families and their required libc ABI. Keep every other Forky package at
+# low priority, retain required libraries, and verify versions during build.
+# Runtime/upgrade acceptance remains covered by hosted image and NAS tests.
+ARG DEBIAN_SNAPSHOT=20261012T000000Z
+ARG DEBIAN_RUNTIME_SNAPSHOT=20261012T000000Z
+ARG DEBIAN_SECURITY_SNAPSHOT=20261012T000000Z
 RUN set -eux; \
     rm -f /etc/apt/sources.list.d/debian.sources; \
     printf '%s\n' \
-        "deb [check-valid-until=no] https://snapshot.debian.org/archive/debian/${DEBIAN_SNAPSHOT}/ trixie main" \
-        "deb [check-valid-until=no] https://snapshot.debian.org/archive/debian/${DEBIAN_SNAPSHOT}/ trixie-updates main" \
+        "deb [check-valid-until=no] https://snapshot.debian.org/archive/debian/${DEBIAN_RUNTIME_SNAPSHOT}/ trixie main" \
+        "deb [check-valid-until=no] https://snapshot.debian.org/archive/debian/${DEBIAN_RUNTIME_SNAPSHOT}/ trixie-updates main" \
         "deb [check-valid-until=no] https://snapshot.debian.org/archive/debian-security/${DEBIAN_SECURITY_SNAPSHOT}/ trixie-security main" \
         > /etc/apt/sources.list; \
     printf '%s\n' "deb [check-valid-until=no] https://snapshot.debian.org/archive/debian/${DEBIAN_SNAPSHOT}/ forky main" \
@@ -45,26 +46,61 @@ RUN set -eux; \
         'Pin: release n=forky' \
         'Pin-Priority: 100' \
         '' \
-        'Package: libsqlite3-0' \
+        'Package: libsqlite3-0 bsdutils libblkid1 liblastlog2-2 libmount1 libsmartcols1 libuuid1 login mount util-linux libacl1 ncurses-base ncurses-bin libncurses6 libncursesw6 libtinfo6 perl-base libc6 libc-bin libc-gconv-modules-extra libsystemd0 libudev1' \
         'Pin: release n=forky' \
         'Pin-Priority: 1001' \
         > /etc/apt/preferences.d/inktime-runtime-fixes; \
     apt-get update; \
-    DEBIAN_FRONTEND=noninteractive apt-get install --no-install-recommends --only-upgrade -y \
+    DEBIAN_FRONTEND=noninteractive apt-get install --no-install-recommends -y \
         bsdutils \
+        gzip \
+        libacl1 \
         libblkid1 \
+        libc6 \
+        libc-bin \
         liblastlog2-2 \
         libmount1 \
+        libncursesw6 \
         libpcre2-8-0 \
         libssl3t64 \
         libsqlite3-0 \
         libsmartcols1 \
+        libsystemd0 \
+        libtinfo6 \
+        libudev1 \
         libuuid1 \
         login \
         mount \
+        ncurses-base \
+        ncurses-bin \
         openssl \
         openssl-provider-legacy \
+        perl-base \
         util-linux; \
+    gzip_version="$(dpkg-query -W -f='${Version}' gzip)"; \
+    dpkg --compare-versions "${gzip_version}" ge '1.13-1+deb13u1'; \
+    perl_version="$(dpkg-query -W -f='${Version}' perl-base)"; \
+    dpkg --compare-versions "${perl_version}" ge '5.42.3-1'; \
+    for util_package in libblkid1 liblastlog2-2 libmount1 libsmartcols1 libuuid1 mount util-linux; do \
+        util_version="$(dpkg-query -W -f='${Version}' "${util_package}")"; \
+        dpkg --compare-versions "${util_version}" ge '2.42.4-1'; \
+    done; \
+    bsdutils_version="$(dpkg-query -W -f='${Version}' bsdutils)"; \
+    dpkg --compare-versions "${bsdutils_version}" ge '1:2.42.4-1'; \
+    login_version="$(dpkg-query -W -f='${Version}' login)"; \
+    dpkg --compare-versions "${login_version}" ge '1:4.16.0-2+really2.42.4-1'; \
+    acl_version="$(dpkg-query -W -f='${Version}' libacl1)"; \
+    dpkg --compare-versions "${acl_version}" ge '2.4.0-1'; \
+    for ncurses_package in ncurses-base ncurses-bin libtinfo6 libncursesw6; do \
+        ncurses_version="$(dpkg-query -W -f='${Version}' "${ncurses_package}")"; \
+        dpkg --compare-versions "${ncurses_version}" ge '6.6+20260608-2'; \
+    done; \
+    libc_version="$(dpkg-query -W -f='${Version}' libc6)"; \
+    dpkg --compare-versions "${libc_version}" ge '2.43-7'; \
+    for systemd_package in libsystemd0 libudev1; do \
+        systemd_version="$(dpkg-query -W -f='${Version}' "${systemd_package}")"; \
+        dpkg --compare-versions "${systemd_version}" ge '262-1'; \
+    done; \
     pcre2_version="$(dpkg-query -W -f='${Version}' libpcre2-8-0)"; \
     dpkg --compare-versions "${pcre2_version}" ge '10.46-1~deb13u3'; \
     for openssl_package in libssl3t64 openssl openssl-provider-legacy; do \
@@ -73,11 +109,12 @@ RUN set -eux; \
     done; \
     sqlite_version="$(dpkg-query -W -f='${Version}' libsqlite3-0)"; \
     dpkg --compare-versions "${sqlite_version}" ge '3.53.2-1'; \
-    dpkg --purge --force-depends \
-        libudev1 \
-        libsystemd0; \
-    test "$(dpkg-query -W -f='${db:Status-Status}' libsystemd0 2>/dev/null || true)" != installed; \
-    test "$(dpkg-query -W -f='${db:Status-Status}' libudev1 2>/dev/null || true)" != installed; \
+    apt-get check; \
+    mount --version; \
+    nsenter --version; \
+    infocmp -V; \
+    perl -e 'print "$^V\n"'; \
+    python -c "import ctypes, hashlib, sqlite3, ssl, zlib; [ctypes.CDLL(name) for name in ('libacl.so.1', 'libtinfo.so.6')]; assert sqlite3.connect(':memory:').execute('SELECT 1').fetchone() == (1,); assert hashlib.sha256(b'ABI').hexdigest(); assert zlib.decompress(zlib.compress(b'ABI')) == b'ABI'; assert ssl.create_default_context().cert_store_stats()['x509_ca'] > 0"; \
     rm -f /etc/apt/sources.list.d/inktime-runtime-fixes.list \
         /etc/apt/preferences.d/inktime-runtime-fixes; \
     rm -rf /var/lib/apt/lists/*

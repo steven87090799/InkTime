@@ -16,6 +16,7 @@ from inktime.app.core.json_values import (
 from inktime.app.core.idempotency import request_fingerprint, scoped_idempotency_key
 from inktime.app.domain.analysis.plan import stored_analysis_fingerprint, canonical_json, fingerprint, normalize_analysis_strategy, analysis_output_token_cap
 from inktime.app.domain.analysis.execution_mode import execution_mode, permits_automatic_ai
+from inktime.app.domain.jobs.settings import validate_worker_settings
 from inktime.app.web.ai_readiness import ai_readiness_snapshot
 from inktime.app.services.jobs import InvalidJobTransition, JobService
 from inktime.app.repositories.analysis_reservations import AnalysisReservationConflict
@@ -142,7 +143,7 @@ def _job_performance_view(job) -> dict:
     settings_repository = current_app.extensions["inktime_settings_repository"]
     runtime_config = current_app.extensions["inktime_runtime_config"]
     try:
-        job_settings = json.loads(str(job["settings_json"] or "{}"))
+        job_settings = validate_worker_settings(json.loads(str(job["settings_json"] or "{}")))
     except (json.JSONDecodeError, TypeError, ValueError):
         job_settings = {}
     configured_concurrency = max(
@@ -467,10 +468,10 @@ def job_detail(job_id: str):
 @administrator_required
 def create_job():
     payload = _payload()
-    raw_settings = payload.get("settings", {})
-    if type(raw_settings) is not dict:
-        return {"message": "JOB-001 settings 必須是 JSON 物件"}, 400
-    settings = dict(raw_settings)
+    try:
+        settings = validate_worker_settings(payload.get("settings", {}))
+    except ValueError as exc:
+        return {"message": str(exc)}, 400
     try:
         budget = nullable_json_float(
             payload,

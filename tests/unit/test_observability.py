@@ -20,6 +20,37 @@ def _service(tmp_path):
     return database, settings, ObservabilityService(database, settings, None)
 
 
+def test_alert_escalation_bypasses_throttle_and_does_not_silently_downgrade(tmp_path):
+    database, _settings, service = _service(tmp_path)
+    now = datetime.now(timezone.utc)
+    service._now = lambda: now
+    service.alert("provider", "AI-PROVIDER-UNAVAILABLE", "failure", severity="ERROR", subject="fixture")
+    now += timedelta(seconds=1)
+    service.alert("provider", "AI-PROVIDER-UNAVAILABLE", "escalated", severity="CRITICAL", subject="fixture")
+    service.alert("provider", "AI-PROVIDER-UNAVAILABLE", "lower", severity="WARNING", subject="fixture")
+    with database.session() as connection:
+        error = connection.execute("SELECT severity,occurrences,message FROM job_errors WHERE resolved_at IS NULL").fetchone()
+        assert tuple(error) == ("critical", 2, "escalated")
+        assert [row[0] for row in connection.execute("SELECT severity FROM activity_events WHERE event='alert' ORDER BY id")] == ["ERROR", "CRITICAL"]
+
+
+def test_cleanup_handles_legacy_mixed_case_and_preserves_unresolved_events(tmp_path):
+    database, _settings, service = _service(tmp_path)
+    now = datetime.now(timezone.utc)
+    old = (now - timedelta(days=30)).isoformat()
+    with database.transaction() as connection:
+        for index, severity in enumerate(("info", "INFO", "iNfO", "debug", "wArNiNg", "error", "critical")):
+            connection.execute("INSERT INTO activity_events(source,source_id,severity,component,event,message,error_code,created_at) "
+                               "VALUES ('fixture',?,?,'fixture','fixture','fixture','KEEP',?)", (str(index), severity, old))
+        connection.execute("INSERT INTO job_errors(component,error_code,fingerprint,severity,message,first_seen_at,last_seen_at) "
+                           "VALUES ('fixture','KEEP','keep','error','unresolved',?,?)", (old, old))
+        plan = connection.execute("EXPLAIN QUERY PLAN SELECT id FROM activity_events WHERE severity COLLATE NOCASE='INFO' ORDER BY id LIMIT 500").fetchall()
+        assert any("idx_activity_events_severity_nocase_id" in str(row[3]) for row in plan)
+    service.cleanup(now)
+    with database.session() as connection:
+        assert {row[0] for row in connection.execute("SELECT severity FROM activity_events WHERE source='fixture'")} == {"wArNiNg", "error", "critical"}
+
+
 def test_diagnostics_caches_git_revision_per_service(tmp_path, monkeypatch):
     database = Database(tmp_path / "db.sqlite")
     migrate(database)

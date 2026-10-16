@@ -41,6 +41,13 @@
 <script nonce="{{ csp_nonce }}">
 document.getElementById('scan-form').onsubmit=async event=>{event.preventDefault();const form=new FormData(event.target);const body={library_name:form.get('library_name'),root_path:form.get('root_path'),mode:form.get('mode'),build_thumbnails:form.has('build_thumbnails')};const response=await window.inktimeFetch('/api/v1/maintenance/scan',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}),data=await window.inktimeDecodeJson(response);if(response.ok)location.href=data.detail_url;else window.inktimeSetStatus('#scan-status',data.message||'建立失敗','error');};
 const virtualButton=document.getElementById('publish-virtual');
-if(virtualButton)virtualButton.onclick=async()=>{const status=document.getElementById('virtual-status');virtualButton.disabled=true;status.textContent='正在建立掃描與發布工作…';const response=await window.inktimeFetch('/api/v1/maintenance/virtual-display',{method:'POST'}),data=await window.inktimeDecodeJson(response);if(response.ok){status.innerHTML=`工作已建立。<a href="${data.detail_url}">查看進度</a>；完成後虛擬墨水屏會自動收到畫面。`;}else{virtualButton.disabled=false;status.textContent=data.message||'建立失敗';}};
+if(virtualButton)virtualButton.onclick=()=>window.inktimeRunAction({button:virtualButton,status:'#virtual-status',unknownMessage:'建立結果尚未確認；請先查看工作列表，避免重複建立。'},async()=>{
+  const status=document.getElementById('virtual-status');status.textContent='正在建立掃描與發布工作…';
+  const response=await window.inktimeFetch('/api/v1/maintenance/virtual-display',{method:'POST'}),data=await window.inktimeDecodeJson(response);
+  if(!response.ok)throw new Error(data.message||'建立失敗');
+  const link=document.createElement('a');link.textContent='查看進度';
+  if(typeof data.detail_url!=='string'||!data.detail_url.startsWith('/jobs/'))throw new Error('工作回覆缺少可查核的連結');
+  link.href=data.detail_url;status.replaceChildren(document.createTextNode('工作已建立。'),link,document.createTextNode('；完成後虛擬墨水屏會自動收到畫面。'));
+});
 </script>
 {% endblock %}

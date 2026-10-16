@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 from typing import Any, cast
+from urllib.parse import unquote
 
 from uuid import uuid4
 
@@ -198,7 +199,7 @@ def update_settings():
             payload,
             changed_by=g.user["id"],
             source_ip=request.remote_addr or "unknown",
-            reason=request.headers.get("X-InkTime-Change-Reason"),
+            reason=_change_reason(),
             reject_control_center=True,
             expected_revisions=expected,
         )
@@ -208,11 +209,25 @@ def update_settings():
         abort(400, description=f"SET-001 未知設定：{exc.args[0]}")
     except (TypeError, ValueError) as exc:
         abort(409 if str(exc).startswith("CONFIG_CONFLICT") else 400, description=f"SET-002 {exc}")
-    configure_logging(settings_repository=repository)
-    current_app.config["PERMANENT_SESSION_LIFETIME"] = timedelta(
-        minutes=int(repository.get("security.session_minutes", 30))
-    )
+    _apply_runtime_settings()
     return {"status": "ok"} | result
+
+
+def _change_reason() -> str | None:
+    value = request.headers.get("X-InkTime-Change-Reason")
+    encoding = request.headers.get("X-InkTime-Change-Reason-Encoding")
+    if encoding is None:
+        return value
+    if encoding != "percent-utf8":
+        raise ValueError("變更原因編碼不支援")
+    return unquote(value or "", encoding="utf-8", errors="strict")
+
+
+def _apply_runtime_settings() -> None:
+    repository = current_app.extensions["inktime_settings_repository"]
+    configure_logging(settings_repository=repository)
+    policy = repository.get_many(["security.session_minutes"], defaults={"security.session_minutes": 30}, fresh=True)
+    current_app.config["PERMANENT_SESSION_LIFETIME"] = timedelta(minutes=int(policy["security.session_minutes"]))
 
 
 def _bounded_counts() -> dict[str, int]:
@@ -422,6 +437,7 @@ def rollback_settings(snapshot_id: str):
         abort(404, description="SET-004 找不到設定 Snapshot")
     except ValueError as exc:
         abort(400, description=f"SET-002 {exc}")
+    _apply_runtime_settings()
     return {"status": "ok"} | result
 
 
@@ -560,6 +576,7 @@ def import_settings():
         )
     except (KeyError, PermissionError, TypeError, ValueError) as exc:
         abort(400, description=f"SET-006 {exc}")
+    _apply_runtime_settings()
     return {"status": "ok", "preview": preview} | result
 
 

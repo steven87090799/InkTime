@@ -35,6 +35,64 @@ def utc_now() -> str:
 class AnalysisBatchRepository:
     """Small, explicit repository; remote state never lives only in settings JSON."""
 
+    def cost_summary(self, batch_id: str, *, connection=None) -> dict[str, Any]:
+        context = self.database.session() if connection is None else nullcontext(connection)
+        with context as active:
+            rows = active.execute(
+                """SELECT i.id,u.cost_source,COALESCE(u.actual_cost,u.estimated_cost) AS cost
+                   FROM analysis_batch_items i LEFT JOIN api_usage u ON u.batch_item_id=i.id
+                   WHERE i.batch_id=?""", (batch_id,),
+            ).fetchall()
+        items = {}
+        known_cost = 0.0
+        unknown = 0
+        for row in rows:
+            known = row["cost_source"] in {"estimated", "provider_reported"} and row["cost"] is not None
+            cost = float(row["cost"]) if known else None
+            items[str(row["id"])] = {"cost_known": known, "display_cost": cost}
+            if cost is None:
+                unknown += 1
+            else:
+                known_cost += cost
+        return {"items": items, "known_cost": known_cost, "unknown_cost_items": unknown,
+                "cost_complete": bool(rows) and unknown == 0}
+
+    def settle_terminal_costs(self, *, batch_id: str | None = None,
+                              provider_id: str | None = None, model: str | None = None) -> int:
+        """Reprice terminal summaries and release reserves only with complete evidence."""
+        released = 0
+        with self.database.transaction(operation="analysis_batch_cost_settlement") as connection:
+            batches = connection.execute(
+                """SELECT id,total_items,reconciliation_error_code FROM analysis_batches b
+                   WHERE status IN ('completed','completed_with_errors','failed','expired','cancelled')
+                     AND (? IS NULL OR id=?) AND (? IS NULL OR provider_id=?)
+                     AND (? IS NULL OR EXISTS(SELECT 1 FROM api_usage u WHERE u.batch_id=b.id AND u.model=?))
+                     AND COALESCE(remote_status,'') NOT IN ('upload_unknown','submission_unknown')""",
+                (batch_id, batch_id, provider_id, provider_id, model, model),
+            ).fetchall()
+            for batch in batches:
+                current_id = str(batch["id"])
+                summary = self.cost_summary(current_id, connection=connection)
+                for item_id, cost in summary["items"].items():
+                    if cost["cost_known"]:
+                        connection.execute("UPDATE analysis_batch_items SET actual_cost=? WHERE id=?",
+                                           (cost["display_cost"], item_id))
+                connection.execute("UPDATE analysis_batches SET actual_cost=? WHERE id=?",
+                                   (summary["known_cost"], current_id))
+                unresolved = connection.execute(
+                    """SELECT 1 FROM analysis_batch_items WHERE batch_id=? AND status IN
+                       ('pending','submitted','upload_unknown','submission_unknown','missing','retry_pending') LIMIT 1""",
+                    (current_id,),
+                ).fetchone()
+                if (not summary["cost_complete"] or len(summary["items"]) != int(batch["total_items"])
+                        or unresolved or batch["reconciliation_error_code"]):
+                    continue
+                released += connection.execute(
+                    "UPDATE budget_reservations SET state='released' WHERE id=? AND state='active'",
+                    ("batch:" + current_id,),
+                ).rowcount
+        return released
+
     BATCH_FIELDS = {
         "job_id",
         "provider_id",

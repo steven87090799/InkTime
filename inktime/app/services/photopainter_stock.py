@@ -75,11 +75,15 @@ class StockCompatibilityService:
     ) -> tuple[bytes, dict[str, Any]]:
         if not authorization.allowed or authorization.manifest is None:
             raise PermissionError("PHOTOPAINTER-006 Release 未授權")
-        entry = self.device_releases.payload_entry_for_authorization(authorization)
+        entry = self.device_releases.payload_entry_for_authorization(
+            authorization, filename=file_name, allow_multiple=True
+        )
         selected_name = str(file_name or entry["name"])
         if selected_name != str(entry["name"]):
             raise PermissionError("PHOTOPAINTER-006 Release Payload 不在授權 Manifest")
-        packed, _metadata = self.device_releases.read_payload(authorization, selected_name)
+        packed, _metadata = self.device_releases.read_payload(
+            authorization, selected_name, allow_multiple=True
+        )
         manifest = authorization.manifest
         converted = packed_frame_to_stock_payload(
             packed,

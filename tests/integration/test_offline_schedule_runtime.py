@@ -27,6 +27,21 @@ def _device_dates() -> tuple[str, str]:
     return today.isoformat(), (today + timedelta(days=1)).isoformat()
 
 
+def test_dst_collision_preparation_keeps_release_order_and_unique_manifest_epochs(app):
+    device_id, _ = app.extensions["inktime_device_repository"].create(
+        "DST", timezone_name="America/New_York", delivery_mode="inktime_offline_schedule",
+        offline_prefetch_allowed=True, schedule_times=["02:30", "03:30"], minimum_schedule_gap_minutes=30,
+    )
+    releases = [_release(app, f"dst-{index}")["release_id"] for index in range(2)]
+    repository = app.extensions["inktime_offline_schedule_repository"]
+    prepared = repository.prepare_day(device_id=device_id, target_date="2026-03-08", release_ids=releases)
+    assert [slot["release_id"] for slot in prepared["slots"]] == releases
+    starts = [datetime.fromisoformat(slot["show_at"]).timestamp() for slot in prepared["slots"]]
+    assert starts[1] - starts[0] == 1800
+    assert starts == sorted(set(starts))
+    assert all(datetime.fromisoformat(slot["ack_deadline"]).timestamp() > start for slot, start in zip(prepared["slots"], starts, strict=True))
+
+
 def test_offline_day_preparation_is_atomic_and_device_projection_contains_full_sha(client, app):
     today, tomorrow = _device_dates()
     devices = app.extensions["inktime_device_repository"]

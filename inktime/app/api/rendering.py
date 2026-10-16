@@ -220,6 +220,8 @@ def _start_preview_job(name: str, settings: dict) -> tuple[dict, int]:
             abort(429, description="RENDER-009 同一使用者最多可有 2 個 Preview Job")
         abort(503, description="RENDER-009 系統 Preview Job 已達固定上限")
     try:
+        if settings.get("input_token"):
+            current_app.extensions["inktime_render_workload_service"].bind_input(str(settings["input_token"]), job_id)
         current_app.extensions["inktime_job_service"].start(job_id)
     except Exception:
         repository.cancel(job_id)
@@ -690,6 +692,7 @@ def preview(photo_id: str):
     arguments["secondary_photo_id"] = fingerprint["render_plan"]["secondary_photo_id"]
     arguments["primary_caption"] = fingerprint["render_plan"]["primary_caption"]
     arguments["secondary_caption"] = fingerprint["render_plan"]["secondary_caption"]
+    arguments["calendar_display_date"] = fingerprint["render_plan"].get("calendar_display_date")
     arguments["orientation"] = fingerprint["render_plan"]["orientation"]
     arguments["fit_mode"] = fingerprint["render_plan"]["fit_mode"]
     arguments.update(
@@ -933,6 +936,8 @@ def rollback_release(release_id: str):
         current_app.extensions["inktime_render_service"].rollback(release_id)
     except KeyError:
         abort(404)
+    except ValueError as exc:
+        abort(409, description=str(exc))
     return {"status": "ok"}
 
 

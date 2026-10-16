@@ -70,9 +70,13 @@ def test_sql_orientation_boundaries_exactly_exclude_the_square_band():
     assert _sql_orientation_matches("portrait", width=1101, height=1000)
 
 
-def test_sql_orientation_keeps_exif_manual_and_accepted_ai_rotation_contract():
+def test_sql_orientation_uses_transposed_metadata_without_applying_exif_twice():
+    assert _sql_orientation_matches("landscape", width=900, height=1600, exif_orientation=6)
+    assert not _sql_orientation_matches("portrait", width=900, height=1600, exif_orientation=6)
+
+
+def test_sql_orientation_keeps_manual_and_accepted_ai_rotation_contract():
     overrides = (
-        {"exif_orientation": 6},
         {"manual_rotation": 90},
         {"ai_rotation": 270, "ai_confidence": 0.99, "ai_ambiguous": False},
     )

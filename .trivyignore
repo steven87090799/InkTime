@@ -1,36 +1,4 @@
-# InkTime temporary unfixed-CVE allowlist for the pinned Python slim base.
-# Owner: inktime-security
-# Expiry: 2026-09-30
-# Reason: Trivy 0.60 reports these Debian base-image CVEs without a FixedVersion;
-#         re-evaluate the pinned base image before expiry. Unlisted findings fail CI.
-CVE-2025-69720
-CVE-2026-13221
-# Debian forky's libsqlite3-0 3.53.4-2 contains the upstream 3.53.2 FTS5 fix,
-# but Trivy still evaluates the installed package against Debian trixie's
-# no-DSA entry. Dockerfile build-time version verification remains required;
-# remove these entries when trixie publishes a fixed package/metadata.
-CVE-2026-11822
-CVE-2026-11824
-# CVE-2026-14456 is limited to OpenSSL QUIC server pending connections. InkTime
-# serves HTTP with Gunicorn and creates no QUIC listener; Debian 13 currently
-# reports fix_deferred with no FixedVersion. Remove after the pinned base is fixed.
-CVE-2026-14456
-CVE-2026-41992
-CVE-2026-42496
-CVE-2026-42497
-CVE-2026-48962
-CVE-2026-53615
-CVE-2026-54369
-CVE-2026-57432
-CVE-2026-57433
-CVE-2026-8376
-CVE-2026-9538
-# util-linux CVEs disclosed 2026-09-02 through 2026-09-04. Debian trixie and
-# forky do not publish a fixed package yet (FixedVersion is absent in Trivy).
-# The runtime is a non-root user with no fstab-authorized X-mount path, does not
-# invoke mount/nsenter helpers, and does not retain the privileges these issues
-# require. Recheck the pinned base and remove these entries before 2026-09-30.
-CVE-2026-76642
-CVE-2026-78408
-CVE-2026-78409
-CVE-2026-78410
+# No active CVE exceptions.
+# The 19 exceptions expiring on 2026-09-30 were retired during prelaunch repair.
+# Trivy must evaluate these findings normally. New exceptions require an owner,
+# a specific reason, and a machine-readable exp:YYYY-MM-DD date; CI checks expiry.

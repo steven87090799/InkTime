@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta, timezone
+import json
 from pathlib import Path
 from typing import Any
 
@@ -22,7 +23,7 @@ class LocalSelectionPolicy:
             locations,
         )
 
-    def _rows(self, *, target: date, limit: int) -> list[dict[str, Any]]:
+    def _rows(self, *, target: date, limit: int, candidate_years: list[int] | None = None) -> list[dict[str, Any]]:
         month_day = target.strftime("%m-%d")
         with self.database.session() as connection:
             rows = connection.execute(
@@ -34,10 +35,12 @@ class LocalSelectionPolicy:
                 WHERE p.lifecycle_status='active' AND p.eligible=1 AND l.enabled=1
                   AND p.exclusion_status NOT IN ('auto_excluded','manually_excluded')
                   AND p.local_features_status='complete' AND p.local_candidate_score IS NOT NULL
+                  AND (?=0 OR CAST(substr(p.captured_date,1,4) AS INTEGER)
+                      IN (SELECT value FROM json_each(?)))
                 ORDER BY CASE WHEN p.captured_month_day=? THEN 0 ELSE 1 END,
                          p.local_candidate_score DESC,p.captured_at ASC,p.id ASC LIMIT ?
                 """,
-                (month_day, limit),
+                (int(bool(candidate_years)), json.dumps(candidate_years or []), month_day, limit),
             ).fetchall()
         result: list[dict[str, Any]] = []
         for row in rows:
@@ -176,9 +179,10 @@ class LocalSelectionPolicy:
         orientation: str,
         limit: int | None = None,
         excluded_ids: set[str] | None = None,
+        candidate_years: list[int] | None = None,
     ) -> list[dict[str, Any]]:
         bound = max(20, min(int(limit or self.settings.get("render.local_candidate_limit", 200)), 1000))
-        rows = self._rows(target=target, limit=bound)
+        rows = self._rows(target=target, limit=bound, candidate_years=candidate_years)
         excluded_ids = excluded_ids or set()
         feedback = (
             self.resilience.preference_adjustments(row["id"] for row in rows) if self.resilience else {}
@@ -337,8 +341,10 @@ class LocalSelectionPolicy:
         layout: str,
         excluded_ids: set[str] | None = None,
         target_month_day: str | None = None,
+        candidate_years: list[int] | None = None,
     ) -> dict[str, Any]:
-        ranked = self.ranked(target=target, orientation=orientation, excluded_ids=excluded_ids)
+        ranked = self.ranked(target=target, orientation=orientation, excluded_ids=excluded_ids,
+                             candidate_years=candidate_years)
         requested_month_day = str(target_month_day or target.strftime("%m-%d"))
         effective_month_day, leap_reason = self._effective_month_day(target, target_month_day)
         window = int(self.settings.get("render.history_today_window_days", 7))

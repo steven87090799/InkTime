@@ -650,6 +650,9 @@ def test_batch_management_api_dispatches_lifecycle_actions(client, app, monkeypa
         "reasoning_tokens": 0,
         "actual_cost": 0.01,
         "average_cost": 0.01,
+        "cost_complete": True,
+        "known_cost": 0.01,
+        "unknown_cost_items": 0,
         "per_thousand_cost": 10.0,
         "eligible_missing_count": 1,
         "full_library_estimated_cost": 0.01,
@@ -979,6 +982,31 @@ def test_invalid_uploaded_font_never_replaces_current_font(client, app):
     assert response.json["error_code"] == "IMG-002"
     assert app.extensions["inktime_settings_repository"].get("render.font_path") == "builtin:iansui"
     assert not (app.extensions["inktime_font_manager"].root / "broken.ttf").exists()
+
+
+def test_font_upload_body_limit_precedes_multipart_parsing_and_keeps_file_gate(client, app, monkeypatch):
+    from inktime.app.api import rendering
+    create_admin(app)
+    login(client)
+    app.config["MAX_CONTENT_LENGTH"] = 1024
+    monkeypatch.setattr(rendering, "MAX_FONT_BYTES", 4096)
+    sizes = []
+
+    def validate_fixture(path, **kwargs):
+        sizes.append(path.stat().st_size)
+        raise ValueError("fixture reached font validation")
+
+    monkeypatch.setattr(app.extensions["inktime_font_manager"], "install", validate_fixture)
+    headers = {"X-CSRF-Token": csrf(client)}
+    accepted = client.post("/api/v1/fonts", data={"font": (BytesIO(bytes(4096)), "fixture.ttf")},
+                           headers=headers, content_type="multipart/form-data")
+    assert accepted.status_code == 422
+    assert sizes == [4096]
+    oversized = client.post("/api/v1/fonts", data={"font": (BytesIO(bytes(4097)), "fixture.ttf")},
+                            headers=headers, content_type="multipart/form-data")
+    assert oversized.status_code == 413
+    assert sizes == [4096]
+    assert app.config["MAX_CONTENT_LENGTH"] == 1024
 
 
 def test_backup_is_integrity_checked_and_downloadable(client, app):

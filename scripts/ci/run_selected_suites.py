@@ -54,6 +54,7 @@ RUNNER_SUITE_TEST_PATHS: dict[str, tuple[str, ...]] = {
     ),
     "web_ui_owner": ("tests/integration/test_management_ui.py",),
     "web_api_owner": (
+        "tests/integration/test_photo_crop_state.py",
         "tests/integration/test_management_ui.py",
         "tests/integration/test_activity_console.py",
         "tests/integration/test_deployment_modes.py",
@@ -91,6 +92,7 @@ RUNNER_SUITE_TEST_PATHS: dict[str, tuple[str, ...]] = {
         "tests/integration/test_final_review_history.py",
     ),
     "device_api_contract_owner": (
+        "tests/integration/test_device_layout_delivery.py",
         "tests/unit/test_device_delivery_contract.py",
         "tests/security/test_device_pairing.py",
         "tests/security/test_device_release_authorization.py",
@@ -116,6 +118,8 @@ RUNNER_SUITE_TEST_PATHS: dict[str, tuple[str, ...]] = {
         "tests/integration/test_adaptive_frame_renderer.py",
         "tests/integration/test_dual_photo_caption_layout.py",
         "tests/integration/test_render_candidate_contract.py",
+        "tests/integration/test_device_layout_delivery.py",
+        "tests/integration/test_photo_crop_state.py",
     ),
     "scanner_photos_owner": (
         "tests/unit/test_local_selection.py",

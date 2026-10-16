@@ -359,6 +359,7 @@ def _prepare_library_preview_child(
         fit_mode=arguments.get("fit_mode"),
         primary_caption=arguments.get("primary_caption"),
         secondary_caption=arguments.get("secondary_caption"),
+        calendar_display_date=arguments.get("calendar_display_date"),
     )
     quantized = bool(arguments.get("quantized"))
     if quantized:
@@ -487,20 +488,59 @@ class RenderWorkloadService:
     def save_input(self, image: Image.Image) -> tuple[str, str]:
         token = uuid4().hex
         destination = self.input_root / f"{token}.png"
-        self._atomic_png(destination, image.convert("RGB"))
+        self._reserve_input(token, image.width * image.height * 4 + 65536)
+        try:
+            self._atomic_png(destination, image.convert("RGB"))
+            self._record_input_size(token, destination.stat().st_size)
+        except Exception:
+            self.delete_input(token, suffix=".png")
+            raise
         return token, sha256(destination.read_bytes()).hexdigest()
+
+    @staticmethod
+    def _input_file_token(path: Path) -> str:
+        # Also cover the temporary .TOKEN-random.upload while an upload streams.
+        return path.name.lstrip(".")[:32]
+
+    def _reserve_input(self, token: str, maximum_bytes: int) -> None:
+        self.cleanup()
+        with self.jobs.database.transaction(operation="render_input_reserve") as connection:
+            leases = connection.execute("SELECT token,size_bytes FROM render_input_leases").fetchall()
+            leased = {str(row[0]) for row in leases}
+            extra = [path for path in self.input_root.iterdir() if path.is_file() and self._input_file_token(path) not in leased]
+            total = sum(int(row[1]) for row in leases) + sum(path.stat().st_size for path in extra)
+            if len(leases) + len(extra) >= 128 or total + maximum_bytes > self.max_result_bytes:
+                raise ValueError("RENDER-009 輸入容量已滿；保留可續行／尚未落帳的輸入，請完成或取消既有工作")
+            connection.execute("INSERT INTO render_input_leases(token,size_bytes,created_at) VALUES (?,?,?)",
+                               (token, maximum_bytes, datetime.now(timezone.utc).isoformat()))
+
+    def _record_input_size(self, token: str, size: int) -> None:
+        with self.jobs.database.transaction(operation="render_input_size") as connection:
+            connection.execute("UPDATE render_input_leases SET size_bytes=? WHERE token=?", (size, token))
+
+    def bind_input(self, token: str, job_id: str) -> None:
+        self._validate_token(token)
+        with self.jobs.database.transaction(operation="render_input_bind") as connection:
+            job = connection.execute("SELECT settings_json FROM jobs WHERE id=?", (job_id,)).fetchone()
+            if not job or json.loads(str(job[0])).get("input_token") != token:
+                raise ValueError("RENDER-008 工作與輸入身分不符")
+            cursor = connection.execute("UPDATE render_input_leases SET job_id=?,staged=0 WHERE token=? AND staged=1", (job_id, token))
+            if cursor.rowcount != 1:
+                raise ValueError("RENDER-008 缺少上傳 reservation")
 
     def save_upload(self, stream: BinaryIO, *, suffix: str, max_bytes: int) -> tuple[str, str]:
         if suffix not in SUPPORTED_IMAGE_EXTENSIONS:
             raise ValueError("IMG-002 照片格式不支援")
         token = uuid4().hex
         destination = self.input_root / f"{token}{suffix}"
-        handle, temporary_name = tempfile.mkstemp(prefix=f".{token}-", suffix=".upload", dir=self.input_root)
-        os.close(handle)
-        temporary = Path(temporary_name)
+        self._reserve_input(token, int(max_bytes))
+        temporary: Path | None = None
         digest = sha256()
         size = 0
         try:
+            handle, temporary_name = tempfile.mkstemp(prefix=f".{token}-", suffix=".upload", dir=self.input_root)
+            os.close(handle)
+            temporary = Path(temporary_name)
             with temporary.open("wb") as output:
                 while chunk := stream.read(1024 * 1024):
                     size += len(chunk)
@@ -513,9 +553,14 @@ class RenderWorkloadService:
             if size == 0:
                 raise ValueError("IMG-002 照片內容不可為空")
             os.replace(temporary, destination)
+            self._record_input_size(token, size)
             return token, digest.hexdigest()
+        except Exception:
+            self.delete_input(token, suffix=suffix)
+            raise
         finally:
-            temporary.unlink(missing_ok=True)
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
 
     def save_file(self, source: Path, *, max_bytes: int) -> tuple[str, str, str]:
         suffix = source.suffix.lower()
@@ -532,7 +577,9 @@ class RenderWorkloadService:
         return self.input_root / f"{token}{suffix}"
 
     def delete_input(self, token: str, *, suffix: str) -> None:
-        self.input_path(token, suffix=suffix).unlink(missing_ok=True)
+        with self.jobs.database.transaction(operation="render_input_delete") as connection:
+            self.input_path(token, suffix=suffix).unlink(missing_ok=True)
+            connection.execute("DELETE FROM render_input_leases WHERE token=?", (token,))
 
     def _open_input(self, token: str) -> Image.Image:
         path = self.input_root / f"{self._validate_token(token)}.png"
@@ -1059,11 +1106,33 @@ class RenderWorkloadService:
             shutil.rmtree(prepared, ignore_errors=True)
 
     def cleanup(self) -> int:
+        with self.jobs.database.transaction(operation="render_input_cleanup") as connection:
+            terminal = "('completed','completed_with_errors','failed','cancelled')"
+            invalid = connection.execute(
+                f"SELECT 1 FROM jobs WHERE status NOT IN {terminal} AND NOT json_valid(settings_json) LIMIT 1"  # noqa: S608 -- fixed SQL statuses
+            ).fetchone()
+            protected = {str(row[0]) for row in connection.execute(
+                f"SELECT json_extract(settings_json,'$.input_token') FROM jobs WHERE status NOT IN {terminal} AND json_valid(settings_json) "  # noqa: S608
+                "UNION SELECT token FROM render_input_leases WHERE staged=1"
+            ) if row[0]}
+            if invalid:
+                protected.update(self._input_file_token(path) for path in self.input_root.iterdir() if path.is_file())
+            removed = self._cleanup_locked(protected)
+            leases = connection.execute("SELECT token FROM render_input_leases WHERE staged=0").fetchall()
+            for row in leases:
+                token = str(row[0])
+                if token not in protected and not any(self._input_file_token(path) == token for path in self.input_root.iterdir()):
+                    connection.execute("DELETE FROM render_input_leases WHERE token=?", (token,))
+            return removed
+
+    def _cleanup_locked(self, protected: set[str]) -> int:
         cutoff = datetime.now(timezone.utc) - self.retention
         removed = 0
         input_files = [path for path in self.input_root.iterdir() if path.is_file()]
         prepared_files = list(self.prepared_root.glob("*/*"))
         for path in input_files + list(self.result_root.glob("*/*")) + prepared_files:
+            if path.parent == self.input_root and self._input_file_token(path) in protected:
+                continue
             try:
                 modified_at = datetime.fromtimestamp(path.stat().st_mtime, timezone.utc)
             except OSError:
@@ -1085,10 +1154,15 @@ class RenderWorkloadService:
             inputs.append((path, stat.st_mtime, stat.st_size))
         inputs.sort(key=lambda item: item[1])
         input_total = sum(item[2] for item in inputs)
-        while len(inputs) > 128 or input_total > self.max_result_bytes:
-            path, _modified, size = inputs.pop(0)
+        input_count = len(inputs)
+        for path, _modified, size in inputs:
+            if input_count <= 128 and input_total <= self.max_result_bytes:
+                break
+            if self._input_file_token(path) in protected:
+                continue
             path.unlink(missing_ok=True)
             input_total -= size
+            input_count -= 1
             removed += 1
         entries: list[tuple[Path, float, int]] = []
         for directory in self.result_root.iterdir():

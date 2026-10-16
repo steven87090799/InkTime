@@ -176,13 +176,24 @@ def _activity_cursor(raw: str | int | None) -> dict[str, int]:
     value = str(raw or "").strip()
     if not value:
         return {"activity": 0, "job": 0, "device": 0, "error": 0}
+    if len(value) > 79:
+        raise ValueError("ACTIVITY-001 cursor 格式錯誤")
+
+    def component(part: str) -> int:
+        if not part.isascii() or not part.isdecimal() or len(part) > 19:
+            raise ValueError("ACTIVITY-001 cursor 格式錯誤")
+        number = int(part)
+        if number > 2**63 - 1:
+            raise ValueError("ACTIVITY-001 cursor 超過整數上限")
+        return number
+
     parts = value.split(":")
-    if len(parts) == 4 and all(part.isdigit() for part in parts):
-        return dict(zip(("activity", "job", "device", "error"), (max(0, int(part)) for part in parts), strict=False))
-    if value.isdigit():
+    if len(parts) == 4:
+        return dict(zip(("activity", "job", "device", "error"), (component(part) for part in parts), strict=True))
+    if len(parts) == 1:
         # The former UI only advanced activity_events. Replaying the other
         # bounded sources from zero avoids silently losing their first page.
-        return {"activity": max(0, int(value)), "job": 0, "device": 0, "error": 0}
+        return {"activity": component(value), "job": 0, "device": 0, "error": 0}
     raise ValueError("ACTIVITY-001 cursor 格式錯誤")
 
 

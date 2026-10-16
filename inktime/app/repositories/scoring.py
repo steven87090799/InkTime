@@ -84,6 +84,7 @@ class ScoringProfileRepository:
         rules: str,
         created_by: str,
         source_ip: str,
+        restored_from_version_id: str | None = None,
     ) -> dict:
         clean_name = name.strip()
         clean_rules = normalize_scoring_rules(rules)
@@ -161,6 +162,13 @@ class ScoringProfileRepository:
                         now,
                     ),
                 )
+                if restored_from_version_id is not None:
+                    connection.execute(
+                        "INSERT INTO activity_events(source,source_id,severity,component,event,message,details_json,created_at) "
+                        "VALUES ('scoring',?,'INFO','scoring','scoring_restored',?,?,?)",
+                        (version_id, f"已還原評分版本：{clean_name}",
+                         json.dumps({"restored_from_version_id": restored_from_version_id, "version_id": version_id}, ensure_ascii=False), now),
+                    )
                 connection.execute("COMMIT")
             except Exception:
                 connection.execute("ROLLBACK")
@@ -182,8 +190,9 @@ class ScoringProfileRepository:
         if version["ranking_contract_version"] != 4:
             raise ValueError("舊版評分契約僅供歷史查閱，請以 Vision v4 規則建立新版本")
         return self.create(
-            name=f"還原：{version['name']}",
+            name=f"還原：{version['name'][:77]}",
             rules=str(version["rules"]),
             created_by=created_by,
             source_ip=source_ip,
+            restored_from_version_id=version_id,
         )

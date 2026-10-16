@@ -33,6 +33,25 @@ def _enable(app) -> None:
     )
 
 
+def test_notification_test_delivers_its_own_id_without_draining_backlog(client, app):
+    from tests.conftest import create_admin, csrf, login
+    create_admin(app)
+    login(client)
+    _enable(app)
+    service = app.extensions["inktime_notification_service"]
+    backlog = [service.create_test(created_by="backlog") for _ in range(12)]
+    transport = _SequenceSession([_Response(204)])
+    service.session = transport
+    response = client.post("/api/v1/notifications/test", json={}, headers={"X-CSRF-Token": csrf(client)})
+    assert response.status_code == 200
+    assert response.json["id"] not in backlog
+    assert response.json["webhook_status"] == "delivered"
+    assert response.json["delivery"]["delivered"] == 1
+    assert len(transport.calls) == 1
+    with app.extensions["inktime_database"].session() as connection:
+        assert connection.execute("SELECT COUNT(*) FROM device_notifications WHERE webhook_status='pending'").fetchone()[0] == 12
+
+
 def test_webhook_retry_is_persisted_idempotent_and_survives_service_restart(app):
     _enable(app)
     original = app.extensions["inktime_notification_service"]

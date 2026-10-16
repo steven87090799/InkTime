@@ -48,7 +48,7 @@ class LocationResolver:
     def _grid_key(self, latitude: float, longitude: float) -> tuple[int, int]:
         return (
             math.floor(latitude / self.grid_degrees),
-            math.floor(longitude / self.grid_degrees),
+            math.floor(((longitude + 180.0) % 360.0) / self.grid_degrees),
         )
 
     def _load(self) -> tuple[list[City], dict[tuple[int, int], list[int]]]:
@@ -107,13 +107,21 @@ class LocationResolver:
             return ""
 
         lat_cells = math.ceil(maximum / 110.5 / self.grid_degrees) + 1
-        longitude_km = max(2.0, 111.0 * abs(math.cos(math.radians(lat))))
-        lon_cells = math.ceil(maximum / longitude_km / self.grid_degrees) + 1
+        longitude_buckets = max(1, math.ceil(360.0 / self.grid_degrees))
+        if abs(lat) + maximum / 110.5 >= 90.0:
+            lon_cells = longitude_buckets
+        else:
+            longitude_delta = math.degrees(math.asin(min(
+                1.0, math.sin(maximum / 6371.0) / abs(math.cos(math.radians(lat)))
+            )))
+            lon_cells = math.ceil(longitude_delta / self.grid_degrees) + 1
         center_lat, center_lon = self._grid_key(lat, lon)
+        longitude_columns = sorted({(center_lon + offset) % longitude_buckets
+                                    for offset in range(-lon_cells, lon_cells + 1)})
         candidates: list[int] = []
         for delta_lat in range(-lat_cells, lat_cells + 1):
-            for delta_lon in range(-lon_cells, lon_cells + 1):
-                candidates.extend(grid.get((center_lat + delta_lat, center_lon + delta_lon), ()))
+            for longitude_column in longitude_columns:
+                candidates.extend(grid.get((center_lat + delta_lat, longitude_column), ()))
 
         nearest: City | None = None
         nearest_distance = float("inf")

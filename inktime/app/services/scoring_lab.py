@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from datetime import datetime, timezone
 from pathlib import Path
 import time
@@ -8,20 +7,16 @@ from uuid import uuid4
 
 from inktime.app.domain.photos.formats import load_rgb
 
-from inktime.app.domain.analysis import AnalysisValidationError, validate_analysis_result
-from inktime.app.domain.analysis.json_repair import (
-    assert_semantic_repair_integrity,
-    repair_source_object,
-    semantic_repair_snapshot,
-)
+from inktime.app.domain.analysis.plan import analysis_output_token_cap
+from inktime.app.domain.analysis.schema import AnalysisValidationError, validate_model_response
 from inktime.app.domain.analysis.scoring import calculate_ranking_score
-from inktime.app.services.analysis import FULL_ANALYSIS_TOKEN_CAP
+from inktime.app.services.analysis import PhotoAnalysisService
 from inktime.app.domain.photos.preprocessing import PhotoPreprocessor
 from inktime.app.domain.photos.quality_policy import evaluate_local_quality, local_candidate_score
 from inktime.app.repositories.scoring import ScoringProfileRepository
 from inktime.app.repositories.settings import SettingsRepository
 from inktime.app.repositories.usage import UsageRepository
-from inktime.app.providers.base import VisionAttemptState
+from inktime.app.providers.base import VisionAttemptState, IncompleteProviderResponse, assert_complete_response
 from inktime.app.services.budgets import BudgetService
 from inktime.app.services.providers import ProviderService
 from inktime.app.services.usage_tracking import record_failed_unknown_usage
@@ -38,34 +33,46 @@ class ScoringLabService:
         settings: SettingsRepository,
         usage: UsageRepository,
         budgets: BudgetService,
+        analysis: PhotoAnalysisService,
     ) -> None:
         self.providers = providers
         self.profiles = profiles
         self.settings = settings
         self.usage = usage
         self.budgets = budgets
+        self.analysis = analysis
 
-    @staticmethod
-    def normalize_image(source: Path, destination: Path) -> None:
-        with load_rgb(source, 1600) as image:
+    def normalize_image(self, source: Path, destination: Path) -> None:
+        plan = self._plan()
+        with load_rgb(source, int(plan["vision_input"]["max_side"])) as image:
             image.save(destination, "JPEG", quality=90, optimize=True)
 
+    def _plan(self) -> dict:
+        return self.analysis.build_plan(
+            strategy="single", provider_route=self.providers.usable_route_snapshot(),
+            scoring_profile_id=str(self.profiles.current()["id"]),
+        )
+
     def analyze(self, image_path: Path) -> dict:
-        provider = self.providers.build_router()
+        plan = self._plan()
+        provider = self.providers.build_router(
+            plan["provider_route"], scoring_rules=plan["scoring_rules"], caption_controls=plan["caption_controls"],
+        )
         if provider is None:
             raise ValueError("VLM-008 尚未設定可用 Provider")
         try:
-            return self._analyze_with_provider(image_path, provider)
+            return self._analyze_with_provider(image_path, provider, plan=plan)
         finally:
             close_provider = getattr(provider, "close", None)
             if callable(close_provider):
                 close_provider()
 
-    def _analyze_with_provider(self, image_path: Path, provider) -> dict:
+    def _analyze_with_provider(self, image_path: Path, provider, *, plan: dict | None = None) -> dict:
         self.budgets.assert_request_allowed(None, None)
         profile = self.profiles.current()
-        model = str(self.settings.get("model.high_model", "gpt-4o"))
-        max_tokens = max(256, min(int(self.settings.get("budget.max_tokens", 8000)), FULL_ANALYSIS_TOKEN_CAP))
+        plan = plan or self._plan()
+        model = str(plan["model"])
+        max_tokens = analysis_output_token_cap(self.settings)
         provider_request_context_id = f"scoring_test|{uuid4()}"
         selected_provider = provider
         provider_id = ""
@@ -228,9 +235,12 @@ class ScoringLabService:
             response = provider.analyze(
                 image_path=image_path,
                 model=model,
-                detail="high",
-                stage="scoring_test",
+                detail=str(plan["vision_input"]["detail"]),
+                stage="single",
                 max_tokens=max_tokens,
+                caption_controls=plan["caption_controls"],
+                reasoning_effort=plan["reasoning_effort"],
+                prompt_version=plan["prompt_version"],
                 vision_attempt=vision_request_state,
                 provider_request_context_id=provider_request_context_id,
             )
@@ -263,49 +273,10 @@ class ScoringLabService:
             image_bytes=True,
         )
         try:
-            result = validate_analysis_result(response.content)
-        except AnalysisValidationError as error:
-            repair_source = repair_source_object(response.content)
-            semantic_snapshot = semantic_repair_snapshot(repair_source)
-            repair_started_at = datetime.now(timezone.utc).isoformat()
-            repair_started_perf = time.perf_counter()
-            try:
-                repaired = provider.repair_json(
-                    invalid_content=json.dumps(repair_source, ensure_ascii=False),
-                    validation_error=str(error),
-                    immutable_semantic_values=semantic_snapshot,
-                    model=model,
-                    max_tokens=max_tokens,
-                    stage="scoring_test",
-                    provider_request_context_id=provider_request_context_id,
-                )
-            except Exception as repair_error:
-                request_started = bool(
-                    getattr(repair_error, "request_started", False)
-                    or getattr(repair_error, "vision_started", False)
-                    or getattr(repair_error, "ambiguous", False)
-                )
-                if request_started:
-                    record_failed_attempt(
-                        request_type="scoring_test_repair",
-                        model_name=model,
-                        started_at=repair_started_at,
-                        started_perf=repair_started_perf,
-                        retry_count=1,
-                        image_request=False,
-                        error=repair_error,
-                    )
-                raise
-            record_attempt(
-                repaired,
-                request_type="scoring_test_repair",
-                started_at=repair_started_at,
-                started_perf=repair_started_perf,
-                retry_count=1,
-                image_bytes=False,
-            )
-            result = validate_analysis_result(repaired.content)
-            assert_semantic_repair_integrity(semantic_snapshot, result)
+            assert_complete_response(response)
+        except IncompleteProviderResponse as error:
+            raise AnalysisValidationError(str(error)) from error
+        result = validate_model_response(response.content, caption_controls=plan["caption_controls"])
         total_cost = sum(float(item["effective_cost"]) for item in attempt_summary)
         unknown_count = sum(item["cost_source"] == "unknown" for item in attempt_summary)
         cost_source = (

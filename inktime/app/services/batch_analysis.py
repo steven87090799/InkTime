@@ -34,6 +34,7 @@ from inktime.app.domain.analysis import (
 )
 from inktime.app.domain.analysis.plan import SCHEMA_VERSION, provider_prompt_contract_sha256
 from inktime.app.domain.analysis.schema import validate_model_response
+from inktime.app.domain.analysis.execution_mode import execution_mode, permits_manual_ai
 from inktime.app.domain.photos.quality_policy import is_confirmed_screenshot
 from inktime.app.domain.analysis.plan import FULL_ANALYSIS_TOKEN_CAP, analysis_output_token_cap
 from inktime.app.services.budgets import BudgetService
@@ -897,7 +898,20 @@ class BatchAnalysisService:
             batch_ids.append(current_id)
         return batch_ids
 
+    def _assert_ai_submission_allowed(self) -> None:
+        policy = self.settings.get_many(
+            ["analysis.execution_mode", "analysis.ai_mode", "analysis.prefilter_enabled"],
+            defaults={"analysis.prefilter_enabled": True},
+            fresh=True,
+        )
+        if not permits_manual_ai(execution_mode(policy)):
+            raise BatchLifecycleError(
+                "目前分析執行模式不允許付費 Batch 提交；已提交結果仍可回收與對帳",
+                "BATCH-EXECUTION-MODE",
+            )
+
     def _assert_submission_allowed(self, batch_id):
+        self._assert_ai_submission_allowed()
         self.budgets.assert_restore_reconciled()
         # One indexed EXISTS-style query, not one new DB connection per photo.
         with self.database.session() as connection:
@@ -946,6 +960,7 @@ class BatchAnalysisService:
                 provider = self._provider(str(current["provider_id"]), plan)
                 upload_method = provider.upload_batch_file
                 parameters = inspect.signature(upload_method).parameters
+                self._assert_submission_allowed(batch_id)
                 if "remote_filename" in parameters or any(
                     parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()
                 ):
@@ -1010,6 +1025,7 @@ class BatchAnalysisService:
                 ambiguous and current is not None and str(current["status"]) == "uploading"
             )
             local_failure = code in {
+                "BATCH-EXECUTION-MODE",
                 "BATCH-INPUT-002",
                 "BATCH-INPUT-001",
                 "BATCH-CLAIM-STALE",
@@ -1082,6 +1098,7 @@ class BatchAnalysisService:
         budget_limit: float | None = None,
     ) -> dict[str, Any]:
         submit_started = time.monotonic()
+        self._assert_ai_submission_allowed()
         plan, analysis_fp, model = self._plan()
         provider_id = str(plan["provider_route"][0]["provider_id"])
         provider_identity = self._provider_identity(provider_id)
@@ -1097,6 +1114,7 @@ class BatchAnalysisService:
         )
         if not candidates and skipped["cache_hits"]:
             return {"job_id": None, "batch_ids": [], "prepared_batch_ids": [],
+                    "not_submitted_batch_ids": [], "submission_status": "no_candidates",
                     "candidate_count": 0, **skipped, "analysis_fingerprint": analysis_fp, "model": model}
         if not candidates:
             raise BatchLifecycleError("目前沒有符合條件的 Batch 候選", "BATCH-CANDIDATE-001")
@@ -1246,6 +1264,11 @@ class BatchAnalysisService:
             "job_id": job_id,
             "batch_ids": submitted,
             "prepared_batch_ids": batch_ids,
+            "not_submitted_batch_ids": [current_id for current_id in batch_ids if current_id not in submitted],
+            "submission_status": (
+                "submitted" if submitted and len(submitted) == len(batch_ids)
+                else "partial" if submitted else "needs_attention" if batch_ids else "no_candidates"
+            ),
             "candidate_count": len(candidates),
             "cache_hits": skipped["cache_hits"],
             "sha_duplicates": skipped["sha_duplicates"],
@@ -2115,14 +2138,15 @@ class BatchAnalysisService:
     def _persist_result_receipt(self, batch, item, line, body, provider) -> None:
         """Paid evidence is durable even when the result cannot be applied."""
         usage = self._usage_from_body(body)
-        estimated = provider.estimate_batch_cost(str(batch["model"]), usage)
+        served_model = str(body.get("model") or batch["model"])
+        estimated = provider.estimate_batch_cost(served_model, usage)
         actual = usage.provider_reported_cost
         response = line.get("response") or {}
         request_id = response.get("request_id") or line.get("request_id") or body.get("id")
         with self.database.transaction(operation="analysis_batch_receipt") as connection:
             self.usage.record_batch_once(
                 provider=str(batch["provider_id"]), provider_id=str(batch["provider_id"]),
-                model=str(body.get("model") or batch["model"]),
+                model=served_model,
                 job_id=str(batch["job_id"]) if batch["job_id"] else None,
                 photo_id=str(item["photo_id"]), batch_id=str(batch["id"]), batch_item_id=str(item["id"]),
                 request_type="analysis_batch", input_tokens=usage.input_tokens, tokens_reported=usage.tokens_reported,
@@ -2230,7 +2254,8 @@ class BatchAnalysisService:
                 item, "schema_invalid", str(exc), "schema_invalid", job_id=str(batch["job_id"])
             )
             return "schema_invalid"
-        estimated_cost = provider.estimate_batch_cost(str(batch["model"]), usage)
+        served_model = str(body.get("model") or batch["model"])
+        estimated_cost = provider.estimate_batch_cost(served_model, usage)
         actual_cost = usage.provider_reported_cost
         cost_source = "provider_reported" if actual_cost is not None else "estimated" if estimated_cost is not None else "unknown"
         recorded_cost = actual_cost if actual_cost is not None else estimated_cost
@@ -2302,7 +2327,7 @@ class BatchAnalysisService:
             self.usage.record_batch_once(
                 provider=str(batch["provider_id"]),
                 provider_id=str(batch["provider_id"]),
-                model=str(batch["model"]),
+                model=served_model,
                 job_id=str(batch["job_id"]) if batch["job_id"] else None,
                 photo_id=str(item["photo_id"]),
                 batch_id=str(batch["id"]),
@@ -2312,7 +2337,7 @@ class BatchAnalysisService:
                 cached_tokens=usage.cached_tokens,
                 output_tokens=usage.output_tokens,
                 reasoning_tokens=usage.reasoning_tokens,
-                estimated_cost=recorded_cost or 0.0,
+                estimated_cost=estimated_cost,
                 actual_cost=actual_cost,
                 request_id=str(request_id) if request_id else None,
                 started_at=str(batch["submitted_at"] or utc_now()),
@@ -2643,6 +2668,7 @@ class BatchAnalysisService:
             # recorded.  Never derive a new semantic from remote_status or
             # item counts and accidentally rewrite completed/failed/cancelled/
             # expired into another terminal state.
+            self.batches.settle_terminal_costs(batch_id=batch_id)
             return
         if str(batch["status"]) in {"upload_unknown", "submission_unknown"} or str(
             batch["remote_status"] or ""
@@ -2690,15 +2716,7 @@ class BatchAnalysisService:
         )
         if batch["job_id"]:
             self.photos.refresh_dirty_libraries_for_job(str(batch["job_id"]))
-        if not missing:
-            with self.database.session() as connection:
-                unaccounted = connection.execute(
-                    "SELECT COUNT(*) FROM analysis_batch_items i WHERE i.batch_id=? AND NOT EXISTS "
-                    "(SELECT 1 FROM api_usage u WHERE u.batch_item_id=i.id AND u.cost_source<>'unknown')",
-                    (batch_id,),
-                ).fetchone()[0]
-            if not unaccounted:
-                self.budgets.release("batch:" + batch_id)
+        self.batches.settle_terminal_costs(batch_id=batch_id)
         self._activity(
             "INFO" if final_status == "completed" else "WARNING",
             "batch_completed" if final_status.startswith("completed") else "batch_failed",
@@ -3018,8 +3036,14 @@ class BatchAnalysisService:
                 }
             )
         imported = int(batch["imported_items"] or 0)
-        result["average_cost"] = float(batch["actual_cost"] or 0) / imported if imported else 0.0
-        result["per_thousand_cost"] = result["average_cost"] * 1000
+        costs = self.batches.cost_summary(batch_id)
+        result.update({key: costs[key] for key in ("cost_complete", "unknown_cost_items", "known_cost")})
+        result["cost_complete"] = costs["cost_complete"] and len(costs["items"]) == int(batch["total_items"])
+        for item in result["items"]:
+            item.update(costs["items"].get(str(item["id"]), {"cost_known": False, "display_cost": None}))
+        result["actual_cost"] = costs["known_cost"] if result["cost_complete"] else None
+        result["average_cost"] = costs["known_cost"] / imported if imported and result["cost_complete"] else None
+        result["per_thousand_cost"] = result["average_cost"] * 1000 if result["average_cost"] is not None else None
         result["schema_success_rate"] = (imported / int(batch["total_items"] or 1)) * 100
         with self.database.session() as connection:
             result["eligible_missing_count"] = int(
@@ -3037,5 +3061,7 @@ class BatchAnalysisService:
                     (str(batch["analysis_fingerprint"]),),
                 ).fetchone()[0]
             )
-        result["full_library_estimated_cost"] = result["average_cost"] * result["eligible_missing_count"]
+        result["full_library_estimated_cost"] = (
+            result["average_cost"] * result["eligible_missing_count"] if result["average_cost"] is not None else None
+        )
         return result

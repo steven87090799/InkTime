@@ -18,7 +18,7 @@ from inktime.app.domain.analysis.json_repair import (
     repair_source_object,
     semantic_repair_snapshot,
 )
-from inktime.app.domain.analysis.schema import AnalysisValidationError, validate_analysis_result
+from inktime.app.domain.analysis.schema import AnalysisValidationError, validate_model_response
 from inktime.app.providers.base import ProviderResponse, VisionAttemptState, IncompleteProviderResponse, assert_complete_response
 
 
@@ -358,7 +358,7 @@ def run_provider_contract(provider: Any, *, level: int, model: str, budgets=None
                 return result
         else:
             try:
-                validate_analysis_result(response.content)
+                validate_model_response(response.content, caption_controls=getattr(provider, "caption_controls", None))
                 schema_valid = True
             except AnalysisValidationError:
                 pass
@@ -433,10 +433,13 @@ def run_provider_contract(provider: Any, *, level: int, model: str, budgets=None
                     if usage["estimated_cost"] is not None
                     else "unknown"
                 )
-                repaired_value = validate_analysis_result(repaired.content)
+                assert_complete_response(repaired)
+                repaired_value = validate_model_response(
+                    repaired.content, caption_controls=getattr(provider, "caption_controls", None)
+                )
                 assert_semantic_repair_integrity(semantic_snapshot, repaired_value)
                 schema_valid = True
-            except AnalysisValidationError:
+            except (AnalysisValidationError, IncompleteProviderResponse):
                 schema_valid = False
             except Exception as exc:
                 budget_blocked = str(getattr(exc, "code", "")).startswith("BUDGET-")
@@ -470,6 +473,8 @@ def run_provider_contract(provider: Any, *, level: int, model: str, budgets=None
 
         result = {
             "level": level,
+            "production_acceptance": False,
+            "contract_scope": "synthetic_diagnostic_with_optional_paid_repair",
             "ok": schema_valid,
             "message": f"Level {level} synthetic contract {'passed' if schema_valid else 'failed'}",
             "vision_requests": vision_requests,

@@ -391,6 +391,7 @@ def test_explicit_slot_capability_survives_pairing_confirm(client, app, maximum)
             "schedule": "00:00",
             "schedule_times": schedule_times,
             "delivery_mode": "inktime_offline_schedule",
+            "fit_mode": "stretch_fill",
         },
     )
     assert approved.status_code == 200
@@ -414,10 +415,11 @@ def test_explicit_slot_capability_survives_pairing_confirm(client, app, maximum)
 
     with app.extensions["inktime_database"].session() as connection:
         device = connection.execute(
-            "SELECT offline_schedule_max_slots,offline_schedule_capability_state,schedule_times_json FROM devices WHERE id=?",
+            "SELECT offline_schedule_max_slots,offline_schedule_capability_state,schedule_times_json,fit_mode FROM devices WHERE id=?",
             (payload["device_id"],),
         ).fetchone()
     assert device["offline_schedule_max_slots"] == maximum
+    assert device["fit_mode"] == "stretch_fill"
     assert device["offline_schedule_capability_state"] == f"confirmed_{maximum}"
     assert len(json.loads(str(device["schedule_times_json"]))) == maximum
     assert f"已確認支援 {maximum} 個離線時段" in client.get("/devices").get_data(as_text=True)

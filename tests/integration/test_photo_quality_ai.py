@@ -9,6 +9,7 @@ import threading
 from uuid import uuid4
 
 from PIL import Image
+import pytest
 
 from inktime.app.api import photos as photos_api
 from inktime.app.domain.analysis.plan import fingerprint
@@ -167,6 +168,23 @@ def test_reapply_rules_never_restores_manual_exclusion(app, tmp_path):
     assert after["eligible"] == 0
     assert after["exclusion_status"] == "manually_excluded"
     assert after["reject_reason"] == before["reject_reason"]
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_reapply_quality_rules_uses_current_settings_snapshot(client, app, tmp_path, enabled):
+    create_admin(app)
+    login(client)
+    photo_id = _scan(app, tmp_path)[0]
+    repository = app.extensions["inktime_photo_repository"]
+    with repository.database.transaction() as connection:
+        connection.execute("UPDATE photos SET blur_score=44.54,contrast=11.8,manual_override=0,favorite=0 WHERE id=?", (photo_id,))
+    _setting(app, "analysis.prefilter_low_quality", enabled)
+    response = client.post(f"/api/v1/photos/{photo_id}/exclusion", json={"action": "reanalyze", "reapply_rules": True},
+                           headers={"X-CSRF-Token": csrf(client)})
+    assert response.status_code == 200
+    photo = repository.get_with_path(photo_id)
+    assert photo["eligible"] == (0 if enabled else 1)
+    assert photo["exclusion_status"] == ("auto_excluded" if enabled else "eligible")
 
 
 def test_ai_off_does_not_call_provider(app, tmp_path):

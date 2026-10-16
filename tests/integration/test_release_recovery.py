@@ -23,6 +23,90 @@ def _stage(publisher, profile: str):
     )
 
 
+def _rollback_pair(app):
+    publisher = app.extensions["inktime_release_publisher"]
+    coordinator = app.extensions["inktime_release_coordinator"]
+    first = _stage(publisher, "safe_4c")
+    coordinator.publish([first], created_by="test", photo_ids=[])
+    second = _stage(publisher, "safe_4c")
+    coordinator.publish([second], created_by="test", photo_ids=[])
+    return publisher, coordinator, first, second
+
+
+@pytest.mark.parametrize("corruption", ["manifest", "payload", "profile", "device_test"])
+def test_rollback_rejects_invalid_target_before_changing_pointers_or_database(app, corruption):
+    publisher, coordinator, first, second = _rollback_pair(app)
+    before = publisher.pointer_snapshot(["safe_4c"])
+    path = publisher.root / first["release_id"] / "manifest.json"
+    if corruption == "manifest":
+        path.write_text("{broken", encoding="utf-8")
+    elif corruption == "payload":
+        (path.parent / first["files"][0]["name"]).write_bytes(b"corrupt")
+    else:
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+        manifest["render_profile" if corruption == "profile" else "release_kind"] = (
+            "safe_6c" if corruption == "profile" else "device_test"
+        )
+        path.write_text(json.dumps(manifest), encoding="utf-8")
+    with pytest.raises(ValueError):
+        coordinator.rollback(first["release_id"])
+    assert publisher.pointer_snapshot(["safe_4c"]) == before
+    assert not (publisher.root / ".rollback-intent.json").exists()
+    with coordinator.database.session() as connection:
+        assert connection.execute("SELECT status FROM releases WHERE id=?", (second["release_id"],)).fetchone()[0] == "published"
+
+
+@pytest.mark.parametrize("failure", ["database", "pointer"])
+def test_rollback_failure_restores_original_pointers_and_statuses(app, monkeypatch, failure):
+    publisher, coordinator, first, second = _rollback_pair(app)
+    before = publisher.pointer_snapshot(["safe_4c"])
+    if failure == "database":
+        with coordinator.database.transaction() as connection:
+            connection.execute("CREATE TRIGGER reject_rollback BEFORE UPDATE OF published_at ON releases "
+                               "BEGIN SELECT RAISE(ABORT,'injected rollback failure'); END")
+    else:
+        original = publisher._write_pointer
+        calls = 0
+
+        def fail_once(name, release_id):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise OSError("injected pointer failure")
+            original(name, release_id)
+
+        monkeypatch.setattr(publisher, "_write_pointer", fail_once)
+    with pytest.raises((sqlite3.IntegrityError, OSError)):
+        coordinator.rollback(first["release_id"])
+    assert publisher.pointer_snapshot(["safe_4c"]) == before
+    with coordinator.database.session() as connection:
+        assert connection.execute("SELECT status FROM releases WHERE id=?", (second["release_id"],)).fetchone()[0] == "published"
+    assert not (publisher.root / ".rollback-intent.json").exists()
+
+
+@pytest.mark.parametrize("committed", [False, True])
+def test_restart_reconciles_durable_rollback_intent_with_database_commit_marker(app, committed):
+    from inktime.app.services.release_coordinator import ReleaseCoordinator
+
+    publisher, coordinator, first, second = _rollback_pair(app)
+    marker = "2099-01-01T00:00:00+00:00"
+    coordinator._write_rollback_intent({"version": 1, "release_id": first["release_id"],
+                                       "profile": "safe_4c", "published_at": marker,
+                                       "pointers": publisher.pointer_snapshot(["safe_4c"])})
+    publisher.activate_manifests([first])
+    if committed:
+        with coordinator.database.transaction() as connection:
+            connection.execute("UPDATE releases SET status='superseded' WHERE id=?", (second["release_id"],))
+            connection.execute("UPDATE releases SET status='published',published_at=? WHERE id=?",
+                               (marker, first["release_id"]))
+    restarted = ReleaseCoordinator(coordinator.database, publisher)
+    assert restarted.reconcile()["rollback_recovered"] == 1
+    expected = first["release_id"] if committed else second["release_id"]
+    assert publisher.pointer_snapshot(["safe_4c"]) == {"latest": expected, "latest.safe_4c": expected}
+    assert not (publisher.root / ".rollback-intent.json").exists()
+    assert "rollback_recovered" not in restarted.reconcile()
+
+
 def _gc_candidate(app, *, activate_pointers: bool = False, status: str = "superseded"):
     publisher = app.extensions["inktime_release_publisher"]
     coordinator = app.extensions["inktime_release_coordinator"]
@@ -301,6 +385,7 @@ def test_display_history_keeps_metadata_while_old_payload_is_pruned_and_gc_is_id
         "fallback",
         "queue",
         "rollout",
+        "rollout_frozen_fallback",
         "device_assignment",
         "custom_assignment",
         "staged_publication",
@@ -340,6 +425,14 @@ def test_gc_preserves_every_active_release_reference(app, reference_kind):
             name="GC protection",
             user_id="test",
         )
+    elif reference_kind == "rollout_frozen_fallback":
+        candidate_id = _gc_candidate(app, status="published")
+        campaign = app.extensions["inktime_resilience_repository"].create_rollout(
+            release_id=candidate_id, name="frozen fallback", user_id="test",
+        )
+        with database.transaction() as connection:
+            connection.execute("INSERT INTO rollout_targets(rollout_id,device_id,rollback_release_id,updated_at) VALUES (?,?,?,?)",
+                               (campaign["campaign"]["id"], device_id, release_id, datetime.now(timezone.utc).isoformat()))
     elif reference_kind == "device_assignment":
         with database.session() as connection:
             connection.execute(

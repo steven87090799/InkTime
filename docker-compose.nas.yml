@@ -3,7 +3,7 @@ name: inktime
 # NAS 正式部署只拉取 GitHub Container Registry 映像，不在 NAS 上建置原始碼。
 x-common: &common
   # UGREEN Project redeploy follows stable latest by default. The guarded updater injects its requested tag.
-  image: ${INKTIME_IMAGE_REPOSITORY:-ghcr.io/steven87090799/inktime}:${INKTIME_IMAGE_TAG:-latest}
+  image: ${INKTIME_IMAGE_REF:-${INKTIME_IMAGE_REPOSITORY:-ghcr.io/steven87090799/inktime}:${INKTIME_IMAGE_TAG:-latest}}
   pull_policy: always
   restart: unless-stopped
   init: true

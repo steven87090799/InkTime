@@ -265,6 +265,12 @@ class RenderService:
         if adaptive_requested:
             fit_key = "contain"
         secondary_id = secondary_photo_id
+        if layout_key in {"photo_pair", "photo_pair_caption"} and (not secondary_id or secondary_id == photo_id):
+            layout_key = "photo_info"
+            secondary_id = None
+            effective_orientation = "portrait" if layout_key in PORTRAIT_ONLY_LAYOUTS else orientation_key
+        elif layout_key not in {"photo_pair", "photo_pair_caption", "adaptive_memory"}:
+            secondary_id = None
         if layout_key == "adaptive_memory":
             source_path = safe_join(Path(primary["root_path"]), str(primary["relative_path"]))
             source, _info = self._load_oriented_photo(primary, source_path, target_size=(512, 512))
@@ -330,6 +336,7 @@ class RenderService:
         return {
             "version": "render-plan-v1",
             "layout": layout_key,
+            "calendar_display_date": display_date.isoformat() if layout_key == "calendar" else None,
             "primary_photo_id": str(primary["id"]),
             "primary_sha256": str(primary["sha256"] or ""),
             "secondary_photo_id": str(secondary["id"]) if secondary is not None else None,
@@ -414,6 +421,7 @@ class RenderService:
                 ),
                 device_config=device_config,
                 orientation_metadata=orientation_metadata,
+                calendar_display_date=plan.get("calendar_display_date"),
             )
         except Exception as exc:
             if should_log_rate_limited(
@@ -941,7 +949,6 @@ class RenderService:
     def _adaptive_orientation_sql(frame_orientation: str) -> str:
         """Return a metadata-only opposite-orientation predicate for bounded SQL phases."""
         desired = pair_orientation(frame_orientation)
-        exif_swap = "CASE WHEN COALESCE(p.exif_orientation_original,p.orientation) IN (5,6,7,8) THEN 1 ELSE 0 END"
         override_swap = """
             CASE
               WHEN p.manual_orientation_rotation_cw IN (90,270) THEN 1
@@ -952,7 +959,7 @@ class RenderService:
               ELSE 0
             END
         """
-        swap = f"(({exif_swap}) + ({override_swap})) % 2"
+        swap = override_swap
         effective_width = f"CASE WHEN ({swap})=1 THEN p.height ELSE p.width END"
         effective_height = f"CASE WHEN ({swap})=1 THEN p.width ELSE p.height END"
         if desired == "portrait":
@@ -1370,6 +1377,7 @@ class RenderService:
         secondary_caption: dict[str, Any] | None = None,
         device_config: dict[str, Any] | None = None,
         orientation_metadata: list[dict[str, Any]] | None = None,
+        calendar_display_date: str | None = None,
     ) -> Image.Image:
         photo = self.ensure_photo_features(photo_id)
         path = safe_join(Path(photo["root_path"]), photo["relative_path"])
@@ -1537,7 +1545,7 @@ class RenderService:
                     )
                 )
 
-            today = self._today()
+            today = date.fromisoformat(calendar_display_date) if calendar_display_date else self._today()
             weather = self.weather.current() if self.weather and layout_key == "weather_sensor" else None
             indoor = self._latest_indoor() if layout_key == "weather_sensor" else None
             weather_location = str(self.settings.get("render.weather_location_name", "所在地"))
@@ -1869,7 +1877,23 @@ class RenderService:
                 raise ValueError("RENDER-001 quantity_override 必須介於 1 到 50")
             quantity = quantity_override
         layout_key = str(self.settings.get("render.layout", "photo_info"))
-        source_limit = quantity * 2 if layout_key in {"photo_pair", "photo_pair_caption"} else quantity
+        unique_device_ids = list(dict.fromkeys(str(value) for value in (device_ids or []) if str(value)))
+        effective_devices: dict[str, dict[str, Any]] = {}
+        if unique_device_ids:
+            placeholders = ",".join("?" for _ in unique_device_ids)
+            with self.database.session() as connection:
+                devices = connection.execute(
+                    f"SELECT * FROM devices WHERE enabled=1 AND id IN ({placeholders})",  # noqa: S608 -- bound device IDs
+                    unique_device_ids,
+                ).fetchall()
+            by_id = {str(row["id"]): dict(row) for row in devices}
+            missing = [device_id for device_id in unique_device_ids if device_id not in by_id]
+            if missing:
+                raise ValueError("DISPLAY-004 指定裝置不存在或已停用")
+            effective_devices = {identifier: {**by_id[identifier], **((device_configs or {}).get(identifier) or {})}
+                                 for identifier in unique_device_ids}
+        layouts = [str(device.get("layout_mode") or layout_key) for device in effective_devices.values()] or [layout_key]
+        source_limit = quantity * (2 if any(value in {"photo_pair", "photo_pair_caption"} for value in layouts) else 1)
         selected = photo_ids[:source_limit]
         if not selected:
             selected = self.select_candidates(source_limit)
@@ -1880,32 +1904,22 @@ class RenderService:
         )
         selected = [str(row["id"]) for row in required]
         eligibility_sources = {str(row["id"]): str(row["eligibility_source"]) for row in required}
-        if device_ids:
-            unique_device_ids = list(dict.fromkeys(str(value) for value in device_ids if str(value)))
-            placeholders = ",".join("?" for _ in unique_device_ids)
-            with self.database.session() as connection:
-                devices = connection.execute(
-                    f"SELECT * FROM devices WHERE enabled=1 AND id IN ({placeholders})",  # noqa: S608
-                    unique_device_ids,
-                ).fetchall()
-            by_id = {str(row["id"]): dict(row) for row in devices}
-            missing = [device_id for device_id in unique_device_ids if device_id not in by_id]
-            if missing:
-                raise ValueError("DISPLAY-004 指定裝置不存在或已停用")
+        if unique_device_ids:
             manifests = []
             assignments: dict[str, str] = {}
             release_photo_ids: list[str] = []
             for device_id in unique_device_ids:
-                device = dict((device_configs or {}).get(device_id) or by_id[device_id])
+                device = effective_devices[device_id]
+                effective_layout = str(device.get("layout_mode") or layout_key)
                 profile_key = str(device["panel_profile"])
                 if profile_key not in DISPLAY_PROFILES:
                     raise ValueError("RENDER-003 發布包含不支援的顯示 Profile")
                 device_orientation_metadata: list[dict[str, Any]] = []
-                if layout_key in {"photo_pair", "photo_pair_caption"}:
+                if effective_layout in {"photo_pair", "photo_pair_caption"}:
                     composition_plans = [
                         self.resolve_render_plan(
                             selected[index],
-                            layout=layout_key if index + 1 < len(selected) else "photo_info",
+                            layout=effective_layout,
                             secondary_photo_id=selected[index + 1] if index + 1 < len(selected) else None,
                             device_config=device,
                             profile=profile_key,
@@ -1914,7 +1928,7 @@ class RenderService:
                     ]
                 else:
                     composition_plans = [
-                        self.resolve_render_plan(photo_id, device_config=device, profile=profile_key)
+                        self.resolve_render_plan(photo_id, layout=effective_layout, device_config=device, profile=profile_key)
                         for photo_id in selected[:quantity]
                     ]
                 for plan in composition_plans:
@@ -2470,6 +2484,7 @@ class RenderService:
                 orientation=str(self.settings.get("render.frame_orientation", "portrait")),
                 quantity=limit,
                 layout=str(self.settings.get("render.layout", "photo_info")),
+                candidate_years=candidate_years,
             )
             return result["selected"][:limit]
 
@@ -2886,22 +2901,4 @@ class RenderService:
             )
 
     def rollback(self, release_id: str) -> None:
-        from inktime.app.domain.rendering.release import release_metadata_guard
-        with release_metadata_guard(self.publisher.root):
-            with self.database.session() as connection:
-                row = connection.execute(
-                    "SELECT render_profile,reconciliation_status FROM releases WHERE id=?", (release_id,)
-                ).fetchone()
-            if row is None:
-                raise KeyError(release_id)
-            if str(row["reconciliation_status"]) == "payload_pruned":
-                raise ValueError("RENDER-012 Release Payload 已依保留政策移除，不能回滾")
-            self.publisher.rollback(release_id)
-            with self.database.session() as connection:
-                connection.execute(
-                    """
-                    UPDATE releases SET status=CASE WHEN id=? THEN 'published' ELSE 'superseded' END
-                    WHERE render_profile=?
-                    """,
-                    (release_id, row["render_profile"]),
-                )
+        self.release_coordinator.rollback(release_id)

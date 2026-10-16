@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from flask import Flask
+from flask import Flask, request
 from werkzeug.middleware.proxy_fix import ProxyFix
 
 from inktime.app.bootstrap import bootstrap_services
@@ -22,6 +22,14 @@ def create_app(runtime_config: RuntimeConfig | None = None) -> Flask:
         static_url_path="/static",
     )
     app.config["MAX_CONTENT_LENGTH"] = 32 * 1024 * 1024
+
+    @app.before_request
+    def font_upload_body_limit():
+        # Run before auth/CSRF can parse multipart form data.
+        if request.endpoint == "rendering.upload_font":
+            from inktime.app.api.rendering import MAX_FONT_BYTES
+            request.max_content_length = MAX_FONT_BYTES + 1024 * 1024
+
     if config.proxy_trust:
         app.wsgi_app = ProxyFix(  # type: ignore[method-assign]
             app.wsgi_app,

@@ -11,6 +11,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from inktime.app.core.logging import configure_logging, log_event
+from inktime.app.domain.jobs.settings import validate_worker_settings
 from inktime.app.domain.jobs.failure_policy import (
     FailureClass,
     classify_codes,
@@ -304,7 +305,11 @@ class WorkerRunner:
             # its remote work is owned by OpenAI and is never claimed here.
             if str(job["kind"]) == "analysis_batch":
                 continue
-            settings = json.loads(job["settings_json"])
+            try:
+                settings = validate_worker_settings(json.loads(job["settings_json"]))
+            except (ValueError, TypeError):
+                repository.fail_invalid_settings(str(job["id"]))
+                continue
             analysis_plan = (
                 json.loads(str(job["analysis_spec_json"] or "{}")) if str(job["kind"]) == "analysis" else {}
             )
