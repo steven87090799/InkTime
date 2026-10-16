@@ -220,6 +220,7 @@ textarea:focus-visible {
 .setup-overview-status { margin: 0 0 16px; color: var(--muted); font-size: 13px; }
 .setup-runtime-strip { display: flex; flex-wrap: wrap; gap: 8px 20px; padding: 12px 15px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); color: var(--muted); font-size: 12px; }
 .setup-runtime-strip strong, .setup-runtime-strip code { color: var(--ink); }
+.setup-runtime-strip > span { min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
 .setup-step-list { display: grid; gap: 10px; margin: 18px 0 0; padding: 0; list-style: none; }
 .setup-step { display: grid; grid-template-columns: 38px minmax(0, 1fr) auto; align-items: center; gap: 14px; padding: 16px; border: 1px solid var(--line); border-radius: 14px; background: var(--surface); }
 .setup-step-marker { display: grid; place-items: center; width: 34px; height: 34px; border: 1px solid var(--line); border-radius: 50%; color: var(--muted); font-weight: 900; }
@@ -236,6 +237,7 @@ textarea:focus-visible {
 .setup-step.is-attention .setup-step-title b { background: color-mix(in srgb, var(--warning) 16%, transparent); color: var(--warning); }
 .setup-step.is-missing .setup-step-title b { background: color-mix(in srgb, var(--danger) 14%, transparent); color: var(--danger); }
 .setup-step-body p { margin: 4px 0 0; color: var(--muted); font-size: 12px; }
+.setup-step-body { min-width: 0; overflow-wrap: anywhere; }
 .setup-step-body .setup-step-current { margin-top: 7px; color: var(--ink); font-size: 13px; font-weight: 700; }
 .setup-step-action { white-space: nowrap; }
 .panel { padding: 24px; margin: 18px 0; }
