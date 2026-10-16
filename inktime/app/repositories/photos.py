@@ -1736,14 +1736,22 @@ class PhotoRepository:
     def is_top_candidate(self, photo_id: str, limit: int) -> bool:
         return photo_id in set(self.eligible_photo_ids(limit=max(1, min(int(limit), 10_000))))
 
-    def ai_limit_reached(self, *, daily_limit: int, monthly_limit: int) -> bool:
+    def ai_limit_reached(self, *, daily_limit: int, monthly_limit: int, periods: dict[str, str] | None = None) -> bool:
+        if periods is None:
+            day = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+            month = day.replace(day=1)
+            periods = {"day_start": day.isoformat(), "day_end": (day + timedelta(days=1)).isoformat(),
+                       "month_start": month.isoformat(),
+                       "month_end": (month + timedelta(days=32)).replace(day=1).isoformat()}
         with self.database.session() as connection:
             row = connection.execute(
                 """
-                SELECT COUNT(DISTINCT CASE WHEN date(started_at)=date('now') THEN photo_id END) AS daily,
-                       COUNT(DISTINCT CASE WHEN strftime('%Y-%m',started_at)=strftime('%Y-%m','now') THEN photo_id END) AS monthly
+                SELECT COUNT(DISTINCT CASE WHEN started_at>=? AND started_at<? THEN photo_id END) AS daily,
+                       COUNT(DISTINCT photo_id) AS monthly
                 FROM api_usage WHERE provider != 'local' AND photo_id IS NOT NULL
-                """
+                  AND started_at>=? AND started_at<?
+                """,
+                (periods["day_start"], periods["day_end"], periods["month_start"], periods["month_end"]),
             ).fetchone()
         return int(row["daily"] or 0) >= daily_limit or int(row["monthly"] or 0) >= monthly_limit
 

@@ -23,6 +23,13 @@ def package_release(tag: str, commit: str, digest: str, output: Path, *, root: P
     if template.count(marker) != 1:
         raise ValueError("Cannot identify the unique image tag setting")
     environment = template.replace(marker, f"INKTIME_IMAGE_TAG={tag}")
+    environment = environment.replace(
+        "UGREEN redeploy follows stable latest without per-release edits.",
+        "This release bundle pins an immutable version; change INKTIME_IMAGE_TAG to update.",
+    ).replace(
+        "# UGREEN Project uses latest. scripts/update_nas.sh overrides this when given a SemVer tag.",
+        "# This installation bundle pins the published version shown below.",
+    )
     metadata = {"image": f"{IMAGE}:{tag}", "digest": digest, "commit": commit,
                 "platforms": ["linux/amd64", "linux/arm64"],
                 "deployment_contract": (root / "nas-deployment-contract.version").read_text().strip()}

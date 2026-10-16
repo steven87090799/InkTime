@@ -39,6 +39,7 @@ from inktime.app.domain.photos.quality_policy import (
 from inktime.app.web.access import administrator_required, login_required
 from inktime.app.domain.photos.orientation import original_exif_orientation, resolve_effective_orientation
 from inktime.app.repositories.analysis_history import display_analysis_order_sql, historical_model_sql
+from inktime.app.services.usage_periods import usage_periods
 
 
 bp = Blueprint("photos", __name__)
@@ -92,6 +93,7 @@ def _queue_ai(
     if not force_ai and _repository().ai_limit_reached(
         daily_limit=daily_limit,
         monthly_limit=int(settings.get("analysis.ai_monthly_photo_limit", 500)),
+        periods=usage_periods(str(settings.get("general.timezone", "Asia/Taipei"))),
     ):
         raise ValueError("已達 AI 每日或每月照片上限；目前會保留本機選片結果")
     selected = (

@@ -52,6 +52,7 @@ from inktime.app.repositories.usage import UsageRepository
 from inktime.app.repositories.billable_operations import BillableOperationRepository
 from inktime.app.services.budgets import BudgetService
 from inktime.app.services.usage_tracking import record_failed_unknown_usage
+from inktime.app.services.usage_periods import usage_periods
 
 
 
@@ -436,6 +437,7 @@ class PhotoAnalysisService:
             monthly_limit=int(
                 policy.get("monthly_photo_limit", self.settings.get("analysis.ai_monthly_photo_limit", 500))
             ),
+            periods=usage_periods(str(self.settings.get("general.timezone", "Asia/Taipei"))),
         )
 
     def _score_result(
