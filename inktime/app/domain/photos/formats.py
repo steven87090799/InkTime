@@ -39,7 +39,11 @@ SUPPORTED_IMAGE_EXTENSIONS = frozenset(
 )
 SUPPORTED_PIL_FORMATS = ("JPEG", "PNG", "WEBP", "HEIF", "TIFF", "BMP")
 HEIF_EXTENSIONS = frozenset({".heic", ".heif"})
-UNSUPPORTED_RAW_EXTENSIONS = frozenset({".dng"})
+UNSUPPORTED_RAW_EXTENSIONS = frozenset({
+    ".3fr", ".arw", ".cr2", ".cr3", ".dng", ".erf", ".kdc", ".mos", ".mrw", ".nef",
+    ".nrw", ".orf", ".pef", ".raf", ".raw", ".rw2", ".sr2", ".srf", ".srw", ".x3f",
+})
+UNSUPPORTED_IMAGE_EXTENSIONS = frozenset({".avif", ".jxl", ".jp2", ".j2k", ".psd"})
 DERIVATIVE_FORMAT = "JPEG"
 DERIVATIVE_MEDIA_TYPE = "image/jpeg"
 DERIVATIVE_SIZES = frozenset({512, 1024, 1600})

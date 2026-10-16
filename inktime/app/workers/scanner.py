@@ -12,7 +12,7 @@ from inktime.app.core.logging import log_event, should_log_sample
 from inktime.app.domain.photos import PhotoPreprocessor, ThumbnailCache
 from inktime.app.domain.photos.quality_policy import FEATURE_VERSION
 from inktime.app.domain.photos.formats import (
-    SUPPORTED_IMAGE_EXTENSIONS, UNSUPPORTED_RAW_EXTENSIONS, MAX_SOURCE_PIXELS,
+    SUPPORTED_IMAGE_EXTENSIONS, UNSUPPORTED_RAW_EXTENSIONS, UNSUPPORTED_IMAGE_EXTENSIONS, MAX_SOURCE_PIXELS,
     MAX_SOURCE_EDGE, MAX_FILE_BYTES, ImageSourceError, safe_image_open, log_image_error,
 )
 from inktime.app.repositories.photos import (
@@ -80,6 +80,8 @@ def iter_media(
                             yield path, "image"
                         elif suffix in UNSUPPORTED_RAW_EXTENSIONS:
                             yield path, "unsupported_raw"
+                        elif suffix in UNSUPPORTED_IMAGE_EXTENSIONS:
+                            yield path, "unsupported_image"
                         elif suffix in VIDEO_EXTENSIONS:
                             yield path, "video"
                     except OSError as exc:
@@ -280,6 +282,7 @@ class PhotoScanner:
             "failed": 0,
             "excluded_videos": 0,
             "unsupported_raw": 0,
+            "unsupported_images": 0,
         }
         last_progress_at = time.monotonic()
         major_io_errors = 0
@@ -331,12 +334,18 @@ class PhotoScanner:
                 if cancel_requested():
                     cancelled = True
                     break
-                if media_type == "unsupported_raw":
-                    counts["unsupported_raw"] += 1
-                    if should_log_sample(counts["unsupported_raw"], first=1, every=0):
-                        log_event(LOGGER, logging.WARNING, "iPhone ProRAW .DNG 尚未支援",
+                if media_type in {"unsupported_raw", "unsupported_image"}:
+                    counter = "unsupported_raw" if media_type == "unsupported_raw" else "unsupported_images"
+                    counts[counter] += 1
+                    counts["checked"] += 1
+                    counts["failed"] += 1
+                    errors.append(_scan_error(path.relative_to(root).as_posix(), stage="format",
+                                              error_code="IMG-UNSUPPORTED", retryable=False,
+                                              exc=ValueError("此圖片格式尚未支援，未進入模型處理")))
+                    if should_log_sample(counts[counter], first=1, every=0):
+                        log_event(LOGGER, logging.WARNING, "掃描發現尚未支援的照片格式",
                                   event="image_source_unsupported", error_code="IMG-UNSUPPORTED",
-                                  operation="photo_scan", details={"format": ".dng"})
+                                  operation="photo_scan", details={"format": path.suffix.lower()})
                     continue
                 if media_type == "video":
                     counts["excluded_videos"] += 1
@@ -616,6 +625,7 @@ class PhotoScanner:
                     "restored",
                     "duplicates",
                     "unsupported_raw",
+                    "unsupported_images",
                     "excluded_videos",
                     "reconciliation_status",
                     "candidate_missing",

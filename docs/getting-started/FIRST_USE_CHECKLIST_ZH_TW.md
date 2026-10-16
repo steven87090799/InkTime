@@ -24,7 +24,7 @@ docker compose --env-file .env -f docker-compose.nas.yml ps
 
 ## 非必要但建議查看的設定
 
-- [ ] **掃描範圍與新備份**：確認 NAS ACL 對每層子目錄均可讀；未完成複製的照片待備份完成後再掃描。隱藏的使用者相簿也會掃描；不跟隨 symlink，並略過已知 NAS 回收／縮圖／快照系統目錄及 AppleDouble sidecar。檢查略過／不支援／解碼失敗檔案，不能僅以 NAS 總檔案數當成受支援照片數。避免重疊登錄父、子相簿。
+- [ ] **掃描範圍與新備份**：確認 NAS ACL 對每層子目錄均可讀；未完成複製的照片待備份完成後再掃描。隱藏的使用者相簿也會掃描；不跟隨 symlink，並略過已知 NAS 回收／縮圖／快照系統目錄及 AppleDouble sidecar。檢查略過／不支援／解碼失敗檔案，不能僅以 NAS 總檔案數當成受支援照片數。目前支援 JPEG、PNG、WebP、HEIC／HEIF、TIFF、BMP；單檔上限 200 MiB、6000 萬像素、最長邊 12000px。不支援的常見 RAW／AVIF／JXL 等會列為掃描錯誤；影片與 GIF 另計排除。避免重疊登錄父、子相簿。
 - [ ] **排程**：啟用增量掃描、分析、渲染及備份，避免與 UGREEN 備份、Immich 大量匯入同時競爭磁碟。新增照片會在後續掃描納入，已完成且內容相同的分析應沿用。
 - [ ] **低並行起步**：Intel N100 先用 `analysis.concurrency=1`、`worker.queue_multiplier=1`，查看 RSS、處理速度、磁碟空間與 Provider 限流後再調高。十萬張驗收須包括完整遍歷、錯誤計數、恢復後的配對及實際費用，CI 不等於已在你的照片庫跑完。
 - [ ] **完整紀錄與容量**：保留模型輸入、回應、照片 SHA、模型與提示詞版本。精確送出影像在 `/data/model-inputs`，完整請求／回應及內容版本在資料庫；`batch.local_retention_days=0` 預設永久保存 Batch JSONL。分析追蹤與 Batch 檔案含敏感資訊且會增加容量，勿只備份照片而忽略 `/data`。操作監控的有界追蹤畫面不是完整資料的替代品。

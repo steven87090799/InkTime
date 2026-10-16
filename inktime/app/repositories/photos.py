@@ -1033,6 +1033,9 @@ class PhotoRepository:
                 reconciliation = "applied"
                 if marked:
                     self._mark_library_ranking_dirty(connection, str(scan["library_id"]), now)
+            if status == "completed" and int(counts.get("failed", 0)) > 0:
+                status = "completed_with_warnings"
+                warning_code = "SCAN-PHOTO-WARNINGS"
             connection.execute(
                 """
                 UPDATE scan_runs SET status=?,full_census=?,cancelled=?,major_io_errors=?,

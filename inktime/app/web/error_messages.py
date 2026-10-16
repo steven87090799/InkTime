@@ -70,6 +70,7 @@ _register("SQLITE-INTEGRITY DB-INTEGRITY-001 DB-001 DB-002 DB-LOCK-001 DB-TX-001
 _register("MIGRATION-001 MIGRATION-002 MIGRATION-003 MIGRATION-004", "資料庫升級未完成或版本不相容", "目前程式與資料庫結構無法安全配合，不能繼續寫入。", "請管理員停止服務，核對程式版本與升級紀錄，依升級前備份進行離線恢復。")
 _register("SCAN-001 JOB-SOURCE-MISSING PHOTO-ELIGIBILITY-001 PHOTO-ELIGIBILITY-005 REVIEW-404", "找不到或無法讀取原始照片", "照片檔案可能已移動、刪除，或照片來源沒有正確掛載。", "確認照片來源及讀取權限，再重新掃描；不要刪除已有分析結果。")
 _register("SCAN-002 SCAN-IO-001 SCAN-IO-002", "照片來源無法完整掃描", "照片資料夾的讀取或走訪失敗，掃描結果可能不完整。", "確認 NAS／磁碟掛載與資料夾權限；修復後重新掃描，不要先把照片標成遺失。")
+_register("SCAN-PHOTO-WARNINGS", "掃描完成但部分照片需要處理", "來源已遍歷，但有不支援格式、損壞或處理失敗的照片；不能視為全部照片已匯入。", "查看該掃描的逐檔錯誤，先處理失敗項目並核對數量，再開始全庫分析。")
 _register("SCAN-003 SCAN-004", "掃描方式或來源設定不合法", "提供的掃描模式或來源不在允許範圍內。", "在照片庫與維護頁重新選擇有效來源與掃描方式。")
 _register("SCAN-005", "照片庫正在掃描", "同一照片庫已有掃描工作持有鎖定。", "等待原掃描完成，再重新提出掃描；勿同時啟動多份掃描。")
 _register("SCAN-MISSING-THRESHOLD SCAN-MISSING-002 SCAN-MISSING-003 SCAN-MISSING-004", "照片遺失清單需要重新確認", "遺失比例超過安全值、掃描證據不完整，或已有較新的掃描結果。", "先確認照片掛載與數量，只使用同一照片庫最新的完整掃描進行人工確認。")

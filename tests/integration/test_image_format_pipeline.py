@@ -226,11 +226,25 @@ def test_live_photo_raw_and_corrupt_accounting(app, tmp_path):
     (root / "raw.dng").write_bytes(b"raw")
     (root / "bad.heic").write_bytes(b"bad")
     result = scan(app, root)
-    assert result["processed"] == 1 and result["failed"] == 1
+    assert result["processed"] == 1 and result["failed"] == 2
     assert result["excluded_videos"] == 1 and result["unsupported_raw"] == 1
     assert len(photo_rows(app)) == 1
     with app.extensions["inktime_database"].session() as connection:
-        assert connection.execute("SELECT error_code FROM scan_errors").fetchone()[0] == "IMG-CORRUPT"
+        assert {row[0] for row in connection.execute("SELECT error_code FROM scan_errors")} == {"IMG-CORRUPT", "IMG-UNSUPPORTED"}
+
+
+def test_unsupported_camera_and_image_formats_are_counted_without_model_or_decode(app, tmp_path):
+    root = tmp_path / "unsupported"
+    root.mkdir()
+    for suffix in (".arw", ".nef", ".cr3", ".avif", ".jxl"):
+        (root / ("source" + suffix)).write_bytes(b"not decoded")
+    result = scan(app, root)
+    assert result["failed"] == 5 and result["processed"] == 0
+    assert result["unsupported_raw"] == 3 and result["unsupported_images"] == 2
+    assert result["warning_code"] == "SCAN-PHOTO-WARNINGS"
+    with app.extensions["inktime_database"].session() as connection:
+        assert connection.execute("SELECT COUNT(*) FROM scan_errors").fetchone()[0] == 5
+        assert connection.execute("SELECT COUNT(*) FROM photos").fetchone()[0] == 0
 
 
 @pytest.mark.parametrize(
