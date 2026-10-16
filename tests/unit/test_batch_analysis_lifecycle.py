@@ -791,7 +791,10 @@ def test_child_shard_creation_failure_fails_parent_and_releases_all_items(app, t
         for batch in repository.list_for_job(job_id)
         for item in repository.items(str(batch["id"]))
     )
-    assert not list(service.batch_root.glob("*/**/*.jsonl"))
+    # Even failed preparation retains exact inputs under the permanent policy.
+    retained = list(service.batch_root.glob("*/**/input.jsonl"))
+    assert len(retained) == 2
+    assert all(path.read_text(encoding="utf-8").strip() for path in retained)
 
 
 @pytest.mark.parametrize(
@@ -2532,9 +2535,9 @@ def test_sample_bounds_candidate_file_io_before_materialization(app, tmp_path, m
     original = module.safe_join
     visited = []
 
-    def observed(root, relative):
+    def observed(root, relative, **kwargs):
         visited.append(relative)
-        return original(root, relative)
+        return original(root, relative, **kwargs)
 
     monkeypatch.setattr(module, "safe_join", observed)
     service.estimate(scope="sample", sample_count=2)

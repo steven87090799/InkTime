@@ -70,6 +70,9 @@ def test_source_to_browser_review_ai_render_and_release(app, client, tmp_path, s
     photo = photo_rows(app)[0]
     photo_id = photo["id"]
     admin = create_admin(app)
+    # The tiny synthetic color chart needs an explicit quality override before
+    # any model request, as well as before publishing.
+    app.extensions["inktime_photo_repository"].set_exclusion(photo_id, action="restore", changed_by=admin)
     login(client)
     for endpoint, size in [
         (f"/api/v1/photos/{photo_id}/thumbnail", 512),
@@ -178,7 +181,8 @@ def test_real_48mp_rgb_heif_all_derivative_consumers(app, client, tmp_path, monk
     assert result["processed"] == 1 and result["failed"] == 0
     row = photo_rows(app)[0]
     assert (row["width"], row["height"], row["format"]) == (8064, 6048, "HEIF")
-    create_admin(app)
+    admin = create_admin(app)
+    app.extensions["inktime_photo_repository"].set_exclusion(row["id"], action="restore", changed_by=admin)
     login(client)
     response = client.get(f"/api/v1/photos/{row['id']}/preview")
     assert response.status_code == 200 and response.mimetype == "image/jpeg"

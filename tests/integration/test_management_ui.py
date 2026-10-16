@@ -1237,7 +1237,7 @@ def test_ai_trace_page_explains_that_only_real_provider_calls_are_listed(client,
     assert "在呼叫 Provider 之前就被預算或設定阻擋" in body
     assert "不同照片" in body
     assert "10 萬筆粗估" in body
-    assert "AI Trace 保留策略已啟用" in body
+    assert "AI Trace 紀錄預設永久保存" in body
     assert 'href="/retention"' in body
 
 

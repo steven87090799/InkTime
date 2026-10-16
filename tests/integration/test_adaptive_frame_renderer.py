@@ -346,6 +346,9 @@ def test_frozen_pair_plan_rejects_replaced_content_even_when_photo_id_is_unchang
     database = app.extensions["inktime_database"]
     for photo_id in ("a", "b"):
         _analyzed_photo(app, root, photo_id, (900, 1600), "2024-07-01T10:00:00+00:00")
+        if photo_id == "b":
+            # Adaptive pairing intentionally rejects identical content.
+            Image.new("RGB", (900, 1600), "#508464").save(root / "b.jpg")
         with database.transaction() as connection:
             connection.execute("UPDATE photos SET sha256=? WHERE id=?", (sha256((root / f"{photo_id}.jpg").read_bytes()).hexdigest(), photo_id))
     service = app.extensions["inktime_render_service"]
@@ -364,7 +367,7 @@ def test_pair_dates_are_frozen_and_missing_dates_never_draw_unknown_placeholder(
 ):
     root = tmp_path / "frozen-dates"
     root.mkdir()
-    for photo_id, caption in (("a", "A側回憶"), ("b", "B側回憶")):
+    for photo_id, caption in (("a", "A側相框回憶文字"), ("b", "B側相框回憶文字")):
         _analyzed_photo(
             app, root, photo_id, (900, 1600), "2024-07-01T10:00:00+00:00", side_caption=caption
         )
@@ -395,7 +398,7 @@ def test_pair_dates_are_frozen_and_missing_dates_never_draw_unknown_placeholder(
         "a", layout=layout, secondary_photo_id="b", orientation="landscape"
     )
     assert not any("年" in text or "月" in text for text in calls)
-    assert "A側回憶" in "".join(calls) and "B側回憶" in "".join(calls)
+    assert "A側相框回憶文字" in "".join(calls) and "B側相框回憶文字" in "".join(calls)
     assert service._date_label(None) == ""
 
 
