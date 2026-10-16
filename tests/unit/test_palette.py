@@ -26,7 +26,7 @@ def test_waveshare_nearest_color_preserves_rgb_distance_and_tie_breaks():
     palette = ((0, 0, 0), (255, 255, 255), (255, 255, 0),
                (255, 0, 0), (0, 0, 255), (0, 255, 0))
     for pixel in itertools.product((0, 63, 64, 127, 128, 191, 192, 255), repeat=3):
-        expected = min(range(6), key=lambda i, pixel=pixel: sum((a - b) ** 2 for a, b in zip(pixel, palette[i])))
+        expected = min(range(6), key=lambda i, pixel=pixel: sum((a - b) ** 2 for a, b in zip(pixel, palette[i], strict=True)))
         assert _waveshare_six_color_index(*pixel) == expected
 
 
