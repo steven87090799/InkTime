@@ -59,7 +59,7 @@ class RenderCandidateRepository:
     @staticmethod
     def available(row: Any) -> bool:
         try:
-            return safe_join(Path(str(row["root_path"])), str(row["relative_path"])).is_file()
+            return safe_join(Path(str(row["root_path"])), str(row["relative_path"]), decode_url=False).is_file()
         except (OSError, UnsafePathError, ValueError):
             return False
 

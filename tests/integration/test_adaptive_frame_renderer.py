@@ -294,6 +294,106 @@ def test_landscape_side_caption_draws_upright_glyphs_without_rotating_text_strip
     assert transpose_calls == [Image.Transpose.ROTATE_270]
 
 
+@pytest.mark.parametrize("layout", ("photo_pair", "photo_pair_caption", "adaptive_memory"))
+@pytest.mark.parametrize("orientation", ("portrait", "landscape"))
+def test_every_pair_mode_draws_both_photo_captions_and_smaller_capture_dates(
+    app, tmp_path, monkeypatch, layout, orientation
+):
+    root = tmp_path / "pair-dates"
+    root.mkdir()
+    size = (900, 1600) if orientation == "landscape" else (1600, 900)
+    for photo_id, captured, caption in (
+        ("a", "2024-07-01T10:00:00+00:00", "A側相框回憶文字"),
+        ("b", "2021-12-31T10:00:00+00:00", "B側相框回憶文字"),
+    ):
+        _analyzed_photo(app, root, photo_id, size, captured, side_caption=caption)
+    service = app.extensions["inktime_render_service"]
+    plan = service.resolve_render_plan(
+        "a", layout=layout, secondary_photo_id="b", orientation=orientation
+    )
+    calls = []
+    original_text = ImageDraw.ImageDraw.text
+
+    def capture_text(draw, xy, text, *args, **kwargs):
+        calls.append((str(text), kwargs["font"].size))
+        return original_text(draw, xy, text, *args, **kwargs)
+
+    monkeypatch.setattr(ImageDraw.ImageDraw, "text", capture_text)
+    image = service._render_plan_image(plan)
+    assert image.size == (480, 800)
+    painted = "".join(text for text, _size in calls)
+    for caption in ("A側相框回憶文字", "B側相框回憶文字"):
+        assert caption in painted
+    for label in ("2024年7月1日", "2021年12月31日"):
+        assert label in painted
+    assert plan["primary_caption"]["capture_date"] == "2024-07-01"
+    assert plan["secondary_caption"]["capture_date"] == "2021-12-31"
+    assert all(size <= 14 for text, size in calls if "年" in text or "月" in text)
+    assert all(size >= 18 for text, size in calls if "A" in text or "B" in text)
+
+
+@pytest.mark.parametrize("layout", ("photo_pair", "photo_pair_caption", "adaptive_memory"))
+def test_pair_dates_are_frozen_and_missing_dates_never_draw_unknown_placeholder(
+    app, tmp_path, monkeypatch, layout
+):
+    root = tmp_path / "frozen-dates"
+    root.mkdir()
+    for photo_id, caption in (("a", "A側回憶"), ("b", "B側回憶")):
+        _analyzed_photo(
+            app, root, photo_id, (900, 1600), "2024-07-01T10:00:00+00:00", side_caption=caption
+        )
+    with app.extensions["inktime_database"].session() as connection:
+        connection.execute("UPDATE photos SET captured_at=NULL WHERE id='b'")
+    service = app.extensions["inktime_render_service"]
+    plan = service.resolve_render_plan(
+        "a", layout=layout, secondary_photo_id="b", orientation="landscape"
+    )
+    assert plan["primary_caption"]["capture_date_label"] == "2024年7月1日"
+    assert plan["secondary_caption"]["capture_date_label"] == ""
+    app.extensions["inktime_settings_repository"].update(
+        "render.show_capture_date", False, changed_by="test", source_ip="127.0.0.1"
+    )
+    calls = []
+    original_text = ImageDraw.ImageDraw.text
+
+    def capture_text(draw, xy, text, *args, **kwargs):
+        calls.append(str(text))
+        return original_text(draw, xy, text, *args, **kwargs)
+
+    monkeypatch.setattr(ImageDraw.ImageDraw, "text", capture_text)
+    service._render_plan_image(plan)
+    assert "2024年7月1日" in "".join(calls)
+    assert "未知" not in "".join(calls)
+    calls.clear()
+    service.render_photo(
+        "a", layout=layout, secondary_photo_id="b", orientation="landscape"
+    )
+    assert not any("年" in text or "月" in text for text in calls)
+    assert "A側回憶" in "".join(calls) and "B側回憶" in "".join(calls)
+    assert service._date_label(None) == ""
+
+
+@pytest.mark.parametrize("layout", ("photo_pair", "photo_pair_caption"))
+def test_direct_pair_render_rejects_caption_bound_to_the_other_photo(app, tmp_path, layout):
+    root = tmp_path / "pair-identity"
+    root.mkdir()
+    for photo_id in ("a", "b"):
+        _analyzed_photo(app, root, photo_id, (900, 1600), "2024-07-01T10:00:00+00:00")
+    service = app.extensions["inktime_render_service"]
+    plan = service.resolve_render_plan(
+        "a", layout=layout, secondary_photo_id="b", orientation="landscape"
+    )
+    with pytest.raises(ValueError, match="Caption 與照片識別不一致"):
+        service.render_photo(
+            "a",
+            layout=layout,
+            secondary_photo_id="b",
+            orientation="landscape",
+            primary_caption=plan["secondary_caption"],
+            secondary_caption=plan["primary_caption"],
+        )
+
+
 def test_adaptive_square_and_missing_pair_fall_back_to_single_contain(app, tmp_path):
     root = tmp_path / "photos"
     root.mkdir()

@@ -2459,6 +2459,26 @@ MIGRATIONS = (
         "索引歷史活動事件的大小寫相容保留查詢",
         ("CREATE INDEX idx_activity_events_severity_nocase_id ON activity_events(severity COLLATE NOCASE,id)",),
     ),
+    Migration(
+        68,
+        "永久保存照片內容版本與付費模型輸入證據",
+        (
+            "CREATE TABLE photo_content_history("
+            "id TEXT PRIMARY KEY,photo_id TEXT NOT NULL,content_sha256 TEXT NOT NULL,"
+            "photo_json TEXT NOT NULL,analyses_json TEXT NOT NULL,created_at TEXT NOT NULL)",
+            "CREATE INDEX idx_photo_content_history_sha ON photo_content_history(content_sha256,created_at)",
+            "CREATE INDEX idx_photo_content_history_photo ON photo_content_history(photo_id,created_at)",
+            "CREATE TABLE model_request_evidence("
+            "operation_id TEXT PRIMARY KEY,request_json TEXT NOT NULL,response_json TEXT,"
+            "created_at TEXT NOT NULL,updated_at TEXT NOT NULL)",
+            "UPDATE data_retention_policies SET enabled=0,dry_run=1,updated_at=datetime('now') "
+            "WHERE data_type='ai_trace'",
+            # Promote the former seven-day default to permanent retention. Explicit
+            # nondefault periods remain an operator's choice; zero is now permanent.
+            "UPDATE settings SET value_json='0',updated_at=datetime('now') "
+            "WHERE key='batch.local_retention_days' AND value_json='7'",
+        ),
+    ),
 )
 
 

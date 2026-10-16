@@ -84,6 +84,42 @@ def seed_files(root, count: int) -> None:
         (root / f"photo-{index:03d}.jpg").write_bytes(f"photo-{index}".encode())
 
 
+def test_scan_includes_hidden_user_albums_and_literal_percent_names(app, tmp_path):
+    root = tmp_path / "photos"
+    album = root / ".family" / "2026" / "10"
+    album.mkdir(parents=True)
+    (album / ".photo%25.jpg").write_bytes(b"hidden-photo")
+    (album / "._photo.jpg").write_bytes(b"AppleDouble")
+    (root / "@eaDir").mkdir()
+    (root / "@eaDir" / "thumbnail.jpg").write_bytes(b"NAS-thumbnail")
+    (root / "link.jpg").symlink_to(album / ".photo%25.jpg")
+    scanner, _ = make_scanner(app, tmp_path)
+    result = scanner.scan("隱藏相簿", root, build_thumbnails=False)
+    assert result["failed"] == 0
+    with app.extensions["inktime_database"].session() as connection:
+        assert [row[0] for row in connection.execute("SELECT relative_path FROM photos")] == [".family/2026/10/.photo%25.jpg"]
+
+
+def test_media_enumeration_does_not_hit_python_recursion_limit(tmp_path, monkeypatch):
+    from contextlib import nullcontext
+    from types import SimpleNamespace
+    from inktime.app.workers.scanner import iter_media
+
+    def scandir(directory):
+        level = str(directory).count("/nested")
+        leaf = level == 1200
+        name = "photo.jpg" if leaf else "nested"
+        entry = SimpleNamespace(path=str(directory / name), name=name,
+                                is_symlink=lambda: False,
+                                is_dir=lambda **_kwargs: not leaf,
+                                is_file=lambda **_kwargs: leaf)
+        return nullcontext(iter([entry]))
+    monkeypatch.setattr("inktime.app.workers.scanner.os.scandir", scandir)
+    rows = list(iter_media(tmp_path))
+    assert len(rows) == 1 and rows[0][1] == "image"
+    assert str(rows[0][0]).count("/nested") == 1200
+
+
 def test_batch_database_failure_rolls_back_whole_write_batch(app, tmp_path):
     root = tmp_path / "photos"
     seed_files(root, 2)
@@ -420,6 +456,10 @@ def test_content_change_invalidates_sections_not_run_by_partial_mode(app, tmp_pa
             "SELECT metadata_status,local_features_status,perceptual_hash FROM photos"
         ).fetchone()
         assert connection.execute("SELECT COUNT(*) FROM photo_analysis").fetchone()[0] == 0
+        history = connection.execute("SELECT * FROM photo_content_history WHERE photo_id=?", (photo_id,)).fetchone()
+        assert history["content_sha256"] == sha256(b"photo-0").hexdigest()
+        assert json.loads(history["photo_json"])["relative_path"] == "photo-000.jpg"
+        assert json.loads(history["analyses_json"])[0]["photo_id"] == photo_id
     assert tuple(row) == ("complete", "pending", None)
 
     scanner.scan("部分模式", root, mode="local-features-only", build_thumbnails=False)

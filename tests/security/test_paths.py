@@ -11,6 +11,16 @@ def test_normal_child_path(tmp_path):
     assert safe_join(base, "2026/holiday.jpg") == base / "2026/holiday.jpg"
 
 
+def test_stored_photo_path_keeps_literal_percent_characters(tmp_path):
+    name = "2026/100%25 holiday%2Fphoto.jpg"
+    expected = tmp_path / name
+    expected.parent.mkdir()
+    expected.write_bytes(b"photo")
+    assert safe_join(tmp_path, name, decode_url=False) == expected
+    with pytest.raises(UnsafePathError):
+        safe_join(tmp_path, "../outside.jpg", decode_url=False)
+
+
 @pytest.mark.parametrize(
     "candidate",
     [

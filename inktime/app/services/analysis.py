@@ -505,6 +505,7 @@ class PhotoAnalysisService:
             vision_request_fingerprint=vision_request_fingerprint,
             vision_input_spec_json=vision_input_spec_json,
             prefilter_evaluation=prefilter_evaluation,
+            expected_content_sha256=str(photo["sha256"] or ""),
             connection=connection,
         )
         self._activity(
@@ -842,7 +843,7 @@ class PhotoAnalysisService:
             trace_id=prompt_version,
         )
         has_checkpoint = BillableOperationRepository(self.photos.database).check_retry(
-            content_sha256, request_fingerprint
+            content_sha256, request_fingerprint, reuse_completed=not force_recompute
         )
         owner_id = str(uuid4())
         provider_timeout = max(5, int(getattr(selected_provider, "timeout", 120)))
@@ -946,6 +947,7 @@ class PhotoAnalysisService:
                         f"{hashlib.sha256(owner_id.encode('utf-8')).hexdigest()[:16]}"
                     ),
                     trace_id=trace_id,
+                    reuse_completed=not force_recompute,
                 )
         except Exception as exc:
             self.photos.finish_ai_cache_reservation(cache_key, owner_id, error=str(exc))
@@ -1071,6 +1073,7 @@ class PhotoAnalysisService:
         vision_attempt: VisionAttemptState,
         provider_request_context_id: str,
         trace_id: str | None,
+        reuse_completed: bool = True,
     ) -> tuple[dict, str, float, Usage, int]:
         started_at = datetime.now(timezone.utc).isoformat()
         started_perf = time.perf_counter()
@@ -1087,6 +1090,7 @@ class PhotoAnalysisService:
         )
         operations = BillableOperationRepository(self.photos.database)
         operation_id, checkpoint = operations.begin(content_sha256, vision_request_fingerprint,
+            reuse_completed=reuse_completed,
             context={"provider": actual_call_provider.name, "model": model, "photo_id": photo_id, "job_id": job_id})
         if checkpoint is None and self.budgets:
             try:
@@ -1120,7 +1124,17 @@ class PhotoAnalysisService:
                 response = checkpoint
             else:
                 from inktime.app.core.model_upload_guard import assert_upload_allowed
-                guard = {"database_path": str(self.photos.database.path), "photo_id": photo_id, "job_id": job_id}
+                from inktime.app.repositories.model_evidence import save_model_request
+                save_model_request(self.photos.database, operation_id, {
+                    "image_path": Path(image), "model": model, "detail": detail, "stage": stage,
+                    "max_tokens": max_tokens, "reasoning_effort": reasoning_effort,
+                    "caption_controls": caption_controls, "prompt_version": prompt_version,
+                    "content_sha256": content_sha256,
+                    "vision_request_fingerprint": vision_request_fingerprint,
+                })
+                guard = {"database_path": str(self.photos.database.path), "photo_id": photo_id,
+                         "job_id": job_id, "operation_id": operation_id,
+                         "expected_content_sha256": content_sha256}
                 assert_upload_allowed(**guard)
                 if getattr(actual_call_provider, "supports_upload_guard", False):
                     call["upload_guard"] = guard
@@ -1408,7 +1422,7 @@ class PhotoAnalysisService:
         photo = self.photos.get_with_path(photo_id)
         if photo is None:
             raise FileNotFoundError("SCAN-001 找不到照片資料")
-        source = safe_join(Path(photo["root_path"]), str(photo["relative_path"]))
+        source = safe_join(Path(photo["root_path"]), str(photo["relative_path"]), decode_url=False)
         if not source.is_file():
             raise FileNotFoundError("SCAN-001 找不到照片檔案")
         photo = self._ensure_e6_suitability(photo_id, photo, source)
@@ -1530,12 +1544,9 @@ class PhotoAnalysisService:
             )
             return {"analysis": result, "stage": "local", "_actual_cost": 0}
 
-        if (
-            self.settings is not None
-            and not force_ai
-            and not bool(photo["eligible"])
-            and not bool(photo["manual_override"])
-        ):
+        if not bool(photo["eligible"]) or str(photo["exclusion_status"] or "") in {
+            "auto_excluded", "manually_excluded"
+        }:
             result = validate_analysis_result(
                 self._prefilter_result(photo, policy_settings=plan_prefilter) or self._local_result(photo)
             )
@@ -1636,7 +1647,7 @@ class PhotoAnalysisService:
             ai_trace_id,
         ) = self._model_call(
             provider=provider,
-            image_factory=lambda: self.thumbnails.acquire_for_use(source, sha, image_max_side),
+            image_factory=lambda: self.thumbnails.acquire_for_use(source, sha, image_max_side, verify_source=True),
             model=model,
             detail=str(vision_input.get("detail", "high")),
             stage="single",

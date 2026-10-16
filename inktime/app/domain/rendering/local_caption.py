@@ -8,7 +8,7 @@ from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 
-LOCAL_CAPTION_VERSION = "local-caption-v1"
+LOCAL_CAPTION_VERSION = "local-caption-v2-capture-date"
 
 
 def _zone(name: str) -> ZoneInfo:
@@ -102,6 +102,7 @@ def build_local_caption(
         "source": source,
         "version": LOCAL_CAPTION_VERSION,
         "photo_id": str(photo_id),
+        "capture_date": captured.isoformat() if captured else None,
         "text_hash": sha256((text or "那年今日").encode("utf-8")).hexdigest(),
         "is_ai_generated": ai,
         "source_detail": dict(source_detail or {}) if ai else {},

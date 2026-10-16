@@ -53,27 +53,45 @@ class DiskPhoto:
 def iter_media(
     root: Path, *, on_error: Callable[[OSError], None] | None = None
 ) -> Iterator[tuple[Path, str]]:
-    """串流回傳媒體；walk 的權限／I/O 錯誤不得被靜默忽略。"""
+    """Iterative DFS: no Python recursion limit and no whole-library path list.
 
-    for directory, dirnames, filenames in os.walk(root, onerror=on_error, followlinks=False):
-        dirnames[:] = [
-            name
-            for name in dirnames
-            if not name.startswith(".")
-            and name not in {"@eaDir", "@tmp", "#recycle"}
-            and not (Path(directory) / name).is_symlink()
-        ]
-        for filename in filenames:
-            path = Path(directory) / filename
-            if filename.startswith(".") or filename in {"Thumbs.db", "desktop.ini"} or path.is_symlink():
-                continue
-            suffix = path.suffix.lower()
-            if suffix in SUPPORTED_EXTENSIONS:
-                yield path, "image"
-            elif suffix in UNSUPPORTED_RAW_EXTENSIONS:
-                yield path, "unsupported_raw"
-            elif suffix in VIDEO_EXTENSIONS:
-                yield path, "video"
+    Hidden user albums are valid sources. Only known NAS/system directories,
+    AppleDouble sidecars and symlinks are excluded from the census.
+    """
+    pending = [root]
+    ignored_directories = {"@eaDir", "@tmp", "#recycle", ".git", ".Trash", ".Trashes", ".snapshot", ".snapshots"}
+    while pending:
+        directory = pending.pop()
+        try:
+            with os.scandir(directory) as entries:
+                for entry in entries:
+                    try:
+                        if entry.is_symlink():
+                            continue
+                        if entry.is_dir(follow_symlinks=False):
+                            if entry.name not in ignored_directories:
+                                pending.append(Path(entry.path))
+                            continue
+                        if not entry.is_file(follow_symlinks=False) or entry.name.startswith("._") or entry.name in {"Thumbs.db", "desktop.ini"}:
+                            continue
+                        path = Path(entry.path)
+                        suffix = path.suffix.lower()
+                        if suffix in SUPPORTED_EXTENSIONS:
+                            yield path, "image"
+                        elif suffix in UNSUPPORTED_RAW_EXTENSIONS:
+                            yield path, "unsupported_raw"
+                        elif suffix in VIDEO_EXTENSIONS:
+                            yield path, "video"
+                    except OSError as exc:
+                        if on_error is not None:
+                            on_error(exc)
+                        else:
+                            raise
+        except OSError as exc:
+            if on_error is not None:
+                on_error(exc)
+            else:
+                raise
 
 
 def iter_images(root: Path) -> Iterator[Path]:

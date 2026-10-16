@@ -12,7 +12,6 @@ from PIL import Image
 import pytest
 
 from inktime.app.api import photos as photos_api
-from inktime.app.domain.analysis.plan import fingerprint
 from inktime.app.domain.photos import PhotoPreprocessor
 from inktime.app.providers.base import ProviderResponse, Usage, VisionProvider
 from inktime.app.providers.router import FailoverVisionProvider, ProviderChannel
@@ -198,67 +197,24 @@ def test_ai_off_does_not_call_provider(app, tmp_path):
     assert provider.analyze_calls == 0
 
 
-def test_force_ai_calls_provider_when_ai_is_off_and_preserves_exclusion_audit(app, tmp_path):
+def test_force_ai_cannot_send_manually_excluded_photo(app, tmp_path):
     actor = create_admin(app)
     photo_id = _manual_excluded_photo(app, tmp_path, actor=actor)
     repository = app.extensions["inktime_photo_repository"]
     before = repository.get_with_path(photo_id)
-    _setting(app, "analysis.ai_mode", "off")
     _setting(app, "analysis.execution_mode", "local_with_manual_ai")
     provider = CountingProvider()
-    provider.provider_id = "provider-force-test"
-    plan = app.extensions["inktime_analysis_service"].build_plan(
-        strategy="high_quality",
-        provider_route=[],
-        scoring_profile_id=str(app.extensions["inktime_scoring_repository"].current()["id"]),
-    )
-    job_id = app.extensions["inktime_job_service"].create_analysis_job(
-        name="force excluded",
-        strategy="high_quality",
-        settings={"force_ai": True},
-        created_by=actor,
-        budget_limit=None,
-        photo_ids=[photo_id],
-        analysis_fingerprint=fingerprint(plan),
-        force_recompute=True,
-        analysis_spec=plan,
-    )
-
     result = app.extensions["inktime_analysis_service"].analyze_photo(
-        photo_id=photo_id,
-        job_id=job_id,
-        provider=provider,
-        strategy="high_quality",
-        force_ai=True,
-        force_actor=actor,
-        force_recompute=True,
-        analysis_plan=plan,
+        photo_id=photo_id, job_id=None, provider=provider, strategy="single",
+        force_ai=True, force_actor=actor, force_recompute=True,
     )
-
-    assert result["stage"] == "single"
-    assert provider.analyze_calls == 1
+    assert result["stage"] == "prefilter"
+    assert provider.analyze_calls == 0
     after = repository.get_with_path(photo_id)
-    assert after["eligible"] == before["eligible"] == 0
-    assert after["exclusion_status"] == before["exclusion_status"] == "manually_excluded"
-    assert after["reject_reason"] == before["reject_reason"]
+    for key in ("eligible", "exclusion_status", "reject_reason"):
+        assert after[key] == before[key]
     with app.extensions["inktime_database"].session() as connection:
-        analysis = connection.execute(
-            "SELECT job_id,analysis_fingerprint FROM photo_analysis WHERE photo_id=? ORDER BY id DESC LIMIT 1",
-            (photo_id,),
-        ).fetchone()
-        event = connection.execute(
-            "SELECT changes_json,changed_by FROM photo_events WHERE photo_id=? AND event='force_ai_analysis_completed' "
-            "ORDER BY id DESC LIMIT 1",
-            (photo_id,),
-        ).fetchone()
-    assert analysis["job_id"] == job_id
-    assert analysis["analysis_fingerprint"]
-    assert event["changed_by"] == actor
-    audit = json.loads(event["changes_json"])
-    assert audit["job_id"] == job_id
-    assert audit["provider_id"] == "provider-force-test"
-    assert audit["provider_name"] == "Counting Provider"
-    assert audit["model"] == plan["model"]
+        assert connection.execute("SELECT COUNT(*) FROM billable_operations").fetchone()[0] == 0
 
 
 def test_confirmed_screenshot_cannot_cross_force_ai_send_boundary(app, tmp_path):
@@ -281,35 +237,24 @@ def test_confirmed_screenshot_cannot_cross_force_ai_send_boundary(app, tmp_path)
     assert provider.analyze_calls == 0
 
 
-def test_force_ai_api_is_admin_exclusion_only_and_creates_fresh_job(client, app, tmp_path):
+def test_manual_ai_api_requires_explicit_restore_and_reuses_prior_results(client, app, tmp_path):
     actor = create_admin(app)
     login(client)
     _enable_fake_usable_provider(app)
     excluded_id = _manual_excluded_photo(app, tmp_path, actor=actor)
-    root = tmp_path / "eligible-parent"
-    root.mkdir()
-    eligible_id = _scan(app, root)[0]
-    assert eligible_id != excluded_id
-    with app.extensions["inktime_database"].session() as connection:
-        connection.execute(
-            "UPDATE photos SET eligible=1,exclusion_status='eligible',manual_override=0 WHERE id=?",
-            (eligible_id,),
-        )
-    _setting(app, "analysis.ai_mode", "off")
     _setting(app, "analysis.execution_mode", "local_with_manual_ai")
     headers = {"X-CSRF-Token": csrf(client)}
-    forbidden = client.post(f"/api/v1/photos/{eligible_id}/ai", headers=headers)
-    assert forbidden.status_code == 403
-
+    rejected = client.post(f"/api/v1/photos/{excluded_id}/ai", headers=headers)
+    assert rejected.status_code == 409
+    assert "明確恢復" in rejected.json["message"]
+    assert client.post(f"/api/v1/photos/{excluded_id}/exclusion", json={"action": "restore"}, headers=headers).status_code == 200
     queued = client.post(f"/api/v1/photos/{excluded_id}/ai", headers=headers)
     assert queued.status_code == 201
     job = app.extensions["inktime_job_repository"].get(queued.json["id"])
     assert json.loads(job["settings_json"])["force_ai"] is True
-    assert job["force_recompute"] == 1
+    assert job["force_recompute"] == 0
     assert job["analysis_fingerprint"]
-    assert [item["photo_id"] for item in app.extensions["inktime_job_repository"].list_items(job["id"])] == [
-        excluded_id
-    ]
+    assert [item["photo_id"] for item in app.extensions["inktime_job_repository"].list_items(job["id"])] == [excluded_id]
 
 
 def test_confirmed_screenshot_ai_api_is_controlled_and_creates_no_job(client, app, tmp_path):
@@ -345,6 +290,8 @@ def test_manual_ai_idempotency_key_is_namespaced_per_endpoint(client, app, tmp_p
     batch_root.mkdir()
     excluded_id = _manual_excluded_photo(app, single_root, actor=actor)
     batch_id = _manual_excluded_photo(app, batch_root, actor=actor)
+    for photo_id in [excluded_id, batch_id]:
+        app.extensions["inktime_photo_repository"].set_exclusion(photo_id, action="restore", changed_by=actor)
     _setting(app, "analysis.ai_mode", "off")
     _setting(app, "analysis.execution_mode", "local_with_manual_ai")
     headers = {"X-CSRF-Token": csrf(client), "Idempotency-Key": "shared-manual-key"}
@@ -374,6 +321,8 @@ def test_manual_ai_idempotency_conflict_has_stable_api_error_code(client, app, t
         _manual_excluded_photo(app, second_root, actor=actor),
     ]
     assert excluded_ids[0] != excluded_ids[1]
+    for photo_id in [*excluded_ids]:
+        app.extensions["inktime_photo_repository"].set_exclusion(photo_id, action="restore", changed_by=actor)
     _setting(app, "analysis.ai_mode", "off")
     _setting(app, "analysis.execution_mode", "local_with_manual_ai")
     headers = {"X-CSRF-Token": csrf(client), "Idempotency-Key": "manual-conflict-key"}
@@ -392,6 +341,8 @@ def test_single_excluded_photo_ai_without_provider_is_controlled_and_side_effect
     actor = create_admin(app)
     login(client)
     excluded_id = _manual_excluded_photo(app, tmp_path, actor=actor)
+    for photo_id in [excluded_id]:
+        app.extensions["inktime_photo_repository"].set_exclusion(photo_id, action="restore", changed_by=actor)
     _setting(app, "analysis.ai_mode", "off")
     _setting(app, "analysis.execution_mode", "local_with_manual_ai")
     with app.extensions["inktime_database"].session() as connection:
@@ -766,6 +717,14 @@ def test_full_v5_json_uses_semantic_ranking_independent_of_gps(app, tmp_path):
     assert row["memory_score"] == result["memory_score"]
     assert row["travel_bonus"] == 0
     assert row["final_ranking_score"] == row["base_ranking_score"]
+
+
+def test_full_library_splits_large_year_without_omitting_any_photo(app):
+    photo_ids = add_photos(app, 1201)
+    batches = app.extensions["inktime_photo_repository"].eligible_photo_batches(group_by="year", limit=1201)
+    assert [len(ids) for _, ids in batches] == [500, 500, 201]
+    assert len({group for group, _ in batches}) == 3
+    assert {photo for _, ids in batches for photo in ids} == set(photo_ids)
 
 
 def test_full_library_confirmation_and_queue_count_only_active_eligible_photos(client, app):

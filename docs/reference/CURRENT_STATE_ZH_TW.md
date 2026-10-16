@@ -7,7 +7,7 @@
 | 項目 | 原始碼值 | 權威來源 |
 |---|---|---|
 | Python 套件 | `2.0.0.dev0`，部署／CI 支援 Python 3.12（`>=3.12,<3.13`） | [`inktime/_version.py`](../../inktime/_version.py)、[`pyproject.toml`](../../pyproject.toml) |
-| SQLite Migration | 連續 `1–67`；64–66 保護配送／渲染輸入並支援雙圖附說明，67 索引大小寫相容活動清理；保留歷史／外鍵 | [`migrations.py`](../../inktime/app/db/migrations.py) |
+| SQLite Migration | 連續 `1–68`；64–66 保護配送／渲染輸入並支援雙圖附說明，67 索引活動清理，68 永久保存照片內容版本與模型證據；保留歷史／外鍵 | [`migrations.py`](../../inktime/app/db/migrations.py) |
 | AI Analysis Schema | 嚴格 v5；保留 v4 相容閱讀與既有結果，不為精簡欄位重新付費 | [`plan.py`](../../inktime/app/domain/analysis/plan.py)、[`schema.py`](../../inktime/app/domain/analysis/schema.py) |
 | ESP32 7C／PhotoPainter 韌體 | `2.8.8`（本分支） | [`ink-display-7C-photo.ino`](../../esp32/ink-display-7C-photo/ink-display-7C-photo.ino) |
 | ESP32 Config Store payload | v5，讀取 v1–v5；舊容量 12、新 payload 24 slots read compatibility | [`device_config_store_core.h`](../../esp32/ink-display-7C-photo/device_config_store_core.h) |
@@ -58,3 +58,5 @@ Migration 61 加入付費操作檢查點、共享預算／限流及費用封存�
 Migration 62 加入 `runtime_identity` 密鑰指紋，並啟用五種未經管理員修改的預設清理政策；Migration 63 定點修復分析 `types` enum 並保留 Shadow 觀察模式。詳見[升級說明](../operations/MIGRATION_GUIDE_ZH_TW.md)與[資料保留](../resilience/DATA_RETENTION_ZH_TW.md)。已有指紋的資料庫若與 `session.key` 不符會以 `SESSION-003` 停止啟動；沒有舊指紋的歷史備份不能據此證明密鑰正確。
 
 未對帳的付費請求與預算保留額不會因經過 24 小時而自動釋放。只有未送出或已有完整費用證據才能回收；缺少 usage 不等於明確零費用。原始碼入口：`repositories/usage.py`、`services/budgets.py`、`workers/scheduler.py`；修復背景見[2026-09-21 紀錄](../operations/CODE_REVIEW_FOLLOWUP_20260921.md)。
+
+Migration 68 保存同一路徑內容變更前的照片與分析快照，並以付費操作 ID 配對完整模型 request／response；實際送出影像以內容雜湊放在 `/data/model-inputs`。預設不自動清除 AI Trace，Batch 本機輸入／輸出預設永久保留（`batch.local_retention_days=0`）。完整重裝／備份步驟與必要、建議、可調整設定見[首次使用 Checklist](../getting-started/FIRST_USE_CHECKLIST_ZH_TW.md)。一般送出會沿用已完成的付費 checkpoint，快取遺失不授權再次付費；所有已排除照片均須先明確恢復。

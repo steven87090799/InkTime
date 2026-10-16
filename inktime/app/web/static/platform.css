@@ -229,7 +229,7 @@ textarea:focus-visible {
 .setup-step.is-missing { border-color: color-mix(in srgb, var(--danger) 45%, var(--line)); }
 .setup-step.is-missing .setup-step-marker { border-color: var(--danger); color: var(--danger); }
 .setup-step-title { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
-.setup-step-title h3 { margin: 0; font-size: 16px; }
+.setup-step-title h4 { margin: 0; font-size: 16px; }
 .setup-step-title span, .setup-step-title b { padding: 3px 7px; border-radius: 999px; font-size: 10px; letter-spacing: .02em; }
 .setup-step-title span { background: color-mix(in srgb, var(--line) 65%, transparent); color: var(--muted); }
 .setup-step-title b { background: color-mix(in srgb, var(--accent) 16%, transparent); color: var(--accent); }

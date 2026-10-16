@@ -288,9 +288,10 @@ class PhotoRepository:
     @staticmethod
     def _path_is_still_present(root: Path, relative_path: str) -> bool:
         try:
-            return safe_join(root, relative_path).is_file()
-        except UnsafePathError:
-            # 不安全的舊資料不得被當成可自動搬移的來源。
+            return safe_join(root, relative_path, decode_url=False).is_file()
+        except (OSError, ValueError):
+            # An inaccessible NAS path is not evidence that the old photo has
+            # moved. Preserve its identity until a later successful census.
             return True
 
     def apply_scan_batch(
@@ -542,6 +543,23 @@ class PhotoRepository:
             # 同一路徑換成不同內容時，舊照片的 Metadata／本地特徵已不再可信。
             # 先在同一交易清空並標為 pending，後續 UPDATE 再寫回本次實際完成的區段。
             if changed_ids:
+                # Preserve the previous bytes-to-metadata/result pairing before
+                # invalidating the active rows. This archive is part of the DB
+                # backup and is never a ranking or automatic cleanup source.
+                for plan in plans:
+                    if not plan["content_changed"]:
+                        continue
+                    previous = {**plan["existing"], "root_path": str(root)}
+                    previous_analyses = [dict(row) for row in connection.execute(
+                        "SELECT * FROM photo_analysis WHERE photo_id=? ORDER BY id", (plan["id"],)
+                    )]
+                    connection.execute(
+                        "INSERT INTO photo_content_history("
+                        "id,photo_id,content_sha256,photo_json,analyses_json,created_at) VALUES (?,?,?,?,?,?)",
+                        (str(uuid4()), plan["id"], str(previous.get("sha256") or ""),
+                         json.dumps(previous, ensure_ascii=False),
+                         json.dumps(previous_analyses, ensure_ascii=False), now),
+                    )
                 for chunk in _chunks(changed_ids):
                     placeholders = ",".join("?" for _ in chunk)
                     connection.execute(
@@ -1590,9 +1608,9 @@ class PhotoRepository:
             ).fetchall()
 
     def eligible_photo_ids(self, *, limit: int | None = None, include_all_active: bool = False) -> list[str]:
-        where = "p.lifecycle_status='active' AND p.local_features_status='complete'"
+        where = "p.lifecycle_status='active' AND p.local_features_status='complete' AND COALESCE(p.never_upload,0)=0"
         if not include_all_active:
-            where += " AND p.eligible=1"
+            where += " AND p.eligible=1 AND COALESCE(p.exclusion_status,'') NOT IN ('auto_excluded','manually_excluded')"
         # Advance through pending photos on successive bounded runs. Technical
         # quality is a gate, not a permanent top-N admission score for the AI.
         query = f"""SELECT p.id FROM photos p WHERE {where}
@@ -1610,7 +1628,9 @@ class PhotoRepository:
     def count_active_eligible(self) -> int:
         with self.database.session() as connection:
             row = connection.execute(
-                "SELECT COUNT(*) FROM photos WHERE lifecycle_status='active' AND eligible=1"
+                "SELECT COUNT(*) FROM photos WHERE lifecycle_status='active' AND eligible=1 "
+                "AND COALESCE(never_upload,0)=0 AND COALESCE(exclusion_status,'') "
+                "NOT IN ('auto_excluded','manually_excluded')"
             ).fetchone()
         return int(row[0] or 0)
 
@@ -1658,7 +1678,9 @@ class PhotoRepository:
                 allowed.update(
                     str(row["id"])
                     for row in connection.execute(
-                        f"SELECT id FROM photos WHERE lifecycle_status='active' AND eligible=1 AND id IN ({placeholders})",  # noqa: S608
+                        f"SELECT id FROM photos WHERE lifecycle_status='active' AND eligible=1 "
+                        f"AND COALESCE(never_upload,0)=0 AND COALESCE(exclusion_status,'') "
+                        f"NOT IN ('auto_excluded','manually_excluded') AND id IN ({placeholders})",  # noqa: S608
                         tuple(chunk),
                     ).fetchall()
                 )
@@ -1668,15 +1690,19 @@ class PhotoRepository:
         self, *, group_by: str, limit: int, include_all_active: bool = False
     ) -> list[tuple[str, list[str]]]:
         """完整照片庫模式以年份或第一層資料夾拆成可暫停／續跑的既有工作。"""
-        where = (
-            "lifecycle_status='active'" if include_all_active else "lifecycle_status='active' AND eligible=1"
-        )
+        where = "p.lifecycle_status='active' AND COALESCE(p.never_upload,0)=0"
+        if not include_all_active:
+            where += " AND p.eligible=1 AND COALESCE(p.exclusion_status,'') NOT IN ('auto_excluded','manually_excluded')"
         remaining = max(1, min(int(limit), 100_000))
         with self.database.session() as connection:
             rows = connection.execute(
                 f"""
-                SELECT id,relative_path,captured_at,created_at FROM photos WHERE {where}
-                ORDER BY COALESCE(captured_at,created_at),relative_path,id
+                SELECT p.id,p.relative_path,p.captured_at,p.created_at FROM photos p WHERE {where}
+                ORDER BY EXISTS (
+                    SELECT 1 FROM photo_analysis a WHERE a.photo_id=p.id
+                    AND a.schema_version IN (4,5) AND a.score_kind='semantic'
+                    AND a.ranking_score IS NOT NULL
+                ),COALESCE(p.captured_at,p.created_at),p.relative_path,p.id
                 LIMIT ?
                 """,
                 (remaining,),
@@ -1690,7 +1716,19 @@ class PhotoRepository:
                 else str(row["captured_at"] or row["created_at"] or "未知")[:4]
             )
             groups.setdefault(key or "未知", []).append(str(row["id"]))
-        return list(groups.items())
+        batches = []
+        reserved_keys = set(groups)
+        for key, photo_ids in groups.items():
+            if len(photo_ids) <= 500:
+                batches.append((key, photo_ids))
+            else:
+                for offset in range(0, len(photo_ids), 500):
+                    batch_key = f"{key} · 批次 {offset // 500 + 1}"
+                    while batch_key in reserved_keys:
+                        batch_key += " · 分段"
+                    reserved_keys.add(batch_key)
+                    batches.append((batch_key, photo_ids[offset:offset + 500]))
+        return batches
 
     def is_top_candidate(self, photo_id: str, limit: int) -> bool:
         return photo_id in set(self.eligible_photo_ids(limit=max(1, min(int(limit), 10_000))))
@@ -1896,7 +1934,7 @@ class PhotoRepository:
                 break
             for row in rows:
                 try:
-                    path = safe_join(root, str(row["relative_path"]))
+                    path = safe_join(root, str(row["relative_path"]), decode_url=False)
                 except UnsafePathError:
                     continue
                 if path.is_file():
@@ -2319,6 +2357,7 @@ class PhotoRepository:
         vision_input_spec_json: str | None = None,
         prefilter_evaluation: dict | None = None,
         inherited_from: dict | None = None,
+        expected_content_sha256: str | None = None,
         connection=None,
     ) -> None:
         import json
@@ -2331,6 +2370,12 @@ class PhotoRepository:
             if own_transaction:
                 connection.execute("BEGIN IMMEDIATE")
             try:
+                if expected_content_sha256 is not None:
+                    current_content = connection.execute(
+                        "SELECT sha256 FROM photos WHERE id=?", (photo_id,)
+                    ).fetchone()
+                    if current_content is None or str(current_content["sha256"] or "") != expected_content_sha256:
+                        raise ValueError("IMG-CHANGED 照片內容已變更；已保存模型回應，不得配對到其他照片版本")
                 score_kind = resolve_score_kind(score_kind, provider=provider, stage=stage)
                 if prefilter_evaluation and prefilter_evaluation.get("decision") == "auto_excluded":
                     current = connection.execute(

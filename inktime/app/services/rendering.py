@@ -65,8 +65,8 @@ LAYOUTS = {
     "full": "單張照片",
     "postcard": "明信片",
     "photo_info": "照片＋日期地點",
-    "photo_pair": "雙照片拼版",
-    "photo_pair_caption": "雙照片・各自一句話",
+    "photo_pair": "雙照片拼版・一句話與日期",
+    "photo_pair_caption": "雙照片・各自一句話與日期",
     "adaptive_memory": "智慧自適應回憶",
     "calendar": "月曆相框",
     "weather_sensor": "天氣＋室內溫溼度",
@@ -272,7 +272,7 @@ class RenderService:
         elif layout_key not in {"photo_pair", "photo_pair_caption", "adaptive_memory"}:
             secondary_id = None
         if layout_key == "adaptive_memory":
-            source_path = safe_join(Path(primary["root_path"]), str(primary["relative_path"]))
+            source_path = safe_join(Path(primary["root_path"]), str(primary["relative_path"]), decode_url=False)
             source, _info = self._load_oriented_photo(primary, source_path, target_size=(512, 512))
             with source:
                 source_orientation = photo_orientation(source.size)
@@ -868,6 +868,13 @@ class RenderService:
             source_updated_at=str((analysis or {}).get("created_at") or "") or None,
             maximum_characters=int(self.settings.get("analysis.side_caption_max_chars", 16)),
         )
+        # Freeze the visible date together with the caption's photo identity.
+        # A queued render must not read a different date or visibility setting.
+        record["capture_date_label"] = (
+            self._date_label(self._captured_date(record["capture_date"]))
+            if bool(self.settings.get("render.show_capture_date", True))
+            else ""
+        )
         if override is not None:
             record.update(
                 {
@@ -1183,6 +1190,7 @@ class RenderService:
     ) -> None:
         """Draw one frozen caption only inside its photo's authoritative region."""
         text = str(record["text"])
+        date_label = str(record.get("capture_date_label") or "")
         if left_side:
             draw = ImageDraw.Draw(canvas)
             draw.rectangle((box.x, box.y, box.right, box.bottom), fill="white")
@@ -1192,10 +1200,31 @@ class RenderService:
             vertical_padding = 12
             available_width = max(1, box.width - horizontal_padding * 2)
             available_height = max(0, box.height - vertical_padding * 2)
+            y = box.y + vertical_padding
+            if date_label:
+                # The narrow side strip keeps the date small and gives the
+                # larger memory sentence most of the available height.
+                date_lines = date_label.replace("年", "年\n", 1).splitlines()
+                date_font = ImageFont.truetype(str(font_path), 10)
+                for date_size in range(14, 9, -1):
+                    candidate_font = ImageFont.truetype(str(font_path), date_size)
+                    if all(
+                        draw.textlength(line, font=candidate_font) <= available_width for line in date_lines
+                    ):
+                        date_font = candidate_font
+                        break
+                for line in date_lines:
+                    bounds = draw.textbbox((0, 0), line, font=date_font)
+                    glyph_width = bounds[2] - bounds[0]
+                    x = box.x + horizontal_padding + (available_width - glyph_width) // 2 - bounds[0]
+                    draw.text((x, y - bounds[1]), line, font=date_font, fill="#17221c")
+                    y += 18
+                y += 8
+                available_height = max(0, box.bottom - vertical_padding - y)
             font = ImageFont.truetype(str(font_path), 18)
             for font_size in range(24, 17, -1):
                 candidate_font = ImageFont.truetype(str(font_path), font_size)
-                if all(
+                if len(normalized) * (font_size + 4) <= available_height and all(
                     draw.textbbox((0, 0), character, font=candidate_font)[2]
                     - draw.textbbox((0, 0), character, font=candidate_font)[0]
                     <= available_width
@@ -1212,7 +1241,6 @@ class RenderService:
                     if maximum_characters > 0
                     else []
                 )
-            y = box.y + vertical_padding
             for character in characters:
                 bounds = draw.textbbox((0, 0), character, font=font)
                 glyph_width = bounds[2] - bounds[0]
@@ -1229,11 +1257,17 @@ class RenderService:
         draw = ImageDraw.Draw(canvas)
         draw.rectangle((box.x, box.y, box.right, box.bottom), fill="white")
         draw.line((box.x + 8, box.y + 2, box.right - 8, box.y + 2), fill="#1d2822", width=1)
+        caption_top = box.y + 8
+        if date_label:
+            font_path = self.fonts.resolve(str(self.settings.get("render.font_path", "")))
+            date_font = ImageFont.truetype(str(font_path), 14)
+            draw.text((box.x + 12, caption_top), date_label, font=date_font, fill="#17221c")
+            caption_top += 22
         self._draw_footer_caption(
             draw,
             text,
             x=box.x + 12,
-            top=box.y + 8,
+            top=caption_top,
             bottom=box.bottom - 6,
             width=max(1, box.width - 24),
             fill="#17221c",
@@ -1264,7 +1298,7 @@ class RenderService:
         photo = self.photos.get_with_path(photo_id)
         if photo is None:
             raise KeyError(photo_id)
-        path = safe_join(Path(photo["root_path"]), photo["relative_path"])
+        path = safe_join(Path(photo["root_path"]), photo["relative_path"], decode_url=False)
         if not path.is_file():
             return photo
         return self._ensure_render_features(photo, path)
@@ -1338,7 +1372,7 @@ class RenderService:
 
     @staticmethod
     def _date_label(captured: date | None) -> str:
-        return f"{captured.year}年{captured.month}月{captured.day}日" if captured else "拍攝日期未知"
+        return f"{captured.year}年{captured.month}月{captured.day}日" if captured else ""
 
     def _calendar(self, canvas: Image.Image, fonts, today: date, start_y: int = 75) -> None:
         draw = ImageDraw.Draw(canvas)
@@ -1380,7 +1414,7 @@ class RenderService:
         calendar_display_date: str | None = None,
     ) -> Image.Image:
         photo = self.ensure_photo_features(photo_id)
-        path = safe_join(Path(photo["root_path"]), photo["relative_path"])
+        path = safe_join(Path(photo["root_path"]), photo["relative_path"], decode_url=False)
         location = self.location_name(photo)
         captured = self._captured_date(photo["captured_at"])
         show_date = bool(self.settings.get("render.show_capture_date", True))
@@ -1393,7 +1427,12 @@ class RenderService:
             raise ValueError("RENDER-005 不支援的相框版型")
         # Pair-caption rendering reads its frozen per-photo records below;
         # avoid an unrelated caption query that could observe newer analysis.
-        caption = "" if layout_key == "photo_pair_caption" else self._caption(photo_id)
+        if layout_key in {"photo_pair", "photo_pair_caption"} and (
+            not secondary_photo_id or secondary_photo_id == photo_id
+        ):
+            layout_key = "photo_info"
+            secondary_photo_id = None
+        caption = "" if layout_key in {"photo_pair", "photo_pair_caption"} else self._caption(photo_id)
         adaptive_requested = layout_key == "adaptive_memory"
         orientation_key = orientation or str(
             device_config.get("frame_orientation")
@@ -1464,7 +1503,13 @@ class RenderService:
                             secondary_caption or caption_records[str(second_row["id"])],
                             str(second_row["id"]),
                         )
-                        self._fonts(f"{first_record['text']}\n{second_record['text']}")
+                        self._fonts(
+                            "\n".join(
+                                str(record.get(key) or "")
+                                for record in (first_record, second_record)
+                                for key in ("text", "capture_date_label")
+                            )
+                        )
                         canvas = Image.new("RGB", (frame_width, frame_height), "white")
                         pair_geometry = resolve_adaptive_pair_geometry(
                             effective_orientation, frame_width, frame_height
@@ -1490,7 +1535,7 @@ class RenderService:
                             ),
                             (primary_rect.x, primary_rect.y),
                         )
-                        second_path = safe_join(Path(second_row["root_path"]), second_row["relative_path"])
+                        second_path = safe_join(Path(second_row["root_path"]), second_row["relative_path"], decode_url=False)
                         second_source, second_orientation = self._load_oriented_photo(
                             second_row,
                             second_path,
@@ -1558,16 +1603,18 @@ class RenderService:
             ]
             if adaptive_requested:
                 text_parts.extend(["這一天留下了一個值得記住的片段。", "這一天留下了兩個值得記住的片段。"])
-            if layout_key == "photo_pair":
-                text_parts.append("請選擇第二張照片")
-            if layout_key == "photo_pair_caption":
+            if layout_key in {"photo_pair", "photo_pair_caption"}:
                 if not secondary_photo_id:
                     raise ValueError("RENDER-005 雙照片各自一句話需要第二張照片")
                 second_for_caption = self.photos.get_with_path(secondary_photo_id)
                 if second_for_caption is None:
                     raise ValueError("RENDER-005 第二張照片不存在")
-                first_record = dict(primary_caption or self._caption_record(photo, today))
-                second_record = dict(secondary_caption or self._caption_record(second_for_caption, today))
+                first_record = self._bound_caption_record(
+                    primary_caption or self._caption_record(photo, today), photo_id
+                )
+                second_record = self._bound_caption_record(
+                    secondary_caption or self._caption_record(second_for_caption, today), secondary_photo_id
+                )
                 # Both rendered caption regions are part of the font contract.
                 # Prefixes make a coverage failure actionable without changing
                 # the pixels rendered into either region.
@@ -1575,6 +1622,8 @@ class RenderService:
                     [
                         f"Caption A：{first_record['text']}",
                         f"Caption B：{second_record['text']}",
+                        str(first_record.get("capture_date_label") or ""),
+                        str(second_record.get("capture_date_label") or ""),
                     ]
                 )
             if weather:
@@ -1588,53 +1637,11 @@ class RenderService:
             canvas = Image.new("RGB", (frame_width, frame_height), "white")
             draw = ImageDraw.Draw(canvas)
 
-            if layout_key == "photo_pair":
-                primary_rect = _required_rect(geometry.primary_photo, "primary_photo")
-                secondary_rect = _required_rect(geometry.secondary_photo, "secondary_photo")
-                first_size = (primary_rect.width, primary_rect.height)
-                second_size = (secondary_rect.width, secondary_rect.height)
-                second_position = (secondary_rect.x, secondary_rect.y)
-                first = self._fit_photo(source, photo, first_size, crop_x, crop_y, fit_mode_key)
-                canvas.paste(first, (primary_rect.x, primary_rect.y))
-                if secondary_photo_id:
-                    second_photo = self.ensure_photo_features(secondary_photo_id)
-                    second_path = safe_join(Path(second_photo["root_path"]), second_photo["relative_path"])
-                    second_source, second_orientation = self._load_oriented_photo(
-                        second_photo, second_path, target_size=second_size
-                    )
-                    if orientation_metadata is not None:
-                        orientation_metadata.append(
-                            {"photo_id": secondary_photo_id, "orientation": second_orientation.as_dict()}
-                        )
-                    with second_source:
-                        second = self._fit_photo(
-                            second_source,
-                            second_photo,
-                            second_size,
-                            second_photo["crop_manual_x"],
-                            second_photo["crop_manual_y"],
-                            fit_mode_key,
-                        )
-                        canvas.paste(second, second_position)
-                else:
-                    placeholder = "請選擇第二張照片"
-                    text_width = draw.textlength(placeholder, font=fonts["body"])
-                    draw.text(
-                        (
-                            second_position[0] + max(18, (second_size[0] - text_width) / 2),
-                            second_position[1] + second_size[1] / 2 - 14,
-                        ),
-                        placeholder,
-                        font=fonts["body"],
-                        fill="black",
-                    )
-                return finish(canvas)
-
-            if layout_key == "photo_pair_caption":
+            if layout_key in {"photo_pair", "photo_pair_caption"}:
                 if not secondary_photo_id:
                     raise ValueError("RENDER-005 雙照片各自一句話需要第二張照片")
                 second_photo = self.ensure_photo_features(secondary_photo_id)
-                second_path = safe_join(Path(second_photo["root_path"]), second_photo["relative_path"])
+                second_path = safe_join(Path(second_photo["root_path"]), second_photo["relative_path"], decode_url=False)
                 second_source, second_orientation = self._load_oriented_photo(
                     second_photo, second_path, target_size=(frame_width, frame_height)
                 )
@@ -1642,8 +1649,12 @@ class RenderService:
                     orientation_metadata.append(
                         {"photo_id": secondary_photo_id, "orientation": second_orientation.as_dict()}
                     )
-                first_caption = dict(primary_caption or self._caption_record(photo, self._today()))
-                second_caption = dict(secondary_caption or self._caption_record(second_photo, self._today()))
+                first_caption = self._bound_caption_record(
+                    primary_caption or self._caption_record(photo, today), photo_id
+                )
+                second_caption = self._bound_caption_record(
+                    secondary_caption or self._caption_record(second_photo, today), secondary_photo_id
+                )
                 primary_rect = _required_rect(geometry.primary_photo, "primary_photo")
                 secondary_rect = _required_rect(geometry.secondary_photo, "secondary_photo")
                 primary_caption_rect = _required_rect(
@@ -1678,19 +1689,7 @@ class RenderService:
                         positions[1],
                     )
                 for record, box in ((first_caption, caption_boxes[0]), (second_caption, caption_boxes[1])):
-                    left, top = box.x, box.y
-                    right, bottom = box.right, box.bottom
-                    draw.rectangle((left, top, right, bottom), fill="white")
-                    draw.line((left + 8, top + 2, right - 8, top + 2), fill="#1d2822", width=1)
-                    self._draw_footer_caption(
-                        draw,
-                        str(record["text"]),
-                        x=left + 12,
-                        top=top + 8,
-                        bottom=bottom - 6,
-                        width=max(1, right - left - 24),
-                        fill="#17221c",
-                    )
+                    self._draw_adaptive_pair_caption(canvas, record, box, left_side=False)
                 return finish(canvas)
 
             if layout_key == "postcard":
@@ -2312,7 +2311,7 @@ class RenderService:
             if photo is None:
                 continue
             try:
-                path = safe_join(Path(photo["root_path"]), photo["relative_path"])
+                path = safe_join(Path(photo["root_path"]), photo["relative_path"], decode_url=False)
                 if not path.is_file():
                     continue
                 refreshed = self._ensure_render_features(photo, path)

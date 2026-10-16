@@ -45,6 +45,18 @@ def test_upload_rechecks_current_privacy_and_job_state(app):
         assert_upload_allowed(database.path, photo, job)
 
 
+@pytest.mark.parametrize("state", ["auto_excluded", "manually_excluded"])
+def test_upload_rechecks_exclusion_even_after_request_was_prepared(app, state):
+    database = app.extensions["inktime_database"]
+    photo = add_photos(app, 1)[0]
+    assert_upload_allowed(database.path, photo)
+    with database.session() as connection:
+        connection.execute("UPDATE photos SET eligible=0,exclusion_status=?,manual_override=1 WHERE id=?", (state, photo))
+    with pytest.raises(UploadNotAllowedError) as error:
+        assert_upload_allowed(database.path, photo)
+    assert error.value.not_sent
+
+
 def test_unauthenticated_critical_alerts_are_not_queried_or_rendered(app, client):
     create_admin(app)
     with app.extensions["inktime_database"].session() as connection:

@@ -141,6 +141,10 @@ def test_dashboard_renders_one_page_setup_overview_with_direct_actions(client, a
 
     assert 'id="setup-overview"' in body
     assert "完整設定導覽" in body
+    for group in ("必須完成的設定", "非必要但建議查看", "依照需求調整"):
+        assert f'aria-label="{group}"' in body
+    assert "重裝沿用原本 /data 與 /photos 掛載" in body
+    assert "橫向雙直圖、直向雙橫圖各有一句話與較小日期" in body
     assert 'role="progressbar"' in body
     assert "第 1 級" in body
     assert 'href="#setup-overview"' in body
@@ -165,6 +169,24 @@ def test_dashboard_renders_one_page_setup_overview_with_direct_actions(client, a
         "/backups",
     ):
         assert f'href="{action_url}"' in body
+
+
+def test_setup_checklist_requires_paid_configuration_only_in_ai_modes(app):
+    from inktime.app.api.dashboard import _setup_overview
+
+    settings = app.extensions["inktime_settings_repository"]
+    database = app.extensions["inktime_database"]
+    for mode, required in (("local_only", False), ("automatic_ai", True), ("local_with_manual_ai", True)):
+        settings.update("analysis.execution_mode", mode, changed_by="test", source_ip="127.0.0.1")
+        with app.app_context(), database.session() as connection:
+            overview = _setup_overview(connection)
+        steps = {step["title"]: step for step in overview["steps"]}
+        for title in ("Vision Provider 與模型", "用量限制與預算保護", "送出前排除與人工複核"):
+            assert steps[title]["required"] is required
+            assert steps[title]["group"] == ("required" if required else "recommended")
+        assert steps["備份與保留"]["required"] is True
+        assert overview["total"] == sum(step["required"] for step in overview["steps"])
+        assert overview["missing"] == sum(step["required"] and not step["complete"] for step in overview["steps"])
 
 
 def test_control_glossary_lists_every_setting_options_actions_and_jumps(client, app):

@@ -444,7 +444,7 @@ class BatchAnalysisService:
             if self.analysis.prefilter_snapshot(row, policy_settings=policy_settings)["excluded"]:
                 continue
             try:
-                source = safe_join(Path(str(row["root_path"])), str(row["relative_path"]))
+                source = safe_join(Path(str(row["root_path"])), str(row["relative_path"]), decode_url=False)
             except (OSError, ValueError):
                 continue
             if not source.is_file():
@@ -850,6 +850,7 @@ class BatchAnalysisService:
                 source,
                 str(item["content_sha256"]),
                 int((plan.get("vision_input") or plan.get("high_vision_input") or {})["max_side"]),
+                verify_source=True,
             ) as thumbnail:
                 item["thumbnail"] = thumbnail
                 try:
@@ -917,7 +918,9 @@ class BatchAnalysisService:
         with self.database.session() as connection:
             blocked = connection.execute(
                 "SELECT 1 FROM analysis_batch_items i LEFT JOIN photos p ON p.id=i.photo_id "
-                "WHERE i.batch_id=? AND (p.id IS NULL OR p.never_upload<>0 OR p.lifecycle_status<>'active') LIMIT 1",
+                "WHERE i.batch_id=? AND (p.id IS NULL OR p.never_upload<>0 OR p.lifecycle_status<>'active' "
+                "OR p.eligible<>1 OR p.exclusion_status IN ('auto_excluded','manually_excluded') "
+                "OR COALESCE(p.sha256,'')<>i.content_sha256) LIMIT 1",
                 (batch_id,),
             ).fetchone()
             batch = connection.execute("SELECT job_id FROM analysis_batches WHERE id=?", (batch_id,)).fetchone()
@@ -2106,7 +2109,7 @@ class BatchAnalysisService:
     @staticmethod
     def _current_content_sha(photo) -> str | None:
         try:
-            source = safe_join(Path(str(photo["root_path"])), str(photo["relative_path"]))
+            source = safe_join(Path(str(photo["root_path"])), str(photo["relative_path"]), decode_url=False)
             digest = hashlib.sha256()
             with source.open("rb") as stream:
                 for chunk in iter(lambda: stream.read(1024 * 1024), b""):
@@ -2439,7 +2442,12 @@ class BatchAnalysisService:
 
     def _cleanup_local(self, batch: dict[str, Any], *, immediate: bool = False) -> None:
         batch = dict(batch)
-        retention_days = 0 if immediate else max(0, int(self.settings.get("batch.local_retention_days", 7)))
+        configured_days = max(0, int(self.settings.get("batch.local_retention_days", 0)))
+        # Inputs, errors and downloaded output are durable billing/model evidence.
+        # Zero means permanent, including cancellation and failed preparation.
+        if configured_days == 0:
+            return
+        retention_days = 0 if immediate else configured_days
         cutoff = time.time() - (retention_days * 24 * 60 * 60)
         for key in ("local_input_path", "local_output_path", "local_error_path"):
             raw_path = batch.get(key)

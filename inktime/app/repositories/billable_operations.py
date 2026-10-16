@@ -18,7 +18,7 @@ class BillableOperationRepository:
     def __init__(self, database: Database):
         self.database = database
 
-    def check_retry(self, content_sha256: str, request_fingerprint: str) -> bool:
+    def check_retry(self, content_sha256: str, request_fingerprint: str, *, reuse_completed: bool = False) -> bool:
         with self.database.session() as connection:
             if connection.execute(
                 "SELECT 1 FROM billable_operations o LEFT JOIN ai_cache_reservations r "
@@ -28,8 +28,9 @@ class BillableOperationRepository:
             ).fetchone():
                 raise UnreconciledOperationError("先前 Vision 請求狀態未知；須先對帳，不得自動重新送圖")
             return connection.execute(
-                "SELECT 1 FROM billable_operations WHERE request_fingerprint=? AND state='response' LIMIT 1",
-                (request_fingerprint,),
+                "SELECT 1 FROM billable_operations WHERE request_fingerprint=? "
+                "AND (state='response' OR (? AND state='completed')) LIMIT 1",
+                (request_fingerprint, int(reuse_completed)),
             ).fetchone() is not None
 
     def begin(self, content_sha256: str, request_fingerprint: str, *, reuse_completed: bool = False, context: dict | None = None) -> tuple[str, ProviderResponse | None]:
