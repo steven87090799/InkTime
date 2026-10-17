@@ -19,6 +19,7 @@ from inktime.app.domain.photopainter.offline_schedule import (
     validate_offline_schedule,
 )
 from inktime.app.domain.rendering import current_local_date
+from inktime.app.domain.rendering.adaptive_layout import select_auto_photo_frames
 from inktime.app.domain.rendering.system_presets import DEFAULT_RENDER_PROFILE
 
 
@@ -410,7 +411,7 @@ class DisplayPreparationService:
             }
 
         layout = str(device["layout_mode"] or self.render_service.settings.get("render.layout", "photo_info"))
-        photos_per_frame = 2 if layout in {"photo_pair", "photo_pair_caption"} else 1
+        photos_per_frame = 2 if layout in {"photo_pair", "photo_pair_caption", "auto_photo"} else 1
         required_candidates = len(schedule_times) * photos_per_frame
         candidates = self.render_service.select_candidates_details(
             required_candidates, target_date=target
@@ -418,7 +419,26 @@ class DisplayPreparationService:
         unique_candidates = list(
             dict((str(row["id"]), row) for row in candidates).values()
         )
-        if len(unique_candidates) < required_candidates:
+        if layout == "auto_photo":
+            rows = [
+                {**dict(self.render_service.photos.get_with_path(str(row["id"])) or {}), **row}
+                for row in unique_candidates
+            ]
+            frame_groups = select_auto_photo_frames(
+                rows,
+                frame_orientation=str(
+                    device["frame_orientation"]
+                    or self.render_service.settings.get("render.frame_orientation", "portrait")
+                ),
+                count=len(schedule_times),
+            )
+        else:
+            frame_groups = [
+                unique_candidates[start:start + photos_per_frame]
+                for start in range(0, len(unique_candidates), photos_per_frame)
+                if len(unique_candidates[start:start + photos_per_frame]) == photos_per_frame
+            ][:len(schedule_times)]
+        if len(frame_groups) < len(schedule_times):
             outcome = self.offline_schedules.record_terminal_outcome(
                 device_id=device_id,
                 target_date=target.isoformat(),
@@ -445,9 +465,11 @@ class DisplayPreparationService:
 
         release_ids: list[str] = []
         try:
-            for slot_index, _slot in enumerate(schedule_times):
-                start = slot_index * photos_per_frame
-                frame_candidates = unique_candidates[start:start + photos_per_frame]
+            for frame_candidates in frame_groups:
+                frame_device = dict(device)
+                if layout == "auto_photo":
+                    frame_device["layout_mode"] = "full" if len(frame_candidates) == 1 else "photo_pair"
+                    frame_device["_auto_photo"] = True
                 result = self.render_service.publish(
                     [str(candidate["id"]) for candidate in frame_candidates],
                     created_by,
@@ -456,7 +478,7 @@ class DisplayPreparationService:
                     history=None,
                     device_ids=[device_id],
                     quantity_override=1,
-                    device_configs={device_id: dict(device)},
+                    device_configs={device_id: frame_device},
                     activate_pointers=False,
                     assign_device_releases=False,
                 )

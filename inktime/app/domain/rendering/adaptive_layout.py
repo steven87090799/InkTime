@@ -32,6 +32,34 @@ def orientation_matches(size: tuple[int, int], desired: str) -> bool:
     return photo_orientation(size) == desired
 
 
+def auto_photo_layout(size: tuple[int, int], frame_orientation: str) -> str:
+    if frame_orientation not in {"portrait", "landscape"}:
+        raise ValueError("相框方向不合法")
+    orientation = photo_orientation(size)
+    return "full" if orientation in {"square", frame_orientation} else "photo_pair"
+
+
+def select_auto_photo_frames(
+    candidates: list[dict[str, Any]], *, frame_orientation: str, count: int
+) -> list[list[dict[str, Any]]]:
+    """Reserve distinct sources: matching photos alone, opposite photos in pairs."""
+    available = list({str(row["id"]): row for row in candidates}.values())
+    frames: list[list[dict[str, Any]]] = []
+    while available and len(frames) < count:
+        primary = available.pop(0)
+        size = effective_dimensions(primary)
+        if min(size) <= 0:
+            continue
+        if auto_photo_layout(size, frame_orientation) == "full":
+            frames.append([primary])
+            continue
+        secondary = select_pair_candidate(primary, available, frame_orientation=frame_orientation)
+        if secondary is not None:
+            available.remove(secondary)
+            frames.append([primary, secondary])
+    return frames
+
+
 def effective_dimensions(photo: dict[str, Any]) -> tuple[int, int]:
     """Resolve metadata dimensions through EXIF plus the existing visual override contract."""
     # Stored scanner dimensions already describe EXIF-transposed pixels.

@@ -8,6 +8,48 @@ from inktime.app.domain.analysis.scoring import SEMANTIC_SCORE_KIND
 from tests.unit.test_analysis_schema import valid_result
 
 
+@pytest.mark.parametrize("wide,tall,expected", [(12, 0, 12), (0, 24, 12), (6, 12, 12), (0, 23, 0)])
+def test_auto_photo_schedule_reserves_only_orientation_appropriate_sources(
+    app, monkeypatch, wide, tall, expected
+):
+    times = [f"{hour:02d}:25" for hour in range(0, 24, 2)]
+    did, _ = app.extensions["inktime_device_repository"].create(
+        "Automatic photo frame", panel_profile="gdep073e01_6c",
+        delivery_mode="inktime_offline_schedule", offline_prefetch_allowed=True,
+        schedule_times=times, offline_schedule_max_slots=16,
+        frame_orientation="landscape", layout_mode="auto_photo", fit_mode="contain",
+    )
+    service = app.extensions["inktime_display_preparation_service"]
+    rows = [
+        {"id": f"wide-{i}", "width": 1600, "height": 900} for i in range(wide)
+    ] + [{"id": f"tall-{i}", "width": 900, "height": 1600} for i in range(tall)]
+    published = []
+
+    def publish(ids, *args, **kwargs):
+        config = kwargs["device_configs"][did]
+        published.append((ids, config["layout_mode"]))
+        assert config["_auto_photo"]
+        return {"release_id": f"20261017-000000-{len(published):06d}"}
+
+    monkeypatch.setattr(service.render_service, "select_candidates_details", lambda *args, **kwargs: rows)
+    monkeypatch.setattr(service.render_service, "publish", publish)
+    monkeypatch.setattr(service.offline_schedules, "prepare_day", lambda **kwargs: {
+        "schedule": {"schedule_times": times}, "slots": [{"time": time} for time in times],
+    })
+    result = service.prepare_device_day(device_id=did, target_date="2026-10-17", created_by="test")
+    assert len(published) == expected
+    if expected:
+        assert result["status"] == "ready"
+        used = [photo for ids, _ in published for photo in ids]
+        assert len(used) == len(set(used))
+        for ids, layout in published:
+            assert (layout == "full" and len(ids) == 1 and ids[0].startswith("wide-")) or (
+                layout == "photo_pair" and len(ids) == 2 and all(photo.startswith("tall-") for photo in ids)
+            )
+    else:
+        assert result["outcome"] == "no_content"
+
+
 @pytest.mark.parametrize("available", [24, 23])
 def test_two_hour_offline_pair_schedule_keeps_two_distinct_sources_per_frame(app, monkeypatch, available):
     times = [f"{hour:02d}:00" for hour in range(0, 24, 2)]

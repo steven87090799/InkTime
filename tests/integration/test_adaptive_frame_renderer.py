@@ -58,6 +58,64 @@ def _logical_landscape(image: Image.Image) -> Image.Image:
     return image.transpose(Image.Transpose.ROTATE_90)
 
 
+@pytest.mark.parametrize("primary_size,expected_layout", [((1600, 960), "full"), ((900, 1600), "photo_pair")])
+def test_auto_photo_resolves_source_count_and_draws_each_capture_date(
+    app, tmp_path, primary_size, expected_layout
+):
+    root = tmp_path / "photos"
+    root.mkdir()
+    _analyzed_photo(app, root, "primary", primary_size, "2024-07-01T10:00:00+00:00")
+    _analyzed_photo(app, root, "secondary", (900, 1600), "2024-07-02T10:00:00+00:00")
+    service = app.extensions["inktime_render_service"]
+    plan = service.resolve_render_plan(
+        "primary", layout="auto_photo", orientation="landscape", secondary_photo_id="secondary"
+    )
+    assert plan["layout"] == expected_layout
+    assert plan["capture_date_labels"]["primary"] == "2024年7月1日"
+    expected_ids = {"primary", "secondary"} if expected_layout == "photo_pair" else {"primary"}
+    assert set(plan["capture_date_labels"]) == expected_ids
+    if expected_layout == "photo_pair":
+        assert plan["capture_date_labels"]["secondary"] == "2024年7月2日"
+    else:
+        assert plan["secondary_photo_id"] is None
+    image = service.render_photo(
+        "primary", layout="auto_photo", orientation="landscape", secondary_photo_id="secondary"
+    )
+    logical = _logical_landscape(image)
+    assert logical.size == (800, 480)
+    for key in ("primary_caption", "secondary_caption"):
+        rect = plan["geometry"].get(key)
+        if rect is not None:
+            footer = logical.crop((rect["x"], rect["y"], rect["x"] + rect["width"], rect["y"] + rect["height"]))
+            assert footer.convert("L").getextrema()[0] < 32, "Capture-date text must be visible"
+            assert footer.getpixel((0, 0)) == (255, 255, 255)
+
+
+def test_auto_photo_rejects_unpaired_portrait_instead_of_publishing_wrong_pair(app, tmp_path):
+    root = tmp_path / "photos"
+    root.mkdir()
+    _analyzed_photo(app, root, "primary", (900, 1600), "2024-07-01T10:00:00+00:00")
+    _analyzed_photo(app, root, "wide", (1600, 900), "2024-07-02T10:00:00+00:00")
+    service = app.extensions["inktime_render_service"]
+    with pytest.raises(ValueError, match="需要另一張"):
+        service.resolve_render_plan("primary", layout="auto_photo", orientation="landscape")
+    with pytest.raises(ValueError, match="方向契約"):
+        service.resolve_render_plan(
+            "primary", layout="auto_photo", orientation="landscape", secondary_photo_id="wide"
+        )
+
+
+def test_auto_photo_uses_unknown_capture_date_without_substituting_display_date(app, tmp_path):
+    root = tmp_path / "photos"
+    root.mkdir()
+    _analyzed_photo(app, root, "primary", (1600, 900), "2024-07-01T10:00:00+00:00")
+    with app.extensions["inktime_database"].session() as connection:
+        connection.execute("UPDATE photos SET captured_at=NULL WHERE id='primary'")
+    service = app.extensions["inktime_render_service"]
+    plan = service.resolve_render_plan("primary", layout="auto_photo", orientation="landscape")
+    assert plan["capture_date_labels"] == {"primary": "拍攝日期未知"}
+
+
 def test_adaptive_landscape_single_contains_matching_photo_and_keeps_footer(app, tmp_path):
     root = tmp_path / "photos"
     root.mkdir()

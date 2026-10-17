@@ -828,6 +828,7 @@ SETTING_DEFINITIONS: dict[str, dict[str, Any]] = {
         "risk": "日曆與天氣版型會縮小照片顯示區域",
         "choices": [
             "full",
+            "auto_photo",
             "postcard",
             "photo_info",
             "photo_pair",
@@ -838,6 +839,7 @@ SETTING_DEFINITIONS: dict[str, dict[str, Any]] = {
         ],
         "choice_labels": {
             "full": "單張照片",
+            "auto_photo": "自動照片＋日期（橫單直雙）",
             "postcard": "明信片",
             "photo_info": "單張照片＋資訊",
             "photo_pair": "雙照片拼版",
