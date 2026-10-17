@@ -2,6 +2,8 @@
 
 從 NAS 初次部署、Web 首張 Release 到 ESP32 配對與顯示驗收，請先看[完整上線指南](PRODUCTION_DEPLOYMENT_GUIDE_ZH_TW.md)。
 
+使用共用唯讀照片庫、處理十萬張照片與重新安裝前，請完成[首次使用 Checklist](../getting-started/FIRST_USE_CHECKLIST_ZH_TW.md)。每次新版本映像發布成功後，GitHub Release 會提供 `inktime-nas-vX.Y.Z.zip` 安裝包，內含 Compose、已指定版本的 `.env.example`、Checklist 與映像 digest；NAS 不需要 clone 原始碼或自行 build。解壓、填妥環境檔後即可 pull／部署。需要固定版本時使用 `INKTIME_IMAGE_TAG=vX.Y.Z`；下方 `latest` 是另外可選的一鍵追蹤方式。
+
 **UGREEN Compose 專案的一鍵更新是正式需求。** 首次設定時把映像設為 `ghcr.io/steven87090799/inktime:latest`（本 Compose 檔預設如此），並保留 [`pull_policy: always`](https://docs.docker.com/reference/compose-file/services/#pull_policy)。每次 InkTime 穩定版成功發布後，只要在 UGREEN 按「重新部署」，Compose 就會重新檢查並拉取 `latest`；之後不需改 Tag 或重新輸入登入資訊。預發布版不會移動 `latest`。
 
 若選擇主機端 `scripts/update_nas.sh`，則仍可用明確 SemVer Tag 執行有前置驗證與更新前 recovery point 的流程。兩種更新方式都拉 GHCR 預建映像，不在 NAS Build。

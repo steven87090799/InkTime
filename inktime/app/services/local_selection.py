@@ -46,7 +46,7 @@ class LocalSelectionPolicy:
         for row in rows:
             item = dict(row)
             try:
-                if safe_join(Path(str(item["root_path"])), str(item["relative_path"])).is_file():
+                if safe_join(Path(str(item["root_path"])), str(item["relative_path"]), decode_url=False).is_file():
                     result.append(item)
             except (UnsafePathError, OSError, ValueError):
                 continue

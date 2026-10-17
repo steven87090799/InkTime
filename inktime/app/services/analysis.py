@@ -38,6 +38,7 @@ from inktime.app.domain.analysis.scoring import (
 )
 from inktime.app.domain.analysis.schema import normalize_caption_controls, validate_model_response
 from inktime.app.domain.photos import ThumbnailCache
+from inktime.app.domain.photos.formats import assert_source_content
 from inktime.app.domain.photos.quality_policy import (
     FEATURE_VERSION,
     evaluate_local_quality,
@@ -52,6 +53,7 @@ from inktime.app.repositories.usage import UsageRepository
 from inktime.app.repositories.billable_operations import BillableOperationRepository
 from inktime.app.services.budgets import BudgetService
 from inktime.app.services.usage_tracking import record_failed_unknown_usage
+from inktime.app.services.usage_periods import usage_periods
 
 
 
@@ -436,6 +438,7 @@ class PhotoAnalysisService:
             monthly_limit=int(
                 policy.get("monthly_photo_limit", self.settings.get("analysis.ai_monthly_photo_limit", 500))
             ),
+            periods=usage_periods(str(self.settings.get("general.timezone", "Asia/Taipei"))),
         )
 
     def _score_result(
@@ -505,6 +508,7 @@ class PhotoAnalysisService:
             vision_request_fingerprint=vision_request_fingerprint,
             vision_input_spec_json=vision_input_spec_json,
             prefilter_evaluation=prefilter_evaluation,
+            expected_content_sha256=str(photo["sha256"] or ""),
             connection=connection,
         )
         self._activity(
@@ -842,7 +846,7 @@ class PhotoAnalysisService:
             trace_id=prompt_version,
         )
         has_checkpoint = BillableOperationRepository(self.photos.database).check_retry(
-            content_sha256, request_fingerprint
+            content_sha256, request_fingerprint, reuse_completed=not force_recompute
         )
         owner_id = str(uuid4())
         provider_timeout = max(5, int(getattr(selected_provider, "timeout", 120)))
@@ -921,7 +925,7 @@ class PhotoAnalysisService:
             )
             # The only owner generates a JPEG, after both cache checks.
             with image_factory() as image:
-                result, raw, cost, usage, latency = self._perform_uncached_model_call(
+                result, raw, cost, usage, latency, checkpoint_reused = self._perform_uncached_model_call(
                     provider=provider,
                     selected_channel=selected_channel,
                     image=image,
@@ -946,6 +950,7 @@ class PhotoAnalysisService:
                         f"{hashlib.sha256(owner_id.encode('utf-8')).hexdigest()[:16]}"
                     ),
                     trace_id=trace_id,
+                    reuse_completed=not force_recompute,
                 )
         except Exception as exc:
             self.photos.finish_ai_cache_reservation(cache_key, owner_id, error=str(exc))
@@ -1037,7 +1042,7 @@ class PhotoAnalysisService:
             result,
             raw,
             cost,
-            False,
+            checkpoint_reused,
             actual_provider,
             model,
             request_fingerprint,
@@ -1071,7 +1076,8 @@ class PhotoAnalysisService:
         vision_attempt: VisionAttemptState,
         provider_request_context_id: str,
         trace_id: str | None,
-    ) -> tuple[dict, str, float, Usage, int]:
+        reuse_completed: bool = True,
+    ) -> tuple[dict, str, float, Usage, int, bool]:
         started_at = datetime.now(timezone.utc).isoformat()
         started_perf = time.perf_counter()
         settings = self.budgets.settings if self.budgets else self.settings
@@ -1087,7 +1093,9 @@ class PhotoAnalysisService:
         )
         operations = BillableOperationRepository(self.photos.database)
         operation_id, checkpoint = operations.begin(content_sha256, vision_request_fingerprint,
+            reuse_completed=reuse_completed,
             context={"provider": actual_call_provider.name, "model": model, "photo_id": photo_id, "job_id": job_id})
+        completed_checkpoint = checkpoint is not None and operations.is_completed(operation_id)
         if checkpoint is None and self.budgets:
             try:
                 self.budgets.reserve(
@@ -1120,7 +1128,17 @@ class PhotoAnalysisService:
                 response = checkpoint
             else:
                 from inktime.app.core.model_upload_guard import assert_upload_allowed
-                guard = {"database_path": str(self.photos.database.path), "photo_id": photo_id, "job_id": job_id}
+                from inktime.app.repositories.model_evidence import save_model_request
+                save_model_request(self.photos.database, operation_id, {
+                    "image_path": Path(image), "model": model, "detail": detail, "stage": stage,
+                    "max_tokens": max_tokens, "reasoning_effort": reasoning_effort,
+                    "caption_controls": caption_controls, "prompt_version": prompt_version,
+                    "content_sha256": content_sha256,
+                    "vision_request_fingerprint": vision_request_fingerprint,
+                })
+                guard = {"database_path": str(self.photos.database.path), "photo_id": photo_id,
+                         "job_id": job_id, "operation_id": operation_id,
+                         "expected_content_sha256": content_sha256}
                 assert_upload_allowed(**guard)
                 if getattr(actual_call_provider, "supports_upload_guard", False):
                     call["upload_guard"] = guard
@@ -1379,14 +1397,15 @@ class PhotoAnalysisService:
         return (
             result,
             raw,
-            total_cost,
-            Usage(
+            0.0 if completed_checkpoint else total_cost,
+            Usage() if completed_checkpoint else Usage(
                 total_input_tokens,
                 total_output_tokens,
                 total_cached_tokens,
                 total_reasoning_tokens,
             ),
             latency,
+            completed_checkpoint,
         )
 
     def analyze_photo(
@@ -1408,9 +1427,10 @@ class PhotoAnalysisService:
         photo = self.photos.get_with_path(photo_id)
         if photo is None:
             raise FileNotFoundError("SCAN-001 找不到照片資料")
-        source = safe_join(Path(photo["root_path"]), str(photo["relative_path"]))
+        source = safe_join(Path(photo["root_path"]), str(photo["relative_path"]), decode_url=False)
         if not source.is_file():
             raise FileNotFoundError("SCAN-001 找不到照片檔案")
+        assert_source_content(source, photo["sha256"])
         photo = self._ensure_e6_suitability(photo_id, photo, source)
         analysis_spec = dict(analysis_plan or {})
         if not analysis_spec:
@@ -1530,12 +1550,9 @@ class PhotoAnalysisService:
             )
             return {"analysis": result, "stage": "local", "_actual_cost": 0}
 
-        if (
-            self.settings is not None
-            and not force_ai
-            and not bool(photo["eligible"])
-            and not bool(photo["manual_override"])
-        ):
+        if not bool(photo["eligible"]) or str(photo["exclusion_status"] or "") in {
+            "auto_excluded", "manually_excluded"
+        }:
             result = validate_analysis_result(
                 self._prefilter_result(photo, policy_settings=plan_prefilter) or self._local_result(photo)
             )
@@ -1636,7 +1653,7 @@ class PhotoAnalysisService:
             ai_trace_id,
         ) = self._model_call(
             provider=provider,
-            image_factory=lambda: self.thumbnails.acquire_for_use(source, sha, image_max_side),
+            image_factory=lambda: self.thumbnails.acquire_for_use(source, sha, image_max_side, verify_source=True),
             model=model,
             detail=str(vision_input.get("detail", "high")),
             stage="single",

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from io import BytesIO
+from hashlib import sha256
 import json
 import multiprocessing
 import os
@@ -49,7 +50,7 @@ def _library_photo(app, root: Path, photo_id: str = "preview-photo") -> str:
                 lifecycle_status,crop_focus_x,crop_focus_y,e6_score,created_at,updated_at
             ) VALUES (?,?,?,?,?,?,'analyzed',1,'active',.5,.5,80,datetime('now'),datetime('now'))
             """,
-            (photo_id, library_id, f"{photo_id}.jpg", "a" * 64, 640, 480),
+            (photo_id, library_id, f"{photo_id}.jpg", sha256((root / f"{photo_id}.jpg").read_bytes()).hexdigest(), 640, 480),
         )
     photos.save_analysis(
         photo_id,

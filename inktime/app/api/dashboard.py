@@ -22,6 +22,7 @@ def _configured_step(
     action_url: str,
     attention: bool = False,
     required: bool = True,
+    group: str | None = None,
 ) -> dict:
     return {
         "number": number,
@@ -33,6 +34,7 @@ def _configured_step(
         "action_label": action_label,
         "action_url": action_url,
         "required": required,
+        "group": group or ("required" if required else "recommended"),
     }
 
 
@@ -55,6 +57,7 @@ def _setup_overview(connection) -> dict:
     scan_ready = bool(last_scan and str(last_scan["status"]) in {"completed", "completed_with_warnings"})
 
     mode = str(readiness["execution_mode"])
+    uses_ai = mode in {"automatic_ai", "local_with_manual_ai"}
     ai_mode = str(settings.get("analysis.ai_mode", "off"))
     strategy = str(settings.get("analysis.strategy", "single"))
     ai_mode_label = {
@@ -102,14 +105,15 @@ def _setup_overview(connection) -> dict:
         _configured_step(
             1,
             "照片來源與掃描",
-            complete=library_count > 0 and photo_count > 0 and scan_ready,
+            complete=library_count > 0 and photo_count > 0 and scan_ready
+            and int(last_scan["failed_count"] or 0) == 0,
             attention=bool(last_scan and int(last_scan["failed_count"] or 0) > 0),
             current=f"{library_count} 個照片庫、{photo_count} 張有效照片",
             detail=(
                 f"最近掃描：{str(last_scan['status'])} · {str(last_scan['completed_at'] or '尚未完成')}"
                 if last_scan
                 else "尚未執行照片掃描。"
-            ),
+            ) + " 掃描 /photos 根目錄會遞迴納入年月子目錄；先核對失敗與排除清單，再開始全庫分析。",
             action_label="前往照片庫",
             action_url="/photos",
         ),
@@ -117,9 +121,8 @@ def _setup_overview(connection) -> dict:
             2,
             "分析方式",
             complete=mode != "disabled" and bool(strategy),
-            attention=mode != "automatic_ai",
             current=f"{MODE_LABELS.get(mode, mode)} · {ai_mode_label} · {strategy_label}",
-            detail="決定是否自動送入 AI、分析哪些照片，以及每張照片採用哪種分析流程。",
+            detail="先以僅本機模式驗證照片與版面；需要每張合格照片的完整描述時，使用自動 AI、完整照片庫與 single。切換模式不代表重送已有結果。",
             action_label="調整分析設定",
             action_url="/settings?search=分析執行模式",
         ),
@@ -135,6 +138,7 @@ def _setup_overview(connection) -> dict:
             ),
             action_label="設定模型服務",
             action_url="/providers",
+            required=uses_ai,
         ),
         _configured_step(
             4,
@@ -147,6 +151,7 @@ def _setup_overview(connection) -> dict:
             detail="達到照片數或成本上限時會停止新增模型請求，避免失控使用。",
             action_label="調整限制與預算",
             action_url="/settings?search=預算",
+            required=uses_ai,
         ),
         _configured_step(
             5,
@@ -186,23 +191,67 @@ def _setup_overview(connection) -> dict:
             complete=backup_enabled and bool(backups),
             attention=backup_enabled and not backups,
             current=f"自動備份{'已啟用' if backup_enabled else '未啟用'} · 保留 {backup_retention} 份",
-            detail=f"最近備份：{latest_backup}",
+            detail=(f"最近備份：{latest_backup}。重裝沿用原本 /data 與 /photos 掛載。"
+                    "另將完整 /data 做一致性異機備份，包含 session.key 與分析輸入輸出檔；"
+                    "網頁下載的資料庫備份不包含原始照片或外部分析檔案。"),
             action_label="查看與建立備份",
             action_url="/backups",
+            required=True,
+        ),
+        _configured_step(
+            8,
+            "送出前排除與人工複核",
+            complete=all(bool(settings.get(key, True)) for key in (
+                "analysis.prefilter_enabled", "analysis.prefilter_screenshots", "analysis.prefilter_low_quality"
+            )),
+            current="截圖與低品質預篩選；所有已排除照片在送出前再次阻擋",
+            detail="自動判斷可能誤判或漏判，請先在照片庫複核；已排除或禁止上傳者即使強制分析也不會送出，必須明確恢復才可分析。",
+            action_label="檢查預篩選",
+            action_url="/settings?search=預篩選",
+            required=uses_ai,
+        ),
+        _configured_step(
+            9,
+            "日期、文句與雙照片版面",
+            complete=True,
+            current=f"版型 {settings.get('render.layout', 'photo_info')} · 拍攝日期{'顯示' if settings.get('render.show_capture_date', True) else '隱藏'}",
+            detail="橫向雙直圖、直向雙橫圖各有一句話與較小日期；沒有日期就留空。裝置個別版型優先於全域設定，變更後先預覽並產生新發布。",
+            action_label="預覽與調整版面",
+            action_url="/rendering",
+            required=False,
+            group="preferences",
+        ),
+        _configured_step(
+            10,
+            "長期運作與效能",
+            complete=True,
+            current=f"分析並行 {settings.get('analysis.concurrency', 1)} · 佇列倍率 {settings.get('worker.queue_multiplier', 1)}",
+            detail="十萬張先維持低並行、檢查磁碟空間與三個服務的健康狀態；不明付費結果先查核供應商，勿重建資料庫或反覆重試。",
+            action_label="查看執行監控",
+            action_url="/activity",
             required=False,
         ),
     )
-    completed = sum(1 for step in steps if step["complete"])
-    missing = sum(1 for step in steps if not step["complete"])
+    required_steps = [step for step in steps if step["required"]]
+    completed = sum(1 for step in required_steps if step["complete"])
+    missing = len(required_steps) - completed
     attention = sum(1 for step in steps if step["attention"])
     runtime = current_app.extensions["inktime_runtime_config"]
     return {
         "steps": steps,
+        "groups": tuple(
+            {"key": key, "title": title, "steps": tuple(step for step in steps if step["group"] == key)}
+            for key, title in (
+                ("required", "必須完成的設定"),
+                ("recommended", "非必要但建議查看"),
+                ("preferences", "依照需求調整"),
+            )
+        ),
         "completed": completed,
-        "total": len(steps),
+        "total": len(required_steps),
         "missing": missing,
         "attention": attention,
-        "percent": round(completed / len(steps) * 100),
+        "percent": round(completed / len(required_steps) * 100),
         "environment": str(runtime.environment),
         "photo_dir": str(runtime.photo_dir),
         "data_dir": str(runtime.data_dir),

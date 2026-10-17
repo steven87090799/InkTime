@@ -518,6 +518,7 @@ class OpenAICompatibleProvider(VisionProvider):
         *,
         retry_policy: str = SAFE_READ,
         request_started_callback=None,
+        response_received_callback=None,
         **kwargs,
     ):
         last_response = None
@@ -582,6 +583,8 @@ class OpenAICompatibleProvider(VisionProvider):
                 time.sleep(min(1.0, 0.1 * (attempt + 1)))
                 continue
             last_response = response
+            if response_received_callback is not None:
+                response_received_callback(response)
             status = int(getattr(response, "status_code", 0) or 0)
             if 300 <= status < 400:
                 raise ProviderHTTPError(
@@ -792,11 +795,28 @@ class OpenAICompatibleProvider(VisionProvider):
             if upload_guard is not None:
                 from inktime.app.core.model_upload_guard import assert_upload_allowed
                 assert_upload_allowed(**upload_guard)
+                if upload_guard.get("operation_id"):
+                    from inktime.app.db import Database
+                    from inktime.app.repositories.model_evidence import save_model_request
+                    save_model_request(Database(Path(upload_guard["database_path"])),
+                                       upload_guard["operation_id"], body)
+            def archive_transport_response(received):
+                if upload_guard is not None and upload_guard.get("operation_id"):
+                    from inktime.app.db import Database
+                    from inktime.app.repositories.model_evidence import save_model_transport_response
+                    save_model_transport_response(Database(Path(upload_guard["database_path"])),
+                                                  upload_guard["operation_id"], received.text)
+
+            # Archiving inputs can involve slow NAS writes/fsync. Recheck mutable
+            # consent after that work, immediately before handing off to transport.
+            if upload_guard is not None:
+                assert_upload_allowed(**upload_guard)
             response = self._send(
                 "POST",
                 "/chat/completions",
                 retry_policy=retry_policy,
                 request_started_callback=mark_request_started,
+                **({"response_received_callback": archive_transport_response} if upload_guard else {}),
                 headers=self._headers(),
                 json=body,
                 timeout=self.request_timeout,
@@ -837,6 +857,11 @@ class OpenAICompatibleProvider(VisionProvider):
         if vision_attempt is not None:
             vision_attempt.vision_started = True
         response_received_at = datetime.now(timezone.utc).isoformat()
+        if upload_guard is not None and upload_guard.get("operation_id"):
+            from inktime.app.db import Database
+            from inktime.app.repositories.model_evidence import save_model_transport_response
+            save_model_transport_response(Database(Path(upload_guard["database_path"])),
+                                          upload_guard["operation_id"], response.text)
         try:
             payload = self._json_response(response, error_code="VLM-006", ambiguous_on_invalid=True)
         except ProviderHTTPError as exc:

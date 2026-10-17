@@ -39,7 +39,11 @@ SUPPORTED_IMAGE_EXTENSIONS = frozenset(
 )
 SUPPORTED_PIL_FORMATS = ("JPEG", "PNG", "WEBP", "HEIF", "TIFF", "BMP")
 HEIF_EXTENSIONS = frozenset({".heic", ".heif"})
-UNSUPPORTED_RAW_EXTENSIONS = frozenset({".dng"})
+UNSUPPORTED_RAW_EXTENSIONS = frozenset({
+    ".3fr", ".arw", ".cr2", ".cr3", ".dng", ".erf", ".kdc", ".mos", ".mrw", ".nef",
+    ".nrw", ".orf", ".pef", ".raf", ".raw", ".rw2", ".sr2", ".srf", ".srw", ".x3f",
+})
+UNSUPPORTED_IMAGE_EXTENSIONS = frozenset({".avif", ".jxl", ".jp2", ".j2k", ".psd"})
 DERIVATIVE_FORMAT = "JPEG"
 DERIVATIVE_MEDIA_TYPE = "image/jpeg"
 DERIVATIVE_SIZES = frozenset({512, 1024, 1600})
@@ -118,6 +122,27 @@ def validate_source_file(path: Path):
 
 def _signature(info):
     return info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns
+
+
+def assert_source_content(path: Path, expected_sha256: str | None) -> None:
+    """Verify indexed bytes before reusing results, even if mtime was preserved.
+
+    Historical records without a SHA remain readable; a full scan supplies
+    their missing identity. Every normally scanned image has a SHA-256.
+    """
+    expected = str(expected_sha256 or "").casefold()
+    if len(expected) != 64 or any(character not in "0123456789abcdef" for character in expected):
+        return
+    before = validate_source_file(path)
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    with os.fdopen(descriptor, "rb") as stream:
+        if _signature(os.fstat(stream.fileno())) != _signature(before):
+            raise ImageSourceError("THUMB-004", "原始照片內容已變更；請重新掃描", 409)
+        digest = sha256()
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    if digest.hexdigest() != expected or _signature(path.stat()) != _signature(before):
+        raise ImageSourceError("THUMB-004", "原始照片內容與分析紀錄不符；請重新掃描，不會重新送出模型", 409)
 
 
 @contextmanager
@@ -227,8 +252,11 @@ def bounded_rgb(opened: Image.Image, max_side: int | tuple[int, int]) -> Image.I
         oriented.close()
 
 
-def load_rgb(path: Path, max_side: int | tuple[int, int] = 1600) -> Image.Image:
-    with safe_image_open(path) as opened:
+def load_rgb(path: Path, max_side: int | tuple[int, int] = 1600, *, expected_content_sha256: str | None = None) -> Image.Image:
+    expected = str(expected_content_sha256 or "").casefold()
+    with safe_image_open(path, hash_source=bool(expected)) as opened:
+        if expected and opened.info["inktime_source_sha256"] != expected:
+            raise ImageSourceError("THUMB-004", "原始照片內容與分析紀錄不符；請重新掃描", 409)
         return bounded_rgb(opened, max_side)
 
 

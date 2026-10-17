@@ -32,7 +32,7 @@ def _run_capture_date_backfill(database_path: str, start, results) -> None:
 
 
 def test_fresh_database_is_migrated(tmp_path):
-    assert CURRENT_SCHEMA_VERSION == 67
+    assert CURRENT_SCHEMA_VERSION == 69
     database = Database(tmp_path / "inktime.db")
     assert migrate(database) == list(range(1, CURRENT_SCHEMA_VERSION + 1))
     assert database.integrity_check() == "ok"
@@ -59,6 +59,9 @@ def test_fresh_database_is_migrated(tmp_path):
         "settings_snapshot_items",
         "analysis_batches",
         "analysis_batch_items",
+        "photo_content_history",
+        "model_request_evidence",
+        "analysis_batch_retry_authorizations",
         "idempotency_requests",
         "ai_trace_runs",
         "ai_trace_attempts",
@@ -99,6 +102,9 @@ def test_fresh_database_is_migrated(tmp_path):
                 "SELECT data_type,dry_run FROM data_retention_policies ORDER BY data_type"
             ).fetchall()
         }
+        ai_trace_policy = connection.execute(
+            "SELECT enabled,dry_run FROM data_retention_policies WHERE data_type='ai_trace'"
+        ).fetchone()
     assert {"normalized_username", "session_version", "disabled_at"} <= columns
     assert "request_fingerprint" in job_columns
     assert "model" in provider_columns
@@ -127,10 +133,10 @@ def test_fresh_database_is_migrated(tmp_path):
     } <= pairing_columns
     assert "pairing_code_ciphertext" not in pairing_columns
     assert tuple(api_usage_policy) == (1, 400, 0, 200, 0)
-    # Implemented retention policies enforce; Shadow remains observation-only
-    # until it has an actual cleanup handler.
+    # Paid model evidence is permanent by default; Shadow remains observation-only.
+    assert tuple(ai_trace_policy) == (0, 1)
     assert retention_dry_run_defaults == {
-        "ai_trace": 0,
+        "ai_trace": 1,
         "api_usage": 0,
         "decision_candidate": 0,
         "decision_trace": 0,

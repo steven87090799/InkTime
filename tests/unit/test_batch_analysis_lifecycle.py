@@ -1,20 +1,24 @@
 from __future__ import annotations
 
 import json
+from hashlib import sha256
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import sqlite3
 import threading
 import time
+import tracemalloc
 
 from PIL import Image
 import pytest
 
 from inktime.app.domain.photos import PhotoPreprocessor
-from inktime.app.providers.base import VisionProvider
+from inktime.app.providers.base import ProviderResponse, Usage, VisionProvider
 from inktime.app.providers.openai_compatible import ProviderHTTPError
 from inktime.app.repositories.analysis_batches import AnalysisBatchRepository
+from inktime.app.repositories.analysis_reservations import AnalysisReservationConflict
+from inktime.app.repositories.billable_operations import BillableOperationRepository
 import inktime.app.services.batch_analysis as batch_analysis_module
 from inktime.app.services.batch_analysis import BatchLifecycleError, stream_jsonl_shards
 from inktime.app.workers.scanner import PhotoScanner
@@ -284,6 +288,29 @@ def test_batch_allowed_modes_submit_once(app, tmp_path, mode):
     result = service.submit(scope="sample", sample_count=1)
     assert len(result["batch_ids"]) == 1
     assert fake.batch_counter == 1
+
+
+def test_manual_selection_above_sqlite_variable_limit_preserves_scope_and_order(app, tmp_path, monkeypatch):
+    photo_ids = _seed_candidate_metadata(app, tmp_path, 260)
+    service = _wire_fake(app, FakeBatchProvider())
+    plan, analysis_fp, model = service._plan()
+    selected = photo_ids[::3] + photo_ids[1::3]
+    requested = [f"not-present-{index:05d}" for index in range(40_000)] + list(reversed(selected)) + selected[:20]
+    connect = service.database.connect
+
+    def bounded_variables(*args, **kwargs):
+        connection = connect(*args, **kwargs)
+        connection.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, 32_766)
+        return connection
+
+    monkeypatch.setattr(service.database, "connect", bounded_variables)
+    candidates, skipped, _ = service._candidate_rows(
+        scope="manual_selection", analysis_fingerprint=analysis_fp, provider_id="fake-batch", model=model,
+        plan=plan, photo_ids=requested, sample_count=100,
+    )
+    expected = sorted(selected, key=lambda photo_id: (-(int(photo_id.rsplit("-", 1)[-1]) % 3), photo_id))
+    assert [item["photo"]["id"] for item in candidates] == expected
+    assert skipped["sha_duplicates"] == 0
 
 
 @pytest.mark.parametrize("boundary", ["prepared", "uploaded"])
@@ -791,7 +818,10 @@ def test_child_shard_creation_failure_fails_parent_and_releases_all_items(app, t
         for batch in repository.list_for_job(job_id)
         for item in repository.items(str(batch["id"]))
     )
-    assert not list(service.batch_root.glob("*/**/*.jsonl"))
+    # Even failed preparation retains exact inputs under the permanent policy.
+    retained = list(service.batch_root.glob("*/**/input.jsonl"))
+    assert len(retained) == 2
+    assert all(path.read_text(encoding="utf-8").strip() for path in retained)
 
 
 @pytest.mark.parametrize(
@@ -2532,9 +2562,9 @@ def test_sample_bounds_candidate_file_io_before_materialization(app, tmp_path, m
     original = module.safe_join
     visited = []
 
-    def observed(root, relative):
+    def observed(root, relative, **kwargs):
         visited.append(relative)
-        return original(root, relative)
+        return original(root, relative, **kwargs)
 
     monkeypatch.setattr(module, "safe_join", observed)
     service.estimate(scope="sample", sample_count=2)
@@ -2569,3 +2599,409 @@ def test_result_staging_is_durable_and_raw_receipts_survive_close(app, tmp_path)
     assert len(store) == 0
     with database.session() as connection:
         assert connection.execute("SELECT COUNT(*) FROM batch_result_raw WHERE batch_id=?", (batch_id,)).fetchone()[0] == 1
+
+
+@pytest.mark.parametrize("state", ["started", "response", "completed"])
+def test_batch_does_not_resend_a_single_paid_operation_with_any_plan(app, tmp_path, state):
+    photo_id = _prepare_photos(app, tmp_path, count=1)[0]
+    fake = FakeBatchProvider()
+    service = _wire_fake(app, fake)
+    photo = service.photos.get_with_path(photo_id)
+    operations = BillableOperationRepository(service.database)
+    operation, _ = operations.begin(str(photo["sha256"]), "another-provider-and-plan")
+    if state != "started":
+        operations.save_response(operation, ProviderResponse(json.dumps(valid_result()), Usage(100, 20)))
+    if state == "completed":
+        operations.finish(operation)
+
+    estimate = service.estimate(scope="manual_selection", photo_ids=[photo_id])
+    assert estimate["candidate_count"] == 0
+    assert estimate["paid_operation_held"] == 1
+    assert "即時分析續行" in estimate["paid_operation_hold_message"]
+    with pytest.raises(BatchLifecycleError) as error:
+        service.submit(scope="manual_selection", photo_ids=[photo_id], created_by="tester")
+    assert error.value.code == "BATCH-PAID-OPERATION-HOLD"
+    assert fake.batch_counter == 0 and fake.custom_ids == []
+
+
+@pytest.mark.parametrize("resolution", ["not_sent", "approved"])
+def test_definitely_not_sent_and_operator_approved_single_calls_do_not_lock_batch(app, tmp_path, resolution):
+    photo_id = _prepare_photos(app, tmp_path, count=1)[0]
+    fake = FakeBatchProvider()
+    service = _wire_fake(app, fake)
+    operations = BillableOperationRepository(service.database)
+    photo = service.photos.get_with_path(photo_id)
+    operation, _ = operations.begin(str(photo["sha256"]), "safe-to-retry")
+    if resolution == "not_sent":
+        operations.finish(operation, not_sent=True)
+    else:
+        operations.approve_resend(operation, reason="Administrator reconciled and accepted another request")
+    result = service.submit(scope="manual_selection", photo_ids=[photo_id], created_by="tester")
+    assert len(result["batch_ids"]) == 1
+    assert result["paid_operation_held"] == 0
+    assert fake.batch_counter == 1
+
+
+def test_last_batch_submission_guard_catches_single_started_after_preview(app, tmp_path, monkeypatch):
+    photo_id = _prepare_photos(app, tmp_path, count=1)[0]
+    fake = FakeBatchProvider()
+    service = _wire_fake(app, fake)
+    operations = BillableOperationRepository(service.database)
+    photo = service.photos.get_with_path(photo_id)
+    create_job = service.jobs.create
+
+    def single_wins_before_batch_job(*args, **kwargs):
+        operations.begin(str(photo["sha256"]), "single-started-after-preview")
+        return create_job(*args, **kwargs)
+
+    monkeypatch.setattr(service.jobs, "create", single_wins_before_batch_job)
+    result = service.submit(scope="manual_selection", photo_ids=[photo_id], created_by="tester")
+    assert result["batch_ids"] == []
+    assert fake.batch_counter == 0 and fake.custom_ids == []
+    batch = service.batches.get(result["prepared_batch_ids"][0])
+    assert batch["status"] == "failed"
+    assert batch["last_error_code"] == "BATCH-PAID-OPERATION-HOLD"
+
+
+def test_active_batch_blocks_single_for_identical_bytes_and_duplicate_photo_ids(app, tmp_path):
+    photo_id = _prepare_photos(app, tmp_path, count=1)[0]
+    service = _wire_fake(app, FakeBatchProvider())
+    service.submit(scope="manual_selection", photo_ids=[photo_id], created_by="tester")
+    photo = service.photos.get_with_path(photo_id)
+    alias = "identical-content-different-photo"
+    with service.database.transaction() as connection:
+        connection.execute(
+            "INSERT INTO photos(id,library_id,relative_path,sha256,status,created_at,updated_at) "
+            "SELECT ?,library_id,'another-name.jpg',sha256,status,created_at,updated_at FROM photos WHERE id=?",
+            (alias, photo_id),
+        )
+    operations = BillableOperationRepository(service.database)
+    with pytest.raises(AnalysisReservationConflict):
+        operations.begin(str(photo["sha256"]), "different-provider-plan", context={"photo_id": alias})
+    with pytest.raises(AnalysisReservationConflict):
+        operations.check_retry(str(photo["sha256"]), "different-provider-plan")
+    with pytest.raises(AnalysisReservationConflict):
+        service.jobs.create(name="single duplicate", strategy="single", settings={},
+                            created_by=None, photo_ids=[alias], force_recompute=True)
+    with service.database.session() as connection:
+        assert connection.execute("SELECT COUNT(*) FROM billable_operations").fetchone()[0] == 0
+
+
+def test_queued_batch_owns_bytes_before_preparation_and_cancel_releases_them(app, tmp_path):
+    photo_id = _prepare_photos(app, tmp_path, count=1)[0]
+    service = _wire_fake(app, FakeBatchProvider())
+    photo = service.photos.get_with_path(photo_id)
+    job_id = service.jobs.create(kind="analysis_batch", name="not prepared", strategy="single",
+                                 settings={}, created_by=None, photo_ids=[photo_id])
+    operations = BillableOperationRepository(service.database)
+    with pytest.raises(AnalysisReservationConflict):
+        operations.begin(str(photo["sha256"]), "single-plan")
+    service.jobs.cancel(job_id)
+    operation, checkpoint = operations.begin(str(photo["sha256"]), "single-plan")
+    assert checkpoint is None
+    operations.finish(operation, not_sent=True)
+
+
+def test_terminal_local_status_cannot_release_an_unreconciled_remote_batch(app, tmp_path):
+    photo_id = _prepare_photos(app, tmp_path, count=1)[0]
+    service = _wire_fake(app, AmbiguousFakeBatchProvider())
+    result = service.submit(scope="manual_selection", photo_ids=[photo_id], created_by="tester")
+    batch_id = result["prepared_batch_ids"][0]
+    batch = service.batches.get(batch_id)
+    service.jobs.cancel(str(batch["job_id"]))
+    service.batches.update_batch(batch_id, status="failed")
+    photo = service.photos.get_with_path(photo_id)
+    operations = BillableOperationRepository(service.database)
+    with pytest.raises(AnalysisReservationConflict):
+        operations.begin(str(photo["sha256"]), "unrelated-plan")
+    with pytest.raises(BatchLifecycleError) as retry_error:
+        service.retry_failed(batch_id, created_by="tester")
+    assert retry_error.value.code == "BATCH-RESERVATION-CONFLICT"
+    with service.database.session() as connection:
+        assert connection.execute("SELECT COUNT(*) FROM analysis_batch_retry_authorizations").fetchone()[0] == 0
+    # A recorded operator confirmation that no remote Batch exists resolves
+    # uncertainty; a terminal local status alone above did not.
+    service.batches.update_batch(batch_id, abandon_confirmed_at=datetime.now(timezone.utc).isoformat(),
+                                 remote_status="abandoned")
+    operation, _ = operations.begin(str(photo["sha256"]), "unrelated-plan")
+    operations.finish(operation, not_sent=True)
+
+
+@pytest.mark.parametrize("has_receipt", [False, True])
+def test_confirmed_unsubmitted_batch_attempt_is_not_paid_but_receipt_still_holds(app, tmp_path, has_receipt):
+    photo_id = _prepare_photos(app, tmp_path, count=1)[0]
+    service = _wire_fake(app, FakeBatchProvider())
+    batch_id = service.submit(scope="manual_selection", photo_ids=[photo_id], created_by="tester")["batch_ids"][0]
+    batch = service.batches.get(batch_id)
+    assert batch["submitted_at"]
+    service.jobs.cancel(str(batch["job_id"]))
+    # A submission-attempt timestamp also exists after a definite HTTP rejection.
+    # It is not proof of model processing when no remote identity/receipt exists.
+    service.batches.update_batch(batch_id, status="failed", remote_batch_id=None, remote_status="failed")
+    if has_receipt:
+        service.batches.update_item(str(service.batches.items(batch_id)[0]["id"]),
+                                    raw_response_json='{"id":"durable-paid-response"}')
+    photo = service.photos.get_with_path(photo_id)
+    operations = BillableOperationRepository(service.database)
+    if has_receipt:
+        with pytest.raises(AnalysisReservationConflict):
+            operations.begin(str(photo["sha256"]), "another-plan")
+    else:
+        operation, _ = operations.begin(str(photo["sha256"]), "another-plan")
+        operations.finish(operation, not_sent=True)
+
+
+def test_completed_single_checkpoint_can_still_be_reused_while_batch_owns_bytes(app, tmp_path):
+    photo_id = _prepare_photos(app, tmp_path, count=1)[0]
+    service = _wire_fake(app, FakeBatchProvider())
+    photo = service.photos.get_with_path(photo_id)
+    operations = BillableOperationRepository(service.database)
+    operation, _ = operations.begin(str(photo["sha256"]), "already-paid")
+    response = ProviderResponse(json.dumps(valid_result()), Usage(100, 20))
+    operations.save_response(operation, response)
+    operations.finish(operation)
+    # Existing paid evidence is safe to replay without a network call even if
+    # an older queued Batch still owns the same bytes.
+    service.jobs.create(kind="analysis_batch", name="queued", strategy="single", settings={},
+                        created_by=None, photo_ids=[photo_id])
+    assert operations.check_retry(str(photo["sha256"]), "already-paid", reuse_completed=True)
+    replayed_id, replayed = operations.begin(str(photo["sha256"]), "already-paid", reuse_completed=True)
+    assert replayed_id == operation and replayed == response
+
+
+def _seed_candidate_metadata(app, tmp_path, count, *, exif_bytes=0):
+    """Candidate discovery uses metadata/stat only; no decoder or model call."""
+    root = tmp_path / "candidate-library"
+    root.mkdir()
+    library = app.extensions["inktime_photo_repository"].ensure_library("candidate fixtures", root)
+    exif = json.dumps({"Software": "camera", "UserComment": "x" * exif_bytes})
+    now = datetime.now(timezone.utc).isoformat()
+    records = []
+    for index in range(count):
+        relative = f"memory-{index:06d}.jpg"
+        (root / relative).write_bytes(b"candidate discovery fixture")
+        records.append((f"candidate-{index:06d}", library, relative, f"{index + 1:064x}",
+                        exif, float(index % 3), now, now))
+    with app.extensions["inktime_database"].transaction() as connection:
+        connection.executemany(
+            "INSERT INTO photos(id,library_id,relative_path,sha256,exif_json,local_candidate_score,created_at,updated_at,"
+            "status,local_features_status,metadata_status,width,height,file_size,format,camera_make,blur_score,contrast,"
+            "overexposed_ratio,underexposed_ratio,screenshot_likelihood) "
+            "VALUES (?,?,?,?,?,?,?,?,'preprocessed','complete','complete',900,600,500000,'JPEG','Camera',500,40,0,0,0)",
+            records,
+        )
+    return [record[0] for record in records]
+
+
+def test_large_exif_candidate_discovery_has_bounded_memory(app, tmp_path):
+    photo_ids = _seed_candidate_metadata(app, tmp_path, 1536, exif_bytes=48 * 1024)
+    service = _wire_fake(app, FakeBatchProvider())
+    plan, analysis_fp, model = service._plan()
+    tracemalloc.start()
+    try:
+        candidates, skipped, _ = service._candidate_rows(
+            scope="all_eligible_missing_analysis", analysis_fingerprint=analysis_fp,
+            provider_id="fake-batch", model=model, plan=plan, photo_ids=None, sample_count=100,
+        )
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    expected = sorted(photo_ids, key=lambda photo_id: (-(int(photo_id.rsplit("-", 1)[-1]) % 3), photo_id))
+    assert [item["photo"]["id"] for item in candidates] == expected
+    assert skipped["sha_duplicates"] == 0
+    assert peak < 48 * 1024 * 1024
+
+
+def test_paged_candidate_cache_application_cannot_skip_later_photos(app, tmp_path, monkeypatch):
+    photo_ids = _seed_candidate_metadata(app, tmp_path, 260)
+    service = _wire_fake(app, FakeBatchProvider())
+    plan, analysis_fp, model = service._plan()
+    monkeypatch.setattr(service.photos, "get_ai_cache", lambda **_kwargs: {
+        "result": valid_result(), "raw_json": json.dumps(valid_result())
+    })
+    candidates, skipped, _ = service._candidate_rows(
+        scope="all_eligible_missing_analysis", analysis_fingerprint=analysis_fp,
+        provider_id="fake-batch", model=model, plan=plan, photo_ids=None, sample_count=100, apply_cached=True,
+    )
+    assert candidates == [] and skipped["cache_hits"] == len(photo_ids)
+    with service.database.session() as connection:
+        assert connection.execute("SELECT COUNT(DISTINCT photo_id) FROM photo_analysis").fetchone()[0] == len(photo_ids)
+
+
+def test_sample_candidate_pages_preserve_stable_sampling_order(app, tmp_path):
+    photo_ids = _seed_candidate_metadata(app, tmp_path, 260)
+    service = _wire_fake(app, FakeBatchProvider())
+    plan, analysis_fp, model = service._plan()
+    candidates, _, seed = service._candidate_rows(
+        scope="sample", analysis_fingerprint=analysis_fp, provider_id="fake-batch", model=model,
+        plan=plan, photo_ids=None, sample_count=200,
+    )
+    expected = sorted(photo_ids, key=lambda photo_id: sha256(f"{seed}:{photo_id}".encode()).hexdigest())[:200]
+    assert [item["photo"]["id"] for item in candidates] == expected
+
+
+def test_candidate_keyset_and_paid_content_fences_have_supporting_indexes(app, tmp_path):
+    _seed_candidate_metadata(app, tmp_path, 260)
+    service = _wire_fake(app, FakeBatchProvider())
+    _, analysis_fp, _ = service._plan()
+    query, base_parameters = service._base_candidate_sql(analysis_fingerprint=analysis_fp)
+    with service.database.session() as connection:
+        row = connection.execute("SELECT created_at FROM photos ORDER BY id LIMIT 1").fetchone()
+        page_sql, parameters = service._candidate_page_query(
+            query, base_parameters, seed=None,
+            after=(-1.0, row["created_at"], "candidate-000010"), size=128,
+        )
+        details = " ".join(str(item[3]) for item in connection.execute("EXPLAIN QUERY PLAN " + page_sql, parameters))
+        assert "idx_photos_batch_candidate_page" in details
+        assert "USE TEMP B-TREE FOR ORDER BY" not in details
+        assert "idx_billable_content_state" in details
+        assert connection.execute("PRAGMA index_info(idx_analysis_batch_items_fingerprint)").fetchone()[2] == "content_sha256"
+        assert connection.execute("PRAGMA index_info(idx_job_items_photo_status)").fetchone()[2] == "photo_id"
+
+
+@pytest.mark.parametrize("keep_remote_identity", [True, False])
+def test_lost_batch_cache_and_analysis_never_authorize_another_paid_request(app, tmp_path, keep_remote_identity):
+    photo_id = _prepare_photos(app, tmp_path, count=1)[0]
+    fake = FakeBatchProvider()
+    service = _wire_fake(app, fake)
+    batch_id = service.submit(scope="sample", sample_count=1, created_by="tester")["batch_ids"][0]
+    service.poll_due(limit=10)
+    service.import_batch(batch_id)
+    with service.database.transaction() as connection:
+        connection.execute("DELETE FROM photo_analysis")
+        connection.execute("DELETE FROM ai_analysis_cache")
+    if not keep_remote_identity:
+        service.batches.update_batch(batch_id, remote_batch_id=None, submitted_at=None)
+    estimate = service.estimate(scope="manual_selection", photo_ids=[photo_id])
+    assert estimate["candidate_count"] == 0 and estimate["paid_operation_held"] == 1
+    with pytest.raises(BatchLifecycleError) as error:
+        service.submit(scope="manual_selection", photo_ids=[photo_id], created_by="tester")
+    assert error.value.code == "BATCH-PAID-OPERATION-HOLD"
+    photo = service.photos.get_with_path(photo_id)
+    with pytest.raises(AnalysisReservationConflict):
+        BillableOperationRepository(service.database).begin(str(photo["sha256"]), "another-single-plan")
+    assert fake.batch_counter == 1
+
+
+def _mark_paid_batch_application_failed(service, batch_id):
+    # Represent a paid response that failed application/schema validation. Its
+    # immutable receipt must survive even though no usable application remains.
+    with service.database.transaction() as connection:
+        connection.execute("DELETE FROM photo_analysis")
+        connection.execute("DELETE FROM ai_analysis_cache")
+    item = service.batches.items(batch_id)[0]
+    service.batches.update_item(str(item["id"]), status="schema_invalid", error_code="schema_invalid")
+    service.batches.update_batch(batch_id, status="completed_with_errors", remote_status="completed")
+    return str(item["id"])
+
+
+def test_explicit_failed_item_retries_keep_a_persistent_exact_ancestor_chain(app, tmp_path):
+    _prepare_photos(app, tmp_path, count=1)
+    fake = FakeBatchProvider()
+    service = _wire_fake(app, fake)
+    first = service.submit(scope="sample", sample_count=1, created_by="tester")["batch_ids"][0]
+    service.poll_due(limit=10)
+    service.import_batch(first)
+    first_item = _mark_paid_batch_application_failed(service, first)
+    with pytest.raises(BatchLifecycleError):
+        service.submit(scope="sample", sample_count=1, created_by="tester")
+    second = service.retry_failed(first, created_by="tester")["batch_ids"][0]
+    service.poll_due(limit=10)
+    service.import_batch(second)
+    second_item = _mark_paid_batch_application_failed(service, second)
+    third_result = service.retry_failed(second, created_by="tester")
+    assert len(third_result["batch_ids"]) == 1 and fake.batch_counter == 3
+    with service.database.session() as connection:
+        ancestors = connection.execute(
+            "SELECT source_item_id FROM analysis_batch_retry_authorizations WHERE retry_job_id=?",
+            (third_result["job_id"],),
+        ).fetchall()
+    assert {row[0] for row in ancestors} == {first_item, second_item}
+
+
+def test_failed_item_retry_authorizes_no_successful_sibling(app, tmp_path):
+    _prepare_photos(app, tmp_path, count=2)
+    fake = FakeBatchProvider()
+    service = _wire_fake(app, fake)
+    first = service.submit(scope="all_eligible_missing_analysis", created_by="tester")["batch_ids"][0]
+    service.poll_due(limit=10)
+    service.import_batch(first)
+    first_item, sibling = service.batches.items(first)
+    with service.database.transaction() as connection:
+        connection.execute("DELETE FROM photo_analysis")
+        connection.execute("DELETE FROM ai_analysis_cache")
+    service.batches.update_item(str(first_item["id"]), status="schema_invalid", error_code="schema_invalid")
+    service.batches.update_batch(first, status="completed_with_errors", remote_status="completed")
+    retried = service.retry_failed(first, created_by="tester")
+    new_items = service.batches.items(retried["batch_ids"][0])
+    assert [item["content_sha256"] for item in new_items] == [first_item["content_sha256"]]
+    with service.database.session() as connection:
+        authorized = connection.execute(
+            "SELECT source_item_id FROM analysis_batch_retry_authorizations WHERE retry_job_id=?",
+            (retried["job_id"],),
+        ).fetchall()
+    assert [row[0] for row in authorized] == [first_item["id"]]
+    with pytest.raises(BatchLifecycleError) as error:
+        service.submit(scope="manual_selection", photo_ids=[str(sibling["photo_id"])], created_by="tester")
+    assert error.value.code == "BATCH-PAID-OPERATION-HOLD"
+
+
+@pytest.mark.parametrize("other_operation", ["single_unknown", "batch_unknown", "unrelated_paid_batch"])
+def test_failed_item_authorization_cannot_override_other_paid_or_unknown_operations(
+    app, tmp_path, monkeypatch, other_operation
+):
+    photo_id = _prepare_photos(app, tmp_path, count=1)[0]
+    fake = FakeBatchProvider()
+    service = _wire_fake(app, fake)
+    first = service.submit(scope="sample", sample_count=1, created_by="tester")["batch_ids"][0]
+    service.poll_due(limit=10)
+    service.import_batch(first)
+    _mark_paid_batch_application_failed(service, first)
+    photo = service.photos.get_with_path(photo_id)
+
+    def add_other_batch():
+        service.batches.create_with_items(
+            {"id": "unrelated-batch", "provider_id": "fake-batch", "model": "another-model",
+             "endpoint": "/v1/chat/completions", "analysis_fingerprint": "unrelated-plan",
+             "status": "submission_unknown" if other_operation == "batch_unknown" else "completed_with_errors",
+             "estimated_cost": 0.1},
+            [{"id": "unrelated-item", "photo_id": photo_id, "custom_id": "unrelated-custom-id",
+              "content_sha256": photo["sha256"], "analysis_fingerprint": "unrelated-plan",
+              "vision_request_fingerprint": "unrelated-plan", "vision_input_spec_json": "{}", "estimated_cost": 0.1}],
+        )
+        if other_operation != "batch_unknown":
+            service.batches.update_item("unrelated-item", status="schema_invalid", raw_response_json='{"paid":true}')
+            service.batches.update_batch("unrelated-batch", remote_status="completed")
+
+    if other_operation == "single_unknown":
+        # A legacy or externally interrupted single operation has no Job lease.
+        # The retry grant for the old Batch must never authorize this unknown call.
+        with service.database.transaction() as connection:
+            connection.execute(
+                "INSERT INTO billable_operations(id,content_sha256,request_fingerprint,state,created_at,updated_at) "
+                "VALUES ('other-single',?,'other-provider-plan','started',datetime('now'),datetime('now'))",
+                (photo["sha256"],),
+            )
+        with pytest.raises(BatchLifecycleError) as error:
+            service.retry_failed(first, created_by="tester")
+        assert error.value.code == "BATCH-PAID-OPERATION-HOLD"
+    elif other_operation == "unrelated_paid_batch":
+        add_other_batch()
+        with pytest.raises(BatchLifecycleError) as error:
+            service.retry_failed(first, created_by="tester")
+        assert error.value.code == "BATCH-PAID-OPERATION-HOLD"
+    else:
+        # Arrive after candidate evaluation to exercise the final submission
+        # fence, where a bound retry grant already exists for the original item.
+        create_job = service.jobs.create
+
+        def other_unknown_after_preview(*args, **kwargs):
+            job_id = create_job(*args, **kwargs)
+            add_other_batch()
+            return job_id
+
+        monkeypatch.setattr(service.jobs, "create", other_unknown_after_preview)
+        result = service.retry_failed(first, created_by="tester")
+        assert result["batch_ids"] == []
+        assert service.batches.get(result["prepared_batch_ids"][0])["last_error_code"] == "BATCH-PAID-OPERATION-HOLD"
+    assert fake.batch_counter == 1

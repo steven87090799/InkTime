@@ -5,6 +5,7 @@ from uuid import uuid4
 
 from inktime.app.db import Database
 from inktime.app.providers.base import ProviderCallTrace, ProviderResponse, Usage
+from inktime.app.repositories.analysis_reservations import assert_no_batch_content_owner
 
 
 class UnreconciledOperationError(RuntimeError):
@@ -18,7 +19,7 @@ class BillableOperationRepository:
     def __init__(self, database: Database):
         self.database = database
 
-    def check_retry(self, content_sha256: str, request_fingerprint: str) -> bool:
+    def check_retry(self, content_sha256: str, request_fingerprint: str, *, reuse_completed: bool = False) -> bool:
         with self.database.session() as connection:
             if connection.execute(
                 "SELECT 1 FROM billable_operations o LEFT JOIN ai_cache_reservations r "
@@ -27,10 +28,14 @@ class BillableOperationRepository:
                 (content_sha256, datetime.now(timezone.utc).isoformat()),
             ).fetchone():
                 raise UnreconciledOperationError("先前 Vision 請求狀態未知；須先對帳，不得自動重新送圖")
-            return connection.execute(
-                "SELECT 1 FROM billable_operations WHERE request_fingerprint=? AND state='response' LIMIT 1",
-                (request_fingerprint,),
+            saved = connection.execute(
+                "SELECT 1 FROM billable_operations WHERE request_fingerprint=? "
+                "AND (state='response' OR (? AND state='completed')) LIMIT 1",
+                (request_fingerprint, int(reuse_completed)),
             ).fetchone() is not None
+            if not saved:
+                assert_no_batch_content_owner(connection, content_sha256)
+            return saved
 
     def begin(self, content_sha256: str, request_fingerprint: str, *, reuse_completed: bool = False, context: dict | None = None) -> tuple[str, ProviderResponse | None]:
         now = datetime.now(timezone.utc).isoformat()
@@ -58,6 +63,7 @@ class BillableOperationRepository:
                 if payload.get("call_trace"):
                     payload["call_trace"] = ProviderCallTrace(**payload["call_trace"])
                 return str(saved["id"]), ProviderResponse(**payload)
+            assert_no_batch_content_owner(connection, content_sha256)
             operation_id = str(uuid4())
             connection.execute(
                 "INSERT INTO billable_operations(id,content_sha256,request_fingerprint,state,created_at,updated_at,resolution_note) "
@@ -72,6 +78,11 @@ class BillableOperationRepository:
                 "UPDATE billable_operations SET state='response',response_json=?,updated_at=? WHERE id=?",
                 (json.dumps(asdict(response), ensure_ascii=False), datetime.now(timezone.utc).isoformat(), operation_id),
             )
+
+    def is_completed(self, operation_id: str) -> bool:
+        with self.database.session() as connection:
+            row = connection.execute("SELECT state FROM billable_operations WHERE id=?", (operation_id,)).fetchone()
+        return row is not None and row["state"] == "completed"
 
     def finish(self, operation_id: str, *, not_sent: bool = False) -> None:
         with self.database.transaction() as connection:

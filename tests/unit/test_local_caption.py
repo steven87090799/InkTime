@@ -74,6 +74,8 @@ def test_caption_uses_requested_timezone_for_historical_today():
         timezone="America/Los_Angeles",
     )
     assert taipei["source"] == "local_historical_today"
+    assert taipei["capture_date"] == "2020-07-28"
+    assert los_angeles["capture_date"] == "2020-07-27"
     assert los_angeles["source"] != "local_historical_today"
 
 

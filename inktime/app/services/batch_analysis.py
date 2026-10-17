@@ -43,8 +43,12 @@ from inktime.app.providers.base import MAX_BATCH_RESULT_BYTES, Usage
 from inktime.app.providers.openai_compatible import OpenAICompatibleProvider, calculate_usage_cost
 from inktime.app.repositories.analysis_reservations import (
     AnalysisReservationConflict,
+    held_batch_sql,
+    paid_batch_item_sql,
     reserved_analysis_sql,
+    valid_batch_retry_sql,
 )
+from inktime.app.repositories.batch_retry_authorizations import BatchRetryAuthorizationRepository
 from inktime.app.repositories.analysis_batches import (
     ACTIVE_BATCH_STATUSES,
     TERMINAL_BATCH_STATUSES,
@@ -336,12 +340,28 @@ class BatchAnalysisService:
         )
         return plan, fingerprint(plan), model
 
-    def _base_candidate_sql(self) -> tuple[str, list[Any]]:
+    def _base_candidate_sql(self, *, analysis_fingerprint, retry_authorization=None) -> tuple[str, list[Any]]:
         active = sorted(ACTIVE_BATCH_STATUSES)
         marks = ",".join("?" for _ in active)
         return (
             f"""
-            SELECT p.*,l.root_path
+            SELECT p.id,p.library_id,p.relative_path,p.sha256,p.favorite,p.eligible,
+                   p.exclusion_status,p.manual_override,p.file_size,p.width,p.height,p.format,
+                   p.camera_make,p.camera_model,p.exif_json,p.blur_score,p.contrast,
+                   p.overexposed_ratio,p.underexposed_ratio,p.screenshot_likelihood,
+                   p.local_candidate_score,p.captured_at,p.created_at,l.root_path,
+                   EXISTS(SELECT 1 FROM billable_operations paid_single
+                          WHERE paid_single.content_sha256=p.sha256
+                            AND paid_single.state IN ('started','response','completed')) AS paid_single_held,
+                   EXISTS(SELECT 1 FROM analysis_batch_items paid_item
+                          JOIN analysis_batches paid_batch ON paid_batch.id=paid_item.batch_id
+                          LEFT JOIN analysis_batch_retry_authorizations retry_approval
+                            ON retry_approval.authorization_id=? AND retry_approval.source_item_id=paid_item.id
+                           AND retry_approval.content_sha256=p.sha256
+                          WHERE paid_item.content_sha256=p.sha256
+                            AND {paid_batch_item_sql('paid_item', 'paid_batch')}
+                            AND (retry_approval.source_item_id IS NULL OR
+                                 NOT {valid_batch_retry_sql('paid_item', 'paid_batch')})) AS paid_batch_held
             FROM photos p JOIN libraries l ON l.id=p.library_id
             WHERE p.lifecycle_status='active' AND p.eligible=1
               AND NOT {reserved_analysis_sql()}
@@ -358,10 +378,10 @@ class BatchAnalysisService:
                   JOIN analysis_batches b ON b.id=i.batch_id
                   WHERE i.photo_id=p.id AND b.status IN ({marks})
               )
-            ORDER BY COALESCE(p.local_candidate_score,-1) DESC,
+            ORDER BY -COALESCE(p.local_candidate_score,-1),
                      COALESCE(p.captured_at,p.created_at),p.id
             """,  # noqa: S608 -- only the placeholder count is dynamic.
-            active,
+            [retry_authorization, analysis_fingerprint, *active],
         )
 
     def _finalize_cached_photo(self, photo, cached, *, plan, analysis_fingerprint,
@@ -376,6 +396,56 @@ class BatchAnalysisService:
             analysis_source="cache", connection=connection,
         )
 
+    @staticmethod
+    def _candidate_page_query(query, parameters, *, seed, after, size):
+        base, order = query.rsplit("ORDER BY", 1)
+        page_parameters = list(parameters)
+        if after is not None:
+            if seed is not None:
+                base += " AND (batch_sample_key(p.id),p.id)>(?,?) "
+            else:
+                # Negating the descending numeric score makes every key
+                # ascending, so one tuple comparison can seek the index.
+                base += " AND (-COALESCE(p.local_candidate_score,-1),COALESCE(p.captured_at,p.created_at),p.id)>(?,?,?) "
+            page_parameters.extend(after)
+        return base + " ORDER BY " + order + " LIMIT ?", [*page_parameters, size]
+
+    def _candidate_pages(self, query, parameters, *, seed, limit):
+        """Keyset pages keep EXIF and SQLite read snapshots bounded.
+
+        Cache application may remove earlier candidates from the predicate, so
+        OFFSET pagination would skip photos. All sorting keys are immutable
+        during cache application and are kept even when that row is finalized.
+        """
+        after = None
+        remaining = limit
+        while remaining > 0:
+            page_size = min(128, remaining)
+            page_query, page_parameters = self._candidate_page_query(
+                query, parameters, seed=seed, after=after, size=page_size
+            )
+            with self.database.session() as connection:
+                if seed is not None:
+                    connection.create_function(
+                        "batch_sample_key", 1,
+                        lambda photo_id: hashlib.sha256(f"{seed}:{photo_id}".encode("utf-8")).hexdigest(),
+                        deterministic=True,
+                    )
+                cursor = connection.execute(page_query, page_parameters)
+                rows = [dict(row) for row in cursor.fetchmany(page_size)]
+                cursor.close()
+            if not rows:
+                return
+            last = rows[-1]
+            after = (
+                (hashlib.sha256(f"{seed}:{last['id']}".encode("utf-8")).hexdigest(), last["id"])
+                if seed is not None
+                else (-(last["local_candidate_score"] if last["local_candidate_score"] is not None else -1),
+                      last["captured_at"] if last["captured_at"] is not None else last["created_at"], last["id"])
+            )
+            remaining -= len(rows)
+            yield rows
+
     def _candidate_rows(
         self,
         *,
@@ -387,19 +457,24 @@ class BatchAnalysisService:
         photo_ids: Iterable[str] | None,
         sample_count: int,
         apply_cached: bool = False,
+        retry_authorization: str | None = None,
     ) -> tuple[list[dict[str, Any]], dict[str, int], str | None]:
-        query, active_parameters = self._base_candidate_sql()
-        parameters: list[Any] = [analysis_fingerprint, *active_parameters]
+        query, parameters = self._base_candidate_sql(
+            analysis_fingerprint=analysis_fingerprint, retry_authorization=retry_authorization
+        )
         if scope == "manual_selection":
             requested = list(dict.fromkeys(str(value) for value in (photo_ids or [])))
             if not requested:
-                return [], {"never_upload_excluded": 0, "confirmed_screenshot_excluded": 0, "cache_hits": 0, "sha_duplicates": 0}, None
-            marks = ",".join("?" for _ in requested)
-            query = query.replace(
-                "ORDER BY COALESCE(p.local_candidate_score,-1) DESC,\n                     COALESCE(p.captured_at,p.created_at),p.id",
-                f"AND p.id IN ({marks})\n            ORDER BY COALESCE(p.local_candidate_score,-1) DESC,\n                     COALESCE(p.captured_at,p.created_at),p.id",
-            )
-            parameters.extend(requested)
+                return [], {"never_upload_excluded": 0, "confirmed_screenshot_excluded": 0,
+                            "cache_hits": 0, "sha_duplicates": 0, "paid_operation_held": 0}, None
+            base, order = query.rsplit("ORDER BY", 1)
+            query = base + " AND p.id IN (SELECT value FROM json_each(?)) ORDER BY " + order  # noqa: S608 -- one bound JSON array.
+            parameters.append(json.dumps(requested, ensure_ascii=False, separators=(",", ":")))
+        if retry_authorization is not None:
+            base, order = query.rsplit("ORDER BY", 1)
+            query = (base + " AND p.sha256 IN (SELECT content_sha256 FROM analysis_batch_retry_authorizations "  # noqa: S608 -- bound internal authorization.
+                     "WHERE authorization_id=?) ORDER BY " + order)
+            parameters.append(retry_authorization)
         seed: str | None = None
         # Bound materialization and NAS stat calls before touching candidate files.
         # Sampling order is computed in SQLite; only the selected window enters Python.
@@ -408,16 +483,7 @@ class BatchAnalysisService:
             seed = hashlib.sha256(f"{scope}:{analysis_fingerprint}".encode("utf-8")).hexdigest()
             scan_limit = max(1, min(int(sample_count), scan_limit))
             query = query.rsplit("ORDER BY", 1)[0] + "ORDER BY batch_sample_key(p.id),p.id"
-        query += " LIMIT ?"
-        parameters.append(scan_limit)
         with self.database.session() as connection:
-            if seed is not None:
-                connection.create_function(
-                    "batch_sample_key", 1,
-                    lambda photo_id: hashlib.sha256(f"{seed}:{photo_id}".encode("utf-8")).hexdigest(),
-                    deterministic=True,
-                )
-            rows = [dict(row) for row in connection.execute(query, parameters).fetchall()]
             never_upload = int(
                 connection.execute(
                     """
@@ -426,7 +492,6 @@ class BatchAnalysisService:
                     """
                 ).fetchone()[0]
             )
-        safe_rows: list[dict[str, Any]] = []
         confirmed_screenshot_excluded = 0
         prefilter = dict(plan.get("prefilter") or {})
         policy_settings = {
@@ -437,28 +502,28 @@ class BatchAnalysisService:
             "analysis.e6_prefilter_enabled": bool(prefilter.get("e6_enabled", True)),
             "analysis.e6_min_score": float(prefilter.get("e6_min_score", 25)),
         }
-        for row in rows:
-            if is_confirmed_screenshot(row):
-                confirmed_screenshot_excluded += 1
-                continue
-            if self.analysis.prefilter_snapshot(row, policy_settings=policy_settings)["excluded"]:
-                continue
-            try:
-                source = safe_join(Path(str(row["root_path"])), str(row["relative_path"]))
-            except (OSError, ValueError):
-                continue
-            if not source.is_file():
-                continue
-            safe_rows.append({"photo": row, "source": source})
         candidates: list[dict[str, Any]] = []
         seen_sha: set[str] = set()
         cache_hits = 0
         sha_duplicates = 0
+        paid_operation_held = 0
         vision_input = dict(plan.get("vision_input") or plan.get("high_vision_input") or {})
         vision_input["schema_kind"] = "full"
         vision_input["reasoning_effort"] = str(plan["reasoning_effort"])
-        for item in safe_rows:
-            photo = item["photo"]
+        vision_input_json = canonical_json(vision_input)
+        rows = (photo for page in self._candidate_pages(query, parameters, seed=seed, limit=scan_limit) for photo in page)
+        for photo in rows:
+            if is_confirmed_screenshot(photo):
+                confirmed_screenshot_excluded += 1
+                continue
+            if self.analysis.prefilter_snapshot(photo, policy_settings=policy_settings)["excluded"]:
+                continue
+            try:
+                source = safe_join(Path(str(photo["root_path"])), str(photo["relative_path"]), decode_url=False)
+            except (OSError, ValueError):
+                continue
+            if not source.is_file():
+                continue
             content_sha = str(photo["sha256"] or "").casefold()
             vision_fp = fingerprint(
                 {
@@ -492,21 +557,26 @@ class BatchAnalysisService:
                         self._finalize_cached_photo(
                             photo, cached, plan=plan, analysis_fingerprint=analysis_fingerprint,
                             provider_id=provider_id, model=model, vision_fp=vision_fp,
-                            vision_input_json=canonical_json(vision_input),
+                            vision_input_json=vision_input_json,
                         )
                     cache_hits += 1
                     continue
+            if photo["paid_single_held"] or photo["paid_batch_held"]:
+                paid_operation_held += 1
+                continue
             if content_sha in seen_sha:
                 sha_duplicates += 1
                 continue
             seen_sha.add(content_sha)
             candidates.append(
                 {
-                    "photo": photo,
-                    "source": item["source"],
+                    # Downstream preparation needs the identity, not the full
+                    # EXIF/quality snapshot. Cache writes above use the bounded page.
+                    "photo": {"id": str(photo["id"])},
+                    "source": source,
                     "content_sha256": content_sha,
                     "vision_request_fingerprint": vision_fp,
-                    "vision_input_spec_json": canonical_json(vision_input),
+                    "vision_input_spec_json": vision_input_json,
                 }
             )
         return (
@@ -516,6 +586,7 @@ class BatchAnalysisService:
                 "confirmed_screenshot_excluded": confirmed_screenshot_excluded,
                 "cache_hits": cache_hits,
                 "sha_duplicates": sha_duplicates,
+                "paid_operation_held": paid_operation_held,
             },
             seed,
         )
@@ -584,6 +655,11 @@ class BatchAnalysisService:
             "cache_hits": skipped["cache_hits"],
             "sha_duplicates": skipped["sha_duplicates"],
             "never_upload_excluded": skipped["never_upload_excluded"],
+            "paid_operation_held": skipped.get("paid_operation_held", 0),
+            "paid_operation_hold_message": (
+                "已有模型付費證據；請使用即時分析續行或從原批次／完整備份恢復結果，狀態不明者須先對帳，Batch 不會重送"
+                if skipped.get("paid_operation_held") else None
+            ),
             "submitted_count": len(candidates),
             "estimated_jsonl_bytes": min(MAX_OPENAI_BYTES, len(candidates) * 350_000),
             "estimated_shard_count": max(0, (len(candidates) + max_items - 1) // max_items),
@@ -850,6 +926,7 @@ class BatchAnalysisService:
                 source,
                 str(item["content_sha256"]),
                 int((plan.get("vision_input") or plan.get("high_vision_input") or {})["max_side"]),
+                verify_source=True,
             ) as thumbnail:
                 item["thumbnail"] = thumbnail
                 try:
@@ -915,9 +992,42 @@ class BatchAnalysisService:
         self.budgets.assert_restore_reconciled()
         # One indexed EXISTS-style query, not one new DB connection per photo.
         with self.database.session() as connection:
+            if connection.execute(
+                "SELECT 1 FROM analysis_batch_items i JOIN billable_operations paid_single "
+                "ON paid_single.content_sha256=i.content_sha256 "
+                "WHERE i.batch_id=? AND paid_single.state IN ('started','response','completed') LIMIT 1",
+                (batch_id,),
+            ).fetchone():
+                raise BatchLifecycleError(
+                    "相同照片已有即時模型付費操作；請先續行或對帳，Batch 請求未送出",
+                    "BATCH-PAID-OPERATION-HOLD",
+                )
+            if connection.execute(
+                f"""SELECT 1 FROM analysis_batch_items current_item
+                    JOIN analysis_batch_items reserved_batch_item
+                      ON reserved_batch_item.content_sha256=current_item.content_sha256
+                     AND reserved_batch_item.batch_id<>current_item.batch_id
+                    JOIN analysis_batches reserved_batch ON reserved_batch.id=reserved_batch_item.batch_id
+                    JOIN analysis_batches current_batch ON current_batch.id=current_item.batch_id
+                    LEFT JOIN analysis_batch_retry_authorizations retry_approval
+                      ON retry_approval.retry_job_id=current_batch.job_id
+                     AND retry_approval.source_item_id=reserved_batch_item.id
+                     AND retry_approval.content_sha256=current_item.content_sha256
+                    WHERE current_item.batch_id=? AND (
+                        {held_batch_sql()} OR (
+                            {paid_batch_item_sql('reserved_batch_item', 'reserved_batch')} AND
+                            (retry_approval.source_item_id IS NULL OR
+                             NOT {valid_batch_retry_sql('reserved_batch_item', 'reserved_batch')})
+                        )
+                    ) LIMIT 1""",  # noqa: S608
+                (batch_id,),
+            ).fetchone():
+                raise BatchLifecycleError("相同照片已有其他 Batch 付費證據；請從原批次／完整備份恢復結果或先對帳", "BATCH-PAID-OPERATION-HOLD")
             blocked = connection.execute(
                 "SELECT 1 FROM analysis_batch_items i LEFT JOIN photos p ON p.id=i.photo_id "
-                "WHERE i.batch_id=? AND (p.id IS NULL OR p.never_upload<>0 OR p.lifecycle_status<>'active') LIMIT 1",
+                "WHERE i.batch_id=? AND (p.id IS NULL OR p.never_upload<>0 OR p.lifecycle_status<>'active' "
+                "OR p.eligible<>1 OR p.exclusion_status IN ('auto_excluded','manually_excluded') "
+                "OR COALESCE(p.sha256,'')<>i.content_sha256) LIMIT 1",
                 (batch_id,),
             ).fetchone()
             batch = connection.execute("SELECT job_id FROM analysis_batches WHERE id=?", (batch_id,)).fetchone()
@@ -1030,6 +1140,8 @@ class BatchAnalysisService:
                 "BATCH-INPUT-001",
                 "BATCH-CLAIM-STALE",
                 "BATCH-JOB-START-001",
+                "BATCH-PAID-OPERATION-HOLD",
+                "BATCH-RESERVATION-CONFLICT",
             }
             if code == "BATCH-ALREADY-CLAIMED" or (code == "BATCH-CLAIM-STALE" and not remote_created):
                 # A losing claimant must not overwrite the winner's state.
@@ -1096,6 +1208,7 @@ class BatchAnalysisService:
         photo_ids: Iterable[str] | None = None,
         created_by: str | None = None,
         budget_limit: float | None = None,
+        _retry_authorization: str | None = None,
     ) -> dict[str, Any]:
         submit_started = time.monotonic()
         self._assert_ai_submission_allowed()
@@ -1111,12 +1224,18 @@ class BatchAnalysisService:
             photo_ids=photo_ids,
             sample_count=sample_count,
             apply_cached=True,
+            retry_authorization=_retry_authorization,
         )
         if not candidates and skipped["cache_hits"]:
             return {"job_id": None, "batch_ids": [], "prepared_batch_ids": [],
                     "not_submitted_batch_ids": [], "submission_status": "no_candidates",
                     "candidate_count": 0, **skipped, "analysis_fingerprint": analysis_fp, "model": model}
         if not candidates:
+            if skipped.get("paid_operation_held"):
+                raise BatchLifecycleError(
+                    "候選照片已有模型付費證據；請使用即時分析續行或從原批次／完整備份恢復結果，狀態不明者須先對帳",
+                    "BATCH-PAID-OPERATION-HOLD",
+                )
             raise BatchLifecycleError("目前沒有符合條件的 Batch 候選", "BATCH-CANDIDATE-001")
         estimate = self._estimate_candidates(
             scope=scope,
@@ -1146,6 +1265,12 @@ class BatchAnalysisService:
             )
         except AnalysisReservationConflict as exc:
             raise BatchLifecycleError(str(exc), "BATCH-RESERVATION-CONFLICT") from exc
+        if _retry_authorization is not None:
+            try:
+                BatchRetryAuthorizationRepository(self.database).bind(_retry_authorization, job_id)
+            except Exception:
+                self.jobs.abandon_unstarted(job_id, "BATCH-RETRY-AUTHORIZATION")
+                raise
         job_items = self.jobs.list_items(job_id, limit=max(100, len(candidates)))
         job_items_by_photo = {str(item["photo_id"]): item for item in job_items}
         estimated_each = float(estimate["estimated_cost"] or 0) / max(1, len(candidates))
@@ -1273,6 +1398,7 @@ class BatchAnalysisService:
             "cache_hits": skipped["cache_hits"],
             "sha_duplicates": skipped["sha_duplicates"],
             "never_upload_excluded": skipped["never_upload_excluded"],
+            "paid_operation_held": skipped.get("paid_operation_held", 0),
             "analysis_fingerprint": analysis_fp,
             "model": model,
         }
@@ -1782,25 +1908,14 @@ class BatchAnalysisService:
         return {"status": str(self.batches.get(batch_id)["status"]), "batch_id": batch_id}
 
     def retry_failed(self, batch_id: str, *, created_by: str | None = None) -> dict[str, Any]:
-        items = self.batches.items(batch_id)
-        retry_statuses = {
-            "failed",
-            "missing",
-            "retry_pending",
-            "schema_invalid",
-            "duplicate_custom_id",
-            "unexpected_custom_id",
-        }
-        photo_ids = [
-            str(item["photo_id"])
-            for item in (dict(item) for item in items)
-            if str(item["status"]) in retry_statuses
-            and str(item.get("error_code") or "") != "submission_unknown"
-            and item["photo_id"]
-        ]
-        if not photo_ids:
-            raise BatchLifecycleError("此 Batch 沒有可重試項目", "BATCH-RETRY-001")
-        return self.submit(scope="manual_selection", photo_ids=photo_ids, created_by=created_by)
+        try:
+            token, photo_ids = BatchRetryAuthorizationRepository(self.database).create(batch_id, approved_by=created_by)
+        except AnalysisReservationConflict as exc:
+            raise BatchLifecycleError(str(exc), "BATCH-RESERVATION-CONFLICT") from exc
+        except ValueError as exc:
+            raise BatchLifecycleError(str(exc), "BATCH-RETRY-001") from exc
+        return self.submit(scope="manual_selection", photo_ids=photo_ids, created_by=created_by,
+                           _retry_authorization=token)
 
     def recover_uploaded_file(self, batch_id: str, remote_file_id: str) -> dict[str, Any]:
         """Bind a verified remote input File after an ambiguous upload.
@@ -2106,7 +2221,7 @@ class BatchAnalysisService:
     @staticmethod
     def _current_content_sha(photo) -> str | None:
         try:
-            source = safe_join(Path(str(photo["root_path"])), str(photo["relative_path"]))
+            source = safe_join(Path(str(photo["root_path"])), str(photo["relative_path"]), decode_url=False)
             digest = hashlib.sha256()
             with source.open("rb") as stream:
                 for chunk in iter(lambda: stream.read(1024 * 1024), b""):
@@ -2439,7 +2554,12 @@ class BatchAnalysisService:
 
     def _cleanup_local(self, batch: dict[str, Any], *, immediate: bool = False) -> None:
         batch = dict(batch)
-        retention_days = 0 if immediate else max(0, int(self.settings.get("batch.local_retention_days", 7)))
+        configured_days = max(0, int(self.settings.get("batch.local_retention_days", 0)))
+        # Inputs, errors and downloaded output are durable billing/model evidence.
+        # Zero means permanent, including cancellation and failed preparation.
+        if configured_days == 0:
+            return
+        retention_days = 0 if immediate else configured_days
         cutoff = time.time() - (retention_days * 24 * 60 * 60)
         for key in ("local_input_path", "local_output_path", "local_error_path"):
             raw_path = batch.get(key)

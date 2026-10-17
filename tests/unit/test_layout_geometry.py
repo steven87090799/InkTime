@@ -38,8 +38,10 @@ def test_baseline_rectangles_match_formal_layout_contract_at_both_orientations()
                 "info_rect": {"x": 24, "y": 658, "width": 432, "height": 142},
             },
             "photo_pair": {
-                "primary_photo": {"x": 0, "y": 0, "width": 480, "height": 396},
-                "secondary_photo": {"x": 0, "y": 404, "width": 480, "height": 396},
+                "primary_photo": {"x": 0, "y": 0, "width": 480, "height": 317},
+                "secondary_photo": {"x": 0, "y": 404, "width": 480, "height": 317},
+                "primary_caption": {"x": 0, "y": 317, "width": 480, "height": 79},
+                "secondary_caption": {"x": 0, "y": 721, "width": 480, "height": 79},
             },
             "photo_pair_caption": {
                 "primary_photo": {"x": 0, "y": 0, "width": 480, "height": 317},
@@ -75,8 +77,10 @@ def test_baseline_rectangles_match_formal_layout_contract_at_both_orientations()
                 "info_rect": {"x": 24, "y": 358, "width": 752, "height": 122},
             },
             "photo_pair": {
-                "primary_photo": {"x": 0, "y": 0, "width": 396, "height": 480},
-                "secondary_photo": {"x": 404, "y": 0, "width": 396, "height": 480},
+                "primary_photo": {"x": 0, "y": 0, "width": 396, "height": 384},
+                "secondary_photo": {"x": 404, "y": 0, "width": 396, "height": 384},
+                "primary_caption": {"x": 0, "y": 384, "width": 396, "height": 96},
+                "secondary_caption": {"x": 404, "y": 384, "width": 396, "height": 96},
             },
             "photo_pair_caption": {
                 "primary_photo": {"x": 0, "y": 0, "width": 396, "height": 384},

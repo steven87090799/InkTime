@@ -24,6 +24,11 @@ jobs:
     name: Publish multi-architecture GHCR image
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    outputs:
+      digest: ${{ steps.push.outputs.digest }}
+      commit: ${{ steps.release.outputs.commit }}
+      stable: ${{ steps.release.outputs.stable }}
+      publish_latest: ${{ steps.alias.outputs.publish_latest }}
     steps:
       - name: Check out the tagged source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (Node 24)
@@ -208,3 +213,40 @@ jobs:
               echo "- Stable alias: unchanged (pre-release tag)"
             fi
           } >> "${GITHUB_STEP_SUMMARY}"
+
+  nas-installation:
+    name: Publish versioned NAS installation bundle
+    needs: publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Check out the tagged source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (Node 24)
+      - name: Package and publish pull-only installation files
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_COMMIT: ${{ needs.publish.outputs.commit }}
+          IMAGE_DIGEST: ${{ needs.publish.outputs.digest }}
+          STABLE_RELEASE: ${{ needs.publish.outputs.stable }}
+          PUBLISH_LATEST: ${{ needs.publish.outputs.publish_latest }}
+        run: |
+          set -euo pipefail
+          destination="${RUNNER_TEMP}/nas-release"
+          python scripts/ci/package_nas_release.py --tag "${RELEASE_TAG}" \
+            --commit "${RELEASE_COMMIT}" --digest "${IMAGE_DIGEST}" --output "${destination}"
+          assets=("${destination}/inktime-nas-${RELEASE_TAG}.zip" "${destination}/SHA256SUMS")
+          if gh release view "${RELEASE_TAG}" >/dev/null 2>&1; then
+            # No --clobber: published version assets must never be overwritten.
+            gh release upload "${RELEASE_TAG}" "${assets[@]}"
+          else
+            flags=(--verify-tag --title "InkTime ${RELEASE_TAG}" --notes-file "${destination}/release-notes.md")
+            if [ "${STABLE_RELEASE}" != "true" ]; then flags+=(--prerelease --latest=false);
+            elif [ "${PUBLISH_LATEST}" = "true" ]; then flags+=(--latest);
+            else flags+=(--latest=false); fi
+            gh release create "${RELEASE_TAG}" "${assets[@]}" "${flags[@]}"
+          fi

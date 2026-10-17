@@ -2459,6 +2459,41 @@ MIGRATIONS = (
         "索引歷史活動事件的大小寫相容保留查詢",
         ("CREATE INDEX idx_activity_events_severity_nocase_id ON activity_events(severity COLLATE NOCASE,id)",),
     ),
+    Migration(
+        68,
+        "永久保存照片內容版本與付費模型輸入證據",
+        (
+            "CREATE TABLE photo_content_history("
+            "id TEXT PRIMARY KEY,photo_id TEXT NOT NULL,content_sha256 TEXT NOT NULL,"
+            "photo_json TEXT NOT NULL,analyses_json TEXT NOT NULL,created_at TEXT NOT NULL)",
+            "CREATE INDEX idx_photo_content_history_sha ON photo_content_history(content_sha256,created_at)",
+            "CREATE INDEX idx_photo_content_history_photo ON photo_content_history(photo_id,created_at)",
+            "CREATE TABLE model_request_evidence("
+            "operation_id TEXT PRIMARY KEY,request_json TEXT NOT NULL,response_json TEXT,"
+            "created_at TEXT NOT NULL,updated_at TEXT NOT NULL)",
+            "UPDATE data_retention_policies SET enabled=0,dry_run=1,updated_at=datetime('now') "
+            "WHERE data_type='ai_trace'",
+            # Promote the former seven-day default to permanent retention. Explicit
+            # nondefault periods remain an operator's choice; zero is now permanent.
+            "UPDATE settings SET value_json='0',updated_at=datetime('now') "
+            "WHERE key='batch.local_retention_days' AND value_json='7'",
+        ),
+    ),
+    Migration(
+        69,
+        "索引大型照片庫並保存明確失敗項目重試授權",
+        (
+            "CREATE INDEX idx_photos_batch_candidate_page ON photos("
+            "eligible,lifecycle_status,-COALESCE(local_candidate_score,-1),COALESCE(captured_at,created_at),id) "
+            "WHERE local_features_status='complete' AND COALESCE(never_upload,0)=0",
+            "CREATE TABLE analysis_batch_retry_authorizations("
+            "authorization_id TEXT NOT NULL,source_item_id TEXT NOT NULL REFERENCES analysis_batch_items(id) ON DELETE RESTRICT,"
+            "content_sha256 TEXT NOT NULL,retry_job_id TEXT REFERENCES jobs(id) ON DELETE RESTRICT,"
+            "approved_by TEXT,created_at TEXT NOT NULL,PRIMARY KEY(authorization_id,source_item_id))",
+            "CREATE INDEX idx_batch_retry_job_content ON analysis_batch_retry_authorizations(retry_job_id,content_sha256,source_item_id)",
+            "CREATE INDEX idx_batch_retry_authorization_content ON analysis_batch_retry_authorizations(authorization_id,content_sha256)",
+        ),
+    ),
 )
 
 

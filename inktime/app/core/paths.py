@@ -8,11 +8,11 @@ class UnsafePathError(PermissionError):
     code = "PATH-001"
 
 
-def safe_join(base: Path, relative: str) -> Path:
+def safe_join(base: Path, relative: str, *, decode_url: bool = True) -> Path:
     """解析並限制在 base 內；拒絕絕對、URL 編碼與跨平台逃逸路徑。"""
-    decoded = unquote(str(relative or ""))
+    decoded = unquote(str(relative or "")) if decode_url else str(relative or "")
     # 重複編碼（例如 %252e%252e）也必須在進入檔案系統前完全解開。
-    for _ in range(2):
+    for _ in range(2 if decode_url else 0):
         next_value = unquote(decoded)
         if next_value == decoded:
             break

@@ -205,25 +205,8 @@ def resolve_layout_geometry(
         )
 
     gutter = 8
-    if layout == "photo_pair":
-        if effective_orientation == "landscape":
-            primary_width = (width - gutter) // 2
-            primary = Rect(0, 0, primary_width, height)
-            secondary = Rect(primary_width + gutter, 0, width - primary_width - gutter, height)
-        else:
-            primary_height = (height - gutter) // 2
-            primary = Rect(0, 0, width, primary_height)
-            secondary = Rect(0, primary_height + gutter, width, height - primary_height - gutter)
-        return LayoutGeometry(
-            layout,
-            effective_orientation,
-            width,
-            height,
-            primary_photo=primary,
-            secondary_photo=secondary,
-            gutter=gutter,
-        )
-
+    # Both stored pair modes reserve independent text regions.  Older
+    # installations keep photo_pair as their device override after upgrades.
     if effective_orientation == "landscape":
         card_width = (width - gutter) // 2
         caption_height = max(int(height * 0.15), min(int(height * 0.25), int(height * ratio)))

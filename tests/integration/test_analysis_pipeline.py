@@ -295,6 +295,15 @@ def prepare(app, tmp_path, duplicate=False):
     result = PhotoScanner(photos, PhotoPreprocessor(), cache).scan("照片", root)
     with app.extensions["inktime_database"].session() as connection:
         ids = [row[0] for row in connection.execute("SELECT id FROM photos ORDER BY relative_path")]
+    # These flat synthetic images exercise provider contracts, not quality
+    # selection. Restore them explicitly; force must never bypass exclusions.
+    with app.extensions["inktime_database"].session() as connection:
+        existing_operator = connection.execute(
+            "SELECT id FROM users WHERE username=?", ("analysis-fixture-operator",)
+        ).fetchone()
+    operator = str(existing_operator[0]) if existing_operator else create_admin(app, username="analysis-fixture-operator")
+    for photo_id in ids:
+        photos.set_exclusion(photo_id, action="restore", changed_by=operator)
     service = PhotoAnalysisService(photos, UsageRepository(app.extensions["inktime_database"]), cache)
     return result, ids, service
 

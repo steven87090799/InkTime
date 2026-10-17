@@ -14,7 +14,7 @@
   </div>
   {% if trace_summary.retention %}
     {% if trace_summary.retention.enabled %}<p class="notice success">AI Trace 保留策略已啟用：保留 {{ trace_summary.retention.retention_days }} 天，每次最多清理 {{ trace_summary.retention.cleanup_batch_size }} 筆。<a href="/retention">查看保留設定</a></p>
-    {% else %}<p class="notice warning"><strong>AI Trace 自動保留目前停用。</strong>資料會持續累積；前往<a href="/retention">資料保留</a>啟用 <code>ai_trace</code>，再由排程分批清理超過保留天數的紀錄。</p>{% endif %}
+    {% else %}<p class="notice success"><strong>AI Trace 紀錄預設永久保存。</strong>自動清理已停用；請備份完整資料目錄，以便重新安裝後沿用。需要限期清理時，可前往<a href="/retention">資料保留</a>明確調整。</p>{% endif %}
   {% endif %}
   {% if trace_summary.trace_count and trace_summary.photo_count == 1 %}<p class="notice warning trace-single-photo">目前資料庫確實只有 1 張照片曾產生 AI Trace，所以清單只會看到同一張；這不代表其他照片遺失，而是其他照片沒有成功走到 Provider 呼叫階段。</p>{% endif %}
 </section>

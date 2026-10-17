@@ -16,7 +16,7 @@ def photo_derivative_response(photo_id: str, size: int, *, invalid_path_status: 
         if photo is None or not str(photo["sha256"] or ""):
             raise ImageSourceError("IMG-MISSING", "找不到照片", 404)
         suffix = Path(photo["relative_path"]).suffix.lower()
-        path = safe_join(Path(photo["root_path"]), photo["relative_path"])
+        path = safe_join(Path(photo["root_path"]), photo["relative_path"], decode_url=False)
         cache = current_app.extensions["inktime_thumbnail_cache"]
         if not path.is_file():
             with cache.acquire_existing(str(photo["sha256"]), size) as derivative:

@@ -707,15 +707,26 @@ def scan_detail(scan_id: str):
     scan = repository.get_scan(scan_id)
     if scan is None:
         abort(404)
+    try:
+        limit = int(request.args.get("limit", "200"))
+        after_id = int(request.args.get("after_id", "0"))
+    except (TypeError, ValueError):
+        abort(400, description="SCAN-001 錯誤清單分頁參數不合法")
+    if not 1 <= limit <= 500 or after_id < 0:
+        abort(400, description="SCAN-001 錯誤清單每頁 1–500 筆，游標不得為負數")
     with current_app.extensions["inktime_database"].session() as connection:
         errors = connection.execute(
             """
             SELECT id,scan_id,photo_id,stage,error_code,exception_type,retryable,masked_path,created_at
-            FROM scan_errors WHERE scan_id=? ORDER BY id LIMIT 500
+            FROM scan_errors WHERE scan_id=? AND id>? ORDER BY id LIMIT ?
             """,
-            (scan_id,),
+            (scan_id, after_id, limit + 1),
         ).fetchall()
-    return {"scan": dict(scan), "errors": [dict(error) for error in errors]}
+        total = connection.execute("SELECT COUNT(*) FROM scan_errors WHERE scan_id=?", (scan_id,)).fetchone()[0]
+    has_more = len(errors) > limit
+    page = errors[:limit]
+    return {"scan": dict(scan), "errors": [dict(error) for error in page], "errors_total": total,
+            "has_more": has_more, "next_after_id": int(page[-1]["id"]) if has_more else None}
 
 
 @bp.post("/api/v1/scans/<scan_id>/confirm-missing")

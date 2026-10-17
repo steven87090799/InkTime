@@ -212,7 +212,7 @@ GxEPD2_7C<
 #define DEVICE_PAIRING_CLAIM_PATH "/api/device/v1/pairing/claim"
 #define DEVICE_PAIRING_CONFIRM_PATH "/api/device/v1/pairing/confirm"
 #define DEVICE_PAIRING_REPAIR_PERMISSION_PATH "/api/device/v1/pairing/repair-permission"
-#define INKTIME_FIRMWARE_VERSION "2.8.8"
+#define INKTIME_FIRMWARE_VERSION "2.8.9"
 
 static constexpr uint8_t kQueueAckBatchMaxEvents = 8U;
 static constexpr size_t kQueueAckBatchMaxBodyBytes = 12U * 1024U;
@@ -484,6 +484,22 @@ static bool validSyncStrategy(const String &strategy, const String &syncTime) {
   if (strategy != "first_display_lead" && strategy != "fixed_daily") return false;
   if (strategy == "first_display_lead") return syncTime.isEmpty();
   return !syncTime.isEmpty() && validSyncTime(syncTime);
+}
+
+static DeserializationError readDeviceHttpJson(
+    HTTPClient &http, JsonDocument &document, size_t maximumBytes) {
+  const int expected = http.getSize();
+  if (expected <= 0 || static_cast<size_t>(expected) > maximumBytes) {
+    return DeserializationError(DeserializationError::InvalidInput);
+  }
+  // TLS headers and body can arrive separately. HTTPClient's body reader
+  // retries transient empty reads; parsing its raw stream can report EmptyInput.
+  // Bound allocation first and reject truncated bodies before parsing any JSON.
+  const String body = http.getString();
+  if (body.length() != static_cast<size_t>(expected)) {
+    return DeserializationError(DeserializationError::IncompleteInput);
+  }
+  return deserializeJson(document, body);
 }
 
 static bool applyRemoteSchedule(JsonObject remoteConfig, int schemaVersion, Config &candidate) {
@@ -3349,7 +3365,7 @@ static bool checkRepairPermission(Config &cfg) {
     return false;
   }
   JsonDocument response;
-  const DeserializationError jsonError = deserializeJson(response, http.getStream());
+  const DeserializationError jsonError = readDeviceHttpJson(http, response, 2048U);
   http.end();
   const String statusValue = response["status"] | "";
   const String authorizedDeviceId = response["device_id"] | "";
@@ -3418,7 +3434,7 @@ static bool confirmPairingCredential(Config &cfg, const String &base) {
     return false;
   }
   JsonDocument response;
-  const DeserializationError jsonError = deserializeJson(response, http.getStream());
+  const DeserializationError jsonError = readDeviceHttpJson(http, response, 4096U);
   http.end();
   const String statusValue = response["status"] | "";
   const String confirmedDeviceId = response["device_id"] | "";
@@ -3498,7 +3514,7 @@ static bool claimPairingCredential(Config &cfg, const String &base) {
       return false;
     }
     JsonDocument response;
-    const DeserializationError jsonError = deserializeJson(response, http.getStream());
+    const DeserializationError jsonError = readDeviceHttpJson(http, response, 8192U);
     http.end();
     const String secret = response["device_secret"] | "";
     const JsonVariantConst versionValue = response["credential_version"];
@@ -3621,7 +3637,7 @@ static bool performAutomaticPairing(Config &cfg) {
     return false;
   }
   JsonDocument requestResponse;
-  const DeserializationError requestJsonError = deserializeJson(requestResponse, requestHttp.getStream());
+  const DeserializationError requestJsonError = readDeviceHttpJson(requestHttp, requestResponse, 8192U);
   requestHttp.end();
   const String pairingId = requestResponse["pairing_id"] | "";
   const String pairingCode = requestResponse["pairing_code"] | "";
@@ -3821,7 +3837,7 @@ static bool postQueueAckBatch(
     if (status == HTTP_CODE_OK && responseLength > 0 && responseLength <= 12 * 1024
         && responseContentType.startsWith("application/json")) {
       JsonDocument response;
-      const DeserializationError responseError = deserializeJson(response, ackHttp.getStream());
+      const DeserializationError responseError = readDeviceHttpJson(ackHttp, response, 12U * 1024U);
       const String responseStatus = response["status"] | "";
       const JsonArrayConst results = response["results"].as<JsonArrayConst>();
       const bool responseValid = !responseError && !response.overflowed()
@@ -4218,7 +4234,7 @@ bool downloadLatestPhotoBin(Config &cfg) {
   }
 
   JsonDocument manifest;
-  DeserializationError jsonError = deserializeJson(manifest, manifestHttp.getStream());
+  DeserializationError jsonError = readDeviceHttpJson(manifestHttp, manifest, 65536U);
   manifestHttp.end();
   int schemaVersion = manifest["schema_version"] | 0;
   String pixelFormat = manifest["pixel_format"] | "";
@@ -4661,7 +4677,7 @@ static bool downloadOfflineScheduleAndFrames(Config &cfg, bool targetNext = fals
   if (status == HTTP_CODE_CONFLICT && length > 0 && length <= 4096
       && contentType.startsWith("application/json")) {
     JsonDocument mismatch;
-    const DeserializationError mismatchError = deserializeJson(mismatch, scheduleHttp.getStream());
+    const DeserializationError mismatchError = readDeviceHttpJson(scheduleHttp, mismatch, 8192U);
     const String mismatchName = mismatch["error"] | "";
     const String mismatchCode = mismatch["error_code"] | "";
     scheduleHttp.end();
@@ -4680,7 +4696,7 @@ static bool downloadOfflineScheduleAndFrames(Config &cfg, bool targetNext = fals
   if (status == HTTP_CODE_NOT_FOUND && length > 0 && length <= 4096
       && contentType.startsWith("application/json")) {
     JsonDocument notReady;
-    const DeserializationError notReadyError = deserializeJson(notReady, scheduleHttp.getStream());
+    const DeserializationError notReadyError = readDeviceHttpJson(scheduleHttp, notReady, 8192U);
     scheduleHttp.end();
     const String errorName = notReady["error"] | "";
     const String notReadyTarget = notReady["target"] | "";
@@ -4751,7 +4767,7 @@ static bool downloadOfflineScheduleAndFrames(Config &cfg, bool targetNext = fals
     return false;
   }
   JsonDocument schedule;
-  const DeserializationError jsonError = deserializeJson(schedule, scheduleHttp.getStream());
+  const DeserializationError jsonError = readDeviceHttpJson(scheduleHttp, schedule, 32768U);
   scheduleHttp.end();
   const JsonVariantConst schema = schedule["schema_version"];
   const JsonVariantConst rawSlots = schedule["slots"];
@@ -4770,6 +4786,12 @@ static bool downloadOfflineScheduleAndFrames(Config &cfg, bool targetNext = fals
   const JsonVariantConst rawScheduleVersion = schedule["offline_schedule_version"];
   const JsonVariantConst rawTargetStartEpoch = schedule["target_start_epoch"];
   const JsonVariantConst rawTargetEndEpoch = schedule["target_end_epoch"];
+  if (jsonError || schedule.overflowed()) {
+    lastDeviceErrorCode = "DEVICE-OFFLINE-SCHEDULE-JSON";
+    lastDeviceErrorMessage = String("離線排程 JSON 解析失敗: ") + jsonError.c_str()
+      + "; overflow=" + String(schedule.overflowed() ? 1 : 0);
+    return false;
+  }
   if (jsonError || schedule.overflowed() || responseTarget != (targetNext ? "next" : "current")
       || !schema.is<int32_t>() || schema.is<bool>()
       || schema.as<int32_t>() != 1 || deliveryMode != "inktime_offline_schedule"
@@ -4790,6 +4812,26 @@ static bool downloadOfflineScheduleAndFrames(Config &cfg, bool targetNext = fals
       || rawTargetEndEpoch.as<int64_t>() <= rawTargetStartEpoch.as<int64_t>()) {
     lastDeviceErrorCode = "DEVICE-OFFLINE-SCHEDULE-SCHEMA";
     lastDeviceErrorMessage = "離線排程 schema、日期或快照欄位不相容";
+    // Report field names only: device credentials and response contents stay private.
+    if (responseTarget != (targetNext ? "next" : "current")) lastDeviceErrorMessage += "; target";
+    if (!schema.is<int32_t>() || schema.is<bool>() || schema.as<int32_t>() != 1)
+      lastDeviceErrorMessage += "; schema_version";
+    if (deliveryMode != "inktime_offline_schedule") lastDeviceErrorMessage += "; delivery_mode";
+    if (!rawSlots.is<JsonArrayConst>()) lastDeviceErrorMessage += "; slots";
+    if (targetLocalDate.isEmpty() || (!targetDate.isEmpty() && targetDate != targetLocalDate))
+      lastDeviceErrorMessage += "; target_date";
+    if (timezoneName.isEmpty() || timezoneName.length() > 64U) lastDeviceErrorMessage += "; timezone";
+    if (scheduleId.isEmpty() || !inktime::boundedText(scheduleId.c_str(), inktime::kQueueIdentifierMaxBytes))
+      lastDeviceErrorMessage += "; schedule_id";
+    if (panelProfile.isEmpty() || buttonWakeAction.isEmpty()) lastDeviceErrorMessage += "; profile/button";
+    if (!validSyncStrategy(syncStrategy, syncTime)) lastDeviceErrorMessage += "; sync";
+    if (!rawConfigVersion.is<uint32_t>() || rawConfigVersion.is<bool>()) lastDeviceErrorMessage += "; config_version";
+    if (!rawRotation.is<int32_t>() || rawRotation.is<bool>()) lastDeviceErrorMessage += "; rotation";
+    if (!rawScheduleVersion.is<int32_t>() || rawScheduleVersion.is<bool>() || rawScheduleVersion.as<int32_t>() < 0)
+      lastDeviceErrorMessage += "; offline_schedule_version";
+    if (!rawTargetStartEpoch.is<int64_t>() || rawTargetStartEpoch.is<bool>() || rawTargetStartEpoch.as<int64_t>() <= 0
+        || !rawTargetEndEpoch.is<int64_t>() || rawTargetEndEpoch.is<bool>()
+        || rawTargetEndEpoch.as<int64_t>() <= rawTargetStartEpoch.as<int64_t>()) lastDeviceErrorMessage += "; epochs";
     return false;
   }
   const JsonArrayConst slots = rawSlots.as<JsonArrayConst>();
@@ -5211,7 +5253,7 @@ static QueueDownloadResult downloadQueuePhotoBin(Config &cfg) {
   }
 
   JsonDocument manifest;
-  const DeserializationError jsonError = deserializeJson(manifest, manifestHttp.getStream());
+  const DeserializationError jsonError = readDeviceHttpJson(manifestHttp, manifest, 65536U);
   manifestHttp.end();
   const JsonVariantConst schema = manifest["schema_version"];
   const JsonVariantConst version = manifest["queue_version"];
@@ -6089,7 +6131,9 @@ bool downloadDailyPhotoBin(Config &cfg) {
     if (userButtonWake && cfg.button_wake_action == "check_new") {
       // A button check may replace the active schedule, but a missing or
       // unavailable remote schedule must leave the cached formal day usable.
-      (void)downloadOfflineScheduleAndFrames(cfg);
+      const bool downloaded = downloadOfflineScheduleAndFrames(cfg);
+      const String downloadErrorCode = lastDeviceErrorCode;
+      const String downloadErrorMessage = lastDeviceErrorMessage;
       if (offlineDeliveryModeMismatchDetected) {
         currentPrefetchOnly = false;
         const bool latest = downloadLatestPhotoBin(cfg);
@@ -6097,7 +6141,12 @@ bool downloadDailyPhotoBin(Config &cfg) {
         return latest;
       }
       currentPrefetchOnly = false;
-      return loadOfflineScheduledLocalFrame(cfg, time(nullptr), false);
+      const bool loaded = loadOfflineScheduledLocalFrame(cfg, time(nullptr), false);
+      if (!loaded && !downloaded && !downloadErrorCode.isEmpty()) {
+        lastDeviceErrorCode = downloadErrorCode;
+        lastDeviceErrorMessage = downloadErrorMessage;
+      }
+      return loaded;
     }
     if (timerRequestedNetwork || offlinePrefetchWake(cfg, time(nullptr))) {
       const time_t wakeEpoch = time(nullptr);

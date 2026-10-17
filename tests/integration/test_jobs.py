@@ -54,6 +54,23 @@ def test_job_api_rejects_invalid_worker_settings_without_writes(client, app, set
         assert connection.execute("SELECT COUNT(*) FROM job_items").fetchone()[0] == 0
 
 
+def test_forced_paid_recompute_requires_explicit_additional_cost_acceptance(client, app):
+    from tests.conftest import create_admin, csrf, login
+
+    create_admin(app)
+    login(client)
+    photo_ids = add_photos(app, 1)
+    payload = {"strategy": "single", "photo_ids": photo_ids, "force_recompute": True}
+    headers = {"X-CSRF-Token": csrf(client)}
+    for acceptance in (None, False, "true"):
+        response = client.post("/api/v1/jobs", json={**payload, "accept_additional_cost": acceptance}, headers=headers)
+        assert response.status_code == 400
+        assert response.json["error_code"] == "VLM-RECOMPUTE-CONFIRM"
+    with app.extensions["inktime_database"].session() as connection:
+        assert connection.execute("SELECT COUNT(*) FROM jobs").fetchone()[0] == 0
+        assert connection.execute("SELECT COUNT(*) FROM api_usage").fetchone()[0] == 0
+
+
 def create_job(
     app,
     count: int = 10,

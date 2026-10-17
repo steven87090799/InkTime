@@ -70,6 +70,9 @@ def test_source_to_browser_review_ai_render_and_release(app, client, tmp_path, s
     photo = photo_rows(app)[0]
     photo_id = photo["id"]
     admin = create_admin(app)
+    # The tiny synthetic color chart needs an explicit quality override before
+    # any model request, as well as before publishing.
+    app.extensions["inktime_photo_repository"].set_exclusion(photo_id, action="restore", changed_by=admin)
     login(client)
     for endpoint, size in [
         (f"/api/v1/photos/{photo_id}/thumbnail", 512),
@@ -178,7 +181,8 @@ def test_real_48mp_rgb_heif_all_derivative_consumers(app, client, tmp_path, monk
     assert result["processed"] == 1 and result["failed"] == 0
     row = photo_rows(app)[0]
     assert (row["width"], row["height"], row["format"]) == (8064, 6048, "HEIF")
-    create_admin(app)
+    admin = create_admin(app)
+    app.extensions["inktime_photo_repository"].set_exclusion(row["id"], action="restore", changed_by=admin)
     login(client)
     response = client.get(f"/api/v1/photos/{row['id']}/preview")
     assert response.status_code == 200 and response.mimetype == "image/jpeg"
@@ -226,11 +230,25 @@ def test_live_photo_raw_and_corrupt_accounting(app, tmp_path):
     (root / "raw.dng").write_bytes(b"raw")
     (root / "bad.heic").write_bytes(b"bad")
     result = scan(app, root)
-    assert result["processed"] == 1 and result["failed"] == 1
+    assert result["processed"] == 1 and result["failed"] == 2
     assert result["excluded_videos"] == 1 and result["unsupported_raw"] == 1
     assert len(photo_rows(app)) == 1
     with app.extensions["inktime_database"].session() as connection:
-        assert connection.execute("SELECT error_code FROM scan_errors").fetchone()[0] == "IMG-CORRUPT"
+        assert {row[0] for row in connection.execute("SELECT error_code FROM scan_errors")} == {"IMG-CORRUPT", "IMG-UNSUPPORTED"}
+
+
+def test_unsupported_camera_and_image_formats_are_counted_without_model_or_decode(app, tmp_path):
+    root = tmp_path / "unsupported"
+    root.mkdir()
+    for suffix in (".arw", ".nef", ".cr3", ".avif", ".jxl"):
+        (root / ("source" + suffix)).write_bytes(b"not decoded")
+    result = scan(app, root)
+    assert result["failed"] == 5 and result["processed"] == 0
+    assert result["unsupported_raw"] == 3 and result["unsupported_images"] == 2
+    assert result["warning_code"] == "SCAN-PHOTO-WARNINGS"
+    with app.extensions["inktime_database"].session() as connection:
+        assert connection.execute("SELECT COUNT(*) FROM scan_errors").fetchone()[0] == 5
+        assert connection.execute("SELECT COUNT(*) FROM photos").fetchone()[0] == 0
 
 
 @pytest.mark.parametrize(

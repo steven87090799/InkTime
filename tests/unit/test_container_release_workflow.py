@@ -38,6 +38,28 @@ def test_release_workflow_is_tag_only_and_uses_least_required_permissions():
     }
     assert workflow["env"]["IMAGE_NAME"] == "ghcr.io/steven87090799/inktime"
     assert workflow["concurrency"]["cancel-in-progress"] is False
+    installation = workflow["jobs"]["nas-installation"]
+    assert installation["needs"] == "publish"
+    assert installation["permissions"] == {"contents": "write"}
+
+
+def test_nas_release_bundle_pins_image_without_source_or_private_data(tmp_path):
+    from hashlib import sha256
+    import json
+    import zipfile
+    from scripts.ci.package_nas_release import package_release
+
+    commit, digest = "a" * 40, "sha256:" + "b" * 64
+    archive = package_release("v2.1.1", commit, digest, tmp_path)
+    with zipfile.ZipFile(archive) as bundle:
+        assert set(bundle.namelist()) == {"docker-compose.nas.yml", ".env.example", "FIRST_USE_CHECKLIST_ZH_TW.md", "NAS_TAG_DEPLOYMENT_ZH_TW.md", "release.json"}
+        assert "INKTIME_IMAGE_TAG=v2.1.1" in bundle.read(".env.example").decode()
+        assert "build:" not in bundle.read("docker-compose.nas.yml").decode()
+        assert json.loads(bundle.read("release.json"))["digest"] == digest
+        assert b"](../" not in bundle.read("FIRST_USE_CHECKLIST_ZH_TW.md")
+    assert (tmp_path / "SHA256SUMS").read_text().split()[0] == sha256(archive.read_bytes()).hexdigest()
+    first = archive.read_bytes()
+    assert package_release("v2.1.1", commit, digest, tmp_path).read_bytes() == first
 
 
 def test_release_workflow_pins_actions_and_preserves_release_identity():

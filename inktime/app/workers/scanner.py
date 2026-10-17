@@ -12,7 +12,7 @@ from inktime.app.core.logging import log_event, should_log_sample
 from inktime.app.domain.photos import PhotoPreprocessor, ThumbnailCache
 from inktime.app.domain.photos.quality_policy import FEATURE_VERSION
 from inktime.app.domain.photos.formats import (
-    SUPPORTED_IMAGE_EXTENSIONS, UNSUPPORTED_RAW_EXTENSIONS, MAX_SOURCE_PIXELS,
+    SUPPORTED_IMAGE_EXTENSIONS, UNSUPPORTED_RAW_EXTENSIONS, UNSUPPORTED_IMAGE_EXTENSIONS, MAX_SOURCE_PIXELS,
     MAX_SOURCE_EDGE, MAX_FILE_BYTES, ImageSourceError, safe_image_open, log_image_error,
 )
 from inktime.app.repositories.photos import (
@@ -53,27 +53,47 @@ class DiskPhoto:
 def iter_media(
     root: Path, *, on_error: Callable[[OSError], None] | None = None
 ) -> Iterator[tuple[Path, str]]:
-    """串流回傳媒體；walk 的權限／I/O 錯誤不得被靜默忽略。"""
+    """Iterative DFS: no Python recursion limit and no whole-library path list.
 
-    for directory, dirnames, filenames in os.walk(root, onerror=on_error, followlinks=False):
-        dirnames[:] = [
-            name
-            for name in dirnames
-            if not name.startswith(".")
-            and name not in {"@eaDir", "@tmp", "#recycle"}
-            and not (Path(directory) / name).is_symlink()
-        ]
-        for filename in filenames:
-            path = Path(directory) / filename
-            if filename.startswith(".") or filename in {"Thumbs.db", "desktop.ini"} or path.is_symlink():
-                continue
-            suffix = path.suffix.lower()
-            if suffix in SUPPORTED_EXTENSIONS:
-                yield path, "image"
-            elif suffix in UNSUPPORTED_RAW_EXTENSIONS:
-                yield path, "unsupported_raw"
-            elif suffix in VIDEO_EXTENSIONS:
-                yield path, "video"
+    Hidden user albums are valid sources. Only known NAS/system directories,
+    AppleDouble sidecars and symlinks are excluded from the census.
+    """
+    pending = [root]
+    ignored_directories = {"@eaDir", "@tmp", "#recycle", ".git", ".Trash", ".Trashes", ".snapshot", ".snapshots"}
+    while pending:
+        directory = pending.pop()
+        try:
+            with os.scandir(directory) as entries:
+                for entry in entries:
+                    try:
+                        if entry.is_symlink():
+                            continue
+                        if entry.is_dir(follow_symlinks=False):
+                            if entry.name not in ignored_directories:
+                                pending.append(Path(entry.path))
+                            continue
+                        if not entry.is_file(follow_symlinks=False) or entry.name.startswith("._") or entry.name in {"Thumbs.db", "desktop.ini"}:
+                            continue
+                        path = Path(entry.path)
+                        suffix = path.suffix.lower()
+                        if suffix in SUPPORTED_EXTENSIONS:
+                            yield path, "image"
+                        elif suffix in UNSUPPORTED_RAW_EXTENSIONS:
+                            yield path, "unsupported_raw"
+                        elif suffix in UNSUPPORTED_IMAGE_EXTENSIONS:
+                            yield path, "unsupported_image"
+                        elif suffix in VIDEO_EXTENSIONS:
+                            yield path, "video"
+                    except OSError as exc:
+                        if on_error is not None:
+                            on_error(exc)
+                        else:
+                            raise
+        except OSError as exc:
+            if on_error is not None:
+                on_error(exc)
+            else:
+                raise
 
 
 def iter_images(root: Path) -> Iterator[Path]:
@@ -262,6 +282,7 @@ class PhotoScanner:
             "failed": 0,
             "excluded_videos": 0,
             "unsupported_raw": 0,
+            "unsupported_images": 0,
         }
         last_progress_at = time.monotonic()
         major_io_errors = 0
@@ -313,12 +334,18 @@ class PhotoScanner:
                 if cancel_requested():
                     cancelled = True
                     break
-                if media_type == "unsupported_raw":
-                    counts["unsupported_raw"] += 1
-                    if should_log_sample(counts["unsupported_raw"], first=1, every=0):
-                        log_event(LOGGER, logging.WARNING, "iPhone ProRAW .DNG 尚未支援",
+                if media_type in {"unsupported_raw", "unsupported_image"}:
+                    counter = "unsupported_raw" if media_type == "unsupported_raw" else "unsupported_images"
+                    counts[counter] += 1
+                    counts["checked"] += 1
+                    counts["failed"] += 1
+                    errors.append(_scan_error(path.relative_to(root).as_posix(), stage="format",
+                                              error_code="IMG-UNSUPPORTED", retryable=False,
+                                              exc=ValueError("此圖片格式尚未支援，未進入模型處理")))
+                    if should_log_sample(counts[counter], first=1, every=0):
+                        log_event(LOGGER, logging.WARNING, "掃描發現尚未支援的照片格式",
                                   event="image_source_unsupported", error_code="IMG-UNSUPPORTED",
-                                  operation="photo_scan", details={"format": ".dng"})
+                                  operation="photo_scan", details={"format": path.suffix.lower()})
                     continue
                 if media_type == "video":
                     counts["excluded_videos"] += 1
@@ -598,6 +625,7 @@ class PhotoScanner:
                     "restored",
                     "duplicates",
                     "unsupported_raw",
+                    "unsupported_images",
                     "excluded_videos",
                     "reconciliation_status",
                     "candidate_missing",

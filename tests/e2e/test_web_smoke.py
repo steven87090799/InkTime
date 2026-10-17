@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from hashlib import sha256
+from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 from uuid import UUID
 
@@ -243,6 +244,8 @@ def test_first_setup_login_and_primary_console_pages():
         browser = playwright.chromium.launch()
         page = browser.new_page(viewport={"width": 1280, "height": 900})
         csp_violations: list[str] = []
+        javascript_errors: list[str] = []
+        page.on("pageerror", lambda error: javascript_errors.append(str(error)))
         page.on(
             "console",
             lambda message: csp_violations.append(message.text)
@@ -256,6 +259,17 @@ def test_first_setup_login_and_primary_console_pages():
         page.get_by_label("再次輸入密碼").fill("e2e-password-long")
         page.get_by_role("button", name="建立並進入 InkTime").click()
         page.wait_for_url("**/dashboard")
+        for title in ("必須完成的設定", "非必要但建議查看", "依照需求調整"):
+            expect(page.get_by_role("heading", name=title, exact=True)).to_be_visible()
+        artifact_dir = os.environ.get("INKTIME_UI_ARTIFACT_DIR")
+        if artifact_dir:
+            Path(artifact_dir).mkdir(parents=True, exist_ok=True)
+            page.screenshot(path=str(Path(artifact_dir) / "dashboard-desktop.png"), full_page=True)
+        page.set_viewport_size({"width": 390, "height": 844})
+        assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth + 1")
+        if artifact_dir:
+            page.screenshot(path=str(Path(artifact_dir) / "dashboard-mobile.png"), full_page=True)
+        page.set_viewport_size({"width": 1280, "height": 900})
         operation_keys = page.evaluate("""() => {
           const descriptor = Object.getOwnPropertyDescriptor(Crypto.prototype, 'randomUUID');
           Object.defineProperty(Crypto.prototype, 'randomUUID', {value: undefined, configurable: true});
@@ -300,8 +314,11 @@ def test_first_setup_login_and_primary_console_pages():
             ("診斷", "/diagnostics"),
             ("設定", "/settings"),
         ):
-            page.goto(base + path)
+            response = page.goto(base + path)
+            assert response.status == 200, path
             assert page.locator("html").get_attribute("lang") == "zh-Hant-TW", label
+            if artifact_dir and path in {"/photos", "/rendering", "/devices", "/settings"}:
+                page.screenshot(path=str(Path(artifact_dir) / f"{path[1:]}.png"), full_page=True)
         page.goto(base + "/settings")
         expect(page.get_by_role("radio", name="進階", exact=True)).to_have_count(0)
         concurrency_card = page.locator('.setting-card[data-key="analysis.concurrency"]')
@@ -330,4 +347,5 @@ def test_first_setup_login_and_primary_console_pages():
         _virtual_display_failure_regression(page, base)
         _p3_filter_clear_regression(page, base)
         assert csp_violations == []
+        assert javascript_errors == []
         browser.close()
