@@ -132,7 +132,7 @@ def with_photo_date_footers(geometry: LayoutGeometry) -> LayoutGeometry:
             return None, None
         bottom = existing_caption.bottom if existing_caption is not None else rect.bottom
         height = bottom - rect.y
-        footer = min(36, max(1, height // 4))
+        footer = min(28, max(1, height // 4))
         photo = Rect(rect.x, rect.y, rect.width, height - footer)
         date = Rect(rect.x, photo.bottom, rect.width, footer)
         return photo, date

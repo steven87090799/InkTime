@@ -74,7 +74,11 @@ def test_auto_photo_resolves_source_count_and_draws_each_capture_date(
         "primary", layout="auto_photo", orientation="landscape", secondary_photo_id="secondary"
     )
     assert plan["layout"] == expected_layout
+    assert plan["fit_mode"] == "cover"
     assert plan["capture_date_labels"]["primary"] == "2024年7月1日"
+    assert plan["photo_footer_lines"]["primary"] == (
+        "2024年7月1日 · " + plan["primary_caption"]["text"]
+    )
     expected_ids = {"primary", "secondary"} if expected_layout == "photo_pair" else {"primary"}
     assert set(plan["capture_date_labels"]) == expected_ids
     if expected_layout == "photo_pair":
@@ -86,9 +90,15 @@ def test_auto_photo_resolves_source_count_and_draws_each_capture_date(
     )
     logical = _logical_landscape(image)
     assert logical.size == (800, 480)
+    for rect in (plan["geometry"]["primary_photo"], plan["geometry"]["secondary_photo"]):
+        if rect is not None:
+            y = rect["y"] + rect["height"] // 2
+            for x in (rect["x"], rect["x"] + rect["width"] - 1):
+                assert logical.getpixel((x, y)) != (255, 255, 255), "Photo slots must fill their width"
     for key in ("primary_caption", "secondary_caption"):
         rect = plan["geometry"].get(key)
         if rect is not None:
+            assert rect["height"] == 28
             footer = logical.crop((rect["x"], rect["y"], rect["x"] + rect["width"], rect["y"] + rect["height"]))
             assert footer.convert("L").getextrema()[0] < 32, "Capture-date text must be visible"
             assert footer.getpixel((0, 0)) == (255, 255, 255)
@@ -121,15 +131,31 @@ def test_auto_photo_omits_missing_capture_date_without_substituting_display_date
         "primary", layout="auto_photo", orientation="landscape", secondary_photo_id="secondary"
     )
     assert plan["capture_date_labels"]["primary"] == ""
+    assert plan["photo_footer_lines"]["primary"] == plan["primary_caption"]["text"]
     logical = _logical_landscape(service._render_plan_image(plan))
     rect = plan["geometry"]["primary_caption"]
     footer = logical.crop((rect["x"], rect["y"], rect["x"] + rect["width"], rect["y"] + rect["height"]))
-    assert footer.convert("L").getextrema() == (255, 255), "Missing capture dates must leave no text"
+    assert footer.convert("L").getextrema()[0] < 32, "Missing dates must still keep the caption"
     if plan["secondary_photo_id"] is not None:
         assert plan["capture_date_labels"]["secondary"] == "2024年7月2日"
         rect = plan["geometry"]["secondary_caption"]
         footer = logical.crop((rect["x"], rect["y"], rect["x"] + rect["width"], rect["y"] + rect["height"]))
         assert footer.convert("L").getextrema()[0] < 32, "The other photo must keep its capture date"
+
+
+def test_auto_photo_keeps_caption_footer_when_capture_dates_are_hidden(app, tmp_path):
+    root = tmp_path / "photos"
+    root.mkdir()
+    _analyzed_photo(app, root, "primary", (1600, 900), "2024-07-01T10:00:00+00:00")
+    settings = app.extensions["inktime_settings_repository"]
+    settings.update("render.show_capture_date", False, changed_by=create_admin(app), source_ip="127.0.0.1")
+    service = app.extensions["inktime_render_service"]
+    plan = service.resolve_render_plan("primary", layout="auto_photo", orientation="landscape")
+    assert plan["capture_date_labels"] == {"primary": ""}
+    assert plan["photo_footer_lines"] == {"primary": plan["primary_caption"]["text"]}
+    assert plan["geometry"]["primary_caption"]["height"] == 28
+    image = _logical_landscape(service._render_plan_image(plan))
+    assert image.crop((0, 452, 800, 480)).convert("L").getextrema()[0] < 32
 
 
 def test_auto_photo_pairs_local_scanner_photos_without_ai_rows(app, tmp_path):
@@ -149,6 +175,8 @@ def test_auto_photo_pairs_local_scanner_photos_without_ai_rows(app, tmp_path):
     assert plan["layout"] == "photo_pair"
     assert plan["secondary_photo_id"] == "secondary"
     assert plan["capture_date_labels"] == {"primary": "2024年7月1日", "secondary": "2024年7月2日"}
+    assert plan["primary_caption"]["source"] == "local_footer_fallback"
+    assert plan["photo_footer_lines"]["primary"] == "2024年7月1日 · 把這一刻，好好收藏。"
     image = service._render_plan_image(plan)
     assert image.size == (480, 800)
 

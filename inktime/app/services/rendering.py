@@ -65,7 +65,7 @@ from inktime.app.services.render_cache import RENDERER_VERSION
 
 LAYOUTS = {
     "full": "單張照片",
-    "auto_photo": "自動照片＋日期（橫單直雙）",
+    "auto_photo": "自動滿版＋日期短句（橫單直雙）",
     "postcard": "明信片",
     "photo_info": "照片＋日期地點",
     "photo_pair": "雙照片拼版・一句話與日期",
@@ -266,8 +266,10 @@ class RenderService:
             or fit_key not in FIT_MODES
         ):
             raise ValueError("RENDER-005 無法建立有效的 Render Plan")
-        if adaptive_requested or auto_photo_requested:
+        if adaptive_requested:
             fit_key = "contain"
+        elif auto_photo_requested and fit_key == "stretch_fill":
+            fit_key = "cover"
         secondary_id = secondary_photo_id
         if layout_key in {"photo_pair", "photo_pair_caption"} and (not secondary_id or secondary_id == photo_id):
             layout_key = "photo_info"
@@ -342,6 +344,10 @@ class RenderService:
             if secondary is not None
             else None
         )
+        if auto_photo_requested:
+            primary_caption = self._compact_photo_caption(primary_caption)
+            if resolved_secondary_caption is not None:
+                resolved_secondary_caption = self._compact_photo_caption(resolved_secondary_caption)
         geometry = (
             resolve_adaptive_pair_geometry(
                 effective_orientation,
@@ -357,11 +363,22 @@ class RenderService:
             )
         )
         capture_date_labels: dict[str, str] | None = None
-        if auto_photo_requested and bool(self.settings.get("render.show_capture_date", True)):
+        photo_footer_lines: dict[str, str] | None = None
+        if auto_photo_requested:
             geometry = with_photo_date_footers(geometry)
             capture_date_labels = {
                 str(photo["id"]): self._date_label(self._captured_date(photo["captured_at"]))
+                if bool(self.settings.get("render.show_capture_date", True)) else ""
                 for photo in (primary, secondary) if photo is not None
+            }
+            photo_footer_lines = {
+                str(record["photo_id"]): " · ".join(
+                    part for part in (
+                        capture_date_labels[str(record["photo_id"])],
+                        " ".join(str(record.get("text") or "").split()),
+                    ) if part
+                )
+                for record in (primary_caption, resolved_secondary_caption) if record is not None
             }
         pair_caption_region = (
             "card_left" if layout_key == "adaptive_memory" and effective_orientation == "landscape"
@@ -391,6 +408,7 @@ class RenderService:
             "secondary_caption": resolved_secondary_caption,
             "geometry": geometry.as_dict(),
             "capture_date_labels": capture_date_labels,
+            "photo_footer_lines": photo_footer_lines,
             "primary_caption_text_hash": primary_caption["text_hash"],
             "primary_caption_source": primary_caption["source"],
             "primary_caption_version": primary_caption["version"],
@@ -458,6 +476,7 @@ class RenderService:
                 orientation_metadata=orientation_metadata,
                 calendar_display_date=plan.get("calendar_display_date"),
                 capture_date_labels=plan.get("capture_date_labels"),
+                photo_footer_lines=plan.get("photo_footer_lines"),
                 expected_primary_sha256=plan.get("primary_sha256"),
                 expected_secondary_sha256=plan.get("secondary_sha256"),
             )
@@ -937,6 +956,17 @@ class RenderService:
         if str(bound.get("photo_id") or "") != str(photo_id):
             raise ValueError("RENDER-005 Caption 與照片識別不一致")
         return bound
+
+    @staticmethod
+    def _compact_photo_caption(record: dict[str, Any]) -> dict[str, Any]:
+        if record.get("source") not in {"local_capture_date", "local_location_year", "local_fallback"}:
+            return record
+        text = "把這一刻，好好收藏。"
+        return {
+            **record, "text": text, "source": "local_footer_fallback",
+            "text_hash": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+            "is_ai_generated": False, "source_detail": {}, "source_updated_at": None,
+        }
 
     def _caption_legacy(self, photo_id: str) -> str:
         """Compatibility implementation retained for old call sites during migration."""
@@ -1448,18 +1478,19 @@ class RenderService:
         if expected_sha256 is not None and str(photo["sha256"] or "") != expected_sha256:
             raise ValueError("RENDER-INPUT-CHANGED 照片內容已變更；請重新預覽，避免舊文句配到新照片")
 
-    def _draw_photo_dates(
+    def _draw_photo_footers(
         self, canvas: Image.Image, geometry: LayoutGeometry,
         labels: dict[str, str], primary_id: str, secondary_id: str | None,
     ) -> None:
         draw = ImageDraw.Draw(canvas)
-        font = self._fonts("\n".join(labels.values()))["meta"]
+        fonts = self._fonts("\n".join(labels.values()))
         for photo_id, rect in (
             (primary_id, geometry.primary_caption),
             (secondary_id, geometry.secondary_caption),
         ):
             if photo_id is None or rect is None or not labels.get(photo_id):
                 continue
+            font = fonts["small" if rect.width >= 600 else "tiny"]
             text = self._fit_line(draw, labels.get(photo_id, ""), font, rect.width - 12)
             draw.text(
                 (rect.x + rect.width / 2, rect.y + rect.height / 2),
@@ -1505,6 +1536,7 @@ class RenderService:
         orientation_metadata: list[dict[str, Any]] | None = None,
         calendar_display_date: str | None = None,
         capture_date_labels: dict[str, str] | None = None,
+        photo_footer_lines: dict[str, str] | None = None,
         expected_primary_sha256: str | None = None,
         expected_secondary_sha256: str | None = None,
     ) -> Image.Image:
@@ -1536,6 +1568,7 @@ class RenderService:
                 device_config=device_config, orientation_metadata=orientation_metadata,
                 calendar_display_date=calendar_display_date,
                 capture_date_labels=plan.get("capture_date_labels"),
+                photo_footer_lines=plan.get("photo_footer_lines"),
                 expected_primary_sha256=expected_primary_sha256 or plan.get("primary_sha256"),
                 expected_secondary_sha256=expected_secondary_sha256 or plan.get("secondary_sha256"),
             )
@@ -1692,18 +1725,19 @@ class RenderService:
             geometry = resolve_layout_geometry(
                 layout_key, effective_orientation, frame_width, frame_height
             )
-            if capture_date_labels:
+            footer_lines = photo_footer_lines if photo_footer_lines is not None else capture_date_labels
+            if footer_lines:
                 geometry = with_photo_date_footers(geometry)
             if layout_key == "full":
                 photo_rect = _required_rect(geometry.primary_photo, "primary_photo")
                 fitted = self._fit_photo(
                     source, photo, (photo_rect.width, photo_rect.height), crop_x, crop_y, fit_mode_key,
                 )
-                if not capture_date_labels:
+                if not footer_lines:
                     return finish(fitted)
                 canvas = Image.new("RGB", (frame_width, frame_height), "white")
                 canvas.paste(fitted, (photo_rect.x, photo_rect.y))
-                self._draw_photo_dates(canvas, geometry, capture_date_labels, photo_id, None)
+                self._draw_photo_footers(canvas, geometry, footer_lines, photo_id, None)
                 return finish(canvas)
 
             today = date.fromisoformat(calendar_display_date) if calendar_display_date else self._today()
@@ -1805,9 +1839,9 @@ class RenderService:
                         ),
                         positions[1],
                     )
-                if capture_date_labels:
-                    self._draw_photo_dates(
-                        canvas, geometry, capture_date_labels, photo_id, secondary_photo_id
+                if footer_lines:
+                    self._draw_photo_footers(
+                        canvas, geometry, footer_lines, photo_id, secondary_photo_id
                     )
                 else:
                     for record, box in ((first_caption, caption_boxes[0]), (second_caption, caption_boxes[1])):
