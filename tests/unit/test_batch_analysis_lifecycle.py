@@ -2717,12 +2717,38 @@ def test_terminal_local_status_cannot_release_an_unreconciled_remote_batch(app, 
     with pytest.raises(BatchLifecycleError) as retry_error:
         service.retry_failed(batch_id, created_by="tester")
     assert retry_error.value.code == "BATCH-RESERVATION-CONFLICT"
+    with service.database.session() as connection:
+        assert connection.execute("SELECT COUNT(*) FROM analysis_batch_retry_authorizations").fetchone()[0] == 0
     # A recorded operator confirmation that no remote Batch exists resolves
     # uncertainty; a terminal local status alone above did not.
     service.batches.update_batch(batch_id, abandon_confirmed_at=datetime.now(timezone.utc).isoformat(),
                                  remote_status="abandoned")
     operation, _ = operations.begin(str(photo["sha256"]), "unrelated-plan")
     operations.finish(operation, not_sent=True)
+
+
+@pytest.mark.parametrize("has_receipt", [False, True])
+def test_confirmed_unsubmitted_batch_attempt_is_not_paid_but_receipt_still_holds(app, tmp_path, has_receipt):
+    photo_id = _prepare_photos(app, tmp_path, count=1)[0]
+    service = _wire_fake(app, FakeBatchProvider())
+    batch_id = service.submit(scope="manual_selection", photo_ids=[photo_id], created_by="tester")["batch_ids"][0]
+    batch = service.batches.get(batch_id)
+    assert batch["submitted_at"]
+    service.jobs.cancel(str(batch["job_id"]))
+    # A submission-attempt timestamp also exists after a definite HTTP rejection.
+    # It is not proof of model processing when no remote identity/receipt exists.
+    service.batches.update_batch(batch_id, status="failed", remote_batch_id=None, remote_status="failed")
+    if has_receipt:
+        service.batches.update_item(str(service.batches.items(batch_id)[0]["id"]),
+                                    raw_response_json='{"id":"durable-paid-response"}')
+    photo = service.photos.get_with_path(photo_id)
+    operations = BillableOperationRepository(service.database)
+    if has_receipt:
+        with pytest.raises(AnalysisReservationConflict):
+            operations.begin(str(photo["sha256"]), "another-plan")
+    else:
+        operation, _ = operations.begin(str(photo["sha256"]), "another-plan")
+        operations.finish(operation, not_sent=True)
 
 
 def test_completed_single_checkpoint_can_still_be_reused_while_batch_owns_bytes(app, tmp_path):

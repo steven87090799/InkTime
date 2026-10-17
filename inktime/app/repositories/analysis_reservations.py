@@ -15,6 +15,10 @@ def held_batch_sql(alias: str = "reserved_batch") -> str:
         {alias}.abandon_confirmed_at IS NULL AND (
             COALESCE({alias}.last_error_code,'') IN ('BATCH-SUBMISSION-UNKNOWN','BATCH-UPLOAD-UNKNOWN',
                                        'submission_unknown','upload_unknown','submission_persist_unknown')
+            OR COALESCE({alias}.reconciliation_error_code,'') IN (
+                'BATCH-SUBMISSION-UNKNOWN','BATCH-UPLOAD-UNKNOWN',
+                'submission_unknown','upload_unknown','submission_persist_unknown')
+            OR COALESCE({alias}.remote_status,'') IN ('submission_unknown','upload_unknown')
             OR ({alias}.remote_batch_id IS NOT NULL AND
                 COALESCE({alias}.remote_status,'') NOT IN ('completed','failed','expired','cancelled'))
         )
@@ -22,7 +26,9 @@ def held_batch_sql(alias: str = "reserved_batch") -> str:
 
 
 def paid_batch_item_sql(item: str, batch: str) -> str:
-    return f"""({batch}.remote_batch_id IS NOT NULL OR {batch}.submitted_at IS NOT NULL
+    return f"""({batch}.remote_batch_id IS NOT NULL OR (
+            {batch}.submitted_at IS NOT NULL AND {batch}.abandon_confirmed_at IS NULL
+            AND COALESCE({batch}.remote_status,'') NOT IN ('failed','expired','cancelled','abandoned'))
         OR {item}.raw_response_json IS NOT NULL OR {item}.request_id IS NOT NULL
         OR {item}.status IN ('success','imported'))"""
 
