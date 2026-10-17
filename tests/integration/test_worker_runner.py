@@ -462,12 +462,13 @@ def test_release_requested_by_ui_runs_as_background_job(client, app, monkeypatch
     assert published and published[0][0] == []
 
 
-def test_virtual_display_inbox_scans_and_publishes_without_provider(client, app, tmp_path):
+@pytest.mark.parametrize("size,has_content", [((800, 480), True), ((480, 800), False)])
+def test_virtual_display_inbox_scans_and_publishes_without_provider(client, app, tmp_path, size, has_content):
     from tests.conftest import create_admin, csrf, login
 
     root = tmp_path / "simulation-photos"
     root.mkdir()
-    Image.effect_noise((480, 800), 100).convert("RGB").save(root / "receiver-test.png")
+    Image.effect_noise(size, 100).convert("RGB").save(root / "receiver-test.png")
     app.config["INKTIME_PHOTO_DIR"] = root
     create_admin(app)
     login(client)
@@ -485,8 +486,16 @@ def test_virtual_display_inbox_scans_and_publishes_without_provider(client, app,
     assert job["status"] == "completed"
     profile_key = str(app.extensions["inktime_settings_repository"].get("render.profile"))
     manifest = client.get(f"/api/v1/virtual-display/manifest?profile={profile_key}")
-    assert manifest.status_code == 200
-    assert manifest.json["files"][0]["source_photo_id"]
+    if has_content:
+        assert manifest.status_code == 200
+        assert manifest.json["files"][0]["source_photo_id"]
+    else:
+        assert manifest.status_code == 404
+        with app.extensions["inktime_database"].session() as connection:
+            item = connection.execute("SELECT result_json,attempts FROM job_items WHERE job_id=?", (job_id,)).fetchone()
+        assert json.loads(item["result_json"])["outcome"] == "no_content"
+        assert item["attempts"] == 1
+        assert WorkerRunner(app).run_once() == 0
     with app.extensions["inktime_database"].session() as connection:
         assert connection.execute("SELECT COUNT(*) FROM photos").fetchone()[0] == 1
         assert connection.execute("SELECT COUNT(*) FROM api_usage").fetchone()[0] == 0

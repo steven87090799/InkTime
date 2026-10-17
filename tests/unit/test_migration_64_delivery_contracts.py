@@ -34,10 +34,11 @@ def test_upgrade_preserves_device_identity_queue_history_and_children(tmp_path, 
     assert migrations.migrate(database) == []
 
 
-def test_v65_upgrade_adds_caption_layout_and_preserves_tokens_children_and_schema_objects(tmp_path, monkeypatch):
+@pytest.mark.parametrize("baseline", [65, 69])
+def test_layout_upgrade_preserves_tokens_children_and_schema_objects(tmp_path, monkeypatch, baseline):
     full = migrations.MIGRATIONS
-    monkeypatch.setattr(migrations, "MIGRATIONS", tuple(m for m in full if m.version <= 65))
-    database = Database(tmp_path / "v65.db")
+    monkeypatch.setattr(migrations, "MIGRATIONS", tuple(m for m in full if m.version <= baseline))
+    database = Database(tmp_path / f"v{baseline}.db")
     migrations.migrate(database)
     devices = DeviceRepository(database, "dummy-pepper")
     device_id, token = devices.create("existing-pair", layout_mode="photo_pair", fit_mode="stretch_fill")
@@ -52,7 +53,7 @@ def test_v65_upgrade_adds_caption_layout_and_preserves_tokens_children_and_schem
         connection.execute("CREATE TRIGGER v65_device_name_change AFTER UPDATE OF name ON devices "
                            "BEGIN INSERT INTO device_name_audit VALUES(NEW.id,NEW.name); END")
     monkeypatch.setattr(migrations, "MIGRATIONS", full)
-    assert migrations.migrate(database) == [migration.version for migration in full if migration.version >= 66]
+    assert migrations.migrate(database) == [migration.version for migration in full if migration.version > baseline]
     assert dict(devices.get(device_id)) == before
     with database.session() as connection:
         assert connection.execute("SELECT name FROM v65_device_names WHERE id=?", (device_id,)).fetchone()[0] == before["name"]
@@ -61,8 +62,10 @@ def test_v65_upgrade_adds_caption_layout_and_preserves_tokens_children_and_schem
         assert connection.execute("SELECT device_id FROM device_content_queue_items WHERE id=?", (item,)).fetchone()[0] == device_id
         assert connection.execute("PRAGMA foreign_keys").fetchone()[0] == 1
         assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
-        connection.execute("UPDATE devices SET name='new-name',layout_mode='photo_pair_caption' WHERE id=?", (device_id,))
+        connection.execute("UPDATE devices SET name='new-name',layout_mode='auto_photo' WHERE id=?", (device_id,))
+        assert connection.execute("SELECT layout_mode FROM devices WHERE id=?", (device_id,)).fetchone()[0] == "auto_photo"
         assert tuple(connection.execute("SELECT device_id,name FROM device_name_audit").fetchone()) == (device_id, "new-name")
+        connection.execute("UPDATE devices SET layout_mode='photo_pair_caption' WHERE id=?", (device_id,))
         with pytest.raises(sqlite3.IntegrityError):
             connection.execute("UPDATE devices SET layout_mode='invalid' WHERE id=?", (device_id,))
     assert devices.authenticate(token, "127.0.0.1")["id"] == device_id

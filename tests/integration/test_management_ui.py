@@ -1446,8 +1446,8 @@ def test_rendering_console_exposes_layout_e6_and_manual_crop_controls(client, ap
     assert "URL.revokeObjectURL" in body
     assert "new AbortController" in body
     assert "compositionPreviewController?.abort()" in body
-    assert "effectiveFit=adaptive?'contain':frameFitMode.value" in body
-    assert "fit_mode:adaptive?'contain':frameFitMode.value" in body
+    assert "effectiveFit=adaptive?'contain':automatic&&frameFitMode.value==='stretch_fill'?'cover':frameFitMode.value" in body
+    assert "fit_mode:adaptive?'contain':automatic&&frameFitMode.value==='stretch_fill'?'cover':frameFitMode.value" in body
     assert "雙照片拼版" in body
     assert "月曆相框" in body
     assert "天氣＋室內溫溼度" in body

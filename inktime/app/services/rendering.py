@@ -48,11 +48,15 @@ from inktime.app.domain.photos.orientation import (
     resolve_effective_orientation,
 )
 from inktime.app.domain.rendering.adaptive_layout import (
+    InsufficientPhotoContentError,
+    auto_photo_layout,
     pair_orientation,
     pair_score,
     photo_orientation,
+    select_auto_photo_frames,
     select_pair_candidate,
 )
+from inktime.app.domain.rendering.layout_geometry import LayoutGeometry, with_photo_date_footers
 from inktime.app.repositories.photos import PhotoRepository
 from inktime.app.repositories.render_candidates import RenderCandidateRepository
 from inktime.app.repositories.settings import SettingsRepository
@@ -63,6 +67,7 @@ from inktime.app.services.render_cache import RENDERER_VERSION
 
 LAYOUTS = {
     "full": "單張照片",
+    "auto_photo": "自動滿版＋左短句右日期（橫單直雙）",
     "postcard": "明信片",
     "photo_info": "照片＋日期地點",
     "photo_pair": "雙照片拼版・一句話與日期",
@@ -246,15 +251,16 @@ class RenderService:
             raise KeyError(photo_id)
         device = device_config or {}
         layout_key = layout or str(
-            device.get("layout_mode") or self.settings.get("render.layout", "photo_info")
+            device.get("layout_mode") or self.settings.get("render.layout", "auto_photo")
         )
         adaptive_requested = layout_key == "adaptive_memory"
+        auto_photo_requested = layout_key == "auto_photo" or bool(device.get("_auto_photo", False))
         orientation_key = orientation or str(
-            device.get("frame_orientation") or self.settings.get("render.frame_orientation", "portrait")
+            device.get("frame_orientation") or self.settings.get("render.frame_orientation", "landscape")
         )
         effective_orientation = "portrait" if layout_key in PORTRAIT_ONLY_LAYOUTS else orientation_key
         fit_key = fit_mode or str(
-            device.get("fit_mode") or self.settings.get("render.fit_mode", "stretch_fill")
+            device.get("fit_mode") or self.settings.get("render.fit_mode", "cover")
         )
         if (
             layout_key not in LAYOUTS
@@ -264,13 +270,32 @@ class RenderService:
             raise ValueError("RENDER-005 無法建立有效的 Render Plan")
         if adaptive_requested:
             fit_key = "contain"
+        elif auto_photo_requested and fit_key == "stretch_fill":
+            fit_key = "cover"
         secondary_id = secondary_photo_id
         if layout_key in {"photo_pair", "photo_pair_caption"} and (not secondary_id or secondary_id == photo_id):
             layout_key = "photo_info"
             secondary_id = None
             effective_orientation = "portrait" if layout_key in PORTRAIT_ONLY_LAYOUTS else orientation_key
-        elif layout_key not in {"photo_pair", "photo_pair_caption", "adaptive_memory"}:
+        elif layout_key not in {"photo_pair", "photo_pair_caption", "adaptive_memory", "auto_photo"}:
             secondary_id = None
+        if auto_photo_requested:
+            source_path = safe_join(Path(primary["root_path"]), str(primary["relative_path"]), decode_url=False)
+            source, _info = self._load_oriented_photo(primary, source_path, target_size=(512, 512))
+            with source:
+                resolved_layout = auto_photo_layout(source.size, effective_orientation)
+            if device.get("_auto_photo") and layout_key != resolved_layout:
+                raise ValueError("RENDER-005 照片方向已改變，必須重新準備自動版型")
+            layout_key = resolved_layout
+            if layout_key == "full":
+                secondary_id = None
+            elif secondary_id is None:
+                candidate = self._select_auto_photo_pair_candidate(
+                    dict(primary), frame_orientation=effective_orientation
+                )
+                if candidate is None:
+                    raise InsufficientPhotoContentError("RENDER-005 自動照片需要另一張方向相符的照片")
+                secondary_id = str(candidate["id"])
         if layout_key == "adaptive_memory":
             source_path = safe_join(Path(primary["root_path"]), str(primary["relative_path"]), decode_url=False)
             source, _info = self._load_oriented_photo(primary, source_path, target_size=(512, 512))
@@ -290,13 +315,19 @@ class RenderService:
         secondary = self.photos.get_with_path(secondary_id) if secondary_id else None
         if secondary_id and secondary is None:
             raise KeyError(secondary_id)
-        if layout_key == "adaptive_memory" and secondary is not None:
-            production_secondary = self.candidates.get(str(secondary["id"]))
+        if (layout_key == "adaptive_memory" or auto_photo_requested) and secondary is not None:
+            production_secondary = (
+                self.candidates.require_for_execution_mode(
+                    [str(secondary["id"])], execution_mode(self.settings)
+                )[0]
+                if auto_photo_requested
+                else self.candidates.get(str(secondary["id"]))
+            )
             desired = pair_orientation(effective_orientation)
             if production_secondary is None or pair_score(
                 dict(primary), production_secondary, desired_orientation=desired
             ) is None:
-                raise ValueError("RENDER-005 Adaptive Memory 第二張照片不符合安全方向契約")
+                raise ValueError("RENDER-005 自動配對的第二張照片不符合安全方向契約")
             secondary = production_secondary
         dither_plan = self.resolve_effective_dither(
             primary, secondary, requested=dither, device_config=device
@@ -315,6 +346,10 @@ class RenderService:
             if secondary is not None
             else None
         )
+        if auto_photo_requested:
+            primary_caption = self._compact_photo_caption(primary_caption)
+            if resolved_secondary_caption is not None:
+                resolved_secondary_caption = self._compact_photo_caption(resolved_secondary_caption)
         geometry = (
             resolve_adaptive_pair_geometry(
                 effective_orientation,
@@ -329,6 +364,32 @@ class RenderService:
                 480 if effective_orientation == "landscape" else 800,
             )
         )
+        capture_date_labels: dict[str, str] | None = None
+        photo_footer_lines: dict[str, str] | None = None
+        photo_footer_parts: dict[str, dict[str, str]] | None = None
+        if auto_photo_requested:
+            geometry = with_photo_date_footers(geometry)
+            capture_date_labels = {
+                str(photo["id"]): self._date_label(self._captured_date(photo["captured_at"]))
+                if bool(self.settings.get("render.show_capture_date", True)) else ""
+                for photo in (primary, secondary) if photo is not None
+            }
+            photo_footer_lines = {
+                str(record["photo_id"]): " · ".join(
+                    part for part in (
+                        capture_date_labels[str(record["photo_id"])],
+                        " ".join(str(record.get("text") or "").split()),
+                    ) if part
+                )
+                for record in (primary_caption, resolved_secondary_caption) if record is not None
+            }
+            photo_footer_parts = {
+                str(record["photo_id"]): {
+                    "caption": " ".join(str(record.get("text") or "").split()),
+                    "date": capture_date_labels[str(record["photo_id"])],
+                }
+                for record in (primary_caption, resolved_secondary_caption) if record is not None
+            }
         pair_caption_region = (
             "card_left" if layout_key == "adaptive_memory" and effective_orientation == "landscape"
             else "card_footer"
@@ -356,6 +417,10 @@ class RenderService:
             "primary_caption": primary_caption,
             "secondary_caption": resolved_secondary_caption,
             "geometry": geometry.as_dict(),
+            "capture_date_labels": capture_date_labels,
+            "photo_footer_lines": photo_footer_lines,
+            "photo_footer_parts": photo_footer_parts,
+            "footer_alignment": {"caption": "left", "date": "right"} if auto_photo_requested else None,
             "primary_caption_text_hash": primary_caption["text_hash"],
             "primary_caption_source": primary_caption["source"],
             "primary_caption_version": primary_caption["version"],
@@ -422,6 +487,9 @@ class RenderService:
                 device_config=device_config,
                 orientation_metadata=orientation_metadata,
                 calendar_display_date=plan.get("calendar_display_date"),
+                capture_date_labels=plan.get("capture_date_labels"),
+                photo_footer_lines=plan.get("photo_footer_lines"),
+                photo_footer_parts=plan.get("photo_footer_parts"),
                 expected_primary_sha256=plan.get("primary_sha256"),
                 expected_secondary_sha256=plan.get("secondary_sha256"),
             )
@@ -640,7 +708,7 @@ class RenderService:
                 "caption_min_font_size": int(self.settings.get("render.caption_min_font_size", 17)),
             },
             "render_settings": {
-                "fit_mode": fit_mode or str(self.settings.get("render.fit_mode", "stretch_fill")),
+                "fit_mode": fit_mode or str(self.settings.get("render.fit_mode", "cover")),
                 "layout": layout_key,
                 "frame_orientation": effective_frame,
                 "profile": profile_key,
@@ -902,6 +970,17 @@ class RenderService:
             raise ValueError("RENDER-005 Caption 與照片識別不一致")
         return bound
 
+    @staticmethod
+    def _compact_photo_caption(record: dict[str, Any]) -> dict[str, Any]:
+        if record.get("source") not in {"local_capture_date", "local_location_year", "local_fallback"}:
+            return record
+        text = "把這一刻，好好收藏。"
+        return {
+            **record, "text": text, "source": "local_footer_fallback",
+            "text_hash": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+            "is_ai_generated": False, "source_detail": {}, "source_updated_at": None,
+        }
+
     def _caption_legacy(self, photo_id: str) -> str:
         """Compatibility implementation retained for old call sites during migration."""
         with self.database.session() as connection:
@@ -1066,6 +1145,16 @@ class RenderService:
                 row["city"], row["types"] = None, []
             candidates.append(row)
         return candidates
+
+    def _select_auto_photo_pair_candidate(
+        self, primary: dict[str, Any], *, frame_orientation: str
+    ) -> dict[str, Any] | None:
+        rows = self._auto_photo_candidate_pool()
+        for allowed in self._auto_candidate_stages(rows):
+            candidate = select_pair_candidate(primary, allowed, frame_orientation=frame_orientation)
+            if candidate is not None:
+                return candidate
+        return None
 
     def _select_adaptive_pair_candidate(
         self, primary: dict[str, Any], *, frame_orientation: str
@@ -1383,6 +1472,31 @@ class RenderService:
         if expected_sha256 is not None and str(photo["sha256"] or "") != expected_sha256:
             raise ValueError("RENDER-INPUT-CHANGED 照片內容已變更；請重新預覽，避免舊文句配到新照片")
 
+    def _draw_photo_footers(
+        self, canvas: Image.Image, geometry: LayoutGeometry,
+        parts: dict[str, dict[str, str]], primary_id: str, secondary_id: str | None,
+    ) -> None:
+        draw = ImageDraw.Draw(canvas)
+        fonts = self._fonts("\n".join(value for part in parts.values() for value in part.values()))
+        for photo_id, rect in (
+            (primary_id, geometry.primary_caption),
+            (secondary_id, geometry.secondary_caption),
+        ):
+            if photo_id is None or rect is None or photo_id not in parts:
+                continue
+            font = fonts["small"]
+            date_font = ImageFont.truetype(font.path, 14)
+            part = parts[photo_id]
+            date_label = part.get("date", "")
+            date_width = draw.textlength(date_label, font=date_font) if date_label else 0
+            available = max(1, rect.width - 16 - date_width - (12 if date_label else 0))
+            text = self._fit_line(draw, part.get("caption", ""), font, int(available))
+            y = rect.y + rect.height / 2
+            if text:
+                draw.text((rect.x + 8, y), text, font=font, fill="black", anchor="lm")
+            if date_label:
+                draw.text((rect.right - 8, y), date_label, font=date_font, fill="black", anchor="rm")
+
     def _calendar(self, canvas: Image.Image, fonts, today: date, start_y: int = 75) -> None:
         draw = ImageDraw.Draw(canvas)
         weekdays = "一二三四五六日"
@@ -1421,6 +1535,9 @@ class RenderService:
         device_config: dict[str, Any] | None = None,
         orientation_metadata: list[dict[str, Any]] | None = None,
         calendar_display_date: str | None = None,
+        capture_date_labels: dict[str, str] | None = None,
+        photo_footer_lines: dict[str, str] | None = None,
+        photo_footer_parts: dict[str, dict[str, str]] | None = None,
         expected_primary_sha256: str | None = None,
         expected_secondary_sha256: str | None = None,
     ) -> Image.Image:
@@ -1433,10 +1550,30 @@ class RenderService:
         date_label = self._date_label(captured) if show_date else ""
         device_config = device_config or {}
         layout_key = layout or str(
-            device_config.get("layout_mode") or self.settings.get("render.layout", "photo_info")
+            device_config.get("layout_mode") or self.settings.get("render.layout", "auto_photo")
         )
         if layout_key not in LAYOUTS:
             raise ValueError("RENDER-005 不支援的相框版型")
+        if layout_key == "auto_photo":
+            plan = self.resolve_render_plan(
+                photo_id, layout=layout_key, orientation=orientation,
+                secondary_photo_id=secondary_photo_id, crop_x=crop_x, crop_y=crop_y,
+                fit_mode=fit_mode, primary_caption=primary_caption,
+                secondary_caption=secondary_caption, device_config=device_config,
+            )
+            return self.render_photo(
+                photo_id, width, height, layout=str(plan["layout"]),
+                crop_x=crop_x, crop_y=crop_y, secondary_photo_id=plan["secondary_photo_id"],
+                orientation=str(plan["orientation"]), fit_mode=str(plan["fit_mode"]),
+                primary_caption=plan["primary_caption"], secondary_caption=plan.get("secondary_caption"),
+                device_config=device_config, orientation_metadata=orientation_metadata,
+                calendar_display_date=calendar_display_date,
+                capture_date_labels=plan.get("capture_date_labels"),
+                photo_footer_lines=plan.get("photo_footer_lines"),
+                photo_footer_parts=plan.get("photo_footer_parts"),
+                expected_primary_sha256=expected_primary_sha256 or plan.get("primary_sha256"),
+                expected_secondary_sha256=expected_secondary_sha256 or plan.get("secondary_sha256"),
+            )
         # Pair-caption rendering reads its frozen per-photo records below;
         # avoid an unrelated caption query that could observe newer analysis.
         if layout_key in {"photo_pair", "photo_pair_caption"} and (
@@ -1448,12 +1585,12 @@ class RenderService:
         adaptive_requested = layout_key == "adaptive_memory"
         orientation_key = orientation or str(
             device_config.get("frame_orientation")
-            or self.settings.get("render.frame_orientation", "portrait")
+            or self.settings.get("render.frame_orientation", "landscape")
         )
         if orientation_key not in FRAME_ORIENTATIONS:
             raise ValueError("RENDER-005 不支援的相框方向")
         fit_mode_key = fit_mode or str(
-            device_config.get("fit_mode") or self.settings.get("render.fit_mode", "stretch_fill")
+            device_config.get("fit_mode") or self.settings.get("render.fit_mode", "cover")
         )
         if fit_mode_key not in FIT_MODES:
             raise ValueError("RENDER-005 不支援的照片縮放方式")
@@ -1590,18 +1727,30 @@ class RenderService:
             geometry = resolve_layout_geometry(
                 layout_key, effective_orientation, frame_width, frame_height
             )
+            footer_lines = photo_footer_lines if photo_footer_lines is not None else capture_date_labels
+            footer_parts = photo_footer_parts
+            if footer_parts is None and footer_lines:
+                records = [primary_caption or self._caption_record(photo, self._today()), secondary_caption]
+                footer_parts = {
+                    str(record["photo_id"]): {
+                        "caption": str(record.get("text") or ""),
+                        "date": (capture_date_labels or {}).get(str(record["photo_id"]), ""),
+                    }
+                    for record in records if record is not None
+                }
+            if footer_lines:
+                geometry = with_photo_date_footers(geometry)
             if layout_key == "full":
                 photo_rect = _required_rect(geometry.primary_photo, "primary_photo")
-                return finish(
-                    self._fit_photo(
-                        source,
-                        photo,
-                        (photo_rect.width, photo_rect.height),
-                        crop_x,
-                        crop_y,
-                        fit_mode_key,
-                    )
+                fitted = self._fit_photo(
+                    source, photo, (photo_rect.width, photo_rect.height), crop_x, crop_y, fit_mode_key,
                 )
+                if not footer_lines:
+                    return finish(fitted)
+                canvas = Image.new("RGB", (frame_width, frame_height), "white")
+                canvas.paste(fitted, (photo_rect.x, photo_rect.y))
+                self._draw_photo_footers(canvas, geometry, footer_parts or {}, photo_id, None)
+                return finish(canvas)
 
             today = date.fromisoformat(calendar_display_date) if calendar_display_date else self._today()
             weather = self.weather.current() if self.weather and layout_key == "weather_sensor" else None
@@ -1702,8 +1851,13 @@ class RenderService:
                         ),
                         positions[1],
                     )
-                for record, box in ((first_caption, caption_boxes[0]), (second_caption, caption_boxes[1])):
-                    self._draw_adaptive_pair_caption(canvas, record, box, left_side=False)
+                if footer_lines:
+                    self._draw_photo_footers(
+                        canvas, geometry, footer_parts or {}, photo_id, secondary_photo_id
+                    )
+                else:
+                    for record, box in ((first_caption, caption_boxes[0]), (second_caption, caption_boxes[1])):
+                        self._draw_adaptive_pair_caption(canvas, record, box, left_side=False)
                 return finish(canvas)
 
             if layout_key == "postcard":
@@ -1858,6 +2012,25 @@ class RenderService:
             )
             return finish(canvas)
 
+    def _auto_photo_plans(
+        self, photo_ids: list[str], quantity: int, *,
+        device_config: dict[str, Any] | None = None, profile: str | None = None,
+    ) -> list[dict[str, Any]]:
+        device = device_config or {}
+        orientation = str(device.get("frame_orientation") or self.settings.get("render.frame_orientation", "landscape"))
+        rows = [dict(self.ensure_photo_features(photo_id)) for photo_id in dict.fromkeys(photo_ids)]
+        groups = select_auto_photo_frames(rows, frame_orientation=orientation, count=quantity)
+        if not groups:
+            raise InsufficientPhotoContentError("RENDER-005 沒有可組成完整畫面的照片；請補充方向相符且不重複的照片")
+        return [
+            self.resolve_render_plan(
+                str(group[0]["id"]), layout="full" if len(group) == 1 else "photo_pair",
+                secondary_photo_id=str(group[1]["id"]) if len(group) == 2 else None,
+                device_config={**device, "_auto_photo": True}, profile=profile,
+            )
+            for group in groups
+        ]
+
     def publish(
         self,
         photo_ids: list[str],
@@ -1889,7 +2062,7 @@ class RenderService:
             if type(quantity_override) is not int or not 1 <= quantity_override <= 50:
                 raise ValueError("RENDER-001 quantity_override 必須介於 1 到 50")
             quantity = quantity_override
-        layout_key = str(self.settings.get("render.layout", "photo_info"))
+        layout_key = str(self.settings.get("render.layout", "auto_photo"))
         unique_device_ids = list(dict.fromkeys(str(value) for value in (device_ids or []) if str(value)))
         effective_devices: dict[str, dict[str, Any]] = {}
         if unique_device_ids:
@@ -1906,10 +2079,24 @@ class RenderService:
             effective_devices = {identifier: {**by_id[identifier], **((device_configs or {}).get(identifier) or {})}
                                  for identifier in unique_device_ids}
         layouts = [str(device.get("layout_mode") or layout_key) for device in effective_devices.values()] or [layout_key]
-        source_limit = quantity * (2 if any(value in {"photo_pair", "photo_pair_caption"} for value in layouts) else 1)
-        selected = photo_ids[:source_limit]
+        source_limit = quantity * (2 if any(value in {"photo_pair", "photo_pair_caption", "auto_photo"} for value in layouts) else 1)
+        auto_orientations = {
+            str(device.get("frame_orientation") or self.settings.get("render.frame_orientation", "landscape"))
+            for device in effective_devices.values()
+            if str(device.get("layout_mode") or layout_key) == "auto_photo"
+        }
+        if not effective_devices and layout_key == "auto_photo":
+            auto_orientations.add(str(self.settings.get("render.frame_orientation", "landscape")))
+        selected = list(dict.fromkeys(photo_ids)) if auto_orientations else photo_ids[:source_limit]
         if not selected:
-            selected = self.select_candidates(source_limit)
+            if auto_orientations:
+                selected = list(dict.fromkeys(
+                    str(row["id"])
+                    for orientation in sorted(auto_orientations)
+                    for row in self.select_auto_photo_candidates(quantity, frame_orientation=orientation)
+                ))
+            else:
+                selected = self.select_candidates(source_limit)
         # 明確指定與自動選片都必須在發布前重新驗證；不得使用過期候選或遺失來源契約。
         required = self.candidates.require_for_execution_mode(
             selected,
@@ -1928,7 +2115,11 @@ class RenderService:
                 if profile_key not in DISPLAY_PROFILES:
                     raise ValueError("RENDER-003 發布包含不支援的顯示 Profile")
                 device_orientation_metadata: list[dict[str, Any]] = []
-                if effective_layout in {"photo_pair", "photo_pair_caption"}:
+                if effective_layout == "auto_photo":
+                    composition_plans = self._auto_photo_plans(
+                        selected, quantity, device_config=device, profile=profile_key
+                    )
+                elif effective_layout in {"photo_pair", "photo_pair_caption"}:
                     composition_plans = [
                         self.resolve_render_plan(
                             selected[index],
@@ -1989,7 +2180,7 @@ class RenderService:
                     dither_strength=dither_strength,
                     orientation=str(
                         device.get("frame_orientation")
-                        or self.settings.get("render.frame_orientation", "portrait")
+                        or self.settings.get("render.frame_orientation", "landscape")
                     ),
                     activate=False,
                     metadata={
@@ -2029,7 +2220,9 @@ class RenderService:
             )
             return {"releases": published, "device_releases": assignments}
         release_orientation_metadata: list[dict[str, Any]] = []
-        if layout_key in {"photo_pair", "photo_pair_caption"}:
+        if layout_key == "auto_photo":
+            plans = self._auto_photo_plans(selected, quantity)
+        elif layout_key in {"photo_pair", "photo_pair_caption"}:
             plans = []
             for index in range(0, len(selected), 2):
                 primary_id = selected[index]
@@ -2478,15 +2671,55 @@ class RenderService:
             append(ranked, "ranked_fallback")
         return selected
 
+    @staticmethod
+    def _auto_candidate_stages(rows: list[dict[str, Any]]):
+        """Expand only through the configured fallback stages, in order."""
+        allowed: list[dict[str, Any]] = []
+        for stage in ({"exact_day"}, {"nearby_day"}, {"ranked_fallback", "top_ranked"}):
+            added = [row for row in rows if row.get("match_type", "top_ranked") in stage]
+            if added:
+                allowed.extend(added)
+                yield list(allowed)
+
+    def _auto_photo_candidate_pool(self, *, target_date: date | None = None) -> list[dict[str, Any]]:
+        rows = self.select_candidates_details(1000, target_date=target_date, composition_pool=True)
+        result = []
+        recent_cutoff = datetime.now(timezone.utc) - timedelta(days=14)
+        for row in rows:
+            photo = {**dict(self.photos.get_with_path(str(row["id"])) or {}), **row}
+            photo["ever_displayed"] = bool(photo.get("display_count"))
+            try:
+                displayed = datetime.fromisoformat(str(photo.get("last_displayed_at") or ""))
+                displayed = displayed.replace(tzinfo=timezone.utc) if displayed.tzinfo is None else displayed
+                photo["recently_displayed"] = displayed >= recent_cutoff
+            except ValueError:
+                photo["recently_displayed"] = False
+            result.append(photo)
+        return result
+
+    def select_auto_photo_candidates(
+        self, quantity: int, *, frame_orientation: str, target_date: date | None = None,
+    ) -> list[dict[str, Any]]:
+        # The configured pool bounds memory/work. Output quantity bounds frames,
+        # not sources: an unpairable burst must not hide lower-ranked sources.
+        rows = self._auto_photo_candidate_pool(target_date=target_date)
+        allowed: list[dict[str, Any]] = []
+        for allowed in self._auto_candidate_stages(rows):
+            if len(select_auto_photo_frames(allowed, frame_orientation=frame_orientation, count=quantity)) >= quantity:
+                break
+        return allowed
+
     def select_candidates_details(
         self,
         quantity: int | None = None,
         *,
         target_date: date | None = None,
         candidate_years: list[int] | None = None,
+        composition_pool: bool = False,
     ) -> list[dict[str, Any]]:
         limit = quantity if quantity is not None else int(self.settings.get("render.quantity", 5))
-        limit = max(1, min(int(limit), 50))
+        pool_bound = max(20, min(int(self.settings.get("render.local_candidate_limit", 200)), 1000))
+        limit = max(1, min(int(limit), pool_bound if composition_pool else 50))
         target = target_date or self._today()
         mode = execution_mode(self.settings)
         if mode in {"local_only", "local_with_manual_ai", "disabled"}:
@@ -2494,12 +2727,19 @@ class RenderService:
                 self.database, self.settings, self.resilience, self.locations
             ).select(
                 target=target,
-                orientation=str(self.settings.get("render.frame_orientation", "portrait")),
+                orientation=str(self.settings.get("render.frame_orientation", "landscape")),
                 quantity=limit,
-                layout=str(self.settings.get("render.layout", "photo_info")),
+                layout=str(self.settings.get("render.layout", "auto_photo")),
                 candidate_years=candidate_years,
             )
-            return result["selected"][:limit]
+            selected = result["selected"][:limit]
+            if composition_pool:
+                exact = {str(row["id"]) for row in result["exact_pool"]}
+                nearby = {str(row["id"]) for row in result["nearby_pool"]}
+                selected = [{**row, "match_type": "exact_day" if str(row["id"]) in exact
+                             else "nearby_day" if str(row["id"]) in nearby else "ranked_fallback"}
+                            for row in selected]
+            return selected
 
         if mode == "automatic_ai":
             return self._select_candidates_for_score_kind(

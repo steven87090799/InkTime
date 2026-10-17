@@ -28,6 +28,7 @@ from inktime.app.domain.rendering import (
     resolve_layout_geometry,
 )
 from inktime.app.repositories.jobs import PreviewCapacityError
+from inktime.app.repositories.settings import SETTING_DEFINITIONS
 from inktime.app.services.rendering import (
     FIT_MODES,
     FRAME_ORIENTATIONS,
@@ -58,9 +59,9 @@ def _payload() -> dict:
 def rendering_page():
     settings = current_app.extensions["inktime_settings_repository"]
     render_service = current_app.extensions["inktime_render_service"]
-    current_layout = str(settings.get("render.layout", "photo_info"))
-    current_orientation = str(settings.get("render.frame_orientation", "portrait"))
-    current_fit_mode = str(settings.get("render.fit_mode", "stretch_fill"))
+    current_layout = str(settings.get("render.layout", "auto_photo"))
+    current_orientation = str(settings.get("render.frame_orientation", "landscape"))
+    current_fit_mode = str(settings.get("render.fit_mode", "cover"))
     frame_geometries = {
         f"{layout}:{orientation}": resolve_layout_geometry(
             layout, orientation, 480, 800
@@ -78,6 +79,9 @@ def rendering_page():
         profiles=profile_summaries(),
         current_profile=str(settings.get("render.profile", "safe_4c")),
         current_dither=str(settings.get("render.dither", "floyd_steinberg")),
+        current_dither_label=SETTING_DEFINITIONS["render.dither"]["choice_labels"].get(
+            str(settings.get("render.dither", "floyd_steinberg")), "自訂"
+        ),
         dither_strength=float(settings.get("render.dither_strength", 1.0)),
         color_distance=str(settings.get("render.color_distance", "oklab")),
         show_location=bool(settings.get("render.show_location", True)),
@@ -687,6 +691,8 @@ def preview(photo_id: str):
         )
     except KeyError:
         abort(404)
+    except ValueError as exc:
+        abort(400, description=str(exc))
     arguments["render_plan"] = fingerprint["render_plan"]
     arguments["layout"] = fingerprint["render_plan"]["layout"]
     arguments["secondary_photo_id"] = fingerprint["render_plan"]["secondary_photo_id"]
@@ -712,12 +718,12 @@ def preview(photo_id: str):
             "Renderer 背景 Preview",
             {"operation": "library_preview", "arguments": arguments, "fingerprint": fingerprint},
         )
-    layout_key = layout or str(settings.get("render.layout", "photo_info"))
-    orientation_key = orientation or str(settings.get("render.frame_orientation", "portrait"))
+    layout_key = layout or str(settings.get("render.layout", "auto_photo"))
+    orientation_key = orientation or str(settings.get("render.frame_orientation", "landscape"))
     effective_orientation = "portrait" if layout_key in PORTRAIT_ONLY_LAYOUTS else orientation_key
     response = send_file(cached, mimetype="image/png", max_age=0)
     response.headers["Cache-Control"] = "no-store"
-    response.headers["X-InkTime-Layout"] = layout or str(settings.get("render.layout", "photo_info"))
+    response.headers["X-InkTime-Layout"] = layout or str(settings.get("render.layout", "auto_photo"))
     response.headers["X-InkTime-Orientation"] = effective_orientation
     response.headers["X-InkTime-Renderer-Cache"] = "hit"
     if quantized:
@@ -820,7 +826,7 @@ def _history_response(selection: dict) -> dict:
         candidate["renderer"] = "server"
         candidate["render_profile"] = str(settings.get("render.profile", "safe_4c"))
         candidate["palette_version"] = str(settings.get("render.profile", "safe_4c"))
-        candidate["preset"] = str(settings.get("render.layout", "photo_info"))
+        candidate["preset"] = str(settings.get("render.layout", "auto_photo"))
         candidate["dither"] = str(settings.get("render.dither", "floyd_steinberg"))
         candidate["render_ms"] = None
     return selection
@@ -881,7 +887,7 @@ def publish_history_test_release():
         "source_photo_id": photo_id,
         "device_id": device_id,
         "profile": profile_key,
-        "fit": str(settings.get("render.fit_mode", "stretch_fill")),
+        "fit": str(settings.get("render.fit_mode", "cover")),
         "delivery": str(payload.get("delivery", "next_wake")),
         "one_time": True,
         "restore_formal": True,

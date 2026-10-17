@@ -52,8 +52,12 @@ RUNNER_SUITE_TEST_PATHS: dict[str, tuple[str, ...]] = {
         "tests/unit",
         "tests/integration/test_application_factory.py",
     ),
-    "web_ui_owner": ("tests/integration/test_management_ui.py",),
+    "web_ui_owner": (
+        "tests/integration/test_offline_download_display.py",
+        "tests/integration/test_management_ui.py",
+    ),
     "web_api_owner": (
+        "tests/integration/test_auto_photo_review_regressions.py",
         "tests/integration/test_photo_crop_state.py",
         "tests/integration/test_management_ui.py",
         "tests/integration/test_activity_console.py",
@@ -66,6 +70,7 @@ RUNNER_SUITE_TEST_PATHS: dict[str, tuple[str, ...]] = {
         "tests/integration/test_deployment_modes.py",
     ),
     "runtime_scheduler_owner": (
+        "tests/integration/test_auto_publish_pool_regression.py",
         "tests/unit/test_runtime_concurrency.py",
         "tests/unit/test_runtime_config.py",
         "tests/integration/test_jobs.py",
@@ -86,6 +91,7 @@ RUNNER_SUITE_TEST_PATHS: dict[str, tuple[str, ...]] = {
         "tests/integration/test_resilience_runtime.py",
     ),
     "persistence_owner": (
+        "tests/integration/test_auto_photo_selection_regressions.py",
         "tests/unit/test_backups.py",
         "tests/unit/test_photo_analysis_retention.py",
         "tests/integration/test_sqlite_concurrency.py",
@@ -103,11 +109,18 @@ RUNNER_SUITE_TEST_PATHS: dict[str, tuple[str, ...]] = {
         "tests/integration/test_photopainter_stock_api.py",
     ),
     "device_delivery_owner": (
+        "tests/integration/test_offline_download_display.py",
+        "tests/integration/test_auto_photo_review_boundaries.py",
         "tests/unit/test_device_delivery_contract.py",
         "tests/integration/test_offline_queue_ack.py",
         "tests/integration/test_device_test_ack.py",
     ),
     "render_release_owner": (
+        "tests/unit/test_photo_pair_matching.py",
+        "tests/integration/test_auto_publish_pool_regression.py",
+        "tests/integration/test_auto_photo_review_boundaries.py",
+        "tests/integration/test_auto_photo_selection_regressions.py",
+        "tests/integration/test_auto_photo_review_regressions.py",
         "tests/unit/test_composition.py",
         "tests/unit/test_display_prepare_contract.py",
         "tests/unit/test_photo_renderer.py",
@@ -139,11 +152,14 @@ RUNNER_SUITE_TEST_PATHS: dict[str, tuple[str, ...]] = {
         "tests/integration/test_activity_console.py",
     ),
     "settings_governance_owner": (
+        "tests/integration/test_budget_offset_regressions.py",
+        "tests/integration/test_auto_photo_review_boundaries.py",
         "tests/unit/test_settings_repository_governance.py",
         "tests/integration/test_settings_governance.py",
         "tests/integration/test_budget_calendar.py",
     ),
     "provider_analysis_owner": (
+        "tests/integration/test_budget_offset_regressions.py",
         "tests/unit/test_analysis_plan.py",
         "tests/unit/test_analysis_schema.py",
         "tests/unit/test_usage_periods.py",

@@ -117,6 +117,9 @@ def test_source_to_browser_review_ai_render_and_release(app, client, tmp_path, s
     # API; this tests format transport, not photographic quality selection.
     app.extensions["inktime_photo_repository"].set_exclusion(photo_id, action="restore", changed_by=admin)
     # Formal E6 render/release on disposable test storage; no device is assigned.
+    app.extensions["inktime_settings_repository"].update(
+        "render.layout", "full", changed_by=admin, source_ip="127.0.0.1"
+    )
     release = renderer.publish(
         [photo_id],
         admin,

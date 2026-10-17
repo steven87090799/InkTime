@@ -822,12 +822,13 @@ SETTING_DEFINITIONS: dict[str, dict[str, Any]] = {
     },
     "render.layout": {
         "category": "渲染設定",
-        "default": "photo_info",
+        "default": "auto_photo",
         "type": "string",
         "description": "正式發布使用的相框版型",
         "risk": "雙照片均保留各自一句話與日期區；日曆與天氣版型會縮小照片顯示區域",
         "choices": [
             "full",
+            "auto_photo",
             "postcard",
             "photo_info",
             "photo_pair",
@@ -838,6 +839,7 @@ SETTING_DEFINITIONS: dict[str, dict[str, Any]] = {
         ],
         "choice_labels": {
             "full": "單張照片",
+            "auto_photo": "自動滿版＋左短句右日期（橫單直雙）",
             "postcard": "明信片",
             "photo_info": "單張照片＋資訊",
             "photo_pair": "雙照片拼版・一句話與日期",
@@ -850,7 +852,7 @@ SETTING_DEFINITIONS: dict[str, dict[str, Any]] = {
     },
     "render.frame_orientation": {
         "category": "渲染設定",
-        "default": "portrait",
+        "default": "landscape",
         "type": "string",
         "description": "相框實際擺放方向",
         "risk": "月曆與天氣版型固定使用直向；其他版型會依此重新排版",
@@ -860,7 +862,7 @@ SETTING_DEFINITIONS: dict[str, dict[str, Any]] = {
     },
     "render.fit_mode": {
         "category": "渲染設定",
-        "default": "stretch_fill",
+        "default": "cover",
         "type": "string",
         "description": "照片縮放方式",
         "risk": "填滿照片區不裁切但可能微變形；完整顯示會保留留白；填滿裁切可能裁掉照片邊緣",
@@ -961,14 +963,15 @@ SETTING_DEFINITIONS: dict[str, dict[str, Any]] = {
     },
     "render.dither": {
         "category": "渲染設定",
-        "default": "gooddisplay",
+        "default": "warm_vivid_c",
         "type": "string",
-        "description": "有限色電子紙的抖動算法；可選 GDEP 原廠相容或減少色塊與雜點的照片平滑模式",
-        "risk": "原廠相容與照片平滑固定使用標準強度；照片平滑可能略微柔化極細線條",
+        "description": "電子紙色彩模式；預設 C 微暖增豔，也可保留原版或選擇其他抖色方式",
+        "risk": "C 微暖增豔與原廠相容固定使用標準強度；底片或已調色照片可切回原版",
         "choices": [
             "none",
             "floyd_steinberg",
             "gooddisplay",
+            "warm_vivid_c",
             "photo_smooth",
             "atkinson",
             "bayer4",
@@ -980,7 +983,8 @@ SETTING_DEFINITIONS: dict[str, dict[str, Any]] = {
         "choice_labels": {
             "none": "不抖動",
             "floyd_steinberg": "Floyd–Steinberg（InkTime）",
-            "gooddisplay": "Good Display 原廠相容",
+            "gooddisplay": "原版（Good Display 原廠相容）",
+            "warm_vivid_c": "C 微暖增豔（預設）",
             "photo_smooth": "照片平滑（減少色塊／雜點）",
             "atkinson": "Atkinson（較柔和）",
             "bayer4": "Bayer 4×4（規律顆粒）",

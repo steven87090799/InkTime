@@ -480,3 +480,7 @@ pre { white-space: pre-wrap; word-break: break-word; max-height: 420px; overflow
 .error-technical { margin-top: .5rem; font-size: .82rem; }
 .error-technical summary { cursor: pointer; }
 .error-technical pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 14rem; overflow: auto; }
+
+.frame-demo[data-layout="auto_photo"] .frame-demo-caption { align-items: center; align-content: normal; justify-content: space-between; grid-template-columns: minmax(0, 1fr) auto; gap: 4px; padding: 0 3px; border: 0; font-size: 5px; }
+.frame-demo[data-layout="auto_photo"] .frame-demo-caption strong { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; text-align: left; }
+.frame-demo[data-layout="auto_photo"] .frame-demo-caption span { flex: none; white-space: nowrap; text-align: right; }

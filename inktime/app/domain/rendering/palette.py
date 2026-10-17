@@ -4,7 +4,7 @@ from dataclasses import dataclass, replace
 from functools import lru_cache
 from typing import Any, Mapping, Sequence, cast
 
-from PIL import Image, ImageFilter
+from PIL import Image, ImageEnhance, ImageFilter
 
 
 @dataclass(frozen=True)
@@ -96,6 +96,7 @@ DITHER_ALGORITHMS = (
     "none",
     "floyd_steinberg",
     "gooddisplay",
+    "warm_vivid_c",
     "photo_smooth",
     "atkinson",
     "bayer4",
@@ -320,6 +321,97 @@ def _quantize_gooddisplay(
     return indexes, quantized.convert("RGB"), _gooddisplay_colors(profile)
 
 
+def _warm_vivid_c(image: Image.Image) -> Image.Image:
+    """Frozen C preset accepted on the physical PhotoPainter on 2026-10-17."""
+    import numpy as np
+
+    original = np.asarray(image.convert("RGB")).astype(float)
+    adjusted = ImageEnhance.Color(image).enhance(1.12)
+    adjusted = ImageEnhance.Contrast(adjusted).enhance(1.06)
+    adjusted = ImageEnhance.Brightness(adjusted).enhance(1.03)
+    working = np.asarray(adjusted).astype(float)
+    luminance = original @ np.array([0.2126, 0.7152, 0.0722])
+    highlight = np.clip((luminance - 230) / 25, 0, 1)[..., None]
+    working = working * (1 - highlight) + original * highlight
+    weight = np.clip(luminance / 35, 0, 1) * np.clip((245 - luminance) / 45, 0, 1)
+    working[:, :, 0] *= 1 + 0.015 * weight
+    working[:, :, 2] *= 1 - 0.035 * weight
+    return Image.fromarray(np.clip(np.rint(working), 0, 255).astype("uint8"))
+
+
+def _waveshare_six_color_index(red: int, green: int, blue: int) -> int:
+    """Exact RGB nearest vertex, with the official white/red/blue/green tie order."""
+    if blue >= 128:
+        if red >= 128:
+            if green >= 128 or (red + green >= 255 and blue + green >= 255):
+                return 1
+            return 3 if blue <= red else 4
+        if green >= 128:
+            if red + green >= 255 and red + blue >= 255:
+                return 1
+            return 4 if green <= blue else 5
+        return 4
+    if red >= 128:
+        return 2 if green >= 128 else 3
+    return 5 if green >= 128 else 0
+
+
+@lru_cache(maxsize=1)
+def _waveshare_diffusion_tables() -> dict[int, bytes]:
+    import numpy as np
+
+    values = np.arange(256)[None, :]
+    errors = np.arange(-255, 256)[:, None]
+    return {
+        numerator: np.clip(np.rint(values + errors * numerator / 16), 0, 255)
+        .astype("uint8").tobytes()
+        for numerator in (7, 3, 5, 1)
+    }
+
+
+def _quantize_waveshare_six_color(
+    image: Image.Image, profile: DisplayProfile
+) -> tuple[bytearray, Image.Image, tuple[PaletteColor, ...]]:
+    """Match PhotoPainter's web Floyd–Steinberg, including Uint8Clamped rounding.
+
+    Reference: waveshareteam/ESP32-S3-PhotoPainter at a5e8f757,
+    02_SDCARD/03_sys_ap_html/script.min.js. Palette order also defines tie breaks.
+    """
+    colors = ((0, 0, 0), (255, 255, 255), (255, 255, 0),
+              (255, 0, 0), (0, 0, 255), (0, 255, 0))
+    logical = (0, 1, 5, 4, 3, 2)
+    work = bytearray(image.tobytes())
+    width, height = image.size
+    indexes = bytearray(width * height)
+    diffusion = _waveshare_diffusion_tables()
+    for y in range(height):
+        for x in range(width):
+            offset = (y * width + x) * 3
+            red, green, blue = work[offset:offset + 3]
+            chosen = _waveshare_six_color_index(red, green, blue)
+            indexes[y * width + x] = logical[chosen]
+            errors = (red - colors[chosen][0], green - colors[chosen][1], blue - colors[chosen][2])
+            neighbors = []
+            if x + 1 < width:
+                neighbors.append((offset + 3, 7))
+            if y + 1 < height:
+                if x > 0:
+                    neighbors.append((offset + (width - 1) * 3, 3))
+                neighbors.append((offset + width * 3, 5))
+                if x + 1 < width:
+                    neighbors.append((offset + (width + 1) * 3, 1))
+            for neighbor, numerator in neighbors:
+                table = diffusion[numerator]
+                for channel, error in enumerate(errors):
+                    # JS ToUint8Clamp rounds ties to even, as Python round does.
+                    work[neighbor + channel] = table[(error + 255) * 256 + work[neighbor + channel]]
+    palette = _gooddisplay_colors(profile)
+    preview = Image.frombytes("P", image.size, bytes(indexes))
+    flattened = [channel for color in palette for channel in color.rgb]
+    preview.putpalette(flattened + [0] * (768 - len(flattened)))
+    return indexes, preview.convert("RGB"), palette
+
+
 def _clamp_channel(value: float) -> int:
     return max(0, min(255, int(round(value))))
 
@@ -470,7 +562,13 @@ def encode_image(
         raise ValueError("RENDER-004 抖動強度必須介於 0 到 2")
     rgb = image.convert("RGB")
     preview_palette = profile.colors
-    if dither == "gooddisplay":
+    if dither == "warm_vivid_c":
+        adjusted = _warm_vivid_c(rgb)
+        if profile.key == "gdep073e01_6c":
+            indexes, preview, preview_palette = _quantize_waveshare_six_color(adjusted, profile)
+        else:
+            indexes, preview, preview_palette = _quantize_gooddisplay(adjusted, profile)
+    elif dither == "gooddisplay":
         indexes, preview, preview_palette = _quantize_gooddisplay(rgb, profile)
     elif dither == "photo_smooth":
         smoothed = rgb.filter(ImageFilter.MedianFilter(size=3))

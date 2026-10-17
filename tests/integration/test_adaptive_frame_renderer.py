@@ -10,6 +10,7 @@ import pytest
 from inktime.app.domain.analysis.scoring import SEMANTIC_SCORE_KIND
 from inktime.app.domain.rendering import Rect
 from inktime.app.services import rendering as rendering_service
+from tests.conftest import create_admin
 from tests.unit.test_analysis_schema import valid_result
 
 
@@ -58,6 +59,169 @@ def _analyzed_photo(
 
 def _logical_landscape(image: Image.Image) -> Image.Image:
     return image.transpose(Image.Transpose.ROTATE_90)
+
+
+@pytest.mark.parametrize("primary_size,expected_layout", [((1600, 960), "full"), ((900, 1600), "photo_pair")])
+def test_auto_photo_resolves_source_count_and_draws_each_capture_date(
+    app, tmp_path, primary_size, expected_layout
+):
+    root = tmp_path / "photos"
+    root.mkdir()
+    _analyzed_photo(app, root, "primary", primary_size, "2024-07-01T10:00:00+00:00")
+    _analyzed_photo(app, root, "secondary", (900, 1600), "2024-07-02T10:00:00+00:00")
+    service = app.extensions["inktime_render_service"]
+    plan = service.resolve_render_plan(
+        "primary", layout="auto_photo", orientation="landscape", secondary_photo_id="secondary"
+    )
+    assert plan["layout"] == expected_layout
+    assert plan["fit_mode"] == "cover"
+    assert plan["capture_date_labels"]["primary"] == "2024年7月1日"
+    assert plan["photo_footer_lines"]["primary"] == (
+        "2024年7月1日 · " + plan["primary_caption"]["text"]
+    )
+    expected_ids = {"primary", "secondary"} if expected_layout == "photo_pair" else {"primary"}
+    assert set(plan["capture_date_labels"]) == expected_ids
+    if expected_layout == "photo_pair":
+        assert plan["capture_date_labels"]["secondary"] == "2024年7月2日"
+    else:
+        assert plan["secondary_photo_id"] is None
+    image = service.render_photo(
+        "primary", layout="auto_photo", orientation="landscape", secondary_photo_id="secondary"
+    )
+    logical = _logical_landscape(image)
+    assert logical.size == (800, 480)
+    for rect in (plan["geometry"]["primary_photo"], plan["geometry"]["secondary_photo"]):
+        if rect is not None:
+            y = rect["y"] + rect["height"] // 2
+            for x in (rect["x"], rect["x"] + rect["width"] - 1):
+                assert logical.getpixel((x, y)) != (255, 255, 255), "Photo slots must fill their width"
+    for key in ("primary_caption", "secondary_caption"):
+        rect = plan["geometry"].get(key)
+        if rect is not None:
+            assert rect["height"] == 28
+            footer = logical.crop((rect["x"], rect["y"], rect["x"] + rect["width"], rect["y"] + rect["height"]))
+            assert footer.convert("L").getextrema()[0] < 32, "Capture-date text must be visible"
+            assert footer.getpixel((0, 0)) == (255, 255, 255)
+
+
+def test_auto_photo_rejects_unpaired_portrait_instead_of_publishing_wrong_pair(app, tmp_path):
+    root = tmp_path / "photos"
+    root.mkdir()
+    _analyzed_photo(app, root, "primary", (900, 1600), "2024-07-01T10:00:00+00:00")
+    _analyzed_photo(app, root, "wide", (1600, 900), "2024-07-02T10:00:00+00:00")
+    service = app.extensions["inktime_render_service"]
+    with pytest.raises(ValueError, match="需要另一張"):
+        service.resolve_render_plan("primary", layout="auto_photo", orientation="landscape")
+    with pytest.raises(ValueError, match="方向契約"):
+        service.resolve_render_plan(
+            "primary", layout="auto_photo", orientation="landscape", secondary_photo_id="wide"
+        )
+
+
+@pytest.mark.parametrize("primary_size", [(1600, 900), (900, 1600)])
+def test_auto_photo_omits_missing_capture_date_without_substituting_display_date(app, tmp_path, primary_size):
+    root = tmp_path / "photos"
+    root.mkdir()
+    _analyzed_photo(app, root, "primary", primary_size, "2024-07-01T10:00:00+00:00")
+    _analyzed_photo(app, root, "secondary", (900, 1600), "2024-07-02T10:00:00+00:00")
+    with app.extensions["inktime_database"].session() as connection:
+        connection.execute("UPDATE photos SET captured_at=NULL WHERE id='primary'")
+    service = app.extensions["inktime_render_service"]
+    plan = service.resolve_render_plan(
+        "primary", layout="auto_photo", orientation="landscape", secondary_photo_id="secondary"
+    )
+    assert plan["capture_date_labels"]["primary"] == ""
+    assert plan["photo_footer_lines"]["primary"] == plan["primary_caption"]["text"]
+    logical = _logical_landscape(service._render_plan_image(plan))
+    rect = plan["geometry"]["primary_caption"]
+    footer = logical.crop((rect["x"], rect["y"], rect["x"] + rect["width"], rect["y"] + rect["height"]))
+    assert footer.convert("L").getextrema()[0] < 32, "Missing dates must still keep the caption"
+    if plan["secondary_photo_id"] is not None:
+        assert plan["capture_date_labels"]["secondary"] == "2024年7月2日"
+        rect = plan["geometry"]["secondary_caption"]
+        footer = logical.crop((rect["x"], rect["y"], rect["x"] + rect["width"], rect["y"] + rect["height"]))
+        assert footer.convert("L").getextrema()[0] < 32, "The other photo must keep its capture date"
+
+
+def test_auto_photo_keeps_caption_footer_when_capture_dates_are_hidden(app, tmp_path):
+    root = tmp_path / "photos"
+    root.mkdir()
+    _analyzed_photo(app, root, "primary", (1600, 900), "2024-07-01T10:00:00+00:00")
+    settings = app.extensions["inktime_settings_repository"]
+    settings.update("render.show_capture_date", False, changed_by=create_admin(app), source_ip="127.0.0.1")
+    service = app.extensions["inktime_render_service"]
+    plan = service.resolve_render_plan("primary", layout="auto_photo", orientation="landscape")
+    assert plan["capture_date_labels"] == {"primary": ""}
+    assert plan["photo_footer_lines"] == {"primary": plan["primary_caption"]["text"]}
+    assert plan["geometry"]["primary_caption"]["height"] == 28
+    image = _logical_landscape(service._render_plan_image(plan))
+    assert image.crop((0, 452, 800, 480)).convert("L").getextrema()[0] < 32
+
+
+@pytest.mark.parametrize("size", [(1600, 900), (900, 1600)])
+def test_auto_photo_footer_keeps_caption_left_date_right_without_overlap(app, tmp_path, monkeypatch, size):
+    root = tmp_path / "photos"
+    root.mkdir()
+    for pid, captured in (("primary", "2024-07-01"), ("secondary", "2024-07-02")):
+        _analyzed_photo(app, root, pid, size, captured + "T10:00:00+00:00")
+    service = app.extensions["inktime_render_service"]
+    plan = service.resolve_render_plan("primary", layout="auto_photo", secondary_photo_id="secondary")
+    assert plan["footer_alignment"] == {"caption": "left", "date": "right"}
+    calls = []
+    original = ImageDraw.ImageDraw.text
+
+    def record(draw, xy, text, *args, **kwargs):
+        calls.append((xy, str(text), kwargs.get("anchor"), draw.textlength(str(text), font=kwargs["font"])))
+        return original(draw, xy, text, *args, **kwargs)
+
+    monkeypatch.setattr(ImageDraw.ImageDraw, "text", record)
+    service._render_plan_image(plan)
+    for pid, key in (("primary", "primary_caption"), ("secondary", "secondary_caption")):
+        rect = plan["geometry"][key]
+        if rect is None:
+            continue
+        y = rect["y"] + rect["height"] / 2
+        caption = next(call for call in calls if call[2] == "lm" and call[0] == (rect["x"] + 8, y))
+        captured = next(call for call in calls if call[2] == "rm" and call[0] == (rect["x"] + rect["width"] - 8, y))
+        assert captured[1] == plan["capture_date_labels"][pid]
+        assert caption[0][0] + caption[3] + 12 <= captured[0][0] - captured[3]
+
+
+def test_default_batch_photo_plans_reserve_distinct_portrait_sources(app, tmp_path):
+    root = tmp_path / "photos"
+    root.mkdir()
+    for pid in ("a", "b", "c", "d"):
+        _analyzed_photo(app, root, pid, (900, 1600), "2024-07-01T10:00:00+00:00")
+    plans = app.extensions["inktime_render_service"]._auto_photo_plans(["a", "b", "c", "d"], 2)
+    assert len(plans) == 2
+    sources = [pid for plan in plans for pid in (plan["primary_photo_id"], plan["secondary_photo_id"])]
+    assert len(set(sources)) == 4
+    assert all(plan["footer_alignment"] == {"caption": "left", "date": "right"} for plan in plans)
+
+
+def test_auto_photo_pairs_local_scanner_photos_without_ai_rows(app, tmp_path):
+    root = tmp_path / "photos"
+    root.mkdir()
+    _analyzed_photo(app, root, "primary", (900, 1600), "2024-07-01T10:00:00+00:00")
+    _analyzed_photo(app, root, "secondary", (900, 1600), "2024-07-02T10:00:00+00:00")
+    settings = app.extensions["inktime_settings_repository"]
+    actor = create_admin(app)
+    settings.update_many(
+        {"analysis.execution_mode": "local_only"}, changed_by=actor, source_ip="127.0.0.1"
+    )
+    with app.extensions["inktime_database"].session() as connection:
+        connection.execute("DELETE FROM photo_analysis")
+        connection.execute("UPDATE photos SET local_candidate_score=80, "
+                           "captured_date=substr(captured_at,1,10),captured_month_day=substr(captured_at,6,5)")
+    service = app.extensions["inktime_render_service"]
+    plan = service.resolve_render_plan("primary", layout="auto_photo", orientation="landscape")
+    assert plan["layout"] == "photo_pair"
+    assert plan["secondary_photo_id"] == "secondary"
+    assert plan["capture_date_labels"] == {"primary": "2024年7月1日", "secondary": "2024年7月2日"}
+    assert plan["primary_caption"]["source"] == "local_footer_fallback"
+    assert plan["photo_footer_lines"]["primary"] == "2024年7月1日 · 把這一刻，好好收藏。"
+    image = service._render_plan_image(plan)
+    assert image.size == (480, 800)
 
 
 def test_adaptive_landscape_single_contains_matching_photo_and_keeps_footer(app, tmp_path):
@@ -616,7 +780,8 @@ def test_all_formal_frame_layouts_render_with_the_resolved_photos(app, tmp_path)
     assert paired.size == (480, 800)
 
 
-def test_formal_render_bounds_decoded_source_to_render_target(app, tmp_path, monkeypatch):
+@pytest.mark.parametrize("orientation", ["portrait", "landscape"])
+def test_formal_render_bounds_decoded_source_to_render_target(app, tmp_path, monkeypatch, orientation):
     root = tmp_path / "photos"
     root.mkdir()
     _analyzed_photo(app, root, "large", (2400, 1600), "2024-07-01T10:00:00+00:00")
@@ -630,12 +795,13 @@ def test_formal_render_bounds_decoded_source_to_render_target(app, tmp_path, mon
         return source, orientation
 
     monkeypatch.setattr(service, "_load_oriented_photo", capture_loader)
-    image = service.render_photo("large", layout="full", fit_mode="cover")
+    image = service.render_photo("large", layout="full", fit_mode="cover", orientation=orientation)
 
     assert image.size == (480, 800)
     assert observed
-    assert observed[0][0] <= 960
-    assert observed[0][1] <= 1600
+    bound = (960, 1600) if orientation == "portrait" else (1600, 960)
+    assert observed[0][0] <= bound[0]
+    assert observed[0][1] <= bound[1]
 
 
 def test_formal_render_accepts_48mp_jpeg_and_bounds_before_exif(app, tmp_path, monkeypatch):

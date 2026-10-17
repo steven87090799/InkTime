@@ -8,13 +8,14 @@ scale the same slots without inventing a second set of percentages in CSS.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 
 PORTRAIT_ONLY_LAYOUTS = frozenset({"calendar", "weather_sensor"})
 SUPPORTED_LAYOUTS = frozenset(
     {
         "full",
+        "auto_photo",
         "photo_info",
         "postcard",
         "photo_pair",
@@ -125,6 +126,25 @@ class LayoutGeometry:
         }
 
 
+def with_photo_date_footers(geometry: LayoutGeometry) -> LayoutGeometry:
+    def split(rect: Rect | None, existing_caption: Rect | None) -> tuple[Rect | None, Rect | None]:
+        if rect is None:
+            return None, None
+        bottom = existing_caption.bottom if existing_caption is not None else rect.bottom
+        height = bottom - rect.y
+        footer = min(28, max(1, height // 4))
+        photo = Rect(rect.x, rect.y, rect.width, height - footer)
+        date = Rect(rect.x, photo.bottom, rect.width, footer)
+        return photo, date
+
+    primary, primary_date = split(geometry.primary_photo, geometry.primary_caption)
+    secondary, secondary_date = split(geometry.secondary_photo, geometry.secondary_caption)
+    return replace(
+        geometry, primary_photo=primary, secondary_photo=secondary,
+        primary_caption=primary_date, secondary_caption=secondary_date,
+    )
+
+
 def _normalized_canvas(orientation: str, width: int, height: int) -> tuple[int, int]:
     if orientation not in {"portrait", "landscape"}:
         raise ValueError("orientation must be portrait or landscape")
@@ -140,8 +160,9 @@ def _normalized_canvas(orientation: str, width: int, height: int) -> tuple[int, 
 def _single_info_geometry(
     *, layout: str, orientation: str, width: int, height: int, caption_ratio: float
 ) -> LayoutGeometry:
-    if layout == "full":
-        return LayoutGeometry(layout, orientation, width, height, primary_photo=Rect(0, 0, width, height))
+    if layout in {"full", "auto_photo"}:
+        geometry = LayoutGeometry(layout, orientation, width, height, primary_photo=Rect(0, 0, width, height))
+        return with_photo_date_footers(geometry) if layout == "auto_photo" else geometry
     if layout == "photo_info":
         info_height = 76 if orientation == "landscape" else 96
         photo = Rect(0, 0, width, height - info_height)

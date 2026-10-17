@@ -5,9 +5,39 @@ import sqlite3
 from inktime.app.domain.rendering.adaptive_layout import (
     dimensions_after_exif,
     photo_orientation,
+    select_auto_photo_frames,
     select_pair_candidate,
 )
 from inktime.app.services.rendering import RenderService
+
+
+def test_auto_photo_frames_keep_landscapes_single_and_only_pair_portraits():
+    rows = [
+        {"id": "wide-a", "width": 1600, "height": 900},
+        {"id": "tall-a", "width": 900, "height": 1600},
+        {"id": "wide-b", "width": 1600, "height": 900},
+        {"id": "tall-b", "width": 900, "height": 1600},
+        {"id": "square", "width": 1000, "height": 1000},
+    ]
+    frames = select_auto_photo_frames(rows, frame_orientation="landscape", count=4)
+    assert [[row["id"] for row in group] for group in frames] == [
+        ["wide-a"], ["tall-a", "tall-b"], ["wide-b"], ["square"],
+    ]
+    assert len({row["id"] for group in frames for row in group}) == 5
+
+
+def test_auto_photo_frames_skip_unpaired_portrait_and_honor_manual_rotation():
+    rows = [
+        {"id": "rotated", "width": 1600, "height": 900, "manual_orientation_rotation_cw": 90},
+        {"id": "tall", "width": 900, "height": 1600},
+        {"id": "unpaired", "width": 900, "height": 1600},
+        {"id": "wide", "width": 1600, "height": 900},
+    ]
+    frames = select_auto_photo_frames(rows, frame_orientation="landscape", count=3)
+    assert len(frames) == 2
+    assert frames[0][0]["id"] == "rotated"
+    assert frames[0][1]["id"] in {"tall", "unpaired"}
+    assert [row["id"] for row in frames[1]] == ["wide"]
 
 
 def test_orientation_classification_uses_square_band_and_exif_rotation():
