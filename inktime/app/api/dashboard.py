@@ -214,7 +214,7 @@ def _setup_overview(connection) -> dict:
             9,
             "日期、文句與雙照片版面",
             complete=True,
-            current=f"版型 {settings.get('render.layout', 'photo_info')} · 拍攝日期{'顯示' if settings.get('render.show_capture_date', True) else '隱藏'}",
+            current=f"版型 {settings.get('render.layout', 'auto_photo')} · 拍攝日期{'顯示' if settings.get('render.show_capture_date', True) else '隱藏'}",
             detail="橫向雙直圖、直向雙橫圖各有一句話與較小日期；沒有日期就留空。裝置個別版型優先於全域設定，變更後先預覽並產生新發布。",
             action_label="預覽與調整版面",
             action_url="/rendering",
