@@ -354,7 +354,7 @@ class RenderService:
         if auto_photo_requested and bool(self.settings.get("render.show_capture_date", True)):
             geometry = with_photo_date_footers(geometry)
             capture_date_labels = {
-                str(photo["id"]): self._date_label(self._captured_date(photo["captured_at"]))
+                str(photo["id"]): self._date_label(self._captured_date(photo["captured_at"])) or "拍攝日期未知"
                 for photo in (primary, secondary) if photo is not None
             }
         pair_caption_region = (
