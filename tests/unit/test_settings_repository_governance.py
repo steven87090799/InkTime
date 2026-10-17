@@ -11,6 +11,12 @@ from inktime.app.repositories.settings import (
 )
 
 
+def test_project_photo_defaults_use_automatic_landscape_cover():
+    assert SETTING_DEFINITIONS["render.layout"]["default"] == "auto_photo"
+    assert SETTING_DEFINITIONS["render.frame_orientation"]["default"] == "landscape"
+    assert SETTING_DEFINITIONS["render.fit_mode"]["default"] == "cover"
+
+
 @pytest.mark.parametrize("value", [math.nan, math.inf, -math.inf])
 def test_number_coercion_rejects_non_finite_values(value):
     with pytest.raises(ValueError, match="有限數字"):

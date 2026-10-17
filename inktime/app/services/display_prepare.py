@@ -410,7 +410,7 @@ class DisplayPreparationService:
                 "slots": existing["slots"],
             }
 
-        layout = str(device["layout_mode"] or self.render_service.settings.get("render.layout", "photo_info"))
+        layout = str(device["layout_mode"] or self.render_service.settings.get("render.layout", "auto_photo"))
         photos_per_frame = 2 if layout in {"photo_pair", "photo_pair_caption", "auto_photo"} else 1
         required_candidates = len(schedule_times) * photos_per_frame
         candidates = self.render_service.select_candidates_details(
@@ -428,7 +428,7 @@ class DisplayPreparationService:
                 rows,
                 frame_orientation=str(
                     device["frame_orientation"]
-                    or self.render_service.settings.get("render.frame_orientation", "portrait")
+                    or self.render_service.settings.get("render.frame_orientation", "landscape")
                 ),
                 count=len(schedule_times),
             )

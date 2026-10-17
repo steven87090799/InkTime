@@ -53,7 +53,7 @@
   <label>Stock 相框位址（IP／主機名）<input name="stock_endpoint_host" maxlength="253" placeholder="192.168.1.50"></label>
   <label>畫面方向<select name="rotation"><option value="0">0°</option><option value="180">180°</option></select></label>
   <label>相框方向<select name="frame_orientation"><option value="">沿用全域</option><option value="portrait">直向</option><option value="landscape">橫向</option></select></label>
-  <label>版面用途<select name="layout_mode"><option value="">沿用全域</option><option value="auto_photo">自動滿版＋日期短句（橫單直雙）</option><option value="adaptive_memory">智慧自適應回憶（建議）</option><option value="photo_info">單張照片＋資訊</option><option value="photo_pair">雙照片・各自一句話與日期</option></select></label>
+  <label>版面用途<select name="layout_mode"><option value="">沿用全域</option><option value="auto_photo">自動滿版＋左短句右日期（橫單直雙）</option><option value="adaptive_memory">智慧自適應回憶（建議）</option><option value="photo_info">單張照片＋資訊</option><option value="photo_pair">雙照片・各自一句話與日期</option></select></label>
   <label>照片顯示方式<select name="fit_mode"><option value="">沿用全域</option><option value="stretch_fill">填滿照片區（不裁切，可微變形）</option><option value="contain">完整顯示</option><option value="cover">填滿並裁切</option></select></label>
   <details><summary>進階設定</summary><div class="form-stack">
     <label>面板 Profile<select name="panel_profile">{% for key, profile in display_profiles.items() %}<option value="{{ key }}">{{ profile.label }}</option>{% endfor %}</select></label>

@@ -370,9 +370,9 @@ def _prepare_library_preview_child(
             color_distance=str(arguments["color_distance"]),
             strength=float(arguments["dither_strength"]),
         ).preview
-    layout_key = str(arguments.get("layout") or settings_repository.get("render.layout", "photo_info"))
+    layout_key = str(arguments.get("layout") or settings_repository.get("render.layout", "auto_photo"))
     orientation_key = str(
-        arguments.get("orientation") or settings_repository.get("render.frame_orientation", "portrait")
+        arguments.get("orientation") or settings_repository.get("render.frame_orientation", "landscape")
     )
     if ("portrait" if layout_key in PORTRAIT_ONLY_LAYOUTS else orientation_key) == "landscape":
         image = image.transpose(Image.Transpose.ROTATE_90)

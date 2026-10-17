@@ -158,6 +158,47 @@ def test_auto_photo_keeps_caption_footer_when_capture_dates_are_hidden(app, tmp_
     assert image.crop((0, 452, 800, 480)).convert("L").getextrema()[0] < 32
 
 
+@pytest.mark.parametrize("size", [(1600, 900), (900, 1600)])
+def test_auto_photo_footer_keeps_caption_left_date_right_without_overlap(app, tmp_path, monkeypatch, size):
+    root = tmp_path / "photos"
+    root.mkdir()
+    for pid, captured in (("primary", "2024-07-01"), ("secondary", "2024-07-02")):
+        _analyzed_photo(app, root, pid, size, captured + "T10:00:00+00:00")
+    service = app.extensions["inktime_render_service"]
+    plan = service.resolve_render_plan("primary", layout="auto_photo", secondary_photo_id="secondary")
+    assert plan["footer_alignment"] == {"caption": "left", "date": "right"}
+    calls = []
+    original = ImageDraw.ImageDraw.text
+
+    def record(draw, xy, text, *args, **kwargs):
+        calls.append((xy, str(text), kwargs.get("anchor"), draw.textlength(str(text), font=kwargs["font"])))
+        return original(draw, xy, text, *args, **kwargs)
+
+    monkeypatch.setattr(ImageDraw.ImageDraw, "text", record)
+    service._render_plan_image(plan)
+    for pid, key in (("primary", "primary_caption"), ("secondary", "secondary_caption")):
+        rect = plan["geometry"][key]
+        if rect is None:
+            continue
+        y = rect["y"] + rect["height"] / 2
+        caption = next(call for call in calls if call[2] == "lm" and call[0] == (rect["x"] + 8, y))
+        captured = next(call for call in calls if call[2] == "rm" and call[0] == (rect["x"] + rect["width"] - 8, y))
+        assert captured[1] == plan["capture_date_labels"][pid]
+        assert caption[0][0] + caption[3] + 12 <= captured[0][0] - captured[3]
+
+
+def test_default_batch_photo_plans_reserve_distinct_portrait_sources(app, tmp_path):
+    root = tmp_path / "photos"
+    root.mkdir()
+    for pid in ("a", "b", "c", "d"):
+        _analyzed_photo(app, root, pid, (900, 1600), "2024-07-01T10:00:00+00:00")
+    plans = app.extensions["inktime_render_service"]._auto_photo_plans(["a", "b", "c", "d"], 2)
+    assert len(plans) == 2
+    sources = [pid for plan in plans for pid in (plan["primary_photo_id"], plan["secondary_photo_id"])]
+    assert len(set(sources)) == 4
+    assert all(plan["footer_alignment"] == {"caption": "left", "date": "right"} for plan in plans)
+
+
 def test_auto_photo_pairs_local_scanner_photos_without_ai_rows(app, tmp_path):
     root = tmp_path / "photos"
     root.mkdir()

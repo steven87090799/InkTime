@@ -822,7 +822,7 @@ SETTING_DEFINITIONS: dict[str, dict[str, Any]] = {
     },
     "render.layout": {
         "category": "渲染設定",
-        "default": "photo_info",
+        "default": "auto_photo",
         "type": "string",
         "description": "正式發布使用的相框版型",
         "risk": "雙照片均保留各自一句話與日期區；日曆與天氣版型會縮小照片顯示區域",
@@ -839,7 +839,7 @@ SETTING_DEFINITIONS: dict[str, dict[str, Any]] = {
         ],
         "choice_labels": {
             "full": "單張照片",
-            "auto_photo": "自動照片＋日期（橫單直雙）",
+            "auto_photo": "自動滿版＋左短句右日期（橫單直雙）",
             "postcard": "明信片",
             "photo_info": "單張照片＋資訊",
             "photo_pair": "雙照片拼版・一句話與日期",
@@ -852,7 +852,7 @@ SETTING_DEFINITIONS: dict[str, dict[str, Any]] = {
     },
     "render.frame_orientation": {
         "category": "渲染設定",
-        "default": "portrait",
+        "default": "landscape",
         "type": "string",
         "description": "相框實際擺放方向",
         "risk": "月曆與天氣版型固定使用直向；其他版型會依此重新排版",
@@ -862,7 +862,7 @@ SETTING_DEFINITIONS: dict[str, dict[str, Any]] = {
     },
     "render.fit_mode": {
         "category": "渲染設定",
-        "default": "stretch_fill",
+        "default": "cover",
         "type": "string",
         "description": "照片縮放方式",
         "risk": "填滿照片區不裁切但可能微變形；完整顯示會保留留白；填滿裁切可能裁掉照片邊緣",
