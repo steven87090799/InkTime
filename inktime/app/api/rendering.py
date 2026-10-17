@@ -691,6 +691,8 @@ def preview(photo_id: str):
         )
     except KeyError:
         abort(404)
+    except ValueError as exc:
+        abort(400, description=str(exc))
     arguments["render_plan"] = fingerprint["render_plan"]
     arguments["layout"] = fingerprint["render_plan"]["layout"]
     arguments["secondary_photo_id"] = fingerprint["render_plan"]["secondary_photo_id"]

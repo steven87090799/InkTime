@@ -48,6 +48,7 @@ from inktime.app.domain.photos.orientation import (
     resolve_effective_orientation,
 )
 from inktime.app.domain.rendering.adaptive_layout import (
+    InsufficientPhotoContentError,
     auto_photo_layout,
     pair_orientation,
     pair_score,
@@ -293,7 +294,7 @@ class RenderService:
                     dict(primary), frame_orientation=effective_orientation
                 )
                 if candidate is None:
-                    raise ValueError("RENDER-005 自動照片需要另一張方向相符的照片")
+                    raise InsufficientPhotoContentError("RENDER-005 自動照片需要另一張方向相符的照片")
                 secondary_id = str(candidate["id"])
         if layout_key == "adaptive_memory":
             source_path = safe_join(Path(primary["root_path"]), str(primary["relative_path"]), decode_url=False)
@@ -1148,31 +1149,12 @@ class RenderService:
     def _select_auto_photo_pair_candidate(
         self, primary: dict[str, Any], *, frame_orientation: str
     ) -> dict[str, Any] | None:
-        if execution_mode(self.settings) == "automatic_ai":
-            return self._select_adaptive_pair_candidate(primary, frame_orientation=frame_orientation)
-        orientation_sql = self._adaptive_orientation_sql(frame_orientation)
-        with self.database.session() as connection:
-            rows = connection.execute(
-                f"""
-                SELECT p.*,l.root_path,l.enabled AS library_enabled,
-                       EXISTS(SELECT 1 FROM display_history dh WHERE dh.photo_id=p.id) ever_displayed,
-                       EXISTS(SELECT 1 FROM display_history dh WHERE dh.photo_id=p.id
-                              AND dh.displayed_at>=datetime('now','-14 days')) recently_displayed
-                FROM photos p JOIN libraries l ON l.id=p.library_id
-                WHERE p.id<>? AND p.lifecycle_status='active' AND p.eligible=1
-                  AND p.local_features_status='complete' AND l.enabled=1
-                  AND p.exclusion_status NOT IN ('auto_excluded','manually_excluded')
-                  AND ({orientation_sql})
-                ORDER BY recently_displayed,
-                         ABS(julianday(COALESCE(p.captured_at,p.created_at))-julianday(?)),p.id
-                LIMIT 50
-                """,  # noqa: S608 -- trusted orientation predicate; all photo values are bound.
-                (str(primary["id"]), str(primary.get("captured_at") or primary.get("created_at") or "")),
-            ).fetchall()
-        return select_pair_candidate(
-            primary, [dict(row) for row in rows if self.candidates.available(row)],
-            frame_orientation=frame_orientation,
-        )
+        rows = self._auto_photo_candidate_pool()
+        for allowed in self._auto_candidate_stages(rows):
+            candidate = select_pair_candidate(primary, allowed, frame_orientation=frame_orientation)
+            if candidate is not None:
+                return candidate
+        return None
 
     def _select_adaptive_pair_candidate(
         self, primary: dict[str, Any], *, frame_orientation: str
@@ -2038,10 +2020,8 @@ class RenderService:
         orientation = str(device.get("frame_orientation") or self.settings.get("render.frame_orientation", "landscape"))
         rows = [dict(self.ensure_photo_features(photo_id)) for photo_id in dict.fromkeys(photo_ids)]
         groups = select_auto_photo_frames(rows, frame_orientation=orientation, count=quantity)
-        if not groups and len(photo_ids) == 1:
-            return [self.resolve_render_plan(photo_ids[0], layout="auto_photo", device_config=device, profile=profile)]
         if not groups:
-            raise ValueError("RENDER-005 沒有可組成完整畫面的照片")
+            raise InsufficientPhotoContentError("RENDER-005 沒有可組成完整畫面的照片；請補充方向相符且不重複的照片")
         return [
             self.resolve_render_plan(
                 str(group[0]["id"]), layout="full" if len(group) == 1 else "photo_pair",
@@ -2100,9 +2080,23 @@ class RenderService:
                                  for identifier in unique_device_ids}
         layouts = [str(device.get("layout_mode") or layout_key) for device in effective_devices.values()] or [layout_key]
         source_limit = quantity * (2 if any(value in {"photo_pair", "photo_pair_caption", "auto_photo"} for value in layouts) else 1)
-        selected = photo_ids[:source_limit]
+        auto_orientations = {
+            str(device.get("frame_orientation") or self.settings.get("render.frame_orientation", "landscape"))
+            for device in effective_devices.values()
+            if str(device.get("layout_mode") or layout_key) == "auto_photo"
+        }
+        if not effective_devices and layout_key == "auto_photo":
+            auto_orientations.add(str(self.settings.get("render.frame_orientation", "landscape")))
+        selected = list(dict.fromkeys(photo_ids)) if auto_orientations else photo_ids[:source_limit]
         if not selected:
-            selected = self.select_candidates(source_limit)
+            if auto_orientations:
+                selected = list(dict.fromkeys(
+                    str(row["id"])
+                    for orientation in sorted(auto_orientations)
+                    for row in self.select_auto_photo_candidates(quantity, frame_orientation=orientation)
+                ))
+            else:
+                selected = self.select_candidates(source_limit)
         # 明確指定與自動選片都必須在發布前重新驗證；不得使用過期候選或遺失來源契約。
         required = self.candidates.require_for_execution_mode(
             selected,
@@ -2677,15 +2671,55 @@ class RenderService:
             append(ranked, "ranked_fallback")
         return selected
 
+    @staticmethod
+    def _auto_candidate_stages(rows: list[dict[str, Any]]):
+        """Expand only through the configured fallback stages, in order."""
+        allowed: list[dict[str, Any]] = []
+        for stage in ({"exact_day"}, {"nearby_day"}, {"ranked_fallback", "top_ranked"}):
+            added = [row for row in rows if row.get("match_type", "top_ranked") in stage]
+            if added:
+                allowed.extend(added)
+                yield list(allowed)
+
+    def _auto_photo_candidate_pool(self, *, target_date: date | None = None) -> list[dict[str, Any]]:
+        rows = self.select_candidates_details(1000, target_date=target_date, composition_pool=True)
+        result = []
+        recent_cutoff = datetime.now(timezone.utc) - timedelta(days=14)
+        for row in rows:
+            photo = {**dict(self.photos.get_with_path(str(row["id"])) or {}), **row}
+            photo["ever_displayed"] = bool(photo.get("display_count"))
+            try:
+                displayed = datetime.fromisoformat(str(photo.get("last_displayed_at") or ""))
+                displayed = displayed.replace(tzinfo=timezone.utc) if displayed.tzinfo is None else displayed
+                photo["recently_displayed"] = displayed >= recent_cutoff
+            except ValueError:
+                photo["recently_displayed"] = False
+            result.append(photo)
+        return result
+
+    def select_auto_photo_candidates(
+        self, quantity: int, *, frame_orientation: str, target_date: date | None = None,
+    ) -> list[dict[str, Any]]:
+        # The configured pool bounds memory/work. Output quantity bounds frames,
+        # not sources: an unpairable burst must not hide lower-ranked sources.
+        rows = self._auto_photo_candidate_pool(target_date=target_date)
+        allowed: list[dict[str, Any]] = []
+        for allowed in self._auto_candidate_stages(rows):
+            if len(select_auto_photo_frames(allowed, frame_orientation=frame_orientation, count=quantity)) >= quantity:
+                break
+        return allowed
+
     def select_candidates_details(
         self,
         quantity: int | None = None,
         *,
         target_date: date | None = None,
         candidate_years: list[int] | None = None,
+        composition_pool: bool = False,
     ) -> list[dict[str, Any]]:
         limit = quantity if quantity is not None else int(self.settings.get("render.quantity", 5))
-        limit = max(1, min(int(limit), 50))
+        pool_bound = max(20, min(int(self.settings.get("render.local_candidate_limit", 200)), 1000))
+        limit = max(1, min(int(limit), pool_bound if composition_pool else 50))
         target = target_date or self._today()
         mode = execution_mode(self.settings)
         if mode in {"local_only", "local_with_manual_ai", "disabled"}:
@@ -2698,7 +2732,14 @@ class RenderService:
                 layout=str(self.settings.get("render.layout", "auto_photo")),
                 candidate_years=candidate_years,
             )
-            return result["selected"][:limit]
+            selected = result["selected"][:limit]
+            if composition_pool:
+                exact = {str(row["id"]) for row in result["exact_pool"]}
+                nearby = {str(row["id"]) for row in result["nearby_pool"]}
+                selected = [{**row, "match_type": "exact_day" if str(row["id"]) in exact
+                             else "nearby_day" if str(row["id"]) in nearby else "ranked_fallback"}
+                            for row in selected]
+            return selected
 
         if mode == "automatic_ai":
             return self._select_candidates_for_score_kind(

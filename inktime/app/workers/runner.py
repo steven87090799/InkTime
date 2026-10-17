@@ -24,6 +24,7 @@ from inktime.app.domain.photos.formats import MAX_FILE_BYTES, MAX_SOURCE_PIXELS,
 from inktime.app.services.analysis import AnalysisDisabledError, ProviderUnavailableError
 from inktime.app.domain.analysis.execution_mode import permits_automatic_ai, permits_manual_ai
 from inktime.app.domain.analysis.scoring import LOCAL_QUALITY_SCORE_KIND
+from inktime.app.domain.rendering.adaptive_layout import InsufficientPhotoContentError
 
 
 LOGGER = logging.getLogger("worker")
@@ -184,10 +185,16 @@ def _execute_job_item(app, item, *, job, settings, provider, provider_error, ana
             progress_interval_seconds=progress_seconds,
             **scanner_safety,
         )
+        quantity = int(settings.get("quantity", 5))
+        layout = str(runtime_settings.get("render.layout", "auto_photo"))
+        source_limit = (
+            max(20, min(int(runtime_settings.get("render.local_candidate_limit", 200)), 1000))
+            if layout == "auto_photo" else quantity * (2 if layout in {"photo_pair", "photo_pair_caption"} else 1)
+        )
         photo_ids = app.extensions["inktime_photo_repository"].list_existing_photo_ids(
             str(scan["library_id"]),
             root,
-            limit=int(settings.get("quantity", 5)),
+            limit=source_limit,
         )
         if not photo_ids:
             raise ValueError("IMG-002 模擬照片資料夾內沒有可用圖片")
@@ -206,11 +213,16 @@ def _execute_job_item(app, item, *, job, settings, provider, provider_error, ana
                 "{}",
                 score_kind=LOCAL_QUALITY_SCORE_KIND,
             )
-        release = app.extensions["inktime_render_service"].publish(
-            photo_ids,
-            str(job["created_by"] or "system"),
-            profile_keys=[str(settings["profile_key"])],
-        )
+        try:
+            release = app.extensions["inktime_render_service"].publish(
+                photo_ids,
+                str(job["created_by"] or "system"),
+                profile_keys=[str(settings["profile_key"])],
+                quantity_override=quantity,
+            )
+        except InsufficientPhotoContentError as exc:
+            return {"scan": scan, "status": "completed", "outcome": "no_content",
+                    "outcome_code": "NO_ELIGIBLE_CANDIDATES", "message": str(exc)}
         return {"scan": scan, "release": release}
     if job["kind"] == "backup":
         path = app.extensions["inktime_backup_service"].create()

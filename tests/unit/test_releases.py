@@ -1016,7 +1016,7 @@ def test_all_photo_frame_layouts_render_at_panel_size(app, tmp_path):
     assert pair.size == (800, 480)
     assert pair.getpixel((198, 240)) != pair.getpixel((602, 240))
 
-    info = service.render_photo("layout-photo", layout="photo_info")
+    info = service.render_photo("layout-photo", layout="photo_info", orientation="portrait", fit_mode="contain")
     assert info.getpixel((479, 799)) == (255, 255, 255)
     assert info.getpixel((479, 720)) == (255, 255, 255)
     quantized = encode_image(
@@ -1060,7 +1060,7 @@ def test_formal_caption_uses_builtin_traditional_font_without_fallback(app, tmp_
     )
 
     render_service = app.extensions["inktime_render_service"]
-    rendered = render_service.render_photo("caption-photo")
+    rendered = render_service.render_photo("caption-photo", layout="photo_info", orientation="portrait")
     assert rendered.size == (480, 800)
     assert app.extensions["inktime_settings_repository"].get("render.font_path") == "builtin:iansui"
 
@@ -1068,7 +1068,7 @@ def test_formal_caption_uses_builtin_traditional_font_without_fallback(app, tmp_
         "render.font_path", "", changed_by="tester", source_ip="127.0.0.1"
     )
     with pytest.raises(FontCoverageError, match="尚未設定"):
-        render_service.render_photo("caption-photo")
+        render_service.render_photo("caption-photo", layout="photo_info", orientation="portrait")
 
 
 def test_formal_render_shows_nearest_city_when_photo_has_gps(app, tmp_path):
@@ -1104,9 +1104,9 @@ def test_formal_render_shows_nearest_city_when_photo_has_gps(app, tmp_path):
     photo = photos.get_with_path("location-photo")
 
     assert render_service.location_name(photo) == "臺北市"
-    with_location = render_service.render_photo("location-photo")
+    with_location = render_service.render_photo("location-photo", layout="photo_info", orientation="portrait")
     app.extensions["inktime_settings_repository"].update(
         "render.show_location", False, changed_by="tester", source_ip="127.0.0.1"
     )
-    without_location = render_service.render_photo("location-photo")
+    without_location = render_service.render_photo("location-photo", layout="photo_info", orientation="portrait")
     assert with_location.tobytes() != without_location.tobytes()

@@ -39,11 +39,18 @@ def auto_photo_layout(size: tuple[int, int], frame_orientation: str) -> str:
     return "full" if orientation in {"square", frame_orientation} else "photo_pair"
 
 
+class InsufficientPhotoContentError(ValueError):
+    """A deterministic shortage of sources, not a retryable render failure."""
+
+    code = "NO_ELIGIBLE_CANDIDATES"
+
+
 def select_auto_photo_frames(
     candidates: list[dict[str, Any]], *, frame_orientation: str, count: int
 ) -> list[list[dict[str, Any]]]:
     """Reserve distinct sources: matching photos alone, opposite photos in pairs."""
-    available = list({str(row["id"]): row for row in candidates}.values())
+    unique = list({str(row["id"]): row for row in candidates}.values())
+    available = list(unique)
     frames: list[list[dict[str, Any]]] = []
     while available and len(frames) < count:
         primary = available.pop(0)
@@ -57,7 +64,115 @@ def select_auto_photo_frames(
         if secondary is not None:
             available.remove(secondary)
             frames.append([primary, secondary])
-    return frames
+    if len(frames) >= count:
+        return frames
+
+    # Keep the preferred greedy assignment whenever it fills the request.
+    # Otherwise find augmenting paths (including odd cycles) before declaring
+    # a shortage: a locally attractive pair can strand two compatible peers.
+    singles: list[list[dict[str, Any]]] = []
+    peers: list[dict[str, Any]] = []
+    for row in unique:
+        size = effective_dimensions(row)
+        if min(size) <= 0:
+            continue
+        if auto_photo_layout(size, frame_orientation) == "full":
+            singles.append([row])
+        else:
+            peers.append(row)
+    desired = pair_orientation(frame_orientation)
+    edges: list[list[int]] = []
+    for primary in peers:
+        scored = [(pair_score(primary, row, desired_orientation=desired), i) for i, row in enumerate(peers)]
+        valid = [(score, i) for score, i in scored if score is not None]
+        valid.sort(key=lambda item: (
+            not peers[item[1]].get("recently_displayed"), item[0],
+            str(peers[item[1]].get("captured_at") or ""), str(peers[item[1]]["id"]),
+        ), reverse=True)
+        edges.append([i for _, i in valid])
+    matching = _maximum_pairing(edges, count)
+    complete = singles + [[peers[i], peers[j]] for i, j in enumerate(matching) if j > i]
+    order = {str(row["id"]): i for i, row in enumerate(unique)}
+    complete.sort(key=lambda group: order[str(group[0]["id"])])
+    return complete[:count]
+
+
+def _maximum_pairing(edges: list[list[int]], limit: int) -> list[int]:
+    """Maximum cardinality matching in a general graph, bounded by frame count.
+
+    Edmonds' alternating-tree search contracts odd cycles instead of treating
+    this symmetric photo compatibility graph as bipartite. Neighbor order
+    preserves preference when several augmenting paths are possible.
+    """
+    size = len(edges)
+    match = [-1] * size
+    pairs = 0
+    for root in range(size):
+        if pairs >= limit:
+            break
+        if match[root] != -1:
+            continue
+        parent, base = [-1] * size, list(range(size))
+        used = [False] * size
+        used[root] = True
+        queue = [root]
+
+        def ancestor(first: int, second: int, *, base=base, parent=parent) -> int:
+            seen: set[int] = set()
+            while True:
+                first = base[first]
+                seen.add(first)
+                if match[first] == -1:
+                    break
+                first = parent[match[first]]
+            while base[second] not in seen:
+                second = parent[match[base[second]]]
+            return base[second]
+
+        def mark_path(vertex: int, common: int, child: int, blossom: set[int], *, base=base, parent=parent) -> None:
+            while base[vertex] != common:
+                blossom.update((base[vertex], base[match[vertex]]))
+                parent[vertex] = child
+                child = match[vertex]
+                vertex = parent[match[vertex]]
+
+        endpoint = -1
+        for vertex in queue:
+            for peer in edges[vertex]:
+                if base[vertex] == base[peer] or match[vertex] == peer:
+                    continue
+                if peer == root or (match[peer] != -1 and parent[match[peer]] != -1):
+                    common = ancestor(vertex, peer)
+                    blossom: set[int] = set()
+                    mark_path(vertex, common, peer, blossom)
+                    mark_path(peer, common, vertex, blossom)
+                    for i in range(size):
+                        if base[i] in blossom:
+                            base[i] = common
+                            if not used[i]:
+                                used[i] = True
+                                queue.append(i)
+                elif parent[peer] == -1:
+                    parent[peer] = vertex
+                    if match[peer] == -1:
+                        endpoint = peer
+                        break
+                    partner = match[peer]
+                    used[partner] = True
+                    queue.append(partner)
+            if endpoint != -1:
+                break
+        if endpoint == -1:
+            continue
+        pairs += 1
+        while endpoint != -1:
+            previous = parent[endpoint]
+            following = match[previous] if previous != -1 else -1
+            match[endpoint] = previous
+            if previous != -1:
+                match[previous] = endpoint
+            endpoint = following
+    return match
 
 
 def effective_dimensions(photo: dict[str, Any]) -> tuple[int, int]:

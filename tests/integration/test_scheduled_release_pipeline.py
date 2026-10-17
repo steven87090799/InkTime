@@ -89,6 +89,9 @@ def test_two_hour_offline_pair_schedule_keeps_two_distinct_sources_per_frame(app
 
 def test_schedule_resolves_devices_limits_years_and_commits_history_after_publish(app, tmp_path):
     app.extensions["inktime_settings_repository"].update(
+        "render.layout", "full", changed_by="test", source_ip="127.0.0.1"
+    )
+    app.extensions["inktime_settings_repository"].update(
         "analysis.execution_mode", "automatic_ai", changed_by="test", source_ip="127.0.0.1"
     )
     root = tmp_path / "scheduled"
@@ -182,7 +185,7 @@ def test_enhanced_device_preparation_publishes_one_release_per_slot_and_is_idemp
     for index in range(1, 25):
         photo_id = f"offline-scheduled-{index}"
         filename = f"{photo_id}.jpg"
-        Image.new("RGB", (480, 800), ((index * 10) % 256, 80, 120)).save(root / filename)
+        Image.new("RGB", (800, 480), ((index * 10) % 256, 80, 120)).save(root / filename)
         with app.extensions["inktime_database"].session() as connection:
             connection.execute(
                 """
@@ -204,6 +207,8 @@ def test_enhanced_device_preparation_publishes_one_release_per_slot_and_is_idemp
                     now,
                 ),
             )
+        with app.extensions["inktime_database"].session() as connection:
+            connection.execute("UPDATE photos SET width=800,height=480 WHERE id=?", (photo_id,))
         photos.save_analysis(
             photo_id,
             None,
@@ -361,6 +366,7 @@ def test_enhanced_prepare_fails_closed_when_device_config_changes_before_commit(
     devices = app.extensions["inktime_device_repository"]
     device_id, _token = devices.create(
         "離線競態裝置",
+        layout_mode="full", frame_orientation="portrait",
         delivery_mode="inktime_offline_schedule",
         offline_prefetch_allowed=True,
         schedule_times=["08:00"],

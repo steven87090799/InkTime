@@ -211,6 +211,8 @@ def test_auto_photo_pairs_local_scanner_photos_without_ai_rows(app, tmp_path):
     )
     with app.extensions["inktime_database"].session() as connection:
         connection.execute("DELETE FROM photo_analysis")
+        connection.execute("UPDATE photos SET local_candidate_score=80, "
+                           "captured_date=substr(captured_at,1,10),captured_month_day=substr(captured_at,6,5)")
     service = app.extensions["inktime_render_service"]
     plan = service.resolve_render_plan("primary", layout="auto_photo", orientation="landscape")
     assert plan["layout"] == "photo_pair"
@@ -778,7 +780,8 @@ def test_all_formal_frame_layouts_render_with_the_resolved_photos(app, tmp_path)
     assert paired.size == (480, 800)
 
 
-def test_formal_render_bounds_decoded_source_to_render_target(app, tmp_path, monkeypatch):
+@pytest.mark.parametrize("orientation", ["portrait", "landscape"])
+def test_formal_render_bounds_decoded_source_to_render_target(app, tmp_path, monkeypatch, orientation):
     root = tmp_path / "photos"
     root.mkdir()
     _analyzed_photo(app, root, "large", (2400, 1600), "2024-07-01T10:00:00+00:00")
@@ -792,12 +795,13 @@ def test_formal_render_bounds_decoded_source_to_render_target(app, tmp_path, mon
         return source, orientation
 
     monkeypatch.setattr(service, "_load_oriented_photo", capture_loader)
-    image = service.render_photo("large", layout="full", fit_mode="cover")
+    image = service.render_photo("large", layout="full", fit_mode="cover", orientation=orientation)
 
     assert image.size == (480, 800)
     assert observed
-    assert observed[0][0] <= 960
-    assert observed[0][1] <= 1600
+    bound = (960, 1600) if orientation == "portrait" else (1600, 960)
+    assert observed[0][0] <= bound[0]
+    assert observed[0][1] <= bound[1]
 
 
 def test_formal_render_accepts_48mp_jpeg_and_bounds_before_exif(app, tmp_path, monkeypatch):

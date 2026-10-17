@@ -258,6 +258,14 @@ def _validated_device_fields(
 @login_required
 def devices_page():
     settings = current_app.extensions["inktime_settings_repository"]
+    devices = [dict(device) for device in _repository().list()]
+    schedules = current_app.extensions["inktime_offline_schedule_repository"]
+    for device in devices:
+        if device["delivery_mode"] == "inktime_offline_schedule":
+            today = datetime.now(ZoneInfo(str(device["timezone"]))).date().isoformat()
+            device["offline_downloads"] = schedules.download_summary(
+                str(device["id"]), target_date=today, config_version=int(device["config_version"])
+            )
     pending_pairings = (
         current_app.extensions["inktime_device_pairing_service"].pending_for_admin()
         if getattr(g, "user", None) is not None and g.user["role"] == "administrator"
@@ -265,7 +273,7 @@ def devices_page():
     )
     return render_template(
         "devices.html",
-        devices=_repository().list(),
+        devices=devices,
         pending_pairings=pending_pairings,
         device_events=_repository().list_events(100),
         notifications=current_app.extensions["inktime_notification_service"].list(100),

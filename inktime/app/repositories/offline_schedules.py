@@ -429,6 +429,32 @@ class OfflineScheduleRepository:
             return {}
         return snapshot if isinstance(snapshot, dict) else {}
 
+    def download_summary(self, device_id: str, *, target_date: str, config_version: int) -> dict[str, Any]:
+        """Verified downloads for the current day's current configuration only."""
+        with self.database.session() as connection:
+            rows = connection.execute(
+                """
+                SELECT slot.release_id,
+                       (SELECT MAX(event.created_at) FROM device_content_queue_events event
+                        WHERE event.queue_item_id=slot.queue_item_id
+                          AND event.event_type='HASH_VERIFIED') AS verified_at
+                FROM device_offline_schedules schedule
+                JOIN device_offline_schedule_slots slot ON slot.schedule_id=schedule.id
+                WHERE schedule.device_id=? AND schedule.target_date=?
+                  AND schedule.config_version=? AND schedule.status='ready'
+                ORDER BY slot.slot_index
+                """,
+                (device_id, target_date, config_version),
+            ).fetchall()
+        verified = [row for row in rows if row["verified_at"]]
+        last = max(verified, key=lambda row: str(row["verified_at"])) if verified else None
+        return {
+            "target_date": target_date, "config_version": config_version,
+            "total": len(rows), "verified": len(verified),
+            "last_release_id": str(last["release_id"]) if last else None,
+            "last_verified_at": str(last["verified_at"]) if last else None,
+        }
+
     def latest_for_device(self, device_id: str) -> dict[str, Any] | None:
         with self.database.session() as connection:
             row = connection.execute(

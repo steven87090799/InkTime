@@ -3088,7 +3088,9 @@ def _apply_migration_70_contracts(connection: sqlite3.Connection) -> None:
     connection.execute("ALTER TABLE devices_contract_v70 RENAME TO devices")
     for item in indexes:
         connection.execute(str(item[0]))
-    for item in objects:
+    # INSTEAD OF triggers require their views to exist. Drop triggers first,
+    # but restore every view before restoring either view or table triggers.
+    for item in sorted(objects, key=lambda item: item["type"] != "view"):
         connection.execute(str(item["sql"]))
 
 

@@ -413,8 +413,16 @@ class DisplayPreparationService:
         layout = str(device["layout_mode"] or self.render_service.settings.get("render.layout", "auto_photo"))
         photos_per_frame = 2 if layout in {"photo_pair", "photo_pair_caption", "auto_photo"} else 1
         required_candidates = len(schedule_times) * photos_per_frame
-        candidates = self.render_service.select_candidates_details(
-            required_candidates, target_date=target
+        frame_orientation = str(
+            device["frame_orientation"]
+            or self.render_service.settings.get("render.frame_orientation", "landscape")
+        )
+        candidates = (
+            self.render_service.select_auto_photo_candidates(
+                len(schedule_times), frame_orientation=frame_orientation, target_date=target
+            ) if layout == "auto_photo" else self.render_service.select_candidates_details(
+                required_candidates, target_date=target
+            )
         )
         unique_candidates = list(
             dict((str(row["id"]), row) for row in candidates).values()
@@ -426,10 +434,7 @@ class DisplayPreparationService:
             ]
             frame_groups = select_auto_photo_frames(
                 rows,
-                frame_orientation=str(
-                    device["frame_orientation"]
-                    or self.render_service.settings.get("render.frame_orientation", "landscape")
-                ),
+                frame_orientation=frame_orientation,
                 count=len(schedule_times),
             )
         else:

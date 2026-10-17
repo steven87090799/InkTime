@@ -178,7 +178,7 @@ Run `python -m inktime.app.workers.runner` and `python -m inktime.app.workers.sc
 | `gdep073e01_6c` | 480×800 | indexed4, 192,000 bytes |
 | `gdey073d46_7c` | 480×800 | indexed4, 192,000 bytes |
 
-PhotoPainter adapts the wire image to the native 800×480 panel. New rendering defaults are six-color `gdep073e01_6c`, `gooddisplay`, `photo_info`, portrait and `stretch_fill`; always match the actual panel. Eight layouts include single/pair-photo choices, calendar and weather/sensor layouts; the latter two require portrait orientation.
+PhotoPainter adapts the wire image to the native 800×480 panel. New rendering defaults are six-color `gdep073e01_6c`, `warm_vivid_c`, `auto_photo`, landscape and `cover`; always match the actual panel. Nine layouts include automatic orientation-aware composition and single/pair-photo choices, calendar and weather/sensor layouts; the latter two require portrait orientation.
 
 Device credentials belong in protected configuration, never in URLs. New devices use Device Secret pairing; Legacy Bearer and PhotoPainter Stock `/dataUP` remain distinct compatibility paths. Queue-first delivery, checksum validation, persisted ACKs and safe same-content refresh skipping are detailed in the [device protocol](docs/devices/DEVICE_PROTOCOL_ZH_TW.md).
 

@@ -349,18 +349,21 @@ def _prepare_library_preview_child(
         WeatherService(settings_repository),
     )
     arguments = dict(settings["arguments"])
-    image = service.render_photo(
-        str(arguments["photo_id"]),
-        layout=arguments.get("layout"),
-        crop_x=arguments.get("crop_x"),
-        crop_y=arguments.get("crop_y"),
-        secondary_photo_id=arguments.get("secondary_photo_id"),
-        orientation=arguments.get("orientation"),
-        fit_mode=arguments.get("fit_mode"),
-        primary_caption=arguments.get("primary_caption"),
-        secondary_caption=arguments.get("secondary_caption"),
-        calendar_display_date=arguments.get("calendar_display_date"),
-    )
+    if arguments.get("render_plan"):
+        image = service._render_plan_image(arguments["render_plan"])
+    else:
+        image = service.render_photo(
+            str(arguments["photo_id"]),
+            layout=arguments.get("layout"),
+            crop_x=arguments.get("crop_x"),
+            crop_y=arguments.get("crop_y"),
+            secondary_photo_id=arguments.get("secondary_photo_id"),
+            orientation=arguments.get("orientation"),
+            fit_mode=arguments.get("fit_mode"),
+            primary_caption=arguments.get("primary_caption"),
+            secondary_caption=arguments.get("secondary_caption"),
+            calendar_display_date=arguments.get("calendar_display_date"),
+        )
     quantized = bool(arguments.get("quantized"))
     if quantized:
         image = encode_image(

@@ -151,6 +151,31 @@ SUITE_EXECUTION_OWNER_JOB_IDS = {
 # bounded while ensuring production changes still select the relevant
 # integration contract.
 INTEGRATION_TEST_OWNER_SUITES: dict[str, tuple[str, ...]] = {
+    "tests/integration/test_auto_photo_review_regressions.py": (
+        "render_release_owner",
+        "web_api_owner",
+    ),
+    "tests/integration/test_auto_photo_selection_regressions.py": (
+        "render_release_owner",
+        "persistence_owner",
+    ),
+    "tests/integration/test_auto_photo_review_boundaries.py": (
+        "render_release_owner",
+        "settings_governance_owner",
+        "device_delivery_owner",
+    ),
+    "tests/integration/test_auto_publish_pool_regression.py": (
+        "render_release_owner",
+        "runtime_scheduler_owner",
+    ),
+    "tests/integration/test_budget_offset_regressions.py": (
+        "settings_governance_owner",
+        "provider_analysis_owner",
+    ),
+    "tests/integration/test_offline_download_display.py": (
+        "device_delivery_owner",
+        "web_ui_owner",
+    ),
     "tests/integration/test_vision_v4.py": (
         "provider_analysis_owner",
         "scanner_photos_owner",

@@ -89,10 +89,12 @@ class BudgetService:
                 return float(result[0]), int(result[1])
 
             daily_known, daily_unknown = totals(
-                "started_at>=? AND started_at<?", (periods["day_start"], periods["day_end"])
+                "julianday(started_at)>=julianday(?) AND julianday(started_at)<julianday(?)",
+                (periods["day_start"], periods["day_end"]),
             )
             monthly_known, monthly_unknown = totals(
-                "started_at>=? AND started_at<?", (periods["month_start"], periods["month_end"])
+                "julianday(started_at)>=julianday(?) AND julianday(started_at)<julianday(?)",
+                (periods["month_start"], periods["month_end"]),
             )
             photo_known, photo_unknown = totals("photo_id=?", (photo_id,))
             job_known, job_unknown = totals("job_id=?", (job_id,))
