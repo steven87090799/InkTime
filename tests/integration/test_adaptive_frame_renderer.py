@@ -108,15 +108,28 @@ def test_auto_photo_rejects_unpaired_portrait_instead_of_publishing_wrong_pair(a
         )
 
 
-def test_auto_photo_uses_unknown_capture_date_without_substituting_display_date(app, tmp_path):
+@pytest.mark.parametrize("primary_size", [(1600, 900), (900, 1600)])
+def test_auto_photo_omits_missing_capture_date_without_substituting_display_date(app, tmp_path, primary_size):
     root = tmp_path / "photos"
     root.mkdir()
-    _analyzed_photo(app, root, "primary", (1600, 900), "2024-07-01T10:00:00+00:00")
+    _analyzed_photo(app, root, "primary", primary_size, "2024-07-01T10:00:00+00:00")
+    _analyzed_photo(app, root, "secondary", (900, 1600), "2024-07-02T10:00:00+00:00")
     with app.extensions["inktime_database"].session() as connection:
         connection.execute("UPDATE photos SET captured_at=NULL WHERE id='primary'")
     service = app.extensions["inktime_render_service"]
-    plan = service.resolve_render_plan("primary", layout="auto_photo", orientation="landscape")
-    assert plan["capture_date_labels"] == {"primary": "拍攝日期未知"}
+    plan = service.resolve_render_plan(
+        "primary", layout="auto_photo", orientation="landscape", secondary_photo_id="secondary"
+    )
+    assert plan["capture_date_labels"]["primary"] == ""
+    logical = _logical_landscape(service._render_plan_image(plan))
+    rect = plan["geometry"]["primary_caption"]
+    footer = logical.crop((rect["x"], rect["y"], rect["x"] + rect["width"], rect["y"] + rect["height"]))
+    assert footer.convert("L").getextrema() == (255, 255), "Missing capture dates must leave no text"
+    if plan["secondary_photo_id"] is not None:
+        assert plan["capture_date_labels"]["secondary"] == "2024年7月2日"
+        rect = plan["geometry"]["secondary_caption"]
+        footer = logical.crop((rect["x"], rect["y"], rect["x"] + rect["width"], rect["y"] + rect["height"]))
+        assert footer.convert("L").getextrema()[0] < 32, "The other photo must keep its capture date"
 
 
 def test_auto_photo_pairs_local_scanner_photos_without_ai_rows(app, tmp_path):

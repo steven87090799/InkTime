@@ -360,7 +360,7 @@ class RenderService:
         if auto_photo_requested and bool(self.settings.get("render.show_capture_date", True)):
             geometry = with_photo_date_footers(geometry)
             capture_date_labels = {
-                str(photo["id"]): self._date_label(self._captured_date(photo["captured_at"])) or "拍攝日期未知"
+                str(photo["id"]): self._date_label(self._captured_date(photo["captured_at"]))
                 for photo in (primary, secondary) if photo is not None
             }
         pair_caption_region = (
@@ -1458,7 +1458,7 @@ class RenderService:
             (primary_id, geometry.primary_caption),
             (secondary_id, geometry.secondary_caption),
         ):
-            if photo_id is None or rect is None:
+            if photo_id is None or rect is None or not labels.get(photo_id):
                 continue
             text = self._fit_line(draw, labels.get(photo_id, ""), font, rect.width - 12)
             draw.text(
