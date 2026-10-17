@@ -39,6 +39,7 @@ from inktime.app.domain.photos.quality_policy import (
 from inktime.app.web.access import administrator_required, login_required
 from inktime.app.domain.photos.orientation import original_exif_orientation, resolve_effective_orientation
 from inktime.app.repositories.analysis_history import display_analysis_order_sql, historical_model_sql
+from inktime.app.services.usage_periods import usage_periods
 
 
 bp = Blueprint("photos", __name__)
@@ -92,6 +93,7 @@ def _queue_ai(
     if not force_ai and _repository().ai_limit_reached(
         daily_limit=daily_limit,
         monthly_limit=int(settings.get("analysis.ai_monthly_photo_limit", 500)),
+        periods=usage_periods(str(settings.get("general.timezone", "Asia/Taipei"))),
     ):
         raise ValueError("已達 AI 每日或每月照片上限；目前會保留本機選片結果")
     selected = (
@@ -105,6 +107,9 @@ def _queue_ai(
     selected = [photo_id for photo_id in selected if photo_id not in screenshot_ids]
     if not selected:
         raise ValueError("已確認為截圖；為保護隱私與額度，禁止送入 AI 模型")
+    selected = _repository().active_eligible_requested_ids(selected, limit=len(selected))
+    if not selected:
+        raise ValueError("已排除的照片禁止送入 AI；請先明確恢復照片，再執行分析")
     strategy = str(settings.get("analysis.strategy", "single"))
     plan = analysis_plan if analysis_plan is not None else _build_analysis_plan(settings, strategy)
     idempotency_key_value = scoped_idempotency_key(idempotency_scope, created_by, idempotency_key)
@@ -125,7 +130,7 @@ def _queue_ai(
     job_id = current_app.extensions["inktime_job_service"].create_analysis_job(
         name=name,
         strategy=strategy,
-        settings={"force_ai": force_ai, "source": "photo-exclusion-management" if force_ai else "ai-mode"},
+        settings={"force_ai": force_ai, "source": "manual-photo-analysis" if force_ai else "ai-mode"},
         created_by=created_by,
         budget_limit=None,
         photo_ids=selected,
@@ -133,7 +138,7 @@ def _queue_ai(
         dedupe_key=idempotency_key_value,
         request_fingerprint=idempotency_fingerprint,
         analysis_fingerprint=stored_analysis_fingerprint(plan),
-        force_recompute=force_ai,
+        force_recompute=False,
         analysis_spec=plan,
     )
     return {
@@ -366,13 +371,11 @@ def queue_photo_ai(photo_id: str):
     photo = _repository().get_with_path(photo_id)
     if photo is None:
         abort(404)
-    if str(photo["exclusion_status"] or "eligible") == "eligible":
-        abort(403, description="IMG-004 Force AI 僅限排除照片管理操作")
     try:
         return _queue_ai(
             [photo_id],
             created_by=str(g.user["id"]),
-            name="排除照片 AI 分析",
+            name="照片 AI 分析（沿用既有結果）",
             force_ai=True,
             idempotency_scope="photo-ai",
             idempotency_key=str(request.headers.get("Idempotency-Key") or "").strip()[:128] or None,
@@ -389,14 +392,13 @@ def queue_exclusions_ai():
     photo_ids = [
         photo_id
         for photo_id in photo_ids
-        if (photo := _repository().get_with_path(photo_id)) is not None
-        and str(photo["exclusion_status"] or "eligible") != "eligible"
+        if _repository().get_with_path(photo_id) is not None
     ]
     try:
         return _queue_ai(
             photo_ids,
             created_by=str(g.user["id"]),
-            name="排除照片批次 AI 分析",
+            name="照片批次 AI 分析（沿用既有結果）",
             force_ai=True,
             idempotency_scope="exclusions-ai",
             idempotency_key=str(request.headers.get("Idempotency-Key") or "").strip()[:128] or None,
@@ -629,7 +631,7 @@ def photo_detail(photo_id: str):
     source_available = False
     retained_preview = False
     try:
-        source_available = safe_join(Path(photo["root_path"]), photo["relative_path"]).is_file()
+        source_available = safe_join(Path(photo["root_path"]), photo["relative_path"], decode_url=False).is_file()
     except (OSError, ValueError, UnsafePathError):
         pass
     if not source_available and photo["sha256"]:
@@ -894,7 +896,7 @@ def photo_image(photo_id: str):
     if photo is None:
         abort(404)
     try:
-        path = safe_join(Path(photo["root_path"]), photo["relative_path"])
+        path = safe_join(Path(photo["root_path"]), photo["relative_path"], decode_url=False)
     except UnsafePathError:
         abort(404)
     if not path.is_file():

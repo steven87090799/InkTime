@@ -869,7 +869,7 @@ def publish_history_test_release():
     if photo is None:
         abort(404, description="HISTORY-001 找不到照片")
     try:
-        source = safe_join(Path(photo["root_path"]), str(photo["relative_path"]))
+        source = safe_join(Path(photo["root_path"]), str(photo["relative_path"]), decode_url=False)
     except UnsafePathError:
         abort(404, description="HISTORY-001 照片路徑不合法")
     workload = current_app.extensions["inktime_render_workload_service"]

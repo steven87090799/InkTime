@@ -510,6 +510,9 @@ def create_job():
     # must not silently turn most manually queued items into local_fallback.
     settings["force_ai"] = strategy != "local"
     settings["source"] = "manual-job"
+    if strategy != "local" and force_recompute and payload.get("accept_additional_cost") is not True:
+        return {"error_code": "VLM-RECOMPUTE-CONFIRM",
+                "message": "強制重新分析會再次送圖並產生額外費用；必須明確確認，否則沿用既有結果。"}, 400
     if execution_mode(current_app.extensions["inktime_settings_repository"]) == "disabled":
         return {
             "error_code": "ANALYSIS-DISABLED",

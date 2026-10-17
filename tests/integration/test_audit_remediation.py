@@ -45,6 +45,18 @@ def test_upload_rechecks_current_privacy_and_job_state(app):
         assert_upload_allowed(database.path, photo, job)
 
 
+@pytest.mark.parametrize("state", ["auto_excluded", "manually_excluded"])
+def test_upload_rechecks_exclusion_even_after_request_was_prepared(app, state):
+    database = app.extensions["inktime_database"]
+    photo = add_photos(app, 1)[0]
+    assert_upload_allowed(database.path, photo)
+    with database.session() as connection:
+        connection.execute("UPDATE photos SET eligible=0,exclusion_status=?,manual_override=1 WHERE id=?", (state, photo))
+    with pytest.raises(UploadNotAllowedError) as error:
+        assert_upload_allowed(database.path, photo)
+    assert error.value.not_sent
+
+
 def test_unauthenticated_critical_alerts_are_not_queried_or_rendered(app, client):
     create_admin(app)
     with app.extensions["inktime_database"].session() as connection:
@@ -169,5 +181,58 @@ def test_provider_rechecks_consent_after_building_body_before_transport(app, tmp
     try:
         with pytest.raises(UploadNotAllowedError):
             provider.analyze(image_path=tmp_path / "unused.png", model="fixture-model", detail="high", stage="single", upload_guard={"database_path": str(database.path), "photo_id": photo})
+    finally:
+        provider.close()
+
+
+@pytest.mark.parametrize("change", ("exclude", "never_upload", "cancel_job"))
+def test_provider_rechecks_consent_after_durable_input_archive(app, tmp_path, monkeypatch, change):
+    from inktime.app.providers.openai_compatible import OpenAICompatibleProvider
+    from inktime.app.repositories import model_evidence
+
+    database = app.extensions["inktime_database"]
+    photo = add_photos(app, 1)[0]
+    jobs = app.extensions["inktime_job_repository"]
+    job = jobs.create_maintenance(kind="backup", name="fixture", settings={}, created_by="test")
+    operation, _ = BillableOperationRepository(database).begin("photo-fixture", "request-fixture")
+    original_archive = model_evidence.save_model_request
+
+    def archive_then_change_consent(*args, **kwargs):
+        original_archive(*args, **kwargs)
+        if change == "cancel_job":
+            jobs.cancel(job)
+        else:
+            with database.transaction() as connection:
+                if change == "exclude":
+                    connection.execute(
+                        "UPDATE photos SET eligible=0,exclusion_status='manually_excluded' WHERE id=?",
+                        (photo,),
+                    )
+                else:
+                    connection.execute("UPDATE photos SET never_upload=1 WHERE id=?", (photo,))
+
+    calls = []
+
+    def forbidden_transport(*args, **kwargs):
+        calls.append(True)
+        raise AssertionError("request must not reach transport after consent changes")
+
+    provider = OpenAICompatibleProvider(name="fixture", base_url="https://provider.invalid/v1", api_key="fixture")
+    monkeypatch.setattr(model_evidence, "save_model_request", archive_then_change_consent)
+    monkeypatch.setattr(provider, "build_analysis_request_body", lambda **kwargs: {"model": "fixture", "messages": []})
+    monkeypatch.setattr(provider, "_send", forbidden_transport)
+    try:
+        with pytest.raises(UploadNotAllowedError) as error:
+            provider.analyze(
+                image_path=tmp_path / "unused.png", model="fixture", detail="high", stage="single",
+                upload_guard={"database_path": str(database.path), "photo_id": photo,
+                              "job_id": job, "operation_id": operation},
+            )
+        assert error.value.not_sent
+        assert calls == []
+        with database.session() as connection:
+            assert connection.execute(
+                "SELECT COUNT(*) FROM model_request_evidence WHERE operation_id=?", (operation,)
+            ).fetchone()[0] == 1
     finally:
         provider.close()

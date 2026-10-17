@@ -151,11 +151,13 @@ class ThumbnailCache:
             return self._get_or_create_locked(source, normalized_hash, destination, size)
 
     @contextmanager
-    def acquire_for_use(self, source: Path, content_hash: str, size: int):
+    def acquire_for_use(self, source: Path, content_hash: str, size: int, *, verify_source: bool = False):
         """Keep this cache shard alive until the caller has finished reading it."""
         normalized_hash, destination = self._destination(content_hash, size)
         with self._generation_lock(destination.stem) as acquired:
             assert acquired
+            if verify_source and self._content_sha256(source) != normalized_hash:
+                raise ImageSourceError("THUMB-004", "原始照片內容已變更；請重新掃描後分析", 409)
             yield self._get_or_create_locked(source, normalized_hash, destination, size)
 
     @contextmanager

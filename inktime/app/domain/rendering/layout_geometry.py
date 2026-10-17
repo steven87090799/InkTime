@@ -127,16 +127,18 @@ class LayoutGeometry:
 
 
 def with_photo_date_footers(geometry: LayoutGeometry) -> LayoutGeometry:
-    def split(rect: Rect | None) -> tuple[Rect | None, Rect | None]:
+    def split(rect: Rect | None, existing_caption: Rect | None) -> tuple[Rect | None, Rect | None]:
         if rect is None:
             return None, None
-        footer = min(36, max(1, rect.height // 4))
-        photo = Rect(rect.x, rect.y, rect.width, rect.height - footer)
+        bottom = existing_caption.bottom if existing_caption is not None else rect.bottom
+        height = bottom - rect.y
+        footer = min(36, max(1, height // 4))
+        photo = Rect(rect.x, rect.y, rect.width, height - footer)
         date = Rect(rect.x, photo.bottom, rect.width, footer)
         return photo, date
 
-    primary, primary_date = split(geometry.primary_photo)
-    secondary, secondary_date = split(geometry.secondary_photo)
+    primary, primary_date = split(geometry.primary_photo, geometry.primary_caption)
+    secondary, secondary_date = split(geometry.secondary_photo, geometry.secondary_caption)
     return replace(
         geometry, primary_photo=primary, secondary_photo=secondary,
         primary_caption=primary_date, secondary_caption=secondary_date,
@@ -224,25 +226,8 @@ def resolve_layout_geometry(
         )
 
     gutter = 8
-    if layout == "photo_pair":
-        if effective_orientation == "landscape":
-            primary_width = (width - gutter) // 2
-            primary = Rect(0, 0, primary_width, height)
-            secondary = Rect(primary_width + gutter, 0, width - primary_width - gutter, height)
-        else:
-            primary_height = (height - gutter) // 2
-            primary = Rect(0, 0, width, primary_height)
-            secondary = Rect(0, primary_height + gutter, width, height - primary_height - gutter)
-        return LayoutGeometry(
-            layout,
-            effective_orientation,
-            width,
-            height,
-            primary_photo=primary,
-            secondary_photo=secondary,
-            gutter=gutter,
-        )
-
+    # Both stored pair modes reserve independent text regions.  Older
+    # installations keep photo_pair as their device override after upgrades.
     if effective_orientation == "landscape":
         card_width = (width - gutter) // 2
         caption_height = max(int(height * 0.15), min(int(height * 0.25), int(height * ratio)))

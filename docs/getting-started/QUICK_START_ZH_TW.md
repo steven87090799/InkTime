@@ -1,5 +1,7 @@
 # 快速開始
 
+首次 NAS 部署請先逐項完成 [首次使用 Checklist](FIRST_USE_CHECKLIST_ZH_TW.md)：必要設定、建議檢查、可調整選項，以及十萬張照片處理與重裝保存步驟。首頁「完整設定導覽」也依此分組。
+
 1. **先選部署方式**：正式 NAS 依[NAS Tag 指南](../operations/NAS_TAG_DEPLOYMENT_ZH_TW.md)準備 `.env.nas` 與實際路徑，以已發布 Tag 執行 `sudo ./scripts/update_nas.sh --initialize vX.Y.Z`；日後更新省略 `--initialize`。NAS 不做本機 Build。
 2. **本機開發／模擬**才使用 `.env.local.example`，並同時指定 `docker-compose.yml`、`docker-compose.dev.yml`。實際命令與 LAN／HTTPS 邊界見[安裝指南](INSTALLATION_ZH_TW.md)。
 3. 確認 Web、Worker、Scheduler 均運作，瀏覽 `/setup` 建立第一位管理員；先建立備份。

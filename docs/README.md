@@ -74,6 +74,7 @@
 ### 開始使用
 
 - [`getting-started/QUICK_START_ZH_TW.md`](getting-started/QUICK_START_ZH_TW.md)：Docker 最短啟動路徑與首輪驗收。
+- [`getting-started/FIRST_USE_CHECKLIST_ZH_TW.md`](getting-started/FIRST_USE_CHECKLIST_ZH_TW.md)：NAS 首次設定、十萬張照片、模型資料保存與重裝檢查。
 - [`getting-started/INSTALLATION_ZH_TW.md`](getting-started/INSTALLATION_ZH_TW.md)：Docker／原生安裝與首次管理員設定。
 - [`getting-started/DEVELOPMENT_GUIDE_ZH_TW.md`](getting-started/DEVELOPMENT_GUIDE_ZH_TW.md)：分層規則、開發指令與測試原則。
 

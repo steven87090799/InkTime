@@ -127,6 +127,12 @@ def test_trace_retention_uses_existing_bounded_dry_run_framework(app):
             "UPDATE ai_trace_runs SET created_at=?,started_at=? WHERE trace_id='trace-test'", (old, old)
         )
     repository = app.extensions["inktime_resilience_repository"]
+    permanent = repository.cleanup(dry_run=False)
+    assert "ai_trace" not in permanent["summary"]
+    # Retention cleanup remains available only after an explicit operator opt-in.
+    with app.extensions["inktime_database"].session() as connection:
+        assert connection.execute("SELECT COUNT(*) FROM ai_trace_runs").fetchone()[0] == 1
+        connection.execute("UPDATE data_retention_policies SET enabled=1,dry_run=0 WHERE data_type='ai_trace'")
     preview = repository.cleanup(dry_run=True)
     assert preview["summary"]["ai_trace"] == 1
     with app.extensions["inktime_database"].session() as connection:
