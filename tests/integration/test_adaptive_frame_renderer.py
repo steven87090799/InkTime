@@ -10,6 +10,7 @@ import pytest
 from inktime.app.domain.analysis.scoring import SEMANTIC_SCORE_KIND
 from inktime.app.domain.rendering import Rect
 from inktime.app.services import rendering as rendering_service
+from tests.conftest import create_admin
 from tests.unit.test_analysis_schema import valid_result
 
 
@@ -116,6 +117,27 @@ def test_auto_photo_uses_unknown_capture_date_without_substituting_display_date(
     service = app.extensions["inktime_render_service"]
     plan = service.resolve_render_plan("primary", layout="auto_photo", orientation="landscape")
     assert plan["capture_date_labels"] == {"primary": "拍攝日期未知"}
+
+
+def test_auto_photo_pairs_local_scanner_photos_without_ai_rows(app, tmp_path):
+    root = tmp_path / "photos"
+    root.mkdir()
+    _analyzed_photo(app, root, "primary", (900, 1600), "2024-07-01T10:00:00+00:00")
+    _analyzed_photo(app, root, "secondary", (900, 1600), "2024-07-02T10:00:00+00:00")
+    settings = app.extensions["inktime_settings_repository"]
+    actor = create_admin(app)
+    settings.update_many(
+        {"analysis.execution_mode": "local_only"}, changed_by=actor, source_ip="127.0.0.1"
+    )
+    with app.extensions["inktime_database"].session() as connection:
+        connection.execute("DELETE FROM photo_analysis")
+    service = app.extensions["inktime_render_service"]
+    plan = service.resolve_render_plan("primary", layout="auto_photo", orientation="landscape")
+    assert plan["layout"] == "photo_pair"
+    assert plan["secondary_photo_id"] == "secondary"
+    assert plan["capture_date_labels"] == {"primary": "2024年7月1日", "secondary": "2024年7月2日"}
+    image = service._render_plan_image(plan)
+    assert image.size == (480, 800)
 
 
 def test_adaptive_landscape_single_contains_matching_photo_and_keeps_footer(app, tmp_path):

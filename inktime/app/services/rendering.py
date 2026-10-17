@@ -286,7 +286,7 @@ class RenderService:
             if layout_key == "full":
                 secondary_id = None
             elif secondary_id is None:
-                candidate = self._select_adaptive_pair_candidate(
+                candidate = self._select_auto_photo_pair_candidate(
                     dict(primary), frame_orientation=effective_orientation
                 )
                 if candidate is None:
@@ -312,7 +312,13 @@ class RenderService:
         if secondary_id and secondary is None:
             raise KeyError(secondary_id)
         if (layout_key == "adaptive_memory" or auto_photo_requested) and secondary is not None:
-            production_secondary = self.candidates.get(str(secondary["id"]))
+            production_secondary = (
+                self.candidates.require_for_execution_mode(
+                    [str(secondary["id"])], execution_mode(self.settings)
+                )[0]
+                if auto_photo_requested
+                else self.candidates.get(str(secondary["id"]))
+            )
             desired = pair_orientation(effective_orientation)
             if production_secondary is None or pair_score(
                 dict(primary), production_secondary, desired_orientation=desired
@@ -1096,6 +1102,35 @@ class RenderService:
                 row["city"], row["types"] = None, []
             candidates.append(row)
         return candidates
+
+    def _select_auto_photo_pair_candidate(
+        self, primary: dict[str, Any], *, frame_orientation: str
+    ) -> dict[str, Any] | None:
+        if execution_mode(self.settings) == "automatic_ai":
+            return self._select_adaptive_pair_candidate(primary, frame_orientation=frame_orientation)
+        orientation_sql = self._adaptive_orientation_sql(frame_orientation)
+        with self.database.session() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT p.*,l.root_path,l.enabled AS library_enabled,
+                       EXISTS(SELECT 1 FROM display_history dh WHERE dh.photo_id=p.id) ever_displayed,
+                       EXISTS(SELECT 1 FROM display_history dh WHERE dh.photo_id=p.id
+                              AND dh.displayed_at>=datetime('now','-14 days')) recently_displayed
+                FROM photos p JOIN libraries l ON l.id=p.library_id
+                WHERE p.id<>? AND p.lifecycle_status='active' AND p.eligible=1
+                  AND p.local_features_status='complete' AND l.enabled=1
+                  AND p.exclusion_status NOT IN ('auto_excluded','manually_excluded')
+                  AND ({orientation_sql})
+                ORDER BY recently_displayed,
+                         ABS(julianday(COALESCE(p.captured_at,p.created_at))-julianday(?)),p.id
+                LIMIT 50
+                """,  # noqa: S608 -- trusted orientation predicate; all photo values are bound.
+                (str(primary["id"]), str(primary.get("captured_at") or primary.get("created_at") or "")),
+            ).fetchall()
+        return select_pair_candidate(
+            primary, [dict(row) for row in rows if self.candidates.available(row)],
+            frame_orientation=frame_orientation,
+        )
 
     def _select_adaptive_pair_candidate(
         self, primary: dict[str, Any], *, frame_orientation: str
