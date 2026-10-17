@@ -7,7 +7,7 @@
 | 項目 | 原始碼值 | 權威來源 |
 |---|---|---|
 | Python 套件 | `2.0.0.dev0`，部署／CI 支援 Python 3.12（`>=3.12,<3.13`） | [`inktime/_version.py`](../../inktime/_version.py)、[`pyproject.toml`](../../pyproject.toml) |
-| SQLite Migration | 連續 `1–69`；64–66 保護配送／渲染輸入並支援雙圖附說明，67 索引活動清理，68 永久保存照片內容版本與模型證據，69 加入 Batch 候選分頁索引與逐項失敗重試授權；保留歷史／外鍵 | [`migrations.py`](../../inktime/app/db/migrations.py) |
+| SQLite Migration | 連續 `1–70`；64–66 保護配送／渲染輸入並支援雙圖附說明，67 索引活動清理，68 永久保存照片內容版本與模型證據，69 加入 Batch 候選分頁索引與逐項失敗重試授權，70 支援橫單直雙與拍攝日期的自動版型；保留歷史／外鍵 | [`migrations.py`](../../inktime/app/db/migrations.py) |
 | AI Analysis Schema | 嚴格 v5；保留 v4 相容閱讀與既有結果，不為精簡欄位重新付費 | [`plan.py`](../../inktime/app/domain/analysis/plan.py)、[`schema.py`](../../inktime/app/domain/analysis/schema.py) |
 | ESP32 7C／PhotoPainter 韌體 | `2.8.9`（本分支；未刷機） | [`ink-display-7C-photo.ino`](../../esp32/ink-display-7C-photo/ink-display-7C-photo.ino) |
 | ESP32 Config Store payload | v5，讀取 v1–v5；舊容量 12、新 payload 24 slots read compatibility | [`device_config_store_core.h`](../../esp32/ink-display-7C-photo/device_config_store_core.h) |
