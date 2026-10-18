@@ -11,5 +11,5 @@ fonttools==4.66.1
 opencv-python-headless==4.14.0.94
 # 2.2.6 is the newest shared line verified with Python 3.10/3.12 and OpenCV 4.13.
 # Newer NumPy lines no longer share the project's complete supported interpreter matrix.
-numpy==2.2.6
+numpy==2.5.4
 opencc==1.4.2
