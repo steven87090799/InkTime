@@ -134,6 +134,74 @@ def test_auto_preview_handles_mixed_orientation_default_secondary(app, tmp_path)
     assert response.status_code == 400, {"http_status": response.status_code}
 
 
+def test_auto_pair_captions_and_dates_remain_visible_and_follow_swapped_photos(app, tmp_path):
+    _configure(app)
+    root = tmp_path / "photos"
+    root.mkdir()
+    for pid, day in (("first", 1), ("second", 2)):
+        _analyzed_photo(app, root, pid, (900, 1600), f"2024-07-{day:02}T10:00:00+00:00")
+    service = app.extensions["inktime_render_service"]
+    outputs = []
+    for first, second in (("first", "second"), ("second", "first")):
+        plan = service.resolve_render_plan(
+            first, secondary_photo_id=second, layout="auto_photo", orientation="landscape", fit_mode="cover",
+        )
+        assert plan["primary_caption"]["photo_id"] == first
+        assert plan["secondary_caption"]["photo_id"] == second
+        assert plan["primary_caption_region"] == "primary_card_left"
+        assert plan["secondary_caption_region"] == "secondary_card_left"
+        logical = service._render_plan_image(plan).transpose(Image.Transpose.ROTATE_90)
+        pieces = []
+        for rect in plan["geometry"]["caption_rects"]:
+            # Exclude the divider so a blank caption cannot pass on its line.
+            region = logical.crop((rect["x"]+4, rect["y"]+4, rect["x"]+rect["width"]-5, rect["y"]+rect["height"]-4))
+            assert ImageChops.invert(region.convert("L")).getbbox() is not None
+        for rect in plan["geometry"]["info_rects"]:
+            region = logical.crop((rect["x"], rect["y"], rect["x"]+rect["width"], rect["y"]+rect["height"]))
+            assert ImageChops.invert(region.convert("L")).getbbox() is not None
+            pieces.append(region.tobytes())
+        outputs.append(pieces)
+    assert outputs[0][0] != outputs[0][1]  # different dates actually reach pixels
+    assert outputs[0] == outputs[1][::-1]  # dates follow photo IDs when order changes
+
+
+def test_compact_d_browser_preview_matches_release_and_protects_text(app, tmp_path):
+    _configure(app, **{"render.dither": "natural_d"})
+    root = tmp_path / "photos"
+    root.mkdir()
+    for pid, day in (("first", 1), ("second", 2)):
+        _analyzed_photo(app, root, pid, (600, 900), f"2024-07-{day:02}T10:00:00+00:00")
+    service = app.extensions["inktime_render_service"]
+    plan = service.resolve_render_plan(
+        "first", secondary_photo_id="second", layout="auto_photo", orientation="landscape",
+        fit_mode="cover", profile="gdep073e01_6c", dither="natural_d",
+    )
+    manifest = service.publisher.publish(
+        [("first+second", service._render_plan_image(plan))], profile_key="gdep073e01_6c",
+        dither="natural_d", orientation="landscape", activate=False, metadata={"render_plans": [plan]},
+    )
+    prepared = tmp_path / "quantized-preview"
+    _prepare_library_preview_child(
+        settings={"arguments": {
+            "photo_id": "first", "layout": plan["layout"], "orientation": plan["orientation"],
+            "render_plan": plan, "quantized": True, "profile": plan["profile"],
+            "effective_dither": "natural_d", "color_distance": "rgb", "dither_strength": 1.,
+        }},
+        database_path=str(service.database.path), prepared_path=str(prepared),
+        font_root=str(service.fonts.root), font_builtin_root=str(service.fonts.builtin_root),
+        location_csv=str(service.locations.csv_path),
+    )
+    with Image.open(service.publisher.root / manifest["release_id"] / "preview_1.png") as published:
+        formal = published.transpose(Image.Transpose.ROTATE_90).convert("RGB")
+    with Image.open(prepared / "preview.png") as browser:
+        assert ImageChops.difference(formal, browser.convert("RGB")).getbbox() is None
+    for rect in [*plan["geometry"]["caption_rects"], *plan["geometry"]["info_rects"]]:
+        region = formal.crop((rect["x"], rect["y"], rect["x"]+rect["width"], rect["y"]+rect["height"]))
+        colors = region.getcolors()
+        assert colors is not None and len(colors) == 2
+        assert {color for _, color in colors} == {(2, 2, 2), (190, 200, 200)}
+
+
 @pytest.mark.parametrize("frame", ["portrait", "landscape"])
 @pytest.mark.parametrize("size", [(1600, 900), (900, 1600), (1000, 1000)])
 @pytest.mark.parametrize("fit", ["contain", "cover"])

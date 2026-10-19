@@ -839,7 +839,7 @@ SETTING_DEFINITIONS: dict[str, dict[str, Any]] = {
         ],
         "choice_labels": {
             "full": "單張照片",
-            "auto_photo": "自動滿版＋左短句右日期（橫單直雙）",
+            "auto_photo": "自動照片（橫單直雙；雙圖左側短句）",
             "postcard": "明信片",
             "photo_info": "單張照片＋資訊",
             "photo_pair": "雙照片拼版・一句話與日期",

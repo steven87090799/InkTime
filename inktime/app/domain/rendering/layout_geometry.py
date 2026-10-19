@@ -145,6 +145,61 @@ def with_photo_date_footers(geometry: LayoutGeometry) -> LayoutGeometry:
     )
 
 
+AUTO_PAIR_MAX_ZOOM = 1.08
+
+
+def resolve_compact_pair_geometry(
+    source_sizes: tuple[tuple[int, int], tuple[int, int]], *, fit_mode: str = "cover"
+) -> LayoutGeometry:
+    """Pack two upright photos with their own left caption and bottom date.
+
+    Use oriented, frozen source sizes, rather than two fixed-width centred
+    contain slots. Extremely narrow photos retain a readable date band; the
+    renderer caps their zoom independently so this cannot force a large crop.
+    """
+    if len(source_sizes) != 2 or any(min(size) <= 0 for size in source_sizes):
+        raise ValueError("compact pair requires two positive source sizes")
+    caption_width, inner_gap, gutter, outer_margin, footer = 44, 8, 12, 8, 24
+    available_width = 800 - 2 * (caption_width + inner_gap + outer_margin) - gutter
+    ratios = [max(width / height, 0.35) for width, height in source_sizes]
+    photo_height = min(480 - footer, max(1, int(available_width / sum(ratios))))
+    zoom = min(
+        1.0 if fit_mode == "contain" else AUTO_PAIR_MAX_ZOOM,
+        available_width / (photo_height * sum(ratios)),
+    )
+    widths = [max(1, int(photo_height * ratio * zoom)) for ratio in ratios]
+    group_width = sum(widths) + 2 * (caption_width + inner_gap) + gutter
+    x = (800 - group_width) // 2
+    y = (480 - photo_height - footer) // 2
+    photos, captions, dates = [], [], []
+    for width in widths:
+        captions.append(Rect(x, y, caption_width, photo_height))
+        photos.append(Rect(x + caption_width + inner_gap, y, width, photo_height))
+        dates.append(Rect(x, y + photo_height, caption_width + inner_gap + width, footer))
+        x += caption_width + inner_gap + width + gutter
+    return LayoutGeometry(
+        "photo_pair", "landscape", 800, 480,
+        primary_photo=photos[0], secondary_photo=photos[1],
+        primary_caption=captions[0], secondary_caption=captions[1],
+        info=tuple(dates), gutter=gutter,
+    )
+
+
+def compact_pair_fit_size(
+    source_size: tuple[int, int], target_size: tuple[int, int], *, fit_mode: str
+) -> tuple[int, int]:
+    """Bound cover enlargement to eight percent; preserve image proportions."""
+    source_width, source_height = source_size
+    target_width, target_height = target_size
+    contain = min(target_width / source_width, target_height / source_height)
+    cover = max(target_width / source_width, target_height / source_height)
+    scale = min(cover, contain * (1.0 if fit_mode == "contain" else AUTO_PAIR_MAX_ZOOM))
+    return (
+        min(target_width, max(1, int(source_width * scale))),
+        min(target_height, max(1, int(source_height * scale))),
+    )
+
+
 def _normalized_canvas(orientation: str, width: int, height: int) -> tuple[int, int]:
     if orientation not in {"portrait", "landscape"}:
         raise ValueError("orientation must be portrait or landscape")

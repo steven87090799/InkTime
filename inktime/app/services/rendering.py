@@ -56,7 +56,12 @@ from inktime.app.domain.rendering.adaptive_layout import (
     select_auto_photo_frames,
     select_pair_candidate,
 )
-from inktime.app.domain.rendering.layout_geometry import LayoutGeometry, with_photo_date_footers
+from inktime.app.domain.rendering.layout_geometry import (
+    LayoutGeometry,
+    compact_pair_fit_size,
+    resolve_compact_pair_geometry,
+    with_photo_date_footers,
+)
 from inktime.app.repositories.photos import PhotoRepository
 from inktime.app.repositories.render_candidates import RenderCandidateRepository
 from inktime.app.repositories.settings import SettingsRepository
@@ -67,7 +72,7 @@ from inktime.app.services.render_cache import RENDERER_VERSION
 
 LAYOUTS = {
     "full": "單張照片",
-    "auto_photo": "自動滿版＋左短句右日期（橫單直雙）",
+    "auto_photo": "自動照片（橫單直雙；雙圖左側短句）",
     "postcard": "明信片",
     "photo_info": "照片＋日期地點",
     "photo_pair": "雙照片拼版・一句話與日期",
@@ -273,6 +278,7 @@ class RenderService:
         elif auto_photo_requested and fit_key == "stretch_fill":
             fit_key = "cover"
         secondary_id = secondary_photo_id
+        primary_source_size: tuple[int, int] | None = None
         if layout_key in {"photo_pair", "photo_pair_caption"} and (not secondary_id or secondary_id == photo_id):
             layout_key = "photo_info"
             secondary_id = None
@@ -283,6 +289,7 @@ class RenderService:
             source_path = safe_join(Path(primary["root_path"]), str(primary["relative_path"]), decode_url=False)
             source, _info = self._load_oriented_photo(primary, source_path, target_size=(512, 512))
             with source:
+                primary_source_size = source.size
                 resolved_layout = auto_photo_layout(source.size, effective_orientation)
             if device.get("_auto_photo") and layout_key != resolved_layout:
                 raise ValueError("RENDER-005 照片方向已改變，必須重新準備自動版型")
@@ -367,8 +374,21 @@ class RenderService:
         capture_date_labels: dict[str, str] | None = None
         photo_footer_lines: dict[str, str] | None = None
         photo_footer_parts: dict[str, dict[str, str]] | None = None
+        auto_pair_source_sizes: list[list[int]] | None = None
         if auto_photo_requested:
             geometry = with_photo_date_footers(geometry)
+            if layout_key == "photo_pair" and effective_orientation == "landscape" and secondary is not None:
+                second_path = safe_join(
+                    Path(secondary["root_path"]), str(secondary["relative_path"]), decode_url=False
+                )
+                second_source, _info = self._load_oriented_photo(
+                    secondary, second_path, target_size=(512, 512)
+                )
+                with second_source:
+                    assert primary_source_size is not None
+                    sizes = (primary_source_size, second_source.size)
+                    geometry = resolve_compact_pair_geometry(sizes, fit_mode=fit_key)
+                    auto_pair_source_sizes = [list(size) for size in sizes]
             capture_date_labels = {
                 str(photo["id"]): self._date_label(self._captured_date(photo["captured_at"]))
                 if bool(self.settings.get("render.show_capture_date", True)) else ""
@@ -391,9 +411,16 @@ class RenderService:
                 for record in (primary_caption, resolved_secondary_caption) if record is not None
             }
         pair_caption_region = (
-            "card_left" if layout_key == "adaptive_memory" and effective_orientation == "landscape"
+            "card_left" if auto_pair_source_sizes is not None
+            or (layout_key == "adaptive_memory" and effective_orientation == "landscape")
             else "card_footer"
         )
+        caption_ratios = [0.20, 0.20]
+        if auto_pair_source_sizes is not None:
+            caption_ratios = [
+                caption.width / (photo.right - caption.x)
+                for photo, caption in zip(geometry.photo_rects, geometry.caption_rects, strict=True)
+            ]
         return {
             "version": "render-plan-v1",
             "layout": layout_key,
@@ -420,12 +447,17 @@ class RenderService:
             "capture_date_labels": capture_date_labels,
             "photo_footer_lines": photo_footer_lines,
             "photo_footer_parts": photo_footer_parts,
-            "footer_alignment": {"caption": "left", "date": "right"} if auto_photo_requested else None,
+            "auto_pair_source_sizes": auto_pair_source_sizes,
+            "footer_alignment": (
+                {"caption": "left_column", "date": "bottom_center"}
+                if auto_pair_source_sizes is not None
+                else {"caption": "left", "date": "right"} if auto_photo_requested else None
+            ),
             "primary_caption_text_hash": primary_caption["text_hash"],
             "primary_caption_source": primary_caption["source"],
             "primary_caption_version": primary_caption["version"],
             "primary_caption_region": f"primary_{pair_caption_region}",
-            "primary_caption_ratio": 0.20,
+            "primary_caption_ratio": caption_ratios[0],
             "secondary_caption_text_hash": resolved_secondary_caption["text_hash"]
             if resolved_secondary_caption
             else None,
@@ -438,7 +470,7 @@ class RenderService:
             "secondary_caption_region": (
                 f"secondary_{pair_caption_region}" if resolved_secondary_caption else None
             ),
-            "secondary_caption_ratio": 0.20 if resolved_secondary_caption else None,
+            "secondary_caption_ratio": caption_ratios[1] if resolved_secondary_caption else None,
             "orientation": effective_orientation,
             "profile": profile
             or str(
@@ -490,6 +522,7 @@ class RenderService:
                 capture_date_labels=plan.get("capture_date_labels"),
                 photo_footer_lines=plan.get("photo_footer_lines"),
                 photo_footer_parts=plan.get("photo_footer_parts"),
+                auto_pair_source_sizes=plan.get("auto_pair_source_sizes"),
                 expected_primary_sha256=plan.get("primary_sha256"),
                 expected_secondary_sha256=plan.get("secondary_sha256"),
             )
@@ -1276,6 +1309,40 @@ class RenderService:
                 return candidate
         return None
 
+    def _fit_compact_pair_photo(
+        self, source: Image.Image, photo, size: tuple[int, int],
+        crop_x: float | None, crop_y: float | None, *, fit_mode: str, align_right: bool,
+    ) -> Image.Image:
+        fitted_size = compact_pair_fit_size(source.size, size, fit_mode=fit_mode)
+        canvas = Image.new("RGB", size, "white")
+        with self._fit_photo(
+            source, photo, fitted_size, crop_x, crop_y, "contain" if fit_mode == "contain" else "cover"
+        ) as fitted:
+            canvas.paste(fitted, (
+                size[0] - fitted.width if align_right else 0,
+                (size[1] - fitted.height) // 2,
+            ))
+        return canvas
+
+    def _draw_compact_pair_captions(
+        self, canvas: Image.Image, geometry: LayoutGeometry,
+        records: tuple[dict[str, Any], dict[str, Any]], parts: dict[str, dict[str, str]],
+    ) -> None:
+        """A single readable column to each photo's left; dates never share IDs."""
+        font_path = self.fonts.resolve(str(self.settings.get("render.font_path", "")))
+        draw = ImageDraw.Draw(canvas)
+        for record, caption_box, date_box in zip(records, geometry.caption_rects, geometry.info, strict=True):
+            self._draw_adaptive_pair_caption(
+                canvas, {**record, "capture_date_label": ""}, caption_box, left_side=True
+            )
+            date_label = parts.get(str(record["photo_id"]), {}).get("date", "")
+            font = ImageFont.truetype(str(font_path), 14)
+            draw.text(
+                (date_box.x + date_box.width // 2, date_box.y + date_box.height // 2),
+                self._fit_line(draw, date_label, font, date_box.width - 8),
+                font=font, fill="black", anchor="mm",
+            )
+
     def _draw_adaptive_pair_caption(
         self, canvas: Image.Image, record: dict[str, Any], box: Rect, *, left_side: bool
     ) -> None:
@@ -1538,6 +1605,7 @@ class RenderService:
         capture_date_labels: dict[str, str] | None = None,
         photo_footer_lines: dict[str, str] | None = None,
         photo_footer_parts: dict[str, dict[str, str]] | None = None,
+        auto_pair_source_sizes: list[list[int]] | None = None,
         expected_primary_sha256: str | None = None,
         expected_secondary_sha256: str | None = None,
     ) -> Image.Image:
@@ -1571,6 +1639,7 @@ class RenderService:
                 capture_date_labels=plan.get("capture_date_labels"),
                 photo_footer_lines=plan.get("photo_footer_lines"),
                 photo_footer_parts=plan.get("photo_footer_parts"),
+                auto_pair_source_sizes=plan.get("auto_pair_source_sizes"),
                 expected_primary_sha256=expected_primary_sha256 or plan.get("primary_sha256"),
                 expected_secondary_sha256=expected_secondary_sha256 or plan.get("secondary_sha256"),
             )
@@ -1740,6 +1809,21 @@ class RenderService:
                 }
             if footer_lines:
                 geometry = with_photo_date_footers(geometry)
+            compact_pair = (
+                auto_pair_source_sizes is not None
+                and layout_key == "photo_pair" and effective_orientation == "landscape"
+            )
+            if compact_pair:
+                assert auto_pair_source_sizes is not None
+                if len(auto_pair_source_sizes) != 2 or any(len(size) != 2 for size in auto_pair_source_sizes):
+                    raise ValueError("RENDER-005 自動雙照片尺寸無效")
+                geometry = resolve_compact_pair_geometry(
+                    (
+                        (auto_pair_source_sizes[0][0], auto_pair_source_sizes[0][1]),
+                        (auto_pair_source_sizes[1][0], auto_pair_source_sizes[1][1]),
+                    ),
+                    fit_mode=fit_mode_key,
+                )
             if layout_key == "full":
                 photo_rect = _required_rect(geometry.primary_photo, "primary_photo")
                 fitted = self._fit_photo(
@@ -1836,22 +1920,37 @@ class RenderService:
                     primary_caption_rect,
                     secondary_caption_rect,
                 )
-                canvas.paste(
-                    self._fit_photo(source, photo, image_size, crop_x, crop_y, fit_mode_key), positions[0]
+                first_fitted = (
+                    self._fit_compact_pair_photo(
+                        source, photo, image_size, crop_x, crop_y,
+                        fit_mode=fit_mode_key, align_right=True,
+                    ) if compact_pair else
+                    self._fit_photo(source, photo, image_size, crop_x, crop_y, fit_mode_key)
                 )
+                with first_fitted:
+                    canvas.paste(first_fitted, positions[0])
                 with second_source:
-                    canvas.paste(
-                        self._fit_photo(
+                    second_fitted = (
+                        self._fit_compact_pair_photo(
+                            second_source, second_photo, second_image_size,
+                            second_photo["crop_manual_x"], second_photo["crop_manual_y"],
+                            fit_mode=fit_mode_key, align_right=False,
+                        ) if compact_pair else self._fit_photo(
                             second_source,
                             second_photo,
                             second_image_size,
                             second_photo["crop_manual_x"],
                             second_photo["crop_manual_y"],
                             fit_mode_key,
-                        ),
-                        positions[1],
+                        )
                     )
-                if footer_lines:
+                    with second_fitted:
+                        canvas.paste(second_fitted, positions[1])
+                if compact_pair:
+                    self._draw_compact_pair_captions(
+                        canvas, geometry, (first_caption, second_caption), footer_parts or {}
+                    )
+                elif footer_lines:
                     self._draw_photo_footers(
                         canvas, geometry, footer_parts or {}, photo_id, secondary_photo_id
                     )

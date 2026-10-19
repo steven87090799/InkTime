@@ -25,6 +25,7 @@ except ImportError:  # pragma: no cover - production containers are Linux/POSIX.
 from PIL import Image
 
 from .palette import DisplayProfile, encode_image, get_display_profile
+from .text_mask import render_plan_text_mask
 
 
 FOUR_COLORS = ((0, 0, 0), (255, 255, 255), (220, 30, 30), (245, 190, 25))
@@ -190,21 +191,24 @@ class AtomicReleasePublisher:
         effective_color_distance = "rgb" if dither in {"gooddisplay", "photo_smooth", "warm_vivid_c", "natural_d"} else color_distance
         files = []
         output_palette = profile.colors
+        render_plans = (metadata or {}).get("render_plans") or []
         try:
             for index, (photo_id, source) in enumerate(images, 1):
                 rendered = source.convert("RGB")
                 if rendered.size != (width, height):
                     raise ValueError(f"RENDER-002 圖片尺寸必須是 {width}×{height}")
-                encoded = encode_image(
-                    rendered,
-                    profile_key=profile_key,
-                    dither=dither,
-                    color_distance=effective_color_distance,
-                    strength=effective_strength,
-                    linear_light=linear_light,
-                    protected_mask=protected_mask,
-                    profile=profile,
-                )
+                plan = render_plans[index - 1] if index <= len(render_plans) else None
+                with render_plan_text_mask(plan, override=protected_mask) as text_mask:
+                    encoded = encode_image(
+                        rendered,
+                        profile_key=profile_key,
+                        dither=dither,
+                        color_distance=effective_color_distance,
+                        strength=effective_strength,
+                        linear_light=linear_light,
+                        protected_mask=text_mask,
+                        profile=profile,
+                    )
                 payload = encoded.payload
                 output_palette = encoded.palette
                 expected = width * height // (4 if profile.pixel_format == "2bpp" else 2)
