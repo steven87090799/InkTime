@@ -186,8 +186,8 @@ class AtomicReleasePublisher:
         temporary = self.root / f".{release_id}.tmp"
         final = self.root / release_id
         temporary.mkdir(mode=0o750)
-        effective_strength = 1.0 if dither in {"gooddisplay", "photo_smooth", "warm_vivid_c"} else float(dither_strength)
-        effective_color_distance = "rgb" if dither in {"gooddisplay", "photo_smooth", "warm_vivid_c"} else color_distance
+        effective_strength = 1.0 if dither in {"gooddisplay", "photo_smooth", "warm_vivid_c", "natural_d"} else float(dither_strength)
+        effective_color_distance = "rgb" if dither in {"gooddisplay", "photo_smooth", "warm_vivid_c", "natural_d"} else color_distance
         files = []
         output_palette = profile.colors
         try:
@@ -251,6 +251,22 @@ class AtomicReleasePublisher:
                 ],
                 "files": files,
             }
+            if dither == "natural_d":
+                from .natural_d import VERSION, WHITE_BALANCE_GAINS
+
+                manifest["palette_version"] = VERSION
+                metadata = dict(metadata or {})
+                metadata["color_pipeline"] = {
+                    "version": VERSION,
+                    "reference": "epdoptimize@1.3.0",
+                    "white_balance_linear_rgb_gains": list(WHITE_BALANCE_GAINS),
+                    "saturation_adjustment": -0.1,
+                    "dynamic_range": "display",
+                    "preserve_white": {"percentile": 0.97, "min_luma": 200, "max_saturation": 0.22},
+                    "color_matching": "rgb",
+                    "diffusion": "serpentine-floyd-steinberg",
+                    "linear_light": False,
+                }
             if metadata:
                 manifest["render_options"] = metadata
                 # Additive metadata: device payload readers continue to use files.

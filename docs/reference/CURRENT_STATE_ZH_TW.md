@@ -7,7 +7,7 @@
 | 項目 | 原始碼值 | 權威來源 |
 |---|---|---|
 | Python 套件 | `2.0.0.dev0`，部署／CI 支援 Python 3.12（`>=3.12,<3.13`） | [`inktime/_version.py`](../../inktime/_version.py)、[`pyproject.toml`](../../pyproject.toml) |
-| SQLite Migration | 連續 `1–70`；64–66 保護配送／渲染輸入並支援雙圖附說明，67 索引活動清理，68 永久保存照片內容版本與模型證據，69 加入 Batch 候選分頁索引與逐項失敗重試授權，70 支援橫單直雙與拍攝日期的自動版型；保留歷史／外鍵 | [`migrations.py`](../../inktime/app/db/migrations.py) |
+| SQLite Migration | 連續 `1–71`；64–66 保護配送／渲染輸入並支援雙圖附說明，67 索引活動清理，68 永久保存照片內容版本與模型證據，69 加入 Batch 候選分頁索引與逐項失敗重試授權，70 支援自動版型，71 將未經管理員另選的舊預設色彩升為 D；保留歷史／外鍵 | [`migrations.py`](../../inktime/app/db/migrations.py) |
 | AI Analysis Schema | 嚴格 v5；保留 v4 相容閱讀與既有結果，不為精簡欄位重新付費 | [`plan.py`](../../inktime/app/domain/analysis/plan.py)、[`schema.py`](../../inktime/app/domain/analysis/schema.py) |
 | ESP32 7C／PhotoPainter 韌體 | `2.8.9`（本分支；未刷機） | [`ink-display-7C-photo.ino`](../../esp32/ink-display-7C-photo/ink-display-7C-photo.ino) |
 | ESP32 Config Store payload | v5，讀取 v1–v5；舊容量 12、新 payload 24 slots read compatibility | [`device_config_store_core.h`](../../esp32/ink-display-7C-photo/device_config_store_core.h) |
@@ -37,8 +37,11 @@ Config Store v5 是裝置本機儲存格式，不是所有 HTTP Manifest 的版�
 
 - 9 種版型：`auto_photo`、`full`、`postcard`、`photo_info`、`photo_pair`、`photo_pair_caption`、`adaptive_memory`、`calendar`、`weather_sensor`；後兩者限直向。
 - 3 種 480×800 Profile：`safe_4c`（2bpp，96,000 bytes）、`gdep073e01_6c`、`gdey073d46_7c`（indexed4，192,000 bytes）。PhotoPainter 在裝置端轉為原生 800×480。
-- 11 個抖動選項（含別名／無抖動）：`warm_vivid_c`、`none`、`floyd_steinberg`、`gooddisplay`、`photo_smooth`、`atkinson`、`bayer4`、`bayer8`、`nearest`、`bayer_ordered`、`serpentine_floyd_steinberg`。
-- 新安裝渲染預設為 `gdep073e01_6c`、`warm_vivid_c`、`auto_photo`、`landscape`、`cover`；新增裝置的預設 Profile 同為 `gdep073e01_6c`，仍必須另外與實板匹配。
+- 12 個抖動選項（含別名／無抖動）：`natural_d`、`warm_vivid_c`、`none`、`floyd_steinberg`、`gooddisplay`、`photo_smooth`、`atkinson`、`bayer4`、`bayer8`、`nearest`、`bayer_ordered`、`serpentine_floyd_steinberg`。
+- 新安裝渲染預設為 `gdep073e01_6c`、`natural_d`、`auto_photo`、`landscape`、`cover`；新增裝置的預設 Profile 同為 `gdep073e01_6c`，仍必須另外與實板匹配。
+- D 自然膚色是自訂配方，以 epdoptimize 1.3.0 的 balanced 為基礎：linear-sRGB 白平衡 gains `(1, 0.985, 1.16)` 並正規化中性亮度、HSL 飽和度微降 10%、LAB display 動態範圍、97 百分位亮部保白（最低 luma 200、最高飽和度 0.22）、RGB 配色與蛇形 Floyd–Steinberg。六色面板使用 upstream 的 aitjcize appearance 色盤，輸出維持原有裝置色碼；亮部保白可能犧牲細微明暗。原版與舊 C 微暖增豔仍可切換。
+- D 調色以最多 2048 像素的分塊運算，輸入上限為一張 480×800 已排版圖片；不載入整個照片庫、不保留影像或 diffusion table 的全域快取，也不新增 Node 常駐程序或執行期套件。每張圖的工作緩衝在該次呼叫結束後釋放；NAS 實際 RSS／CPU 峰值仍需實機量測。文字遮罩保持黑白；預覽與 Release 共用 `encode_image`，Release 保存配方版本與色盤。
+- Migration 71 僅轉換 `render.dither=warm_vivid_c` 且沒有 `updated_by` 的舊預設；保留管理員選項、既有 Release 與快取排程內容。更新後的新預覽與新出圖才使用 D，不強制重繪或重送已快取的照片。
 - Enhanced offline schedule 的 PhotoPainter 2.8.7 以後正式 capability 上限為 16 slots/day；Config Store v5 仍可讀 24-slot payload，能力不明的舊裝置需 repair／重新配對，不直接推定為 16。
 - 2.8.7 以後 PhotoPainter KEY1 雙擊顯示唯讀電源頁，顯示後停留 30 秒，再驗證 Internal Flash 的正式 frame 並恢復原圖；無有效 frame 才回正常網路流程。GPIO0 BOOT、GPIO5 PWR、GPIO21 TG28 IRQ 保持安全邊界。
 - 13.3 吋程式是保留的 beta 舊協定實作；目前 Web 沒有相應正式 Profile。不能直接使用本版 7.3 吋 Release。

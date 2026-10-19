@@ -129,6 +129,7 @@ RUN --mount=type=bind,from=builder,source=/wheels,target=/wheels \
     && python -m pip uninstall --yes pip setuptools \
     && rm -f requirements.txt
 COPY --chown=inktime:inktime inktime/ ./inktime/
+COPY --chown=inktime:inktime third_party/epdoptimize/ ./third_party/epdoptimize/
 RUN python -c "from inktime.app.domain.photos.formats import ensure_image_codecs_registered; assert ensure_image_codecs_registered(), 'HEIF decoder unavailable'"
 COPY --chown=inktime:inktime data/world_cities_zh.csv ./data/world_cities_zh.csv
 COPY --chown=inktime:inktime scripts/container_health.py scripts/create_update_recovery.py scripts/migrate.py scripts/restore_backup.py ./scripts/

@@ -2499,6 +2499,15 @@ MIGRATIONS = (
         "允許依照片方向自動排版並保留裝置身分與播放清單",
         (),
     ),
+    Migration(
+        71,
+        "將未經管理員另選的舊預設色彩更新為 D 自然膚色",
+        (
+            "UPDATE settings SET value_json='\"natural_d\"',updated_at=datetime('now') "
+            "WHERE key='render.dither' AND value_json='\"warm_vivid_c\"' "
+            "AND (updated_by IS NULL OR updated_by='')",
+        ),
+    ),
 )
 
 
