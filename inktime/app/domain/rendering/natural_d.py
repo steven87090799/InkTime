@@ -17,6 +17,9 @@ MAX_PIXELS = 480 * 800
 CHUNK_PIXELS = 2048
 VERSION = "natural-d-epdoptimize-1.3.0-v1"
 WHITE_BALANCE_GAINS = (1.0, 0.985, 1.16)
+# Freeze the float32 normalization recorded with the accepted D preview,
+# independent of a platform's BLAS reduction implementation.
+WHITE_BALANCE_NORMALIZATION = 1.000823974609375
 SATURATION_MULTIPLIER = 0.9
 SPECTRA6 = (
     ("black", (2, 2, 2)),
@@ -42,8 +45,9 @@ def _luma(values: Any) -> Any:
 def _saturation(values: Any) -> Any:
     import numpy as np
 
-    high = values.max(axis=-1)
-    return (high - values.min(axis=-1)) / np.maximum(high, 1)
+    high = values.max(axis=-1) / 255
+    low = values.min(axis=-1) / 255
+    return (high - low) / np.where(high == 0, 1, high)
 
 
 def _white_balance(values: Any) -> Any:
@@ -53,8 +57,7 @@ def _white_balance(values: Any) -> Any:
     encoded = values.astype(np.float32) / 255
     linear = np.where(encoded <= 0.04045, encoded / 12.92, ((encoded + 0.055) / 1.055) ** 2.4)
     gains = np.array(WHITE_BALANCE_GAINS, dtype=np.float32)
-    normalization = float(np.dot(gains, np.array([0.2126, 0.7152, 0.0722], dtype=np.float32)))
-    adjusted = np.clip(linear * (gains / normalization), 0, 1)
+    adjusted = np.clip(linear * (gains / WHITE_BALANCE_NORMALIZATION), 0, 1)
     encoded = np.where(adjusted <= 0.0031308, adjusted * 12.92,
                        1.055 * np.power(adjusted, 1 / 2.4) - 0.055)
     return np.rint(np.clip(encoded, 0, 1) * 255).astype(np.uint8)
@@ -99,7 +102,7 @@ def _lab(values: Any) -> Any:
     linear = np.where(encoded <= 0.04045, encoded / 12.92, ((encoded + 0.055) / 1.055) ** 2.4)
     r, g, b = linear.T
     xyz = np.stack(((r * 0.4124564 + g * 0.3575761 + b * 0.1804375) * 100 / 95.047,
-                    r * 0.2126729 + g * 0.7151522 + b * 0.072175,
+                    (r * 0.2126729 + g * 0.7151522 + b * 0.072175) * 100 / 100,
                     (r * 0.0193339 + g * 0.119192 + b * 0.9503041) * 100 / 108.883), axis=1)
     pivot = np.where(xyz > 0.008856, np.cbrt(xyz), 7.787 * xyz + 16 / 116)
     x, y, z = pivot.T

@@ -252,7 +252,7 @@ class AtomicReleasePublisher:
                 "files": files,
             }
             if dither == "natural_d":
-                from .natural_d import VERSION, WHITE_BALANCE_GAINS
+                from .natural_d import VERSION, WHITE_BALANCE_GAINS, WHITE_BALANCE_NORMALIZATION
 
                 manifest["palette_version"] = VERSION
                 metadata = dict(metadata or {})
@@ -260,6 +260,7 @@ class AtomicReleasePublisher:
                     "version": VERSION,
                     "reference": "epdoptimize@1.3.0",
                     "white_balance_linear_rgb_gains": list(WHITE_BALANCE_GAINS),
+                    "white_balance_normalization": WHITE_BALANCE_NORMALIZATION,
                     "saturation_adjustment": -0.1,
                     "dynamic_range": "display",
                     "preserve_white": {"percentile": 0.97, "min_luma": 200, "max_saturation": 0.22},
