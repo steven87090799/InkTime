@@ -325,18 +325,32 @@ def _warm_vivid_c(image: Image.Image) -> Image.Image:
     """Frozen C preset accepted on the physical PhotoPainter on 2026-10-17."""
     import numpy as np
 
-    original = np.asarray(image.convert("RGB")).astype(float)
-    adjusted = ImageEnhance.Color(image).enhance(1.12)
-    adjusted = ImageEnhance.Contrast(adjusted).enhance(1.06)
-    adjusted = ImageEnhance.Brightness(adjusted).enhance(1.03)
-    working = np.asarray(adjusted).astype(float)
-    luminance = original @ np.array([0.2126, 0.7152, 0.0722])
-    highlight = np.clip((luminance - 230) / 25, 0, 1)[..., None]
-    working = working * (1 - highlight) + original * highlight
-    weight = np.clip(luminance / 35, 0, 1) * np.clip((245 - luminance) / 45, 0, 1)
-    working[:, :, 0] *= 1 + 0.015 * weight
-    working[:, :, 2] *= 1 - 0.035 * weight
-    return Image.fromarray(np.clip(np.rint(working), 0, 255).astype("uint8"))
+    # Contrast uses the whole-image mean. Keep all Pillow adjustments global;
+    # only the pixel-local float64 math can be split without changing colors.
+    with ImageEnhance.Color(image).enhance(1.12) as saturated:
+        with ImageEnhance.Contrast(saturated).enhance(1.06) as contrasted:
+            adjusted = ImageEnhance.Brightness(contrasted).enhance(1.03)
+    result = Image.new("RGB", image.size)
+    try:
+        with adjusted:
+            for top in range(0, image.height, 64):
+                box = (0, top, image.width, min(top + 64, image.height))
+                with image.crop(box) as source, source.convert("RGB") as rgb, adjusted.crop(box) as strip:
+                    original = np.asarray(rgb).astype(float)
+                    working = np.asarray(strip).astype(float)
+                    luminance = original @ np.array([0.2126, 0.7152, 0.0722])
+                    highlight = np.clip((luminance - 230) / 25, 0, 1)[..., None]
+                    working = working * (1 - highlight) + original * highlight
+                    weight = np.clip(luminance / 35, 0, 1) * np.clip((245 - luminance) / 45, 0, 1)
+                    working[:, :, 0] *= 1 + 0.015 * weight
+                    working[:, :, 2] *= 1 - 0.035 * weight
+                    with Image.fromarray(np.clip(np.rint(working), 0, 255).astype("uint8")) as rendered:
+                        result.paste(rendered, (0, top))
+                    del original, working, luminance, highlight, weight
+        return result
+    except BaseException:
+        result.close()
+        raise
 
 
 def _waveshare_six_color_index(red: int, green: int, blue: int) -> int:
@@ -563,11 +577,11 @@ def encode_image(
     rgb = image.convert("RGB")
     preview_palette = profile.colors
     if dither == "warm_vivid_c":
-        adjusted = _warm_vivid_c(rgb)
-        if profile.key == "gdep073e01_6c":
-            indexes, preview, preview_palette = _quantize_waveshare_six_color(adjusted, profile)
-        else:
-            indexes, preview, preview_palette = _quantize_gooddisplay(adjusted, profile)
+        with _warm_vivid_c(rgb) as adjusted:
+            if profile.key == "gdep073e01_6c":
+                indexes, preview, preview_palette = _quantize_waveshare_six_color(adjusted, profile)
+            else:
+                indexes, preview, preview_palette = _quantize_gooddisplay(adjusted, profile)
     elif dither == "gooddisplay":
         indexes, preview, preview_palette = _quantize_gooddisplay(rgb, profile)
     elif dither == "photo_smooth":

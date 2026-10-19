@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from collections import Counter
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 import json
@@ -794,13 +793,25 @@ class RenderWorkloadService:
 
     @staticmethod
     def _palette_statistics(image: Image.Image, colors) -> list[dict]:
-        rgb = image.convert("RGB")
-        pixels = (
-            list(rgb.get_flattened_data())
-            if hasattr(rgb, "get_flattened_data")
-            else list(rgb.getdata())
-        )
-        counts: Counter[Any] = Counter(pixels)
+        colors = tuple(colors)
+        if not colors:
+            return []
+        counts = dict.fromkeys((color.rgb for color in colors), 0)
+        with image.convert("RGB") as rgb:
+            histogram = rgb.getcolors(maxcolors=len(counts))
+            if histogram is not None:
+                counts.update({color: count for count, color in histogram if color in counts})
+            else:
+                # The normal preview has only palette colors. Preserve the old
+                # behavior for arbitrary RGB inputs too, but retain neither an
+                # image-sized pixel tuple sequence nor every distinct RGB key.
+                for top in range(0, rgb.height, 64):
+                    with rgb.crop((0, top, rgb.width, min(top + 64, rgb.height))) as strip:
+                        pixels = strip.get_flattened_data() if hasattr(strip, "get_flattened_data") else strip.getdata()
+                        for pixel in pixels:
+                            if pixel in counts:
+                                counts[pixel] += 1
+                        del pixels
         total = image.width * image.height
         return [
             {

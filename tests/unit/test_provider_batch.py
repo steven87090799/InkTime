@@ -23,6 +23,9 @@ class FakeSession:
         self.calls = []
 
     def post(self, url, **kwargs):
+        if url.endswith("/files") and not isinstance(kwargs.get("data"), dict):
+            # Consume the single-pass upload while its owning stream is open.
+            kwargs["uploaded_body"] = b"".join(kwargs["data"])
         self.calls.append((url, kwargs))
         if url.endswith("/files"):
             return FakeResponse({"id": "file-123"})
@@ -37,8 +40,10 @@ def test_batch_uploads_jsonl_then_creates_batch():
     batch_id = provider.submit_batch([{"custom_id": "photo-1", "body": {"model": "vision"}}])
     assert batch_id == "batch-123"
     upload = session.calls[0][1]
-    assert upload["data"]["purpose"] == "batch"
-    assert b'"custom_id":"photo-1"' in upload["files"]["file"][1]
+    assert b'name="purpose"\r\n\r\nbatch\r\n' in upload["uploaded_body"]
+    assert b'"custom_id":"photo-1"' in upload["uploaded_body"]
+    assert len(upload["uploaded_body"]) == len(upload["data"])
+    assert "files" not in upload
     creation = session.calls[1][1]["json"]
     assert creation == {
         "input_file_id": "file-123",
@@ -370,7 +375,7 @@ def test_upload_file_side_effect_is_never_retried(tmp_path, outcome, expected_am
     with pytest.raises(ProviderHTTPError) as raised:
         provider.upload_batch_file(path, remote_filename="inktime-batch-anonymous.jsonl")
     assert raised.value.ambiguous is expected_ambiguous
-    assert session.calls[0][1]["files"]["file"][0] == "inktime-batch-anonymous.jsonl"
+    assert session.calls[0][1]["data"].filename == "inktime-batch-anonymous.jsonl"
     assert "secret" not in str(raised.value)
     assert len(session.calls) == 1
 
