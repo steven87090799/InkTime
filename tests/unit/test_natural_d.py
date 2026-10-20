@@ -103,7 +103,7 @@ def test_natural_d_release_records_actual_calibration_and_fixed_recipe(tmp_path)
     assert manifest["dither_strength"] == 1
     assert manifest["color_distance"] == "rgb"
     assert manifest["palette_version"] == natural_d.VERSION
-    assert manifest["render_options"]["color_pipeline"]["saturation_adjustment"] == -0.1
+    assert manifest["render_options"]["color_pipeline"]["saturation_adjustment"] == -0.05
     assert {c["name"]: tuple(c["rgb"]) for c in manifest["palette"]} == dict(natural_d.SPECTRA6)
     publisher.validate(manifest["release_id"])
 

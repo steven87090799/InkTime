@@ -13,7 +13,7 @@ src/dither/processing.ts and src/dither/dither.ts. The six-color appearance
 palette is upstream's aitjcizeSpectra6Palette, with blue before green for ties.
 
 InkTime modifications: freeze the user-selected D recipe; add mild normalized
-linear-sRGB white balance and -10% saturation; process adjustments in chunks of
+linear-sRGB white balance and -5% saturation; process adjustments in chunks of
 at most 2048 pixels; bound inputs to one 480x800 frame; use integer diffusion
 tables without persistent image caches; preserve caption masks; map output to
 the existing panel codes. This is a native Python/NumPy adaptation, not a

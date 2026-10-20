@@ -1,6 +1,6 @@
 """Frozen natural-D recipe derived from epdoptimize 1.3.0 (Apache-2.0).
 
-The accepted D camera preview used mild linear-sRGB white balance, -10% HSL
+The updated D recipe uses mild linear-sRGB white balance, -5% HSL
 saturation, display-range LAB compression, white preservation, and serpentine
 RGB Floyd–Steinberg. See docs/reference/CURRENT_STATE_ZH_TW.md for the recipe
 and third_party/epdoptimize/NOTICE.txt for upstream attribution and changes.
@@ -15,12 +15,12 @@ from typing import Any
 
 MAX_PIXELS = 480 * 800
 CHUNK_PIXELS = 2048
-VERSION = "natural-d-epdoptimize-1.3.0-v1"
+VERSION = "natural-d-epdoptimize-1.3.0-v2-sat95"
 WHITE_BALANCE_GAINS = (1.0, 0.985, 1.16)
 # Freeze the float32 normalization recorded with the accepted D preview,
 # independent of a platform's BLAS reduction implementation.
 WHITE_BALANCE_NORMALIZATION = 1.000823974609375
-SATURATION_MULTIPLIER = 0.9
+SATURATION_MULTIPLIER = 0.95
 SPECTRA6 = (
     ("black", (2, 2, 2)),
     ("white", (190, 200, 200)),

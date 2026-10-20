@@ -6,49 +6,56 @@ from PIL import Image, ImageDraw
 import pytest
 
 from inktime.app.domain.rendering.layout_geometry import (
-    AUTO_PAIR_MAX_ZOOM,
-    compact_pair_fit_size,
     resolve_compact_pair_geometry,
 )
 from inktime.app.domain.rendering.text_mask import render_plan_text_mask
 from inktime.app.services.rendering import RenderService
 
 
-@pytest.mark.parametrize("fit_mode", ["cover", "contain"])
 @pytest.mark.parametrize("sizes", list(product([(3265, 4898), (900, 1600), (900, 1000), (100, 1600)], repeat=2)))
-def test_pairs_keep_readable_separate_captions_and_dates_inside_canvas(sizes, fit_mode):
-    geometry = resolve_compact_pair_geometry(sizes, fit_mode=fit_mode)
-    for photo, caption, date, source_size in zip(
-        geometry.photo_rects, geometry.caption_rects, geometry.info, sizes, strict=True
+def test_pairs_use_full_photo_height_with_dates_inside_left_columns(sizes):
+    geometry = resolve_compact_pair_geometry(sizes)
+    assert geometry.info == ()  # no separate bottom date band
+    assert sum(photo.width for photo in geometry.photo_rects) == 684
+    for photo, caption in zip(
+        geometry.photo_rects, geometry.caption_rects, strict=True
     ):
         assert caption.right < photo.x
         assert caption.width >= 24  # readable CJK column, even with a very narrow source
-        assert date.width >= 160
-        assert date.y >= photo.bottom
-        for rect in (photo, caption, date):
+        assert photo.y == caption.y == 0
+        assert photo.height == caption.height == 480
+        for rect in (photo, caption):
             assert min(rect.x, rect.y) >= 0
             assert rect.right <= 800 and rect.bottom <= 480
-        fitted = compact_pair_fit_size(source_size, (photo.width, photo.height), fit_mode=fit_mode)
-        # The visible crop cannot expand into arbitrary cover magnification.
-        scale = max(fitted[0] / source_size[0], fitted[1] / source_size[1])
-        contain = min(photo.width / source_size[0], photo.height / source_size[1])
-        assert scale <= contain * (1 if fit_mode == "contain" else AUTO_PAIR_MAX_ZOOM) + 0.001
-    assert geometry.secondary_caption.x - geometry.primary_photo.right == 12
+    assert geometry.secondary_caption.x - geometry.primary_photo.right == 8
 
 
-def test_subject_at_bottom_survives_bounded_enlargement_without_distortion():
+def test_center_fill_preserves_proportions_without_focus_or_extra_zoom(monkeypatch):
     service = object.__new__(RenderService)
     source = Image.new("RGB", (900, 1600), "white")
-    ImageDraw.Draw(source).rectangle((200, 1510, 700, 1599), fill="red")
-    photo = {
-        "crop_manual_x": None, "crop_manual_y": None, "crop_focus_x": .5, "crop_focus_y": .5,
-        "crop_subject_left": .2, "crop_subject_top": .4, "crop_subject_right": .8, "crop_subject_bottom": 1.,
-    }
+    ImageDraw.Draw(source).ellipse((350, 700, 550, 900), fill="red")
+    def reject_focus(*args, **kwargs):
+        raise AssertionError("compact photos must not use subject-aware fitting")
+    monkeypatch.setattr(service, "_fit_photo", reject_focus)
     with service._fit_compact_pair_photo(
-        source, photo, (277, 456), None, None, fit_mode="cover", align_right=True,
+        source, (342, 480), fit_mode="cover",
     ) as fitted:
-        assert fitted.getpixel((138, 455))[0] > 240
-        assert fitted.getpixel((138, 455))[1] < 20
+        bounds = fitted.getchannel("G").point(lambda value: 255 if value < 32 else 0).getbbox()
+        assert bounds is not None
+        width, height = bounds[2] - bounds[0], bounds[3] - bounds[1]
+        assert abs(width - height) <= 2
+        assert abs(width - 200 * (342 / 900)) <= 2  # only the scale needed to fill
+        assert abs((bounds[0] + bounds[2]) / 2 - 171) <= 1
+        assert abs((bounds[1] + bounds[3]) / 2 - 240) <= 1
+
+
+def test_contain_keeps_edges_when_explicitly_selected():
+    source = Image.new("RGB", (900, 1600), "white")
+    ImageDraw.Draw(source).rectangle((0, 0, 899, 1599), outline="red", width=20)
+    with RenderService._fit_compact_pair_photo(source, (342, 480), fit_mode="contain") as fitted:
+        assert fitted.getpixel((0, 240)) == (255, 255, 255)
+        for point in ((37, 240), (304, 240), (171, 0), (171, 479)):
+            assert fitted.getpixel(point)[0] > 240 and fitted.getpixel(point)[1] < 20
 
 
 def test_text_and_paper_mask_leaves_photos_unprotected_in_physical_orientation():

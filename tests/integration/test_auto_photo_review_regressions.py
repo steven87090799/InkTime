@@ -156,13 +156,47 @@ def test_auto_pair_captions_and_dates_remain_visible_and_follow_swapped_photos(a
             # Exclude the divider so a blank caption cannot pass on its line.
             region = logical.crop((rect["x"]+4, rect["y"]+4, rect["x"]+rect["width"]-5, rect["y"]+rect["height"]-4))
             assert ImageChops.invert(region.convert("L")).getbbox() is not None
-        for rect in plan["geometry"]["info_rects"]:
-            region = logical.crop((rect["x"], rect["y"], rect["x"]+rect["width"], rect["y"]+rect["height"]))
+        assert plan["geometry"]["info_rects"] == []
+        assert plan["auto_pair_crop_policy"] == "center"
+        assert plan["subject_box"] == plan["secondary_subject_box"] == []
+        for rect in plan["geometry"]["caption_rects"]:
+            region = logical.crop((rect["x"], rect["y"]+rect["height"]//2, rect["x"]+rect["width"], rect["y"]+rect["height"]))
             assert ImageChops.invert(region.convert("L")).getbbox() is not None
             pieces.append(region.tobytes())
         outputs.append(pieces)
     assert outputs[0][0] != outputs[0][1]  # different dates actually reach pixels
     assert outputs[0] == outputs[1][::-1]  # dates follow photo IDs when order changes
+
+
+def test_auto_pair_ignores_subject_and_manual_focus_metadata(app, tmp_path):
+    _configure(app)
+    root = tmp_path / "photos"
+    root.mkdir()
+    for pid in ("first", "second"):
+        _analyzed_photo(app, root, pid, (600, 900), "2024-07-01T10:00:00+00:00")
+        with Image.open(root / f"{pid}.jpg") as opened:
+            image = opened.convert("RGB")
+        draw = ImageDraw.Draw(image)
+        draw.rectangle((0, 0, 599, 49), fill="red")
+        draw.rectangle((0, 850, 599, 899), fill="green")
+        image.save(root / f"{pid}.jpg")
+    service = app.extensions["inktime_render_service"]
+    outputs = []
+    for focus in (0., 1.):
+        with app.extensions["inktime_database"].session() as connection:
+            connection.execute(
+                "UPDATE photos SET crop_focus_x=?,crop_focus_y=?,crop_manual_x=?,crop_manual_y=?,"
+                "crop_subject_left=0,crop_subject_top=0,crop_subject_right=1,crop_subject_bottom=1",
+                (focus, focus, focus, focus),
+            )
+        plan = service.resolve_render_plan(
+            "first", secondary_photo_id="second", layout="auto_photo", orientation="landscape", fit_mode="cover",
+        )
+        assert plan["auto_pair_crop_policy"] == "center"
+        assert plan["manual_crop"] == plan["secondary_manual_crop"] == [None, None]
+        assert plan["subject_box"] == plan["secondary_subject_box"] == []
+        outputs.append(service._render_plan_image(plan))
+    assert ImageChops.difference(outputs[0], outputs[1]).getbbox() is None
 
 
 def test_compact_d_browser_preview_matches_release_and_protects_text(app, tmp_path):

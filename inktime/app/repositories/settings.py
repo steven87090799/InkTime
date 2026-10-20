@@ -965,7 +965,7 @@ SETTING_DEFINITIONS: dict[str, dict[str, Any]] = {
         "category": "渲染設定",
         "default": "natural_d",
         "type": "string",
-        "description": "電子紙色彩模式；預設 D 自然膚色，飽和度微降 10%，並輕微修正白平衡與亮部",
+        "description": "電子紙色彩模式；預設 D 自然膚色，飽和度微降 5%，並輕微修正白平衡與亮部",
         "risk": "D、C 與原廠相容固定使用標準強度；D 亮部保白可能減少細微明暗，可切回原版或 C",
         "choices": [
             "none",

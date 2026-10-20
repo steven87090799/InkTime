@@ -58,7 +58,6 @@ from inktime.app.domain.rendering.adaptive_layout import (
 )
 from inktime.app.domain.rendering.layout_geometry import (
     LayoutGeometry,
-    compact_pair_fit_size,
     resolve_compact_pair_geometry,
     with_photo_date_footers,
 )
@@ -387,7 +386,7 @@ class RenderService:
                 with second_source:
                     assert primary_source_size is not None
                     sizes = (primary_source_size, second_source.size)
-                    geometry = resolve_compact_pair_geometry(sizes, fit_mode=fit_key)
+                    geometry = resolve_compact_pair_geometry(sizes)
                     auto_pair_source_sizes = [list(size) for size in sizes]
             capture_date_labels = {
                 str(photo["id"]): self._date_label(self._captured_date(photo["captured_at"]))
@@ -430,16 +429,18 @@ class RenderService:
             "secondary_photo_id": str(secondary["id"]) if secondary is not None else None,
             "secondary_sha256": str(secondary["sha256"] or "") if secondary is not None else None,
             "fit_mode": fit_key,
-            "manual_crop": [
+            "manual_crop": [None, None] if auto_pair_source_sizes is not None else [
                 crop_x if crop_x is not None else primary["crop_manual_x"],
                 crop_y if crop_y is not None else primary["crop_manual_y"],
             ],
-            "subject_box": list(self._subject_box(primary) or ()),
+            "subject_box": [] if auto_pair_source_sizes is not None else list(self._subject_box(primary) or ()),
             "secondary_manual_crop": (
-                [secondary["crop_manual_x"], secondary["crop_manual_y"]] if secondary is not None else None
+                ([None, None] if auto_pair_source_sizes is not None
+                 else [secondary["crop_manual_x"], secondary["crop_manual_y"]])
+                if secondary is not None else None
             ),
             "secondary_subject_box": list(self._subject_box(secondary) or ())
-            if secondary is not None
+            if secondary is not None and auto_pair_source_sizes is None
             else [],
             "primary_caption": primary_caption,
             "secondary_caption": resolved_secondary_caption,
@@ -448,8 +449,9 @@ class RenderService:
             "photo_footer_lines": photo_footer_lines,
             "photo_footer_parts": photo_footer_parts,
             "auto_pair_source_sizes": auto_pair_source_sizes,
+            "auto_pair_crop_policy": "center" if auto_pair_source_sizes is not None else None,
             "footer_alignment": (
-                {"caption": "left_column", "date": "bottom_center"}
+                {"caption": "left_column", "date": "below_caption"}
                 if auto_pair_source_sizes is not None
                 else {"caption": "left", "date": "right"} if auto_photo_requested else None
             ),
@@ -1309,18 +1311,18 @@ class RenderService:
                 return candidate
         return None
 
+    @staticmethod
     def _fit_compact_pair_photo(
-        self, source: Image.Image, photo, size: tuple[int, int],
-        crop_x: float | None, crop_y: float | None, *, fit_mode: str, align_right: bool,
+        source: Image.Image, size: tuple[int, int], *, fit_mode: str,
     ) -> Image.Image:
-        fitted_size = compact_pair_fit_size(source.size, size, fit_mode=fit_mode)
+        # Only normal centred fitting; no subject, focus or additional zoom.
+        if fit_mode != "contain":
+            return ImageOps.fit(source, size, Image.Resampling.LANCZOS, centering=(0.5, 0.5))
         canvas = Image.new("RGB", size, "white")
-        fitted = self._fit_photo(
-            source, photo, fitted_size, crop_x, crop_y, "contain" if fit_mode == "contain" else "cover"
-        )
+        fitted = ImageOps.contain(source, size, Image.Resampling.LANCZOS)
         try:
             canvas.paste(fitted, (
-                size[0] - fitted.width if align_right else 0,
+                (size[0] - fitted.width) // 2,
                 (size[1] - fitted.height) // 2,
             ))
         finally:
@@ -1332,22 +1334,16 @@ class RenderService:
         records: tuple[dict[str, Any], dict[str, Any]], parts: dict[str, dict[str, str]],
     ) -> None:
         """A single readable column to each photo's left; dates never share IDs."""
-        font_path = self.fonts.resolve(str(self.settings.get("render.font_path", "")))
-        draw = ImageDraw.Draw(canvas)
-        for record, caption_box, date_box in zip(records, geometry.caption_rects, geometry.info, strict=True):
-            self._draw_adaptive_pair_caption(
-                canvas, {**record, "capture_date_label": ""}, caption_box, left_side=True
-            )
+        for record, caption_box in zip(records, geometry.caption_rects, strict=True):
             date_label = parts.get(str(record["photo_id"]), {}).get("date", "")
-            font = ImageFont.truetype(str(font_path), 14)
-            draw.text(
-                (date_box.x + date_box.width // 2, date_box.y + date_box.height // 2),
-                self._fit_line(draw, date_label, font, date_box.width - 8),
-                font=font, fill="black", anchor="mm",
+            self._draw_adaptive_pair_caption(
+                canvas, {**record, "capture_date_label": date_label}, caption_box,
+                left_side=True, date_below=True,
             )
 
     def _draw_adaptive_pair_caption(
-        self, canvas: Image.Image, record: dict[str, Any], box: Rect, *, left_side: bool
+        self, canvas: Image.Image, record: dict[str, Any], box: Rect, *, left_side: bool,
+        date_below: bool = False,
     ) -> None:
         """Draw one frozen caption only inside its photo's authoritative region."""
         text = str(record["text"])
@@ -1362,7 +1358,16 @@ class RenderService:
             available_width = max(1, box.width - horizontal_padding * 2)
             available_height = max(0, box.height - vertical_padding * 2)
             y = box.y + vertical_padding
-            if date_label:
+            below_lines: list[str] = []
+            if date_below and date_label:
+                components = date_label.removesuffix("日").replace("年", "/").replace("月", "/").split("/")
+                below_lines = (
+                    [components[0], f"{int(components[1]):02}/{int(components[2]):02}"]
+                    if len(components) == 3 and all(part.isdigit() for part in components)
+                    else [date_label]
+                )
+                available_height = max(0, available_height - len(below_lines) * 16 - 12)
+            if date_label and not date_below:
                 # The narrow side strip keeps the date small and gives the
                 # larger memory sentence most of the available height.
                 date_lines = date_label.replace("年", "年\n", 1).splitlines()
@@ -1408,6 +1413,16 @@ class RenderService:
                 x = box.x + horizontal_padding + (available_width - glyph_width) // 2 - bounds[0]
                 draw.text((x, y - bounds[1]), character, font=font, fill="#17221c")
                 y += line_height
+            if below_lines:
+                y += 12
+                date_font = ImageFont.truetype(str(font_path), 12)
+                for line in below_lines:
+                    draw.text(
+                        (box.x + box.width // 2, y),
+                        self._fit_line(draw, line, date_font, box.width - 8),
+                        font=date_font, fill="black", anchor="mt",
+                    )
+                    y += 16
             draw.line(
                 (box.right - 2, box.y + 12, box.right - 2, box.bottom - 12),
                 fill="#1d2822",
@@ -1825,7 +1840,6 @@ class RenderService:
                         (auto_pair_source_sizes[0][0], auto_pair_source_sizes[0][1]),
                         (auto_pair_source_sizes[1][0], auto_pair_source_sizes[1][1]),
                     ),
-                    fit_mode=fit_mode_key,
                 )
             if layout_key == "full":
                 photo_rect = _required_rect(geometry.primary_photo, "primary_photo")
@@ -1881,6 +1895,8 @@ class RenderService:
                 )
             if indoor:
                 text_parts.extend([str(indoor.get("device_name", "")), "室內溫度濕度"])
+            if compact_pair:
+                text_parts.append("/")
             fonts = self._fonts("\n".join(part for part in text_parts if part))
             # 資訊區使用真正的面板白色，避免米白經抖動後變成彩色雜點。
             canvas = Image.new("RGB", (frame_width, frame_height), "white")
@@ -1925,8 +1941,7 @@ class RenderService:
                 )
                 first_fitted = (
                     self._fit_compact_pair_photo(
-                        source, photo, image_size, crop_x, crop_y,
-                        fit_mode=fit_mode_key, align_right=True,
+                        source, image_size, fit_mode=fit_mode_key,
                     ) if compact_pair else
                     self._fit_photo(source, photo, image_size, crop_x, crop_y, fit_mode_key)
                 )
@@ -1937,9 +1952,7 @@ class RenderService:
                 with second_source:
                     second_fitted = (
                         self._fit_compact_pair_photo(
-                            second_source, second_photo, second_image_size,
-                            second_photo["crop_manual_x"], second_photo["crop_manual_y"],
-                            fit_mode=fit_mode_key, align_right=False,
+                            second_source, second_image_size, fit_mode=fit_mode_key,
                         ) if compact_pair else self._fit_photo(
                             second_source,
                             second_photo,

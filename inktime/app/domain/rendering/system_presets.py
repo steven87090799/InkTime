@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from .natural_d import VERSION as NATURAL_D_VERSION
+
 DEFAULT_RENDER_PROFILE = "gdep073e01_6c"
 DEFAULT_RENDER_DITHER = "natural_d"
 DEFAULT_DEVICE_PANEL_PROFILE = "gdep073e01_6c"
@@ -40,7 +42,7 @@ SYSTEM_PRESETS = {
     "natural_d": {
         "key": "natural_d",
         "label_zh_tw": "D 自然膚色（預設）",
-        "description": "飽和度微降 10%，輕微白平衡修正與亮部保白；適用後續預覽與渲染。",
+        "description": "飽和度微降 5%，輕微白平衡修正與亮部保白；適用後續預覽與渲染。",
         "settings": {
             "render.profile": DEFAULT_RENDER_PROFILE,
             "render.dither": DEFAULT_RENDER_DITHER,
@@ -50,6 +52,6 @@ SYSTEM_PRESETS = {
         },
         "compatible_panel_profiles": [DEFAULT_DEVICE_PANEL_PROFILE],
         "requires_device_confirmation": True,
-        "renderer_version": "natural-d-epdoptimize-1.3.0-v1",
+        "renderer_version": NATURAL_D_VERSION,
     },
 }
