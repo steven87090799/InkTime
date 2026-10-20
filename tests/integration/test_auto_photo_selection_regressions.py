@@ -89,7 +89,13 @@ def test_schema_70_restores_views_before_their_instead_of_triggers(tmp_path, mon
         connection.execute("CREATE TRIGGER custom_view_update INSTEAD OF UPDATE OF name ON custom_device_names "
                            "BEGIN UPDATE devices SET name=NEW.name WHERE id=OLD.id; END")
     monkeypatch.setattr(migrations, "MIGRATIONS", full)
-    assert migrations.migrate(database) == [70]
+    assert migrations.migrate(database) == [migration.version for migration in full if migration.version > 69]
+    with database.transaction() as connection:
+        names = {row[0] for row in connection.execute(
+            "SELECT name FROM sqlite_master WHERE name IN ('custom_device_names','custom_view_update')"
+        )}
+        assert names == {"custom_device_names", "custom_view_update"}
+        connection.execute("UPDATE custom_device_names SET name='Restored after migration'")
 
 
 def test_greedy_auto_pairing_keeps_a_complete_valid_pair_assignment():

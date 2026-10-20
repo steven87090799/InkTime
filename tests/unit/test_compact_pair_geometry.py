@@ -66,6 +66,11 @@ def test_text_and_paper_mask_leaves_photos_unprotected_in_physical_orientation()
             assert logical.getpixel((400, 200))
     with pytest.raises(ValueError):
         mask.getpixel((0, 0))  # context exits release the bit-packed buffer
+    with pytest.raises(RuntimeError, match="encode failed"):
+        with render_plan_text_mask(plan) as failed_mask:
+            raise RuntimeError("encode failed")
+    with pytest.raises(ValueError):
+        failed_mask.getpixel((0, 0))
     with render_plan_text_mask({"layout": "photo_pair"}) as legacy:
         assert legacy is None
     with Image.new("1", (480, 800)) as explicit:

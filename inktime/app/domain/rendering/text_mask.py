@@ -25,13 +25,20 @@ def render_plan_text_mask(
     photo_rects = geometry["photo_rects"]
     if len(photo_rects) != 2:
         raise ValueError("RENDER-005 自動雙照片文字遮罩缺少照片區")
-    with Image.new("1", (width, height), 1) as logical:
-        draw = ImageDraw.Draw(logical)
+    physical = Image.new("1", (height, width), 1)
+    try:
+        draw = ImageDraw.Draw(physical)
         for rect in photo_rects:
             x, y, w, h = (int(rect[key]) for key in ("x", "y", "width", "height"))
             if min(x, y) < 0 or min(w, h) <= 0 or x + w > width or y + h > height:
                 raise ValueError("RENDER-005 自動雙照片文字區超出畫布")
             # Keep text, dates, gutters and outer paper strictly black/white.
-            draw.rectangle((x, y, x + w - 1, y + h - 1), fill=0)
-        with logical.transpose(Image.Transpose.ROTATE_270) as physical:
-            yield physical
+            # Draw directly in physical coordinates: avoid a second rotated
+            # mask allocation. Logical (x, y) rotates clockwise to (H-y-1, x).
+            draw.rectangle((height - y - h, x, height - y - 1, x + w - 1), fill=0)
+        del draw  # ImageDraw holds its own reference to the pixel buffer.
+        yield physical
+    finally:
+        # Pillow's Image context only closes file handles. These masks are
+        # created in memory, so release their pixel buffers explicitly.
+        physical.close()

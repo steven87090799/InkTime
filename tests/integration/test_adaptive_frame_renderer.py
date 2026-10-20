@@ -95,13 +95,16 @@ def test_auto_photo_resolves_source_count_and_draws_each_capture_date(
             y = rect["y"] + rect["height"] // 2
             for x in (rect["x"], rect["x"] + rect["width"] - 1):
                 assert logical.getpixel((x, y)) != (255, 255, 255), "Photo slots must fill their width"
-    for key in ("primary_caption", "secondary_caption"):
-        rect = plan["geometry"].get(key)
-        if rect is not None:
-            assert rect["height"] == 28
-            footer = logical.crop((rect["x"], rect["y"], rect["x"] + rect["width"], rect["y"] + rect["height"]))
-            assert footer.convert("L").getextrema()[0] < 32, "Capture-date text must be visible"
-            assert footer.getpixel((0, 0)) == (255, 255, 255)
+    date_regions = (
+        plan["geometry"]["info_rects"] if expected_layout == "photo_pair"
+        else plan["geometry"]["caption_rects"]
+    )
+    assert len(date_regions) == len(expected_ids)
+    for rect in date_regions:
+        assert rect["height"] == (24 if expected_layout == "photo_pair" else 28)
+        footer = logical.crop((rect["x"], rect["y"], rect["x"] + rect["width"], rect["y"] + rect["height"]))
+        assert footer.convert("L").getextrema()[0] < 32, "Capture-date text must be visible"
+        assert footer.getpixel((0, 0)) == (255, 255, 255)
 
 
 def test_auto_photo_rejects_unpaired_portrait_instead_of_publishing_wrong_pair(app, tmp_path):
@@ -159,14 +162,18 @@ def test_auto_photo_keeps_caption_footer_when_capture_dates_are_hidden(app, tmp_
 
 
 @pytest.mark.parametrize("size", [(1600, 900), (900, 1600)])
-def test_auto_photo_footer_keeps_caption_left_date_right_without_overlap(app, tmp_path, monkeypatch, size):
+def test_auto_photo_places_captions_and_dates_without_overlap(app, tmp_path, monkeypatch, size):
     root = tmp_path / "photos"
     root.mkdir()
     for pid, captured in (("primary", "2024-07-01"), ("secondary", "2024-07-02")):
         _analyzed_photo(app, root, pid, size, captured + "T10:00:00+00:00")
     service = app.extensions["inktime_render_service"]
     plan = service.resolve_render_plan("primary", layout="auto_photo", secondary_photo_id="secondary")
-    assert plan["footer_alignment"] == {"caption": "left", "date": "right"}
+    pair = plan["layout"] == "photo_pair"
+    assert plan["footer_alignment"] == (
+        {"caption": "left_column", "date": "bottom_center"} if pair
+        else {"caption": "left", "date": "right"}
+    )
     calls = []
     original = ImageDraw.ImageDraw.text
 
@@ -176,9 +183,26 @@ def test_auto_photo_footer_keeps_caption_left_date_right_without_overlap(app, tm
 
     monkeypatch.setattr(ImageDraw.ImageDraw, "text", record)
     service._render_plan_image(plan)
-    for pid, key in (("primary", "primary_caption"), ("secondary", "secondary_caption")):
+    for index, (pid, key) in enumerate((("primary", "primary_caption"), ("secondary", "secondary_caption"))):
         rect = plan["geometry"][key]
         if rect is None:
+            continue
+        if pair:
+            photo = plan["geometry"]["photo_rects"][index]
+            date_rect = plan["geometry"]["info_rects"][index]
+            assert rect["x"] + rect["width"] < photo["x"]
+            assert date_rect["y"] >= photo["y"] + photo["height"]
+            assert any(
+                call[2] is None and rect["x"] <= call[0][0] < rect["x"] + rect["width"]
+                and rect["y"] <= call[0][1] < rect["y"] + rect["height"]
+                for call in calls
+            ), "Caption glyphs must reach their own left column"
+            captured = next(call for call in calls if call[2] == "mm" and call[0] == (
+                date_rect["x"] + date_rect["width"] // 2,
+                date_rect["y"] + date_rect["height"] // 2,
+            ))
+            assert captured[1] == plan["capture_date_labels"][pid]
+            assert captured[3] < date_rect["width"] - 8
             continue
         y = rect["y"] + rect["height"] / 2
         caption = next(call for call in calls if call[2] == "lm" and call[0] == (rect["x"] + 8, y))
@@ -196,7 +220,7 @@ def test_default_batch_photo_plans_reserve_distinct_portrait_sources(app, tmp_pa
     assert len(plans) == 2
     sources = [pid for plan in plans for pid in (plan["primary_photo_id"], plan["secondary_photo_id"])]
     assert len(set(sources)) == 4
-    assert all(plan["footer_alignment"] == {"caption": "left", "date": "right"} for plan in plans)
+    assert all(plan["footer_alignment"] == {"caption": "left_column", "date": "bottom_center"} for plan in plans)
 
 
 def test_auto_photo_pairs_local_scanner_photos_without_ai_rows(app, tmp_path):

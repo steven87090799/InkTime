@@ -1315,13 +1315,16 @@ class RenderService:
     ) -> Image.Image:
         fitted_size = compact_pair_fit_size(source.size, size, fit_mode=fit_mode)
         canvas = Image.new("RGB", size, "white")
-        with self._fit_photo(
+        fitted = self._fit_photo(
             source, photo, fitted_size, crop_x, crop_y, "contain" if fit_mode == "contain" else "cover"
-        ) as fitted:
+        )
+        try:
             canvas.paste(fitted, (
                 size[0] - fitted.width if align_right else 0,
                 (size[1] - fitted.height) // 2,
             ))
+        finally:
+            fitted.close()
         return canvas
 
     def _draw_compact_pair_captions(
@@ -1927,8 +1930,10 @@ class RenderService:
                     ) if compact_pair else
                     self._fit_photo(source, photo, image_size, crop_x, crop_y, fit_mode_key)
                 )
-                with first_fitted:
+                try:
                     canvas.paste(first_fitted, positions[0])
+                finally:
+                    first_fitted.close()
                 with second_source:
                     second_fitted = (
                         self._fit_compact_pair_photo(
@@ -1944,8 +1949,10 @@ class RenderService:
                             fit_mode_key,
                         )
                     )
-                    with second_fitted:
+                    try:
                         canvas.paste(second_fitted, positions[1])
+                    finally:
+                        second_fitted.close()
                 if compact_pair:
                     self._draw_compact_pair_captions(
                         canvas, geometry, (first_caption, second_caption), footer_parts or {}
