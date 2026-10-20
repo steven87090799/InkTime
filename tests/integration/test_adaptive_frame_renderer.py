@@ -171,7 +171,7 @@ def test_auto_photo_places_captions_and_dates_without_overlap(app, tmp_path, mon
     plan = service.resolve_render_plan("primary", layout="auto_photo", secondary_photo_id="secondary")
     pair = plan["layout"] == "photo_pair"
     assert plan["footer_alignment"] == (
-        {"caption": "left_column", "date": "below_caption"} if pair
+        {"caption": "left_column", "date": "bottom_vertical"} if pair
         else {"caption": "left", "date": "right"}
     )
     calls = []
@@ -198,10 +198,12 @@ def test_auto_photo_places_captions_and_dates_without_overlap(app, tmp_path, mon
             ]
             assert glyphs, "Caption glyphs must reach their own left column"
             dates = [call for call in calls if call[2] == "mt" and call[0][0] == rect["x"] + rect["width"] // 2]
-            assert [call[1] for call in dates] == ["2024", f"07/0{index + 1}"]
+            assert "".join(call[1] for call in dates) == plan["capture_date_labels"][pid]
+            assert all(len(call[1]) == 1 for call in dates)
+            assert min(call[0][1] for call in glyphs) <= rect["y"] + 12
             assert min(call[0][1] for call in dates) > max(call[0][1] for call in glyphs)
             assert all(call[3] <= rect["width"] - 8 for call in dates)
-            assert dates[-1][0][1] + 16 <= rect["y"] + rect["height"]
+            assert dates[-1][0][1] + 14 == rect["y"] + rect["height"] - 12
             continue
         y = rect["y"] + rect["height"] / 2
         caption = next(call for call in calls if call[2] == "lm" and call[0] == (rect["x"] + 8, y))
@@ -219,7 +221,7 @@ def test_default_batch_photo_plans_reserve_distinct_portrait_sources(app, tmp_pa
     assert len(plans) == 2
     sources = [pid for plan in plans for pid in (plan["primary_photo_id"], plan["secondary_photo_id"])]
     assert len(set(sources)) == 4
-    assert all(plan["footer_alignment"] == {"caption": "left_column", "date": "below_caption"} for plan in plans)
+    assert all(plan["footer_alignment"] == {"caption": "left_column", "date": "bottom_vertical"} for plan in plans)
 
 
 def test_auto_photo_pairs_local_scanner_photos_without_ai_rows(app, tmp_path):

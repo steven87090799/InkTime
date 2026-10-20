@@ -451,7 +451,7 @@ class RenderService:
             "auto_pair_source_sizes": auto_pair_source_sizes,
             "auto_pair_crop_policy": "center" if auto_pair_source_sizes is not None else None,
             "footer_alignment": (
-                {"caption": "left_column", "date": "below_caption"}
+                {"caption": "left_column", "date": "bottom_vertical"}
                 if auto_pair_source_sizes is not None
                 else {"caption": "left", "date": "right"} if auto_photo_requested else None
             ),
@@ -1338,12 +1338,12 @@ class RenderService:
             date_label = parts.get(str(record["photo_id"]), {}).get("date", "")
             self._draw_adaptive_pair_caption(
                 canvas, {**record, "capture_date_label": date_label}, caption_box,
-                left_side=True, date_below=True,
+                left_side=True, date_at_bottom=True,
             )
 
     def _draw_adaptive_pair_caption(
         self, canvas: Image.Image, record: dict[str, Any], box: Rect, *, left_side: bool,
-        date_below: bool = False,
+        date_at_bottom: bool = False,
     ) -> None:
         """Draw one frozen caption only inside its photo's authoritative region."""
         text = str(record["text"])
@@ -1358,16 +1358,11 @@ class RenderService:
             available_width = max(1, box.width - horizontal_padding * 2)
             available_height = max(0, box.height - vertical_padding * 2)
             y = box.y + vertical_padding
-            below_lines: list[str] = []
-            if date_below and date_label:
-                components = date_label.removesuffix("日").replace("年", "/").replace("月", "/").split("/")
-                below_lines = (
-                    [components[0], f"{int(components[1]):02}/{int(components[2]):02}"]
-                    if len(components) == 3 and all(part.isdigit() for part in components)
-                    else [date_label]
-                )
-                available_height = max(0, available_height - len(below_lines) * 16 - 12)
-            if date_label and not date_below:
+            date_characters = list("".join(date_label.split())) if date_at_bottom else []
+            date_line_height = 14
+            if date_characters:
+                available_height = max(0, available_height - len(date_characters) * date_line_height - 12)
+            if date_label and not date_at_bottom:
                 # The narrow side strip keeps the date small and gives the
                 # larger memory sentence most of the available height.
                 date_lines = date_label.replace("年", "年\n", 1).splitlines()
@@ -1413,16 +1408,16 @@ class RenderService:
                 x = box.x + horizontal_padding + (available_width - glyph_width) // 2 - bounds[0]
                 draw.text((x, y - bounds[1]), character, font=font, fill="#17221c")
                 y += line_height
-            if below_lines:
-                y += 12
+            if date_characters:
+                y = box.bottom - vertical_padding - len(date_characters) * date_line_height
                 date_font = ImageFont.truetype(str(font_path), 12)
-                for line in below_lines:
+                for character in date_characters:
                     draw.text(
                         (box.x + box.width // 2, y),
-                        self._fit_line(draw, line, date_font, box.width - 8),
+                        character,
                         font=date_font, fill="black", anchor="mt",
                     )
-                    y += 16
+                    y += date_line_height
             draw.line(
                 (box.right - 2, box.y + 12, box.right - 2, box.bottom - 12),
                 fill="#1d2822",
@@ -1895,8 +1890,6 @@ class RenderService:
                 )
             if indoor:
                 text_parts.extend([str(indoor.get("device_name", "")), "室內溫度濕度"])
-            if compact_pair:
-                text_parts.append("/")
             fonts = self._fonts("\n".join(part for part in text_parts if part))
             # 資訊區使用真正的面板白色，避免米白經抖動後變成彩色雜點。
             canvas = Image.new("RGB", (frame_width, frame_height), "white")

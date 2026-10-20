@@ -39,7 +39,7 @@ Config Store v5 是裝置本機儲存格式，不是所有 HTTP Manifest 的版�
 - 3 種 480×800 Profile：`safe_4c`（2bpp，96,000 bytes）、`gdep073e01_6c`、`gdey073d46_7c`（indexed4，192,000 bytes）。PhotoPainter 在裝置端轉為原生 800×480。
 - 12 個抖動選項（含別名／無抖動）：`natural_d`、`warm_vivid_c`、`none`、`floyd_steinberg`、`gooddisplay`、`photo_smooth`、`atkinson`、`bayer4`、`bayer8`、`nearest`、`bayer_ordered`、`serpentine_floyd_steinberg`。
 - 新安裝渲染預設為 `gdep073e01_6c`、`natural_d`、`auto_photo`、`landscape`、`cover`；新增裝置的預設 Profile 同為 `gdep073e01_6c`，仍必須另外與實板匹配。
-- `auto_photo` 在橫向相框配對直式照片時，依兩張照片校正後的比例分配寬度；每張左側保留 44 px 單欄短句，拍攝日期以小字兩行（年份、月／日）放在短句下方。照片使用完整 480 px 高度，不保留底部日期列；卡片間距 8 px、外邊界 4 px。`cover` 僅等比例置中填滿，不額外放大或使用主體、焦點與手動裁切資料；`contain` 保留完整照片。短句與日期依照片 ID 凍結，沒有短句時使用本機收藏文案，不新增模型請求。文字區在 D 模式固定黑白；遮罩每張 48 KB 並在出圖後明確關閉。預覽、比較圖及 Release 共用凍結比例與遮罩；既有 Release 不重繪，其他明確選擇的雙圖版型與直向相框版面維持原有規則。
+- `auto_photo` 在橫向相框配對直式照片時，依兩張照片校正後的比例分配寬度；每張左側保留 44 px 文字欄；直排短句靠上、較小字的完整拍攝日期直排靠下，預留日期高度以避免重疊。照片使用完整 480 px 高度，不保留底部日期列；卡片間距 8 px、外邊界 4 px。`cover` 僅等比例置中填滿，不額外放大或使用主體、焦點與手動裁切資料；`contain` 保留完整照片。短句與日期依照片 ID 凍結，沒有短句時使用本機收藏文案，不新增模型請求。文字區在 D 模式固定黑白；遮罩每張 48 KB 並在出圖後明確關閉。預覽、比較圖及 Release 共用凍結比例與遮罩；既有 Release 不重繪，其他明確選擇的雙圖版型與直向相框版面維持原有規則。
 - D 自然膚色是自訂配方，以 epdoptimize 1.3.0 的 balanced 為基礎：linear-sRGB 白平衡 gains `(1, 0.985, 1.16)` 並正規化中性亮度、HSL 飽和度微降 5%（配方 v2）、LAB display 動態範圍、97 百分位亮部保白（最低 luma 200、最高飽和度 0.22）、RGB 配色與蛇形 Floyd–Steinberg。六色面板使用 upstream 的 aitjcize appearance 色盤，輸出維持原有裝置色碼；亮部保白可能犧牲細微明暗。原版與舊 C 微暖增豔仍可切換。
 - D 調色以最多 2048 像素的分塊運算，輸入上限為一張 480×800 已排版圖片；不載入整個照片庫、不保留影像或 diffusion table 的全域快取，也不新增 Node 常駐程序或執行期套件。每張圖的工作緩衝在該次呼叫結束後釋放；NAS 實際 RSS／CPU 峰值仍需實機量測。文字遮罩保持黑白；預覽與 Release 共用 `encode_image`，Release 保存配方版本與色盤。
 - Migration 71 僅轉換 `render.dither=warm_vivid_c` 且沒有 `updated_by` 的舊預設；保留管理員選項、既有 Release 與快取排程內容。更新後的新預覽與新出圖才使用 D，不強制重繪或重送已快取的照片。
