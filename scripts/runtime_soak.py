@@ -17,6 +17,7 @@ from datetime import datetime, timezone
 from hashlib import sha256
 
 import psutil
+from PIL import Image
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 if str(ROOT_DIR) not in sys.path:
@@ -137,6 +138,41 @@ def _snapshot(app, process: psutil.Process) -> dict[str, Any]:
 
 
 def _seed_release(app, device_id: str, index: int) -> dict[str, Any]:
+    source_root = app.config["INKTIME_RELEASE_DIR"].parent / "soak-photo-sources"
+    source_root.mkdir(exist_ok=True)
+    source_path = source_root / "safe-source.jpg"
+    if not source_path.exists():
+        Image.new("RGB", (480, 800), "white").save(source_path)
+        source_sha = sha256(source_path.read_bytes()).hexdigest()
+        photos = app.extensions["inktime_photo_repository"]
+        library_id = photos.ensure_library("Soak source", source_root)
+        now = datetime.now(timezone.utc).isoformat()
+        with app.extensions["inktime_database"].transaction() as connection:
+            connection.execute(
+                """INSERT INTO photos(id,library_id,relative_path,sha256,width,height,status,eligible,
+                       lifecycle_status,exclusion_status,local_features_status,created_at,updated_at)
+                   VALUES (?,?,?,?,480,800,'analyzed',1,'active','eligible','complete',?,?)""",
+                ("soak-safe-source", library_id, source_path.name, source_sha, now, now),
+            )
+        analysis = {
+            "schema_version": 6, "types": ["其他"], "memory_score": 50,
+            "visual_score": 50, "special_level": 0, "side_caption": "留白也有重量。",
+            "content_filter": {
+                code: {"detected": False, "confidence": 1.0}
+                for code in ("sexualized_content", "explicit_nudity", "female_glamour_portrait")
+            },
+            "display_exclusion": {"category": "none", "confidence": 1.0},
+            "visual_orientation": {
+                "rotation_cw": 0, "confidence": 1.0, "ambiguous": False,
+                "evidence": ["horizon_level"],
+            },
+        }
+        photos.save_analysis(
+            "soak-safe-source", None, "single", "soak-fixture", "fixture",
+            analysis, json.dumps(analysis, ensure_ascii=False),
+            ranking_score=50, final_ranking_score=50,
+        )
+    source_sha = sha256(source_path.read_bytes()).hexdigest()
     release_id = f"soak-release-{index:06d}"
     payload = f"soak-payload-{index}".encode()
     digest = sha256(payload).hexdigest()
@@ -149,6 +185,13 @@ def _seed_release(app, device_id: str, index: int) -> dict[str, Any]:
         "pixel_format": "2bpp",
         "created_at": datetime.now(timezone.utc).isoformat(),
         "files": [{"name": "photo_1.bin", "size": len(payload), "sha256": digest}],
+        "render_options": {
+            "render_plans": [{
+                "primary_photo_id": "soak-safe-source", "primary_sha256": source_sha,
+                "secondary_photo_id": None, "secondary_sha256": None,
+            }],
+            "photo_orientations": [{"photo_id": "soak-safe-source", "orientation": {"rotation_degrees": 0}}],
+        },
     }
     release_dir = app.config["INKTIME_RELEASE_DIR"] / release_id
     release_dir.mkdir(parents=True)

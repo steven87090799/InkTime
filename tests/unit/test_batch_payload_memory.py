@@ -120,7 +120,7 @@ def test_payload_memory_real_image_100_photo_jsonl(tmp_path):
             assert payload["url"] == "/v1/chat/completions"
             assert payload["body"]["model"] == "gpt-5.6-luna"
             assert payload["body"]["reasoning_effort"] == "none"
-            assert payload["body"]["messages"][0]["content"].startswith("你是 InkTime")
+            assert payload["body"]["messages"][0]["content"].startswith("分析照片，回傳 JSON")
             assert payload["body"]["response_format"]["type"] == "json_schema"
     assert line_count == 100
     assert len(custom_ids) == 100

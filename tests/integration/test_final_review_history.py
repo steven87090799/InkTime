@@ -6,6 +6,7 @@ import time
 
 import pytest
 
+from inktime.app.domain.analysis.scoring import SEMANTIC_SCORE_KIND
 from tests.unit.test_analysis_schema import valid_result
 
 
@@ -28,8 +29,8 @@ def _insert_photo(
             """
             INSERT INTO photos(id,library_id,relative_path,status,captured_at,captured_date,
                 captured_month_day,capture_date_status,eligible,lifecycle_status,
-                local_candidate_score,created_at,updated_at)
-            VALUES (?,?,?,'analyzed',?,?,?,'valid',?, 'active',?,?,?)
+                local_candidate_score,local_features_status,created_at,updated_at)
+            VALUES (?,?,?,'analyzed',?,?,?,'valid',?, 'active',?,'complete',?,?)
             """,
             (
                 photo_id,
@@ -47,7 +48,7 @@ def _insert_photo(
     photos.save_analysis(
         photo_id,
         None,
-        "local",
+        "test-ai",
         "local",
         "local-quality-v3",
         valid_result(
@@ -58,6 +59,7 @@ def _insert_photo(
             side_caption="歷史選片測試短句。",
         ),
         "{}",
+        score_kind=SEMANTIC_SCORE_KIND,
         ranking_score=score,
         final_ranking_score=score,
     )
@@ -127,14 +129,14 @@ def test_history_selection_synthetic_rows_is_bounded_sqlite_work(app, tmp_path, 
         connection.executemany(
             "INSERT INTO photos(id,library_id,relative_path,status,captured_at,captured_date,"
             "captured_month_day,capture_date_status,lifecycle_status,eligible,local_candidate_score,"
-            "created_at,updated_at) VALUES (?,?,?,'analyzed',?,?,?,'valid','active',1,75,?,?)",
+            "local_features_status,created_at,updated_at) VALUES (?,?,?,'analyzed',?,?,?,'valid','active',1,75,'complete',?,?)",
             rows,
         )
         connection.commit()
     photos.save_analysis(
         "selected",
         None,
-        "local",
+        "test-ai",
         "local",
         "synthetic",
         valid_result(
@@ -145,6 +147,7 @@ def test_history_selection_synthetic_rows_is_bounded_sqlite_work(app, tmp_path, 
             side_caption="這是一段測試回憶短句。",
         ),
         "{}",
+        score_kind=SEMANTIC_SCORE_KIND,
         ranking_score=75,
         final_ranking_score=75,
     )

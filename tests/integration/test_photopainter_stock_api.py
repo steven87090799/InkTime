@@ -7,6 +7,7 @@ from PIL import Image
 
 from inktime.app.services.stock_transport import StockUploadResponse
 from tests.conftest import create_admin, csrf, login
+from tests.security.test_device_release_authorization import certified_release_metadata
 
 
 @dataclass
@@ -30,6 +31,7 @@ def test_admin_stock_display_upload_reports_acceptance_without_claiming_completi
         [("stock-photo", Image.new("RGB", (480, 800), "red"))],
         profile_key="safe_4c",
         activate=False,
+        metadata=certified_release_metadata(app),
     )
     release = app.extensions["inktime_release_coordinator"].publish(
         [staged], created_by="stock-api-test", photo_ids=[]

@@ -229,7 +229,7 @@ def test_review_state_invariants_survive_transitions_and_reanalysis(client, app)
         state = connection.execute(
             "SELECT eligible,exclusion_status,manual_override FROM photos WHERE id=?", (keep_photo,)
         ).fetchone()
-    assert tuple(state) == (1, "pending_review", 1)
+    assert tuple(state) == (0, "pending_review", 1)
 
     excluded = client.patch(
         f"/api/v1/review/photos/{keep_photo}",
@@ -296,4 +296,4 @@ def test_review_state_invariants_survive_transitions_and_reanalysis(client, app)
         state = connection.execute(
             "SELECT eligible,exclusion_status,manual_override FROM photos WHERE id=?", (pending_photo,)
         ).fetchone()
-    assert tuple(state) == (1, "pending_review", 1)
+    assert tuple(state) == (0, "pending_review", 1)

@@ -1,6 +1,6 @@
 # InkTime｜照片分析與電子紙回憶管理平台
 
-> 本分支文件更新 2026-10-17；原始碼基準以目前 checkout 為準；部署中的版本請從 Web「診斷」頁確認 Git revision。SQLite Migration 70、AI Schema v5、ESP32 2.8.9（HTTP JSON 接收修復；尚未刷機）；詳細版本、預設值與驗收邊界見[現行基線](docs/reference/CURRENT_STATE_ZH_TW.md)。
+> 本分支文件更新 2026-10-21；原始碼基準以目前 checkout 為準；部署中的版本請從 Web「診斷」頁確認 Git revision。SQLite Migration 70、AI Schema v6、ESP32 2.8.9（HTTP JSON 接收修復；尚未刷機）；詳細版本、預設值與驗收邊界見[現行基線](docs/reference/CURRENT_STATE_ZH_TW.md)。
 
 [English README](README.en.md) · [HTML 手冊與文件入口](USER_MANUAL.html) · [完整 Markdown 文件地圖](docs/README.md) · [完整程式流程圖](#完整程式流程圖從啟動照片分析到電子紙顯示) · [快速開始](docs/getting-started/QUICK_START_ZH_TW.md) · [電子紙模擬器](docs/guides/EPAPER_SIMULATOR_ZH_TW.md) · [N100 Docker 部署規格](docs/operations/DOCKER_GUIDE_ZH_TW.md) · [完整上線指南](docs/operations/PRODUCTION_DEPLOYMENT_GUIDE_ZH_TW.md) · [NAS Tag 更新](docs/operations/NAS_TAG_DEPLOYMENT_ZH_TW.md) · [ESP32／電子紙指南](docs/devices/ESP32_GUIDE_ZH_TW.md) · [ESP32 自動配對與憑證](docs/devices/ESP32_AUTOMATIC_PAIRING_ZH_TW.md) · [Waveshare PhotoPainter](docs/devices/WAVESHARE_PHOTOPAINTER_ZH_TW.md) · [ESP32 TLS／配網信任根](docs/devices/ESP32_TLS_PROVISIONING_ZH_TW.md) · [OpenRouter Provider](docs/providers/OPENROUTER_ZH_TW.md) · [模型 Benchmark](docs/providers/MODEL_BENCHMARK_ZH_TW.md) · [資源與低功耗](docs/operations/N100_RESOURCE_GUIDE_ZH_TW.md) · [Log 指南](docs/operations/LOGGING_GUIDE_ZH_TW.md)
 
@@ -22,12 +22,12 @@ InkTime 會在本地掃描相簿、擷取 EXIF 與品質特徵，先辨識重複
 
 ## 分析模式與資料去向
 
-新安裝可先完成掃描、選片、模擬與電子紙發布，再決定要不要使用 AI。只設定 API Key 不會切換分析模式；模式位於「設定」的 `analysis.execution_mode`。
+新安裝可先完成掃描與本機品質檢查；正式照片發布須先完成 v6 AI 視覺安全分析。只設定 API Key 不會切換分析模式；模式位於「設定」的 `analysis.execution_mode`。
 
 | 模式 | 一般背景分析 | 手動照片 AI | 費用與資料 |
 |---|---|---|---|
 | `disabled` | 不建立新的分析工作 | 不允許 | 既有照片與 Release 仍可讀 |
-| `local_only`（預設） | 本機 EXIF、品質與選片 | 不允許 | 正常照片流程不讀 Provider，不產生模型 Token |
+| `local_only`（預設） | 本機 EXIF、品質與選片 | 不允許 | 正常照片流程不讀 Provider、不產生模型 Token；沒有可正式發布的照片 |
 | `local_with_manual_ai` | 本機分析與選片 | 明確操作時允許 | 手動送出時才可能傳圖片與產生費用 |
 | `automatic_ai` | 依設定允許 AI 工作 | 允許 | 受 Provider、篩選、照片數與預算限制 |
 
@@ -37,7 +37,7 @@ Provider 連線／合成圖片診斷有自己的操作入口，圖片測試、�
 
 ### 現行分析與排名
 
-新回應使用 [Schema v5](docs/VISION_SCHEMA.md)，包含 `types`、`memory_score`、`visual_score`、`special_level`、`side_caption`、`content_filter`、`visual_orientation`。不要求新回應提供長描述、人物數、構圖安全區或特殊代碼；既有 v4 資料按原版本讀取，不因升級重新付費。
+新回應使用 [Schema v6](docs/VISION_SCHEMA.md)，包含 `types`、`memory_score`、`visual_score`、`special_level`、`side_caption`、`content_filter`、`display_exclusion`、`visual_orientation`。不要求新回應提供長描述、人物數、構圖安全區或特殊代碼；既有 v4 資料按原版本讀取，不因升級重新付費。
 
 ```text
 基礎分 = round(回憶分 × 0.67 + 視覺分 × 0.33, 2)
@@ -58,7 +58,7 @@ Provider 連線／合成圖片診斷有自己的操作入口，圖片測試、�
 
 - 以 SHA-256、pHash、dHash、EXIF、亮度、對比、模糊與曝光做本地預處理；符合內容與請求相容性的結果可重用，避免重複呼叫模型。
 - 512／1024／1600px 內容雜湊縮圖快取；預設不傳原始 4K／8K 圖片。
-- 單一分析請求回傳 Schema v5：類型、回憶與視覺分數、特殊程度、8–16 字短文案、內容分類與方向；本機抽取 JSON 後嚴格驗證，不追加模型修復或長描述請求。既有 v4 描述與結果保留可讀。
+- 單一分析請求回傳 Schema v6：類型、回憶與視覺分數、特殊程度、依照片生成且不超過 20 字的一句短文案、內容分類與方向；本機抽取 JSON 後嚴格驗證，不追加模型修復或長描述請求。既有 v4 描述與結果保留可讀。
 - 正式 OpenRouter Provider contract：受控 routing／privacy options、reasoning 與 session routing；OpenRouter 不進入 InkTime Batch 路徑。完整設定見 [OpenRouter Provider 文件](docs/providers/OPENROUTER_ZH_TW.md)。
 - 每筆 usage 區分 `provider_reported`／`estimated`／`unknown`；unknown 不會被當作 US$0，預算與新請求採 fail-closed。Token、cache 與 request-size 指標見 [Token 與成本指南](docs/reference/TOKEN_COST_GUIDE_ZH_TW.md)。
 - 提供預設 offline、bounded、可重現的 [模型 Benchmark](docs/providers/MODEL_BENCHMARK_ZH_TW.md)；不會修改 production DB、analysis、release 或 AI cache。
@@ -282,7 +282,7 @@ flowchart TD
     VISION --> OUTCOME{"回應狀態"}
     OUTCOME -->|不確定是否收費| UNKNOWN["保存未知狀態與保留額；阻擋自動重送"]
     OUTCOME -->|收到| SAVE["保存原始回應與 usage；可恢復解析"]
-    SAVE --> JSON["本機 JSON 抽取與嚴格 v5 驗證"]
+    SAVE --> JSON["本機 JSON 抽取與嚴格 v6 驗證"]
     JSON --> VALID{"有效？"}
     VALID -->|否| FAILED["記錄 Schema 錯誤；不呼叫模型修復"]
     VALID -->|是| SCORE["保存快取、semantic 結果與固定排名"]
@@ -730,11 +730,11 @@ docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build
 管理介面的「設定」與「評分」頁提供：
 
 - `model.analysis_model`：全域單次分析模型；Provider 專屬 `model` 非空時優先。`model.low_model`／`model.high_model` 僅保留舊資料相容。
-- 「評分」頁：現行 Schema v5 評分規則、固定排名公式、版本歷史與單張測試台。
+- 「評分」頁：現行 Schema v6 評分規則、固定排名公式、版本歷史與單張測試台。
 - `analysis.stage_two_threshold`：舊版兩階段設定的讀取相容欄位，不會恢復第二次圖片請求。
 - `render.memory_threshold`：舊設定相容欄位，自動 AI 選片不使用它。
 
-完成現行 v5 或相容 v4 分析的資料列以 `score_kind=semantic` 標記，模型只輸出 `memory_score`、`visual_score` 與特殊程度；Server 以 `ranking-v5-ai-first` 的固定回憶 67%、視覺 33%、本機品質 0% 計算基礎分，再套用特殊程度與最愛提升。本機品質是 candidate qualification／quality gate，不是 ranking weight；本機影像分析以 `score_kind=local_quality` 標記，只保存 `local_score` 與本機特徵，正式語意排名欄位為 `NULL`。`automatic_ai` 要求本機特徵與有效的 v5／v4 semantic 分析都完成，不以 local quality 分數補位或與 semantic 分數混比。無法可靠辨識的歷史列標為 `legacy`；v1–v3 歷史分數不直接轉成現行 semantic 排名。測試台照片只在暫存目錄停留，但模型 Token 與費用仍會記入成本頁。完整資料流見 [專案架構與評分流程](docs/architecture/ARCHITECTURE_ZH_TW.md)。
+完成現行 v6 或相容 v4/v5 分析的資料列以 `score_kind=semantic` 標記，模型只輸出 `memory_score`、`visual_score` 與特殊程度；Server 以 `ranking-v5-ai-first` 的固定回憶 67%、視覺 33%、本機品質 0% 計算基礎分，再套用特殊程度與最愛提升。本機品質是 candidate qualification／quality gate，不是 ranking weight；本機影像分析以 `score_kind=local_quality` 標記，只保存 `local_score` 與本機特徵，正式語意排名欄位為 `NULL`。`automatic_ai` 要求本機特徵與有效的 v6 semantic 安全分析都完成，不以 local quality 分數補位或與 semantic 分數混比。無法可靠辨識的歷史列標為 `legacy`；v1–v3 歷史分數不直接轉成現行 semantic 排名。測試台照片只在暫存目錄停留，但模型 Token 與費用仍會記入成本頁。完整資料流見 [專案架構與評分流程](docs/architecture/ARCHITECTURE_ZH_TW.md)。
 
 ## Token 與成本控制
 

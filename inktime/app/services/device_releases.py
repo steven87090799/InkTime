@@ -17,6 +17,7 @@ from typing import Any, Mapping
 
 from inktime.app.core.paths import UnsafePathError
 from inktime.app.db import Database
+from inktime.app.domain.photos.orientation import original_exif_orientation, resolve_effective_orientation
 from inktime.app.domain.rendering import DeviceTestReleaseStore
 from inktime.app.domain.rendering.release import (
     DEVICE_TEST_INDEX_DIRECTORY,
@@ -26,6 +27,7 @@ from inktime.app.domain.rendering.release import (
     STOCK_DIRECT_TEST_DIRECTORY,
     release_metadata_guard,
 )
+from inktime.app.repositories.render_candidates import RenderCandidateRepository
 
 
 _RELEASE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
@@ -244,6 +246,76 @@ class DeviceReleaseService:
             raise ValueError("Release Manifest 身分不一致")
         return self.release_root / release_id, identity, manifest
 
+    @staticmethod
+    def _formal_photo_versions(manifest: Mapping[str, Any]) -> dict[str, str] | None:
+        """Read immutable source identities from a formal renderer manifest."""
+        options = manifest.get("render_options")
+        plans = options.get("render_plans") if isinstance(options, dict) else None
+        if not isinstance(plans, list) or not plans:
+            return None
+        versions: dict[str, str] = {}
+        for plan in plans:
+            if not isinstance(plan, dict):
+                return None
+            for role in ("primary", "secondary"):
+                photo_id = plan.get(f"{role}_photo_id")
+                expected_sha = plan.get(f"{role}_sha256")
+                if role == "secondary" and photo_id is None and expected_sha is None:
+                    continue
+                if not isinstance(photo_id, str) or not photo_id:
+                    return None
+                if not isinstance(expected_sha, str) or _PAYLOAD_SHA256.fullmatch(expected_sha) is None:
+                    return None
+                digest = expected_sha.lower()
+                if photo_id in versions and versions[photo_id] != digest:
+                    return None
+                versions[photo_id] = digest
+                if len(versions) > RenderCandidateRepository.MAX_REQUESTED:
+                    return None
+        return versions or None
+
+    def _formal_content_is_current(self, manifest: Mapping[str, Any]) -> bool:
+        """A published binary is downloadable only while every source stays safe."""
+        versions = self._formal_photo_versions(manifest)
+        if versions is None:
+            return False
+        options = manifest.get("render_options")
+        orientations = options.get("photo_orientations") if isinstance(options, dict) else None
+        if not isinstance(orientations, list):
+            return False
+        rotations: dict[str, int] = {}
+        for item in orientations:
+            if not isinstance(item, dict) or not isinstance(item.get("photo_id"), str):
+                return False
+            orientation = item.get("orientation")
+            rotation = orientation.get("rotation_degrees") if isinstance(orientation, dict) else None
+            if isinstance(rotation, bool) or not isinstance(rotation, int) or rotation not in {0, 90, 180, 270}:
+                return False
+            photo_id = item["photo_id"]
+            if photo_id in rotations and rotations[photo_id] != rotation:
+                return False
+            rotations[photo_id] = rotation
+        if not versions.keys() <= rotations.keys():
+            return False
+        try:
+            rows = RenderCandidateRepository(self.database).require_for_execution_mode(
+                versions, "automatic_ai"
+            )
+            for row in rows:
+                effective = resolve_effective_orientation(
+                    exif_orientation=original_exif_orientation(row),
+                    manual_rotation_cw=row.get("manual_orientation_rotation_cw"),
+                    ai_rotation_cw=row.get("visual_orientation_rotation_cw"),
+                    ai_confidence=row.get("visual_orientation_confidence"),
+                    ai_ambiguous=bool(row.get("visual_orientation_ambiguous")),
+                )
+                if (str(row.get("sha256") or "").lower() != versions[str(row["id"])]
+                        or effective.rotation_degrees != rotations[str(row["id"])]):
+                    return False
+        except (ValueError, TypeError, KeyError):
+            return False
+        return len(rows) == len(versions)
+
     def _source(
         self,
         *,
@@ -322,6 +394,11 @@ class DeviceReleaseService:
             return DeviceReleaseAuthorization(False, None, "unsafe_release_path", release_id)
         if str(manifest.get("render_profile")) != profile_key:
             return DeviceReleaseAuthorization(False, None, "profile_mismatch", release_id)
+        options = manifest.get("render_options")
+        plans = options.get("render_plans") if isinstance(options, dict) else None
+        explicit_test_upload = source == "test_assignment" and not plans
+        if not explicit_test_upload and not self._formal_content_is_current(manifest):
+            return DeviceReleaseAuthorization(False, None, "photo_ineligible", release_id)
         return DeviceReleaseAuthorization(
             allowed=True,
             source=source,
@@ -940,6 +1017,14 @@ class DeviceReleaseService:
             or authorization.release_dir_identity is None
         ):
             raise PermissionError("Release 未授權")
+        manifest = authorization.manifest or {}
+        options = manifest.get("render_options")
+        plans = options.get("render_plans") if isinstance(options, dict) else None
+        explicit_test_upload = authorization.source in {
+            "test_assignment", "stock_direct_test", "stock_direct_test_expired",
+        } and not plans
+        if not explicit_test_upload and not self._formal_content_is_current(manifest):
+            raise ValueError("Release 照片已排除、變更或等待人工判斷")
         entry = self.payload_entry_for_authorization(
             authorization, filename=filename, allow_multiple=allow_multiple
         )

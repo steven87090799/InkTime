@@ -55,6 +55,11 @@ def test_pair_caption_plan_keeps_two_independent_records_and_fingerprint(app, tm
         "a", layout="photo_pair_caption", secondary_photo_id="b", orientation="landscape"
     ).size == (480, 800)
     assert portrait["orientation"] != landscape["orientation"]
+    for photo_id in ("a", "b"):
+        app.extensions["inktime_photo_repository"].save_analysis(
+            photo_id, None, "single", "test-ai", "test-model",
+            valid_result(types=["其他"]), "{}",
+        )
     settings = app.extensions["inktime_settings_repository"]
     settings.update("render.layout", "photo_pair_caption", changed_by="test", source_ip="127.0.0.1")
     release = service.publish(["a", "b"], "test")
@@ -95,7 +100,7 @@ def test_pair_caption_plan_preserves_ai_and_local_provenance(app, tmp_path):
         "model": "caption-model",
         "stage": "single",
         "prompt_version": "caption-test-v1",
-        "schema_version": 5,
+        "schema_version": 6,
     }
     assert first["source_updated_at"]
     assert second["photo_id"] == "local-b"

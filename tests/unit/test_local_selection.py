@@ -8,6 +8,8 @@ from PIL import Image
 import pytest
 
 from inktime.app.services.local_selection import LocalSelectionPolicy
+from inktime.app.domain.analysis.scoring import SEMANTIC_SCORE_KIND
+from tests.unit.test_analysis_schema import valid_result
 
 
 @pytest.mark.parametrize("mode", ["local_only", "local_with_manual_ai", "disabled"])
@@ -52,6 +54,11 @@ def _candidate(app, root: Path, photo_id: str, score: float, month_day: str):
                 "2020-01-01",
             ),
         )
+    photos.save_analysis(
+        photo_id, None, "test-model", "local", "test",
+        valid_result(types=["其他"]), "{}",
+        score_kind=SEMANTIC_SCORE_KIND, ranking_score=score, final_ranking_score=score,
+    )
 
 
 def test_local_policy_is_bounded_deterministic_and_pairs_different_photos(app, tmp_path):

@@ -6,6 +6,7 @@ from PIL import Image
 import pytest
 
 from tests.conftest import create_admin, csrf, login
+from tests.security.test_device_release_authorization import certified_release_metadata
 
 
 def _seed_photo(app, photo_id: str = "photo") -> None:
@@ -21,8 +22,11 @@ def _seed_photo(app, photo_id: str = "photo") -> None:
 
 
 def _published_release(app, photo_id: str = "photo") -> dict:
+    metadata = certified_release_metadata(app)
+    source_photo_id = metadata["render_plans"][0]["primary_photo_id"]
     manifest = app.extensions["inktime_release_publisher"].publish(
-        [(photo_id, Image.new("RGB", (480, 800), "white"))], profile_key="safe_4c", activate=False
+        [(source_photo_id, Image.new("RGB", (480, 800), "white"))],
+        profile_key="safe_4c", activate=False, metadata=metadata,
     )
     return app.extensions["inktime_release_coordinator"].publish([manifest], created_by="test", photo_ids=[])[
         0

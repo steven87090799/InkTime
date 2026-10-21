@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from hashlib import sha256
 import inspect
 import json
 import shutil
+from uuid import uuid4
 
 from PIL import Image
 import pytest
@@ -11,12 +13,41 @@ import pytest
 from inktime.app.core.paths import UnsafePathError
 from inktime.app.repositories.resilience import ResilienceRepository
 from inktime.app.services.device_releases import payload_entry_from_manifest
+from tests.unit.test_analysis_schema import valid_result
+
+
+def certified_release_metadata(app) -> dict:
+    photo_id = f"security-{uuid4().hex}"
+    source_root = app.config["INKTIME_RELEASE_DIR"].parent / "security-photo-sources"
+    source_root.mkdir(exist_ok=True)
+    source_path = source_root / f"{photo_id}.jpg"
+    Image.new("RGB", (480, 800), "white").save(source_path)
+    digest = sha256(source_path.read_bytes()).hexdigest()
+    photos = app.extensions["inktime_photo_repository"]
+    library_id = photos.ensure_library("Security release sources", source_root)
+    with app.extensions["inktime_database"].transaction() as connection:
+        connection.execute(
+            """INSERT INTO photos(id,library_id,relative_path,sha256,width,height,status,eligible,
+                   lifecycle_status,exclusion_status,local_features_status,created_at,updated_at)
+               VALUES (?,?,?,?,480,800,'analyzed',1,'active','eligible','complete',?,?)""",
+            (photo_id, library_id, source_path.name, digest,
+             datetime.now(timezone.utc).isoformat(), datetime.now(timezone.utc).isoformat()),
+        )
+    analysis = valid_result(types=["其他"])
+    photos.save_analysis(
+        photo_id, None, "single", "security-test", "test-model", analysis,
+        json.dumps(analysis, ensure_ascii=False), ranking_score=80, final_ranking_score=80,
+    )
+    return {"render_plans": [{"primary_photo_id": photo_id, "primary_sha256": digest,
+                              "secondary_photo_id": None, "secondary_sha256": None}],
+            "photo_orientations": [{"photo_id": photo_id, "orientation": {"rotation_degrees": 0}}]}
 
 
 def _publish(app, name: str, *, activate: bool, count: int = 1) -> dict:
     manifest = app.extensions["inktime_release_publisher"].publish(
         [(name if count == 1 else f"{name}-{index}", Image.new("RGB", (480, 800), "white")) for index in range(count)],
         activate=activate,
+        metadata=certified_release_metadata(app),
     )
     with app.extensions["inktime_database"].transaction() as connection:
         connection.execute(
@@ -45,6 +76,44 @@ def _publish(app, name: str, *, activate: bool, count: int = 1) -> dict:
 
 def _headers(token: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
+
+
+@pytest.mark.parametrize("change", ["rotation", "pending", "exclude"])
+def test_download_rechecks_source_safety_and_frozen_rotation(client, app, change):
+    from tests.conftest import create_admin
+
+    actor = create_admin(app)
+    device_id, token = app.extensions["inktime_device_repository"].create("safety-recheck")
+    release = _publish(app, "safety-recheck", activate=True)
+    photo_id = release["render_options"]["render_plans"][0]["primary_photo_id"]
+    service = app.extensions["inktime_device_release_service"]
+    authorization = service.authorize_release_for_device(
+        device_id=device_id, profile_key="safe_4c", release_id=release["release_id"],
+    )
+    assert authorization.allowed
+    url = f"/api/device/v1/releases/{release['release_id']}/files/{release['files'][0]['name']}"
+    response = client.get(url, headers=_headers(token))
+    assert response.status_code == 200
+    response.close()
+    photos = app.extensions["inktime_photo_repository"]
+    if change == "rotation":
+        photos.set_manual_orientation(photo_id, 90, actor)
+    elif change == "pending":
+        result = valid_result(display_exclusion={"category": "none", "confidence": 0.2})
+        photos.save_analysis(photo_id, None, "single", "security-test", "test-model", result, "{}")
+    else:
+        photos.set_exclusion(photo_id, action="exclude", changed_by=actor)
+    assert client.get(url, headers=_headers(token)).status_code == 404
+    with pytest.raises(ValueError, match="照片已排除、變更或等待人工判斷"):
+        service.read_payload(authorization, release["files"][0]["name"])
+
+
+def test_formal_release_requires_frozen_orientation_for_every_source(app):
+    release = _publish(app, "orientation-evidence", activate=True)
+    service = app.extensions["inktime_device_release_service"]
+    assert service._formal_content_is_current(release)
+    del release["render_options"]["photo_orientations"]
+    assert not service._formal_content_is_current(release)
 
 
 @pytest.mark.parametrize("count", [1, 2, 5])

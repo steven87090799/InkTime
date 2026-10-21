@@ -44,6 +44,7 @@ V5_SEMANTIC_INTEGRITY_FIELDS = frozenset(
         "visual_orientation",
     }
 )
+V6_SEMANTIC_INTEGRITY_FIELDS = V5_SEMANTIC_INTEGRITY_FIELDS | {"display_exclusion"}
 
 # Keep the public name for callers that only need to describe the legacy
 # contract; semantic_repair_snapshot() dispatches by schema version below.
@@ -147,10 +148,11 @@ def repair_source_object(raw: str) -> dict[str, Any] | None:
 def semantic_repair_snapshot(source: dict[str, Any] | None) -> dict[str, Any]:
     """Require all photo semantics before allowing text-only repair."""
 
+    version = (source or {}).get("schema_version")
     fields = (
-        V5_SEMANTIC_INTEGRITY_FIELDS
-        if (source or {}).get("schema_version") == 5
-        else LEGACY_V4_SEMANTIC_INTEGRITY_FIELDS
+        V6_SEMANTIC_INTEGRITY_FIELDS if version == 6 else
+        V5_SEMANTIC_INTEGRITY_FIELDS if version == 5 else
+        LEGACY_V4_SEMANTIC_INTEGRITY_FIELDS
     )
     missing = sorted(fields - set(source or {}))
     if source is None or missing:

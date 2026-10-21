@@ -357,7 +357,7 @@ def test_local_detail_does_not_render_compatibility_values_as_ai_scores(client, 
     assert photo_id not in filtered.get_data(as_text=True)
 
 
-def test_local_only_and_ai_disabled_use_local_selection_without_semantic_rank(app, tmp_path):
+def test_local_only_and_ai_disabled_hold_local_only_photo_until_safety_analysis(app, tmp_path):
     photo_id = _scan_one(app, tmp_path / "local-selection")
     with app.extensions["inktime_database"].session() as connection:
         connection.execute(
@@ -380,7 +380,7 @@ def test_local_only_and_ai_disabled_use_local_selection_without_semantic_rank(ap
     render_service = app.extensions["inktime_render_service"]
     for mode in ("local_only", "disabled"):
         settings.update("analysis.execution_mode", mode, changed_by="test", source_ip="127.0.0.1")
-        assert render_service.select_candidates(quantity=1) == [photo_id]
+        assert render_service.select_candidates(quantity=1) == []
     with app.extensions["inktime_database"].session() as connection:
         row = connection.execute(
             "SELECT score_kind,ranking_score,semantic_score,local_score FROM photo_analysis WHERE photo_id=?",
@@ -390,6 +390,10 @@ def test_local_only_and_ai_disabled_use_local_selection_without_semantic_rank(ap
     assert row["ranking_score"] is None
     assert row["semantic_score"] is None
     assert row["local_score"] is not None
+    _save_semantic(app, photo_id, 80)
+    for mode in ("local_only", "disabled"):
+        settings.update("analysis.execution_mode", mode, changed_by="test", source_ip="127.0.0.1")
+        assert render_service.select_candidates(quantity=1) == [photo_id]
 
 
 def test_automatic_ai_never_fills_shortage_with_local_only_photos(app, tmp_path):

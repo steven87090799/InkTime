@@ -974,7 +974,7 @@ def test_side_caption_length_validation_uses_current_plus_partial_update(client,
     assert invalid.status_code == 200
     assert invalid.json["valid"] is False
     assert "side_caption_min_chars" in invalid.json["validation_errors"][0]
-    assert app.extensions["inktime_settings_repository"].get("analysis.side_caption_min_chars") == 8
+    assert app.extensions["inktime_settings_repository"].get("analysis.side_caption_min_chars") == 1
 
     valid = client.post(
         "/api/v1/settings",
@@ -1546,8 +1546,8 @@ def test_ui_contains_dirty_search_filter_snapshot_and_accessibility_contracts(cl
     assert "完整裝置群組覆寫" not in body
     assert "改變 Cache Fingerprint" in body
     assert SETTING_DEFINITIONS["analysis.ai_daily_photo_limit"]["advanced"] is True
-    assert SETTING_DEFINITIONS["analysis.side_caption_min_chars"]["default"] == 8
-    assert SETTING_DEFINITIONS["analysis.side_caption_max_chars"]["default"] == 16
+    assert SETTING_DEFINITIONS["analysis.side_caption_min_chars"]["default"] == 1
+    assert SETTING_DEFINITIONS["analysis.side_caption_max_chars"]["default"] == 20
     assert SETTING_DEFINITIONS["analysis.side_caption_custom_rules"]["default"] == ""
     assert "analysis.caption_variants_enabled" not in SETTING_DEFINITIONS
     assert SETTING_DEFINITIONS["analysis.ai_daily_photo_limit"]["risk"] == "high"

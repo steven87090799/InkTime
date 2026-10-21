@@ -180,6 +180,11 @@ INTEGRATION_TEST_OWNER_SUITES: dict[str, tuple[str, ...]] = {
         "provider_analysis_owner",
         "scanner_photos_owner",
     ),
+    "tests/integration/test_v6_display_safety.py": (
+        "provider_analysis_owner",
+        "render_release_owner",
+        "queue_resilience_owner",
+    ),
     "tests/integration/test_image_format_pipeline.py": ("scanner_photos_owner",),
     "tests/integration/test_activity_console.py": (
         "web_api_owner",

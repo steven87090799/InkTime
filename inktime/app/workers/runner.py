@@ -213,6 +213,11 @@ def _execute_job_item(app, item, *, job, settings, provider, provider_error, ana
                 "{}",
                 score_kind=LOCAL_QUALITY_SCORE_KIND,
             )
+        photo_ids = [photo_id for photo_id in photo_ids if candidate_repository.get(photo_id) is not None]
+        if not photo_ids:
+            return {"scan": scan, "status": "completed", "outcome": "no_content",
+                    "outcome_code": "NO_ELIGIBLE_CANDIDATES",
+                    "message": "照片尚未完成 v6 AI 安全分析，暫不送往相框"}
         try:
             release = app.extensions["inktime_render_service"].publish(
                 photo_ids,

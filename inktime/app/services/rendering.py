@@ -936,7 +936,7 @@ class RenderService:
             existing_caption_is_ai_generated=is_ai_caption if caption else None,
             source_detail=source_detail,
             source_updated_at=str((analysis or {}).get("created_at") or "") or None,
-            maximum_characters=int(self.settings.get("analysis.side_caption_max_chars", 16)),
+            maximum_characters=int(self.settings.get("analysis.side_caption_max_chars", 20)),
         )
         # Freeze the visible date together with the caption's photo identity.
         # A queued render must not read a different date or visibility setting.
@@ -2454,6 +2454,10 @@ class RenderService:
                     f"""
                     WITH ranked_candidates AS (
                     SELECT p.id,p.library_id,p.relative_path,p.captured_at,p.captured_date,p.captured_month_day,
+                           p.width,p.height,p.orientation,p.exif_orientation_original,
+                           p.manual_orientation_rotation_cw,p.visual_orientation_rotation_cw,
+                           p.visual_orientation_confidence,p.visual_orientation_ambiguous,
+                           p.exif_json,p.exclusion_status,p.manual_override,a.raw_json,
                            p.sha256,p.perceptual_hash,p.difference_hash,p.duplicate_group_id,p.gps_lat,p.gps_lon,
                            p.e6_score,p.e6_contrast_score,
                            p.e6_subject_score,p.e6_skin_score,p.e6_text_score,
@@ -2501,8 +2505,11 @@ class RenderService:
             if not rows:
                 break
             for stored in rows:
-                if self.candidates.available(stored):
-                    result.append(dict(stored))
+                if self.candidates.available(stored) and self.candidates.safety_passed(stored):
+                    candidate = dict(stored)
+                    candidate.pop("raw_json", None)
+                    candidate.pop("exif_json", None)
+                    result.append(candidate)
                     if len(result) >= max(limit, 1):
                         break
             last_score = float(rows[-1]["combined_score"])
@@ -2722,26 +2729,9 @@ class RenderService:
         limit = max(1, min(int(limit), pool_bound if composition_pool else 50))
         target = target_date or self._today()
         mode = execution_mode(self.settings)
-        if mode in {"local_only", "local_with_manual_ai", "disabled"}:
-            result = LocalSelectionPolicy(
-                self.database, self.settings, self.resilience, self.locations
-            ).select(
-                target=target,
-                orientation=str(self.settings.get("render.frame_orientation", "landscape")),
-                quantity=limit,
-                layout=str(self.settings.get("render.layout", "auto_photo")),
-                candidate_years=candidate_years,
-            )
-            selected = result["selected"][:limit]
-            if composition_pool:
-                exact = {str(row["id"]) for row in result["exact_pool"]}
-                nearby = {str(row["id"]) for row in result["nearby_pool"]}
-                selected = [{**row, "match_type": "exact_day" if str(row["id"]) in exact
-                             else "nearby_day" if str(row["id"]) in nearby else "ranked_fallback"}
-                            for row in selected]
-            return selected
-
-        if mode == "automatic_ai":
+        if mode in {"local_only", "local_with_manual_ai", "disabled", "automatic_ai"}:
+            # Content safety requires a current semantic judgement even when
+            # scheduling/scoring is configured for local-only operation.
             return self._select_candidates_for_score_kind(
                 target=target,
                 limit=limit,

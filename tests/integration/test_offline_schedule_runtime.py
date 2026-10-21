@@ -9,6 +9,7 @@ import pytest
 
 import inktime.app.repositories.offline_schedules as offline_schedules_module
 from tests.conftest import csrf, create_admin, login
+from tests.security.test_device_release_authorization import certified_release_metadata
 
 
 def _release(app, name: str) -> dict:
@@ -16,6 +17,7 @@ def _release(app, name: str) -> dict:
         [(name, Image.new("RGB", (480, 800), "white"))],
         profile_key="safe_4c",
         activate=False,
+        metadata=certified_release_metadata(app),
     )
     return app.extensions["inktime_release_coordinator"].publish(
         [staged], created_by="offline-test", photo_ids=[]

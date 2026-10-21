@@ -64,6 +64,8 @@ def test_offline_day_searches_past_unpairable_high_ranked_burst(app, tmp_path, m
     service = app.extensions["inktime_display_preparation_service"]
     # Prove that the real selection policy permits enough complete frames.
     all_permitted = service.render_service.select_candidates_details(36, target_date=date(2026, 10, 17))
+    assert all(row["width"] > 0 and row["height"] > 0 for row in all_permitted)
+    assert all(row["visual_orientation_rotation_cw"] == 0 for row in all_permitted)
     assert len(select_auto_photo_frames(all_permitted, frame_orientation="landscape", count=12)) == 12
     published = []
 

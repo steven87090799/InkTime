@@ -341,7 +341,7 @@ def test_single_model_call_returns_all_fields_and_usage(app, tmp_path):
             (trace["trace_id"],),
         ).fetchone()
     assert tuple(usage) == (1000, 100)
-    assert tuple(stored) == (5, valid_result()["side_caption"])
+    assert tuple(stored) == (6, valid_result()["side_caption"])
     assert trace["status"] == "SUCCESS" and json.loads(trace["final_result_json"])["side_caption"]
     assert tuple(attempt[:2]) == ("vision", "SUCCESS") and attempt["api_usage_id"] is not None
 
@@ -353,8 +353,7 @@ def test_legacy_v4_analysis_remains_readable_without_model_call(app, tmp_path):
         ids[0], None, "single", "legacy-provider", "legacy-model", legacy,
         json.dumps(legacy, ensure_ascii=False), score_kind="semantic",
     )
-    # This analysis-persistence compatibility test is independent of the
-    # scanner's local-quality gate; make the fixture publish-eligible.
+    # Stored legacy analysis remains readable but cannot certify formal delivery.
     with app.extensions["inktime_database"].session() as connection:
         connection.execute(
             "UPDATE photos SET eligible=1,exclusion_status='eligible' WHERE id=?", (ids[0],)
@@ -367,7 +366,7 @@ def test_legacy_v4_analysis_remains_readable_without_model_call(app, tmp_path):
     assert row["schema_version"] == 4
     assert row["side_caption"] == legacy["side_caption"]
     assert json.loads(row["raw_json"])["caption"] == legacy["caption"]
-    assert RenderCandidateRepository(app.extensions["inktime_database"]).get(ids[0]) is not None
+    assert RenderCandidateRepository(app.extensions["inktime_database"]).get(ids[0]) is None
 
 
 def test_invalid_model_types_fail_without_text_repair(app, tmp_path):
@@ -1164,8 +1163,8 @@ def test_new_analysis_plan_uses_minimal_side_caption_controls_and_no_reasoning(a
         scoring_profile_id=str(app.extensions["inktime_scoring_repository"].current()["id"]),
     )
     assert plan["caption_controls"] == {
-        "side_caption_min_chars": 8,
-        "side_caption_max_chars": 16,
+        "side_caption_min_chars": 1,
+        "side_caption_max_chars": 20,
         "side_caption_custom_rules": "",
     }
     assert plan["reasoning_effort"] == "none"

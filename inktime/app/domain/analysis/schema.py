@@ -7,12 +7,15 @@ from typing import Any
 
 from inktime.app.domain.analysis.traditional_chinese import to_taiwan_traditional
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
+PREVIOUS_SCHEMA_VERSION = 5
 LEGACY_SCHEMA_VERSION = 4
-SUPPORTED_ANALYSIS_SCHEMA_VERSIONS = frozenset({LEGACY_SCHEMA_VERSION, SCHEMA_VERSION})
+SUPPORTED_ANALYSIS_SCHEMA_VERSIONS = frozenset({LEGACY_SCHEMA_VERSION, PREVIOUS_SCHEMA_VERSION, SCHEMA_VERSION})
 CAPTION_MAX_CHARS = 100
-SIDE_CAPTION_MIN_CHARS = 8
-SIDE_CAPTION_MAX_CHARS = 16
+SIDE_CAPTION_MIN_CHARS = 1
+SIDE_CAPTION_MAX_CHARS = 20
+LEGACY_SIDE_CAPTION_MIN_CHARS = 8
+LEGACY_SIDE_CAPTION_MAX_CHARS = 16
 CAPTION_VARIANT_STYLES = ("natural", "warm", "literary", "humorous", "minimal")
 ALLOWED_TYPES = {
     "人物",
@@ -51,6 +54,13 @@ CONTENT_FILTER_CODES = {
     "explicit_nudity",
     "female_glamour_portrait",
 }
+DISPLAY_EXCLUSION_CATEGORIES = {
+    "none",
+    "adult_media_cover",
+    "commercial_model_photo",
+    "screenshot",
+    "document_record",
+}
 ORIENTATION_EVIDENCE = {
     "faces_upright",
     "text_upright",
@@ -79,6 +89,7 @@ PROTOCOL_ENUM_VALUES = frozenset(
     set(ALLOWED_TYPES)
     | set(SPECIAL_CODES)
     | set(CONTENT_FILTER_CODES)
+    | set(DISPLAY_EXCLUSION_CATEGORIES)
     | set(ORIENTATION_EVIDENCE)
     | set(POSITIONS)
     | {"none"}
@@ -119,8 +130,8 @@ LEGACY_V4_JSON_SCHEMA: dict[str, Any] = {
             "caption": {"type": "string", "minLength": 10, "maxLength": CAPTION_MAX_CHARS},
             "side_caption": {
                 "type": "string",
-                "minLength": SIDE_CAPTION_MIN_CHARS,
-                "maxLength": SIDE_CAPTION_MAX_CHARS,
+                "minLength": LEGACY_SIDE_CAPTION_MIN_CHARS,
+                "maxLength": LEGACY_SIDE_CAPTION_MAX_CHARS,
             },
             "content_filter": _object(
                 {
@@ -148,20 +159,20 @@ LEGACY_V4_JSON_SCHEMA: dict[str, Any] = {
 }
 
 
-ANALYSIS_JSON_SCHEMA: dict[str, Any] = {
+V5_ANALYSIS_JSON_SCHEMA: dict[str, Any] = {
     "name": "inktime_photo_analysis",
     "strict": True,
     "schema": _object(
         {
-            "schema_version": {"type": "integer", "const": SCHEMA_VERSION},
+            "schema_version": {"type": "integer", "const": PREVIOUS_SCHEMA_VERSION},
             "types": _enum_array(ALLOWED_TYPES, 1, 3),
             "memory_score": {"type": "number", "minimum": 0, "maximum": 100},
             "visual_score": {"type": "number", "minimum": 0, "maximum": 100},
             "special_level": {"type": "integer", "minimum": 0, "maximum": 4},
             "side_caption": {
                 "type": "string",
-                "minLength": SIDE_CAPTION_MIN_CHARS,
-                "maxLength": SIDE_CAPTION_MAX_CHARS,
+                "minLength": LEGACY_SIDE_CAPTION_MIN_CHARS,
+                "maxLength": LEGACY_SIDE_CAPTION_MAX_CHARS,
             },
             "content_filter": _object(
                 {
@@ -185,6 +196,18 @@ ANALYSIS_JSON_SCHEMA: dict[str, Any] = {
         }
     ),
 }
+ANALYSIS_JSON_SCHEMA: dict[str, Any] = deepcopy(V5_ANALYSIS_JSON_SCHEMA)
+ANALYSIS_JSON_SCHEMA["schema"]["properties"]["schema_version"]["const"] = SCHEMA_VERSION
+ANALYSIS_JSON_SCHEMA["schema"]["properties"]["side_caption"].update(
+    minLength=SIDE_CAPTION_MIN_CHARS, maxLength=SIDE_CAPTION_MAX_CHARS,
+)
+ANALYSIS_JSON_SCHEMA["schema"]["properties"]["display_exclusion"] = _object(
+    {
+        "category": {"type": "string", "enum": sorted(DISPLAY_EXCLUSION_CATEGORIES)},
+        "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+    }
+)
+ANALYSIS_JSON_SCHEMA["schema"]["required"] = sorted(ANALYSIS_JSON_SCHEMA["schema"]["properties"])
 FULL_ANALYSIS_JSON_SCHEMA = ANALYSIS_JSON_SCHEMA
 REQUIRED_FIELDS = set(ANALYSIS_JSON_SCHEMA["schema"]["required"])
 
@@ -211,7 +234,7 @@ PROVIDER_CONTRACT_JSON_SCHEMA: dict[str, Any] = {
 
 
 def normalize_caption_controls(controls: dict[str, Any]) -> dict[str, Any]:
-    """Bound side-caption settings to the fixed v5 safety contract."""
+    """Bound current side-caption settings to one nonempty sentence, at most 20 chars."""
     normalized = dict(controls)
     custom_rules = " ".join(str(controls.get("side_caption_custom_rules", "")).split())[:1000].strip()
     side_upper = max(
@@ -267,16 +290,28 @@ def _validate_unicode(value: Any) -> None:
 
 
 def json_schema_for_stage(
-    stage: str, *, caption_controls: dict[str, Any] | None = None
+    stage: str, *, caption_controls: dict[str, Any] | None = None,
+    schema_version: int = SCHEMA_VERSION,
 ) -> dict[str, Any]:
     if stage == "provider_contract_level2":
         return deepcopy(PROVIDER_CONTRACT_JSON_SCHEMA)
-    schema = deepcopy(ANALYSIS_JSON_SCHEMA)
+    if schema_version not in {PREVIOUS_SCHEMA_VERSION, SCHEMA_VERSION}:
+        raise ValueError("不支援的模型輸出 Schema 版本")
+    schema = deepcopy(V5_ANALYSIS_JSON_SCHEMA if schema_version == PREVIOUS_SCHEMA_VERSION else ANALYSIS_JSON_SCHEMA)
     if caption_controls:
         controls = normalize_caption_controls(caption_controls)
+        if schema_version == PREVIOUS_SCHEMA_VERSION:
+            minimum = max(LEGACY_SIDE_CAPTION_MIN_CHARS, min(
+                LEGACY_SIDE_CAPTION_MAX_CHARS, int(caption_controls.get("side_caption_min_chars", LEGACY_SIDE_CAPTION_MIN_CHARS)),
+            ))
+            maximum = max(minimum, min(
+                LEGACY_SIDE_CAPTION_MAX_CHARS, int(caption_controls.get("side_caption_max_chars", LEGACY_SIDE_CAPTION_MAX_CHARS)),
+            ))
+        else:
+            minimum = controls["side_caption_min_chars"]
+            maximum = controls["side_caption_max_chars"]
         schema["schema"]["properties"]["side_caption"].update(
-            minLength=controls["side_caption_min_chars"],
-            maxLength=controls["side_caption_max_chars"],
+            minLength=minimum, maxLength=maximum,
         )
     return schema
 
@@ -327,7 +362,8 @@ def _validate(value: Any, schema: dict[str, Any], path: str) -> None:
         raise AnalysisValidationError(f"{path} 長度不合法")
 
 
-def validate_model_response(raw: str | dict, *, caption_controls: dict[str, Any] | None = None) -> dict:
+def validate_model_response(raw: str | dict, *, caption_controls: dict[str, Any] | None = None,
+                            schema_version: int = SCHEMA_VERSION) -> dict:
     """Normalize only conservative orientation contradictions at model ingress.
 
     Validate the complete shape first: missing fields, invalid enums/types,
@@ -341,7 +377,11 @@ def validate_model_response(raw: str | dict, *, caption_controls: dict[str, Any]
             raise AnalysisValidationError("模型回傳無效 JSON") from exc
     _validate_unicode(raw)
     value = to_taiwan_traditional(deepcopy(raw), protected=PROTOCOL_ENUM_VALUES)
-    _validate(value, json_schema_for_stage("single", caption_controls=caption_controls)["schema"], "analysis")
+    if schema_version == SCHEMA_VERSION and isinstance(value, dict) and isinstance(value.get("side_caption"), str):
+        value["side_caption"] = value["side_caption"].strip()
+    _validate(value, json_schema_for_stage(
+        "single", caption_controls=caption_controls, schema_version=schema_version,
+    )["schema"], "analysis")
     if not isinstance(value, dict):
         raise AnalysisValidationError("analysis 必須是 object")
     orientation = value["visual_orientation"]
@@ -354,7 +394,7 @@ def validate_model_response(raw: str | dict, *, caption_controls: dict[str, Any]
             confidence=min(orientation["confidence"], 0.5),
             evidence=["insufficient_visual_cues"],
         )
-    return validate_analysis_result(value, accepted_versions=frozenset({SCHEMA_VERSION}))
+    return validate_analysis_result(value, accepted_versions=frozenset({schema_version}))
 
 
 def validate_analysis_result(
@@ -377,8 +417,12 @@ def validate_analysis_result(
     if type(version) is not int or version not in accepted_versions:
         raise AnalysisValidationError("analysis.schema_version 不支援的版本")
     schema = (
-        LEGACY_V4_JSON_SCHEMA if version == LEGACY_SCHEMA_VERSION else ANALYSIS_JSON_SCHEMA
+        LEGACY_V4_JSON_SCHEMA if version == LEGACY_SCHEMA_VERSION
+        else V5_ANALYSIS_JSON_SCHEMA if version == PREVIOUS_SCHEMA_VERSION
+        else ANALYSIS_JSON_SCHEMA
     )
+    if version == SCHEMA_VERSION and isinstance(value.get("side_caption"), str):
+        value["side_caption"] = value["side_caption"].strip()
     _validate(value, schema["schema"], "analysis")
     orientation = value["visual_orientation"]
     if orientation["rotation_cw"] is None and not orientation["ambiguous"]:

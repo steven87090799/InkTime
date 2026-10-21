@@ -64,8 +64,8 @@ class AnalysisDisabledError(RuntimeError):
     code = "ANALYSIS-DISABLED"
 
 
-PROMPT_VERSION = "photo-analysis-v5-complete-literary-v2-20261011"
-# The compact eight-field response still needs enough headroom to complete
+PROMPT_VERSION = "photo-analysis-v6-literary20-20261021"
+# The compact response still needs enough headroom to complete
 # strict JSON without truncation.
 LOGGER = logging.getLogger("analysis")
 
@@ -171,8 +171,8 @@ class PhotoAnalysisService:
         if settings is None:
             return normalize_caption_controls({})
         return normalize_caption_controls({
-            "side_caption_min_chars": int(settings.get("analysis.side_caption_min_chars", 8)),
-            "side_caption_max_chars": int(settings.get("analysis.side_caption_max_chars", 16)),
+            "side_caption_min_chars": int(settings.get("analysis.side_caption_min_chars", 1)),
+            "side_caption_max_chars": int(settings.get("analysis.side_caption_max_chars", 20)),
             "side_caption_custom_rules": str(
                 settings.get("analysis.side_caption_custom_rules", "")
             ),
@@ -244,9 +244,9 @@ class PhotoAnalysisService:
         return f"{PROMPT_VERSION}-caption-{fingerprint}"
 
     @staticmethod
-    def _local_result(photo) -> dict:
-        return {
-            "schema_version": SCHEMA_VERSION,
+    def _local_result(photo, *, schema_version: int = SCHEMA_VERSION) -> dict:
+        result = {
+            "schema_version": schema_version,
             "types": ["截圖" if is_confirmed_screenshot(photo) else "其他"],
             "memory_score": 0.0, "visual_score": 0.0,
             "special_level": 0,
@@ -254,6 +254,9 @@ class PhotoAnalysisService:
             "content_filter": {code: {"detected": False, "confidence": 0.0} for code in CONTENT_FILTER_SWITCHES},
             "visual_orientation": _unknown_visual_orientation(),
         }
+        if schema_version >= 6:
+            result["display_exclusion"] = {"category": "none", "confidence": 0.0}
+        return result
 
     @staticmethod
     def _local_quality(photo) -> float:
@@ -389,12 +392,13 @@ class PhotoAnalysisService:
             "summary": decision_labels.get(policy["decision"], policy["decision"]),
         }
 
-    def _prefilter_result(self, photo, *, policy_settings: dict | None = None) -> dict | None:
+    def _prefilter_result(self, photo, *, policy_settings: dict | None = None,
+                          schema_version: int = SCHEMA_VERSION) -> dict | None:
         evaluation = self.prefilter_snapshot(photo, policy_settings=policy_settings)
         if not evaluation["excluded"]:
             return None
 
-        return self._local_result(photo)
+        return self._local_result(photo, schema_version=schema_version)
 
     def _ensure_e6_suitability(self, photo_id: str, photo, source: Path):
         # E6 is a bounded Scanner feature.  Analysis must not reopen the
@@ -771,20 +775,21 @@ class PhotoAnalysisService:
         selected_revision = str(getattr(selected_channel, "analysis_revision", "") or "")
         if selected_revision:
             fingerprint_material["selected_provider_analysis_revision"] = selected_revision
+        schema_version = 5 if prompt_version.startswith("photo-analysis-v5-") else SCHEMA_VERSION
         request_fingerprint = fingerprint(
             {
                 **fingerprint_material,
-                "schema_version": SCHEMA_VERSION,
+                "schema_version": schema_version,
             }
         )
         cache_schema_kind = schema_kind
-        cache_schema_version = SCHEMA_VERSION
+        cache_schema_version = schema_version
         vision_json = canonical_json(vision_input)
 
         def get_cache() -> dict | None:
             cached = self.photos.get_ai_cache(
                 content_sha256=content_sha256, provider=actual_provider, model_name=model,
-                prompt_version=prompt_version, schema_version=SCHEMA_VERSION,
+                prompt_version=prompt_version, schema_version=schema_version,
                 schema_kind=cache_schema_kind, vision_request_fingerprint=request_fingerprint,
             )
             if cached is not None:
@@ -1341,7 +1346,10 @@ class PhotoAnalysisService:
         try:
             local_json = extract_json_value(response.content)
             candidate = local_json if isinstance(local_json, dict) else response.content
-            result = validate_model_response(candidate, caption_controls=caption_controls)
+            result = validate_model_response(
+                candidate, caption_controls=caption_controls,
+                schema_version=int(cache_schema_version or SCHEMA_VERSION),
+            )
             raw = response.content
             parsed_at = datetime.now(timezone.utc).isoformat()
             self._trace_write(
@@ -1460,6 +1468,7 @@ class PhotoAnalysisService:
         model = str(analysis_spec.get("model") or analysis_spec.get("high_model") or "")
         caption_controls = dict(analysis_spec.get("caption_controls") or {}) or None
         prompt_version = str(analysis_spec["prompt_version"])
+        plan_schema_version = int(analysis_spec["schema_version"])
         vision_input = dict(analysis_spec["vision_input"])
         image_max_side = int(vision_input["max_side"])
         scoring_version_id = str(analysis_spec["scoring_profile_id"]) or scoring_version_id
@@ -1532,7 +1541,7 @@ class PhotoAnalysisService:
                 self.photos.refresh_library_ranking(str(photo["library_id"]))
             return {"analysis": inherited, "stage": "inherited", "_actual_cost": 0}
         if strategy == "local":
-            result = validate_analysis_result(self._local_result(photo))
+            result = validate_analysis_result(self._local_result(photo, schema_version=plan_schema_version))
             raw = json.dumps(result, ensure_ascii=False)
             result = self._save_result(
                 photo_id=photo_id,
@@ -1554,7 +1563,10 @@ class PhotoAnalysisService:
             "auto_excluded", "manually_excluded"
         }:
             result = validate_analysis_result(
-                self._prefilter_result(photo, policy_settings=plan_prefilter) or self._local_result(photo)
+                self._prefilter_result(
+                    photo, policy_settings=plan_prefilter, schema_version=plan_schema_version,
+                )
+                or self._local_result(photo, schema_version=plan_schema_version)
             )
             raw = json.dumps(result, ensure_ascii=False)
             result = self._save_result(
@@ -1577,7 +1589,9 @@ class PhotoAnalysisService:
         prefiltered = (
             None
             if (force_ai or self.settings is None) and not confirmed_screenshot
-            else self._prefilter_result(photo, policy_settings=plan_prefilter)
+            else self._prefilter_result(
+                photo, policy_settings=plan_prefilter, schema_version=plan_schema_version,
+            )
         )
         if prefiltered is not None:
             prefilter_evaluation = self.prefilter_snapshot(photo, policy_settings=plan_prefilter)
@@ -1603,7 +1617,7 @@ class PhotoAnalysisService:
         if not self._allow_ai_for_photo(photo_id, force_ai=force_ai, execution_policy=execution_policy) or (
             not force_ai and self._photo_limits_reached(execution_policy)
         ):
-            result = validate_analysis_result(self._local_result(photo))
+            result = validate_analysis_result(self._local_result(photo, schema_version=plan_schema_version))
             raw = json.dumps(result, ensure_ascii=False)
             result = self._save_result(
                 photo_id=photo_id,

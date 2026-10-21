@@ -48,7 +48,7 @@ def _analysis_payload(**overrides) -> dict:
 
 # ISSUE-001 -- s2twp rewrote the enum member 文件 to 檔案 before the enum check.
 def test_document_type_enum_survives_traditional_chinese_conversion():
-    result = validate_model_response(json.dumps(_analysis_payload(), ensure_ascii=False))
+    result = validate_model_response(json.dumps(_analysis_payload(), ensure_ascii=False), schema_version=5)
     assert result["types"] == ["文件"]
 
 
@@ -63,7 +63,7 @@ def test_protocol_enum_values_are_never_converted():
 
 def test_unknown_type_is_still_rejected():
     with pytest.raises(AnalysisValidationError):
-        validate_model_response(json.dumps(_analysis_payload(types=["檔案"]), ensure_ascii=False))
+        validate_model_response(json.dumps(_analysis_payload(types=["檔案"]), ensure_ascii=False), schema_version=5)
 
 
 # ISSUE-002 -- routing-only provider fields were part of the paid-cache identity.

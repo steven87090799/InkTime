@@ -1,10 +1,10 @@
 # InkTime · Photo analysis and e-ink memory frames
 
-> Branch documentation updated on 2026-10-17 from `origin/main=80f3121` for PR #162. SQLite Migration 70, AI Schema v5, firmware 2.8.9 (HTTP JSON reception fix; not flashed), Config Store v5 and NAS deployment contract 3 are separate versions. Check the deployed Git revision in Diagnostics; see the [source baseline](docs/reference/CURRENT_STATE_ZH_TW.md).
+> Branch documentation updated on 2026-10-21 from `origin/main=5908c28` for Draft PR #167. SQLite Migration 70, AI Schema v6, firmware 2.8.9 (HTTP JSON reception fix; not flashed), Config Store v5 and NAS deployment contract 3 are separate versions. Check the deployed Git revision in Diagnostics; see the [source baseline](docs/reference/CURRENT_STATE_ZH_TW.md).
 
 [繁體中文](README.md) · [Documentation map](docs/README.md) · [HTML manual](USER_MANUAL.html) · [Quick start](docs/getting-started/QUICK_START_ZH_TW.md)
 
-InkTime scans a read-only photo library, selects suitable memories, renders versioned e-ink images and serves them to ESP32 frames. A Traditional Chinese Web console manages photos, jobs, providers, costs, schedules, devices, backups and diagnostics. New installations work locally without a model API key. AI analysis is an explicit choice.
+InkTime scans a read-only photo library, selects suitable memories, renders versioned e-ink images and serves them to ESP32 frames. A Traditional Chinese Web console manages photos, jobs, providers, costs, schedules, devices, backups and diagnostics. New installations can scan and assess local quality without a model API key. Formal photo delivery requires v6 visual safety analysis.
 
 ![InkTime dashboard](docs/images/dashboard.png)
 
@@ -23,8 +23,8 @@ InkTime scans a read-only photo library, selects suitable memories, renders vers
 
 - Local EXIF, SHA-256, pHash/dHash, exposure and quality analysis; original files remain read-only.
 - JPEG, PNG, WEBP, TIFF, BMP and HEIC/HEIF input, including supported 48MP HEIC. Preview and AI inputs are generated JPEGs. ProRAW DNG, GIF and Live Photo MOV are not supported photo inputs; see the [image-format contract](docs/architecture/IMAGE_FORMAT_CONTRACT_ZH_TW.md).
-- Local-only selection, on-this-day selection, preferences, favorites, pair layouts and display-history filters.
-- One normal Vision image request producing strict Schema v5 scores, classification, a short caption and orientation; stored v4 results remain readable.
+- Local quality review, on-this-day selection, preferences, favorites, pair layouts and display-history filters.
+- One normal Vision image request producing strict Schema v6 scores, classification, a short caption and orientation; stored v4 results remain readable.
 - Compatible result inheritance, request-fingerprint caching, persisted jobs, bounded workers, pause/resume/cancel and restart recovery.
 - Provider-specific models and prices, OpenRouter routing/privacy options, AI Trace and explicit unknown-cost handling.
 - Optional OpenAI Files/Batch lifecycle with upload, submission, polling, result import, cleanup and manual recovery for ambiguous remote outcomes. OpenRouter does not use this Batch path.
@@ -41,7 +41,7 @@ Configure `analysis.execution_mode` in Settings. Adding a Provider or API key do
 | Mode | Ordinary processing | Explicit manual photo AI | Data and cost |
 |---|---|---|---|
 | `disabled` | Reject new analysis | Disabled | Existing photos/releases remain readable |
-| `local_only` (default) | Local features and selection | Disabled | Normal photo processing does not read a Provider or use model tokens |
+| `local_only` (default) | Local features and selection | Disabled | Normal photo processing does not read a Provider or use model tokens; no photos qualify for formal delivery |
 | `local_with_manual_ai` | Local features and selection | Allowed | A deliberate manual action can upload an image and incur cost |
 | `automatic_ai` | AI jobs allowed by policy | Allowed | Provider, scope, photo limits and budgets still apply |
 
@@ -49,11 +49,11 @@ Provider diagnostics, scoring-lab tests and live benchmarks are separate operati
 
 ### Schema and selection
 
-New responses use [Schema v5](docs/VISION_SCHEMA.md): `types`, `memory_score`, `visual_score`, `special_level`, `side_caption`, `content_filter` and `visual_orientation`, plus `schema_version`. The short caption is 8–16 characters. New output no longer requires a long caption, people count, special codes or composition/text-safe-area fields.
+New responses use [Schema v6](docs/VISION_SCHEMA.md): `types`, `memory_score`, `visual_score`, `special_level`, `side_caption`, `content_filter`, `display_exclusion` and `visual_orientation`, plus `schema_version`. The caption is one photo-specific sentence of at most 20 characters, with no fixed length target. New output no longer requires a long caption, people count, special codes or composition/text-safe-area fields.
 
 Normal photo analysis extracts JSON locally and validates it. It does not request a second model call for JSON repair or long-caption generation. Provider diagnostics, scoring-lab tests and benchmark repair are separate bounded flows. Legacy strategy names normalize to `single`; they do not restore two-stage image analysis.
 
-Stored v4/v5 semantic results remain usable under their own validation rules. Historical v1–v3 records remain readable but do not enter current semantic ranking. Updating the schema does not itself authorize paid reanalysis.
+Stored v4/v5 semantic results remain readable under their own validation rules, but cannot certify current formal photo delivery. Historical v1–v3 records remain readable but do not enter current semantic ranking. Updating the schema does not itself authorize paid reanalysis.
 
 ```text
 base = round(memory_score × 0.67 + visual_score × 0.33, 2)

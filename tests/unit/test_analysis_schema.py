@@ -25,13 +25,14 @@ def content_filter_result(code=None, confidence=0.97, **updates):
 
 def valid_result(**updates):
     value = {
-        "schema_version": 5,
+        "schema_version": 6,
         "types": ["人物", "日常"],
         "memory_score": 72,
         "visual_score": 81,
         "special_level": 2,
         "side_caption": "釣竿伸向雲層深處。",
         "content_filter": content_filter_result(),
+        "display_exclusion": {"category": "none", "confidence": 0.97},
         "visual_orientation": {
             "rotation_cw": 0,
             "confidence": 0.97,
@@ -44,7 +45,7 @@ def valid_result(**updates):
 
 
 def legacy_v4_result(**updates):
-    value = valid_result(schema_version=4) | {
+    value = {key: item for key, item in valid_result(schema_version=4).items() if key != "display_exclusion"} | {
         "special_codes": ["meaningful_activity"],
         "people_count": 1,
         "caption": "男子在河畔持釣竿，背景為開闊天空與河岸，身旁草地上的釣具清楚可見。",
@@ -60,7 +61,7 @@ def test_strict_schema_accepts_expected_result():
 
 
 @pytest.mark.parametrize("field", sorted(REQUIRED_FIELDS))
-def test_every_v5_field_is_required(field):
+def test_every_v6_field_is_required(field):
     value = valid_result()
     del value[field]
     with pytest.raises(AnalysisValidationError):
@@ -91,8 +92,8 @@ def test_rejects_obsolete_or_server_owned_fields(extra):
         validate_analysis_result(valid_result(**{extra: 1}))
 
 
-@pytest.mark.parametrize("version", [1, 2, 3, 6, True, 5.0])
-def test_only_v4_and_v5_are_supported(version):
+@pytest.mark.parametrize("version", [1, 2, 3, 7, True, 5.0])
+def test_only_v4_v5_and_v6_are_supported(version):
     with pytest.raises(AnalysisValidationError):
         validate_analysis_result(valid_result(schema_version=version))
 
@@ -112,8 +113,8 @@ def test_only_v4_and_v5_are_supported(version):
         ("types", []),
         ("types", ["人物", "人物"]),
         ("types", ["人物", "日常", "活動", "旅行"]),
-        ("side_caption", "字" * 7),
-        ("side_caption", "字" * 17),
+        ("side_caption", ""),
+        ("side_caption", "字" * 21),
         ("content_filter", {"exclude_code": "screenshot", "confidence": 0.99}),
         ("content_filter", {"exclude_code": "none", "confidence": 0.99, "exclude": True}),
         ("content_filter", {"exclude_code": "none", "confidence": 0.99}),
@@ -210,12 +211,13 @@ def test_side_caption_controls_cannot_publish_a_contract_the_validator_rejects()
     schema = json_schema_for_stage('full', caption_controls={
         'side_caption_min_chars': 0, 'side_caption_max_chars': 20,
     })['schema']['properties']['side_caption']
-    assert schema['minLength'] == 8 and schema['maxLength'] == 16
+    assert schema['minLength'] == 1 and schema['maxLength'] == 20
 
 
 def test_v5_exact_fields_and_legacy_v4_remains_readable():
     assert set(ANALYSIS_JSON_SCHEMA["schema"]["properties"]) == REQUIRED_FIELDS
-    assert set(LEGACY_V4_JSON_SCHEMA["schema"]["properties"]) > REQUIRED_FIELDS
+    assert "display_exclusion" not in LEGACY_V4_JSON_SCHEMA["schema"]["properties"]
+    assert {"caption", "people_count", "special_codes"} <= set(LEGACY_V4_JSON_SCHEMA["schema"]["properties"])
     assert validate_analysis_result(legacy_v4_result()) == legacy_v4_result()
 
 
@@ -224,7 +226,7 @@ def test_new_model_ingress_rejects_legacy_v4():
         validate_model_response(legacy_v4_result())
 
 
-@pytest.mark.parametrize("length,valid", [(7, False), (8, True), (16, True), (17, False)])
+@pytest.mark.parametrize("length,valid", [(0, False), (1, True), (20, True), (21, False)])
 def test_side_caption_length_contract(length, valid):
     value = valid_result(side_caption="字" * length)
     if valid:
@@ -232,6 +234,21 @@ def test_side_caption_length_contract(length, valid):
     else:
         with pytest.raises(AnalysisValidationError):
             validate_analysis_result(value)
+
+
+@pytest.mark.parametrize("caption", [" ", "\t\n", "\u3000"])
+def test_v6_caption_cannot_disappear_after_trimming(caption):
+    for validator in (validate_model_response, validate_analysis_result):
+        with pytest.raises(AnalysisValidationError):
+            validator(valid_result(side_caption=caption))
+
+
+def test_v6_custom_caption_minimum_applies_to_visible_text():
+    with pytest.raises(AnalysisValidationError):
+        validate_model_response(
+            valid_result(side_caption=" 字 "),
+            caption_controls={"side_caption_min_chars": 3, "side_caption_max_chars": 20},
+        )
 
 
 @pytest.mark.parametrize("code", ["sexualized_content", "explicit_nudity", "female_glamour_portrait"])

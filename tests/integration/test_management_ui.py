@@ -1571,7 +1571,7 @@ def test_prompt_preview_has_no_side_effects_and_uses_live_settings(client, app, 
     assert lab["system_prompt"] == saved.json["system_prompt"]
     assert {field["name"] for field in saved.json["fields"]} == {
         "schema_version", "types", "memory_score", "visual_score", "special_level",
-        "side_caption", "content_filter", "visual_orientation",
+        "side_caption", "content_filter", "display_exclusion", "visual_orientation",
     }
     assert "repair_prompt" not in saved.json
     assert saved.json["prompt_chars"] == len(saved.json["system_prompt"])

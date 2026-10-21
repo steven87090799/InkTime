@@ -11,6 +11,7 @@ import pytest
 from PIL import Image
 
 from inktime.app.domain.rendering import release as release_module
+from inktime.app.domain.analysis.scoring import SEMANTIC_SCORE_KIND
 from tests.conftest import create_admin, csrf, login
 from tests.unit.test_analysis_schema import valid_result
 
@@ -140,9 +141,9 @@ def _add_history_photo(app, tmp_path, release_id: str) -> str:
             INSERT INTO photos(
                 id,library_id,relative_path,status,captured_at,captured_date,
                 captured_month_day,capture_date_status,eligible,lifecycle_status,
-                local_candidate_score,created_at,updated_at
+                local_candidate_score,local_features_status,created_at,updated_at
             ) VALUES (?,?,'history.jpg','analyzed','2020-08-01T10:00:00','2020-08-01',
-                      '08-01','valid',1,'active',80,?,?)
+                      '08-01','valid',1,'active',80,'complete',?,?)
             """,
             (photo_id, library_id, now, now),
         )
@@ -157,7 +158,7 @@ def _add_history_photo(app, tmp_path, release_id: str) -> str:
     photos.save_analysis(
         photo_id,
         None,
-        "local",
+        "test-ai",
         "local",
         "gc-regression",
         valid_result(
@@ -168,6 +169,7 @@ def _add_history_photo(app, tmp_path, release_id: str) -> str:
             side_caption="GC 歷史測試短句。",
         ),
         "{}",
+        score_kind=SEMANTIC_SCORE_KIND,
         ranking_score=80,
         final_ranking_score=80,
     )

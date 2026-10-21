@@ -27,7 +27,7 @@ ranking_score = round(clamp(base + bonus, 0, 100), 2)
 不作排名加分。最愛不繞過 AI 內容排除；人工恢復可覆寫，普通重掃／重新分析
 保留人工決定。分類門檻來源：`inktime/app/domain/analysis/content_filter.py`。
 
-`side_caption` 是 8–16 字的完整相框短句，以可見細節為依據；
+`side_caption` 是依照片產生、不超過 20 字的完整相框短句，以可見細節寫畫外之意，不逐項描述畫面；
 `visual_orientation` 是 EXIF transpose 後仍需的順時針旋轉判斷。
 不確定時保守處理，不捏造方向或提高信心。完整現行欄位與相容性見
 [Vision Schema](../VISION_SCHEMA.md)。

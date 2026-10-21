@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any, Iterable
 
 from inktime.app.core.paths import UnsafePathError, safe_join
 from inktime.app.db import Database
+from inktime.app.domain.analysis.content_filter import evaluate_content_filter, evaluate_display_exclusion
+from inktime.app.domain.analysis.schema import validate_analysis_result
 from inktime.app.domain.analysis.scoring import (
-    LOCAL_QUALITY_SCORE_KIND,
     SEMANTIC_SCORE_KIND,
     preferred_analysis_order_sql,
 )
@@ -32,24 +34,25 @@ class RenderCandidateRepository:
     _BASE_SQL_PREDICATE = """
         p.status='analyzed'
         AND p.eligible=1
-        AND p.exclusion_status NOT IN ('auto_excluded','manually_excluded')
+        AND p.exclusion_status IN ('eligible','manually_restored')
         AND p.lifecycle_status='active'
         AND l.enabled=1
-        AND a.id IS NOT NULL AND a.schema_version IN (4,5)
+        AND a.id IS NOT NULL AND a.schema_version=6 AND a.score_kind='semantic'
     """
     SQL_PREDICATE = f"""
         {_BASE_SQL_PREDICATE}
-        AND a.score_kind IN ('{SEMANTIC_SCORE_KIND}','{LOCAL_QUALITY_SCORE_KIND}')
+        AND a.ranking_score IS NOT NULL
+        AND p.local_features_status='complete'
     """
     SEMANTIC_SQL_PREDICATE = f"""
         {_BASE_SQL_PREDICATE}
-        AND a.score_kind='{SEMANTIC_SCORE_KIND}'
         AND a.ranking_score IS NOT NULL
         AND p.local_features_status='complete'
     """
     LOCAL_SQL_PREDICATE = f"""
         {_BASE_SQL_PREDICATE}
-        AND a.score_kind='{LOCAL_QUALITY_SCORE_KIND}'
+        AND a.local_score IS NOT NULL
+        AND p.local_features_status='complete'
     """
     MAX_REQUESTED = 200
 
@@ -63,12 +66,35 @@ class RenderCandidateRepository:
         except (OSError, UnsafePathError, ValueError):
             return False
 
+    @staticmethod
+    def safety_passed(row: Any) -> bool:
+        """Recheck stored model evidence even after an operator status change."""
+        from inktime.app.repositories.photos import PhotoRepository
+
+        try:
+            analysis = validate_analysis_result(json.loads(row["raw_json"]))
+            if analysis["schema_version"] != 6:
+                return False
+            decisions = (
+                evaluate_content_filter(analysis["content_filter"], strict=True)["decision"],
+                evaluate_display_exclusion(analysis["display_exclusion"])["decision"],
+            )
+            if "auto_excluded" in decisions:
+                return False
+            if "pending_review" in decisions and not (
+                row["exclusion_status"] == "manually_restored" and row["manual_override"]
+            ):
+                return False
+            return PhotoRepository._orientation_review(dict(row), analysis["visual_orientation"]) is None
+        except (ValueError, TypeError, KeyError, json.JSONDecodeError):
+            return False
+
     def get(self, photo_id: str) -> dict[str, Any] | None:
         with self.database.session() as connection:
             row = connection.execute(
                 f"""
                 SELECT p.*,l.root_path,l.enabled AS library_enabled,a.id AS latest_analysis_id,
-                       a.score_kind,a.ranking_score,a.local_score,a.final_ranking_score
+                       a.score_kind,a.ranking_score,a.local_score,a.final_ranking_score,a.raw_json
                 FROM photos p
                 JOIN libraries l ON l.id=p.library_id
                 LEFT JOIN photo_analysis a ON a.id=(
@@ -80,7 +106,7 @@ class RenderCandidateRepository:
                 """,  # noqa: S608 -- predicate is a fixed class constant
                 (photo_id,),
             ).fetchone()
-        if row is None or not self.available(row):
+        if row is None or not self.available(row) or not self.safety_passed(row):
             return None
         return dict(row)
 
@@ -121,19 +147,8 @@ class RenderCandidateRepository:
         return rows
 
     def get_local(self, photo_id: str) -> dict[str, Any] | None:
-        """Local-only formal releases require scanner features, not AI rows."""
-        with self.database.session() as connection:
-            row = connection.execute(
-                """
-                SELECT p.*,l.root_path,l.enabled AS library_enabled
-                FROM photos p JOIN libraries l ON l.id=p.library_id
-                WHERE p.id=? AND p.lifecycle_status='active' AND p.eligible=1
-                  AND p.local_features_status='complete' AND l.enabled=1
-                  AND p.exclusion_status NOT IN ('auto_excluded','manually_excluded')
-                """,
-                (photo_id,),
-            ).fetchone()
-        return dict(row) if row is not None and self.available(row) else None
+        """A local ranking still needs v6 semantic safety evidence to publish."""
+        return self.get(photo_id)
 
     def require_local(self, photo_ids: Iterable[str]) -> list[dict[str, Any]]:
         rows: list[dict[str, Any]] = []
@@ -151,12 +166,9 @@ class RenderCandidateRepository:
     ) -> list[dict[str, Any]]:
         """Resolve one release contract per requested photo, without N+1 queries.
 
-        Non-automatic modes deliberately accept a mix of old, fully analysed
-        photos and scanner-only photos.  A contract is never chosen for the
-        whole batch: doing so made a valid old photo fail merely because a
-        second photo had only local features (and vice versa).  Automatic AI
-        callers require both scanner features and a valid current model
-        result. Local-only rows never fill an automatic AI release.
+        Every formal release requires a current v6 semantic safety result and
+        local scanner features. Older v4/v5 results remain readable but cannot
+        certify the additional display-exclusion categories.
         """
         ids = list(dict.fromkeys(str(value).strip() for value in photo_ids if str(value).strip()))
         if len(ids) > self.MAX_REQUESTED:
@@ -169,7 +181,7 @@ class RenderCandidateRepository:
             rows = connection.execute(
                 f"""
                 SELECT p.*, l.root_path, l.enabled AS library_enabled,
-                       a.id AS latest_analysis_id,a.score_kind,a.ranking_score,a.schema_version
+                       a.id AS latest_analysis_id,a.score_kind,a.ranking_score,a.schema_version,a.raw_json
                 FROM photos p
                 LEFT JOIN libraries l ON l.id=p.library_id
                 LEFT JOIN photo_analysis a ON a.id=(
@@ -193,8 +205,8 @@ class RenderCandidateRepository:
                 raise IneligiblePhotoError(
                     photo_id, "PHOTO-ELIGIBILITY-003 照片已 Missing 或不在 active 狀態"
                 )
-            if str(row.get("exclusion_status") or "eligible") in {"auto_excluded", "manually_excluded"}:
-                raise IneligiblePhotoError(photo_id, "PHOTO-ELIGIBILITY-004 照片已排除")
+            if str(row.get("exclusion_status") or "") not in {"eligible", "manually_restored"}:
+                raise IneligiblePhotoError(photo_id, "PHOTO-ELIGIBILITY-004 照片已排除或等待人工判斷")
             if not self.available(row):
                 raise IneligiblePhotoError(photo_id, "PHOTO-ELIGIBILITY-005 原始檔不存在")
 
@@ -203,25 +215,17 @@ class RenderCandidateRepository:
                 and bool(row.get("eligible"))
                 and row.get("latest_analysis_id") is not None
                 and str(row.get("score_kind") or "") == SEMANTIC_SCORE_KIND
-                and row.get("schema_version") in {4, 5}
+                and row.get("schema_version") == 6
                 and row.get("ranking_score") is not None
             )
             local_eligible = (
                 bool(row.get("eligible")) and str(row.get("local_features_status") or "") == "complete"
             )
-            if execution == "automatic_ai":
-                if analysis_eligible and local_eligible:
-                    source = "analysis"
-                else:
-                    raise IneligiblePhotoError(photo_id, "PHOTO-ELIGIBILITY-007 尚未同時完成本機品質檢查與有效 AI 正式分析")
-            elif analysis_eligible:
-                source = "analysis"
-            elif local_eligible:
-                source = "local"
-            else:
+            if not (analysis_eligible and local_eligible and self.safety_passed(row)):
                 raise IneligiblePhotoError(
-                    photo_id, "PHOTO-ELIGIBILITY-006 本機特徵未完成，且缺少有效正式分析"
+                    photo_id, "PHOTO-ELIGIBILITY-007 尚未同時完成本機品質檢查與 v6 AI 安全分析"
                 )
+            source = "analysis"
 
             resolved.append(
                 {

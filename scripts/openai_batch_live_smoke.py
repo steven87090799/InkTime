@@ -12,7 +12,7 @@ import tempfile
 import time
 from uuid import uuid4
 
-from inktime.app.domain.analysis.schema import validate_model_response
+from inktime.app.domain.analysis.schema import SCHEMA_VERSION, validate_model_response
 from inktime.app.domain.photos import ThumbnailCache
 from inktime.app.providers.openai_compatible import OpenAICompatibleProvider
 from inktime.app.providers import openai_compatible as provider_contract
@@ -97,7 +97,7 @@ def _validate_outputs(remote: dict, expected: list[str], files: list[Path]) -> d
                 if isinstance(content, list):
                     content = "".join(str(part.get("text", "")) for part in content if isinstance(part, dict))
                 analysis = validate_model_response(content)
-                if analysis.get("schema_version") != 5:
+                if analysis.get("schema_version") != SCHEMA_VERSION:
                     raise ValueError("Current analysis required")
                 accepted, code = True, "OK"
             except (KeyError, IndexError, TypeError, ValueError):

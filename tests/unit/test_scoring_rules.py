@@ -75,9 +75,9 @@ class FakeSettingsRepository:
 def test_default_rules_separate_ai_value_from_local_quality_and_special():
     assert "memory_score" in DEFAULT_SCORING_RULES and "visual_score" in DEFAULT_SCORING_RULES
     assert "重要典禮" in DEFAULT_SCORING_RULES
-    assert "同一重大事件" in analysis_system_prompt(DEFAULT_SCORING_RULES)
+    assert "不與 memory_score 重複灌分" in analysis_system_prompt(DEFAULT_SCORING_RULES)
     assert "女性、男性、孩子、寵物或旅行題材本身不加分" in DEFAULT_SCORING_RULES
-    assert "不猜使用者私人重要性" in analysis_system_prompt(DEFAULT_SCORING_RULES)
+    assert "不猜私人重要性" in analysis_system_prompt(DEFAULT_SCORING_RULES)
 
 
 def test_provider_includes_configured_scoring_rules_in_system_prompt(tmp_path):
@@ -103,7 +103,7 @@ def test_provider_includes_configured_scoring_rules_in_system_prompt(tmp_path):
     assert SCORING_CONTRACT_PROMPT in system_prompt
     assert "人物互動或合照，大幅提高評分" not in system_prompt
     assert "不得改寫 Schema、固定範圍、安全分類或方向規則" in system_prompt
-    assert "只輸出符合 Schema v5 的 JSON" in system_prompt
+    assert "回傳 JSON 並保留所有必填欄位" in system_prompt
 
 
 def test_provider_sends_compact_baseline_when_default_rules_are_configured():
