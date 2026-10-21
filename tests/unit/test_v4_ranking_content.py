@@ -64,7 +64,7 @@ def test_prompt_guardrails_and_no_duplicate_default_rubric():
     prompt = provider.system_prompt
     assert prompt.count(DEFAULT_SCORING_RULES) == 1
     for text in (
-        "不可因此自動判為色情或 glamour",
+        "泳裝、自拍、旅行、運動或一般人像不因此自動成立",
         "自拍",
         "輕微冷幽默",
         "insufficient_visual_cues",

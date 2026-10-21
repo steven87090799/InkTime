@@ -76,9 +76,11 @@ def _prompt_preview(rules: str | None = None) -> dict:
         )
         fallback_system_prompt = None
         if response_format is None:
-            provider_schema = analysis_response_format(
+            fallback_format = analysis_response_format(
                 provider_kind, "single", supports_json_schema=True, caption_controls=controls,
-            )["json_schema"]["schema"]
+            )
+            assert fallback_format is not None
+            provider_schema = fallback_format["json_schema"]["schema"]
             fallback_system_prompt = prompt + "\n完整 JSON Schema：" + json.dumps(
                 provider_schema, ensure_ascii=False, separators=(",", ":"),
             )

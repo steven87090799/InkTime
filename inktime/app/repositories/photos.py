@@ -2310,7 +2310,7 @@ class PhotoRepository:
         try:
             exif = json.loads(str(photo.get("exif_json") or "{}"))
             orientation = exif.get("Orientation") if isinstance(exif, dict) else None
-            return type(orientation) in (int, str) and int(orientation) in range(1, 9)
+            return isinstance(orientation, (int, str)) and not isinstance(orientation, bool) and int(orientation) in range(1, 9)
         except (TypeError, ValueError):
             return False
 

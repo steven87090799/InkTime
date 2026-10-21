@@ -14,6 +14,7 @@ import pytest
 
 from tests.conftest import create_admin, csrf, login
 from tests.unit.test_analysis_schema import valid_result
+from tests.security.test_device_release_authorization import certified_release_metadata
 from inktime.app.workers.runner import WorkerRunner
 from inktime.app.domain.rendering import DeviceTestReleaseStore
 from inktime.app.workers.process_boundary import ProcessCallError, ProcessCallTimeout
@@ -714,6 +715,7 @@ def test_test_release_is_one_time_and_does_not_overwrite_formal_schedule(client,
     formal = publisher.publish(
         [("formal", Image.new("RGB", (480, 800), "white"))],
         profile_key="gdep073e01_6c",
+        metadata=certified_release_metadata(app),
     )
     app.extensions["inktime_release_coordinator"].publish(
         [formal],

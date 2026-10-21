@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from hashlib import sha256
 import inspect
 import json
 import shutil
+from uuid import uuid4
 
 from PIL import Image
 import pytest
@@ -11,12 +13,40 @@ import pytest
 from inktime.app.core.paths import UnsafePathError
 from inktime.app.repositories.resilience import ResilienceRepository
 from inktime.app.services.device_releases import payload_entry_from_manifest
+from tests.unit.test_analysis_schema import valid_result
+
+
+def certified_release_metadata(app) -> dict:
+    photo_id = f"security-{uuid4().hex}"
+    source_root = app.config["INKTIME_RELEASE_DIR"].parent / "security-photo-sources"
+    source_root.mkdir(exist_ok=True)
+    source_path = source_root / f"{photo_id}.jpg"
+    Image.new("RGB", (480, 800), "white").save(source_path)
+    digest = sha256(source_path.read_bytes()).hexdigest()
+    photos = app.extensions["inktime_photo_repository"]
+    library_id = photos.ensure_library("Security release sources", source_root)
+    with app.extensions["inktime_database"].transaction() as connection:
+        connection.execute(
+            """INSERT INTO photos(id,library_id,relative_path,sha256,status,eligible,
+                   lifecycle_status,exclusion_status,local_features_status,created_at,updated_at)
+               VALUES (?,?,?,?,'analyzed',1,'active','eligible','complete',?,?)""",
+            (photo_id, library_id, source_path.name, digest,
+             datetime.now(timezone.utc).isoformat(), datetime.now(timezone.utc).isoformat()),
+        )
+    analysis = valid_result(types=["其他"])
+    photos.save_analysis(
+        photo_id, None, "single", "security-test", "test-model", analysis,
+        json.dumps(analysis, ensure_ascii=False), ranking_score=80, final_ranking_score=80,
+    )
+    return {"render_plans": [{"primary_photo_id": photo_id, "primary_sha256": digest,
+                              "secondary_photo_id": None, "secondary_sha256": None}]}
 
 
 def _publish(app, name: str, *, activate: bool, count: int = 1) -> dict:
     manifest = app.extensions["inktime_release_publisher"].publish(
         [(name if count == 1 else f"{name}-{index}", Image.new("RGB", (480, 800), "white")) for index in range(count)],
         activate=activate,
+        metadata=certified_release_metadata(app),
     )
     with app.extensions["inktime_database"].transaction() as connection:
         connection.execute(

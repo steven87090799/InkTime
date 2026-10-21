@@ -283,7 +283,7 @@ class ReviewRepository:
         if not isinstance(classifications, dict):
             classifications = {}
         confidences = [entry.get("confidence") for entry in classifications.values() if isinstance(entry, dict)]
-        valid_confidences = [float(c) for c in confidences if type(c) in (int, float)]
+        valid_confidences = [float(c) for c in confidences if isinstance(c, (int, float)) and not isinstance(c, bool)]
         value["confidence"] = min(valid_confidences) if valid_confidences else None
         value["content_filter"] = classifications
         risk = classifications.get(str(value.get("reject_reason") or ""))

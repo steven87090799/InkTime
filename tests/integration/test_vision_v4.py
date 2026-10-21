@@ -39,11 +39,11 @@ def test_defaults_and_settings_ui(app, client):
     assert response.status_code == 200
     text = response.get_data(as_text=True)
     for label in (
-        "排除偏色情／性感照片",
-        "排除成人裸露照片",
-        "排除女性單人寫真",
-        "內容排除最低信心",
-        "女性寫真最低信心",
+        "舊版色情化內容排除",
+        "舊版裸露內容排除",
+        "舊版女性寫真排除",
+        "舊版內容信心門檻",
+        "舊版寫真信心門檻",
     ):
         assert label in text
     assert client.get("/scoring").status_code == 200
@@ -51,9 +51,10 @@ def test_defaults_and_settings_ui(app, client):
 
 @pytest.mark.parametrize("code", list(CONTENT_FILTER_SWITCHES))
 @pytest.mark.parametrize(
-    "confidence,enabled,excluded", [(0.95, True, True), (0.8, True, False), (0.95, False, False)]
+    "confidence,enabled,status", [(0.95, True, "auto_excluded"), (0.4, True, "pending_review"),
+                                   (0.95, False, "auto_excluded")]
 )
-def test_authoritative_exclusion_retains_analysis_orientation(app, code, confidence, enabled, excluded):
+def test_authoritative_exclusion_retains_analysis_orientation(app, code, confidence, enabled, status):
     actor = create_admin(app)
     settings = app.extensions["inktime_settings_repository"]
     settings.update(CONTENT_FILTER_SWITCHES[code], enabled, changed_by=actor, source_ip="test")
@@ -61,19 +62,16 @@ def test_authoritative_exclusion_retains_analysis_orientation(app, code, confide
     photo_id = add_photos(app, 1)[0]
     result = save(repo, photo_id, content_filter=content_filter_result(code, confidence))
     photo = repo.get_with_path(photo_id)
-    assert bool(photo["eligible"]) is not excluded
-    assert (photo["exclusion_status"] == "auto_excluded") == excluded
+    assert photo["eligible"] == 0
+    assert photo["exclusion_status"] == status
     assert photo["visual_orientation_rotation_cw"] == 0
-    if excluded:
-        assert photo["reject_reason"] == code
-        assert result["selection_score"] == 0
-        assert repo.score_population() == []
-    else:
-        assert repo.score_population() == [result["ranking_score"]]
+    assert photo["reject_reason"] == code
+    assert result["selection_score"] == 0
+    assert repo.score_population() == []
     with repo.database.session() as connection:
         row = connection.execute("SELECT * FROM photo_analysis WHERE photo_id=?", (photo_id,)).fetchone()
         assert (
-            row["schema_version"] == 5
+            row["schema_version"] == 6
             and json.loads(row["raw_json"])["content_filter"][code] == {"detected": True, "confidence": confidence}
         )
         assert (
@@ -87,16 +85,17 @@ def test_restore_rescan_reanalysis_and_explicit_reapply(app, tmp_path):
     repo = app.extensions["inktime_photo_repository"]
     content = content_filter_result("female_glamour_portrait", 0.95)
     save(repo, photo_id, content_filter=content)
-    repo.set_exclusion(photo_id, action="restore", changed_by=actor)
+    with pytest.raises(ValueError, match="v6 安全分析已排除"):
+        repo.set_exclusion(photo_id, action="restore", changed_by=actor)
     # Scan changed bytes too: only explicit reapply may reset a manual restore.
     Image.effect_noise((900, 600), 80).convert("RGB").save(tmp_path / "photos" / "photo.jpg")
     PhotoScanner(repo, PhotoPreprocessor(), app.extensions["inktime_thumbnail_cache"]).scan(
         "測試照片", tmp_path / "photos", build_thumbnails=False
     )
     save(repo, photo_id, content_filter=content)
-    assert repo.get_with_path(photo_id)["exclusion_status"] == "manually_restored"
+    assert repo.get_with_path(photo_id)["exclusion_status"] == "auto_excluded"
     repo.set_exclusion(photo_id, action="reanalyze", changed_by=actor)
-    assert repo.get_with_path(photo_id)["eligible"] == 1
+    assert repo.get_with_path(photo_id)["eligible"] == 0
     repo.set_exclusion(photo_id, action="reanalyze", changed_by=actor, reapply_rules=True)
     photo = repo.get_with_path(photo_id)
     assert (
@@ -145,7 +144,7 @@ def test_local_quality_favorite_population_and_caption_search(app):
     assert count == 6 and len(rows) == 6  # excluded analysis remains searchable
 
 
-def test_real_service_uses_v5_and_content_policy(app, tmp_path):
+def test_real_service_uses_v6_and_content_policy(app, tmp_path):
     photo_id = _scan(app, tmp_path)[0]
     provider = CountingProvider(
         valid_result(content_filter=content_filter_result("explicit_nudity", 0.95))
@@ -159,7 +158,7 @@ def test_real_service_uses_v5_and_content_policy(app, tmp_path):
         photo_id=photo_id, job_id=None, provider=provider, strategy="single", force_ai=True
     )
     assert provider.analyze_calls == 1
-    assert result["analysis"]["schema_version"] == 5
+    assert result["analysis"]["schema_version"] == 6
     assert (
         app.extensions["inktime_photo_repository"].get_with_path(photo_id)["reject_reason"]
         == "explicit_nudity"
@@ -212,7 +211,7 @@ def test_reapply_uses_current_switch_and_favorite_inheritance_still_excludes(app
         "analysis.exclude_female_glamour_portraits", False, changed_by=actor, source_ip="test"
     )
     repo.set_exclusion(ids[0], action="reanalyze", reapply_rules=True, changed_by=actor)
-    assert repo.get_with_path(ids[0])["eligible"] == 1
+    assert repo.get_with_path(ids[0])["eligible"] == 0
 
 
 def test_adding_library_peers_does_not_add_special_levels(app):
@@ -370,15 +369,16 @@ def test_overlapping_content_persists_all_reasons_and_reapply_uses_other_enabled
     save(repo, photo_id, content_filter=content)
     details = json.loads(repo.get_with_path(photo_id)["reject_details_json"])
     assert set(details["matched_codes"]) == set(CONTENT_FILTER_SWITCHES)
-    repo.set_exclusion(photo_id, action="restore", changed_by=actor)
+    with pytest.raises(ValueError, match="v6 安全分析已排除"):
+        repo.set_exclusion(photo_id, action="restore", changed_by=actor)
     save(repo, photo_id, content_filter=content)
-    assert repo.get_with_path(photo_id)["eligible"] == 1
+    assert repo.get_with_path(photo_id)["eligible"] == 0
     for key in ("analysis.exclude_sexualized_content", "analysis.exclude_female_glamour_portraits"):
         settings.update(key, False, changed_by=actor, source_ip="test")
     repo.set_exclusion(photo_id, action="reanalyze", reapply_rules=True, changed_by=actor)
     photo = repo.get_with_path(photo_id)
-    assert photo["eligible"] == 0 and photo["reject_reason"] == "explicit_nudity"
-    assert json.loads(photo["reject_details_json"])["matched_codes"] == ["explicit_nudity"]
+    assert photo["eligible"] == 0 and photo["reject_reason"] == "sexualized_content"
+    assert set(json.loads(photo["reject_details_json"])["matched_codes"]) == set(CONTENT_FILTER_SWITCHES)
 
 
 def test_favorite_added_after_exclusion_does_not_restore_photo(app):

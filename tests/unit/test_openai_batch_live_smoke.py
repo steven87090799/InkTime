@@ -47,7 +47,7 @@ def test_acceptance_requires_complete_current_analysis_and_exact_coverage(tmp_pa
     summary = smoke._validate_outputs(remote, ["test"], [path])
     assert summary["accepted"] is (case == "valid")
     if case == "valid":
-        assert summary["items"][0]["analysis"]["schema_version"] == 5
+        assert summary["items"][0]["analysis"]["schema_version"] == 6
         assert summary["usage"] == {"input_tokens": 100, "cached_tokens": 50, "output_tokens": 200, "reasoning_tokens": 20}
 
 

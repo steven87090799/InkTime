@@ -90,7 +90,7 @@ def test_missing_or_removed_file_is_never_a_candidate(app, tmp_path):
     assert app.extensions["inktime_render_candidate_repository"].get("removed") is None
 
 
-def test_local_only_explicit_local_feature_photo_can_queue_release(client, app, tmp_path):
+def test_local_only_photo_requires_v6_safety_before_release(client, app, tmp_path):
     root = tmp_path / "local-only"
     root.mkdir()
     Image.new("RGB", (640, 480), "white").save(root / "local.jpg")
@@ -108,10 +108,18 @@ def test_local_only_explicit_local_feature_photo_can_queue_release(client, app, 
     response = client.post(
         "/api/v1/releases", json={"photo_ids": ["local-only"]}, headers={"X-CSRF-Token": csrf(client)}
     )
+    assert response.status_code == 409
+    photos.save_analysis(
+        "local-only", None, "test-model", "local", "test", valid_result(types=["其他"]), "{}",
+        score_kind=SEMANTIC_SCORE_KIND, ranking_score=80, final_ranking_score=80,
+    )
+    response = client.post(
+        "/api/v1/releases", json={"photo_ids": ["local-only"]}, headers={"X-CSRF-Token": csrf(client)}
+    )
     assert response.status_code == 202
 
 
-def test_non_automatic_modes_mix_analysis_and_local_contracts(app, tmp_path):
+def test_non_automatic_modes_also_require_v6_safety(app, tmp_path):
     root = tmp_path / "mixed"
     root.mkdir()
     _candidate(app, root, "analysed-old")
@@ -126,24 +134,24 @@ def test_non_automatic_modes_mix_analysis_and_local_contracts(app, tmp_path):
             (library,),
         )
     candidates = app.extensions["inktime_render_candidate_repository"]
+    with pytest.raises(ValueError, match="scanner-local"):
+        candidates.require_for_execution_mode(["analysed-old", "scanner-local"], "local_only")
+    photos.save_analysis(
+        "scanner-local", None, "test-model", "local", "test", valid_result(types=["其他"]), "{}",
+        score_kind=SEMANTIC_SCORE_KIND, ranking_score=80, final_ranking_score=80,
+    )
     for mode in ("local_only", "local_with_manual_ai", "disabled"):
         rows = candidates.require_for_execution_mode(["analysed-old", "scanner-local", "analysed-old"], mode)
         assert [row["id"] for row in rows] == ["analysed-old", "scanner-local"]
-        assert [row["eligibility_source"] for row in rows] == ["analysis", "local"]
+        assert [row["eligibility_source"] for row in rows] == ["analysis", "analysis"]
     settings = app.extensions["inktime_settings_repository"]
     settings.update("render.layout", "photo_pair", changed_by="test", source_ip="test")
     release = app.extensions["inktime_render_service"].publish(["analysed-old", "scanner-local"], "test")
     manifest = app.extensions["inktime_release_publisher"].validate(release["release_id"])
     plan = manifest["render_options"]["render_plans"][0]
     assert plan["primary_eligibility_source"] == "analysis"
-    assert plan["secondary_eligibility_source"] == "local"
-    try:
-        candidates.require_for_execution_mode(["analysed-old", "scanner-local"], "automatic_ai")
-    except ValueError as exc:
-        assert "scanner-local" in str(exc)
-        assert "正式分析" in str(exc)
-    else:
-        raise AssertionError("automatic_ai must not accept a local-only candidate")
+    assert plan["secondary_eligibility_source"] == "analysis"
+    assert len(candidates.require_for_execution_mode(["analysed-old", "scanner-local"], "automatic_ai")) == 2
 
 
 def test_automatic_local_selection_records_per_photo_eligibility_sources(app, tmp_path):
@@ -169,6 +177,10 @@ def test_automatic_local_selection_records_per_photo_eligibility_sources(app, tm
                'eligible','complete',80,'2020-07-28T10:00:00+00:00','2020-07-28','07-28',?,?)""",
             (library, now, now),
         )
+    photos.save_analysis(
+        "automatic-local", None, "test-model", "local", "test", valid_result(types=["其他"]), "{}",
+        score_kind=SEMANTIC_SCORE_KIND, ranking_score=80, final_ranking_score=80,
+    )
     settings = app.extensions["inktime_settings_repository"]
     settings.update("analysis.execution_mode", "local_only", changed_by="test", source_ip="test")
     settings.update("render.layout", "photo_pair", changed_by="test", source_ip="test")
@@ -177,7 +189,7 @@ def test_automatic_local_selection_records_per_photo_eligibility_sources(app, tm
     manifest = app.extensions["inktime_release_publisher"].validate(release["release_id"])
     plan = manifest["render_options"]["render_plans"][0]
     assert plan["primary_eligibility_source"] == "analysis"
-    assert plan["secondary_eligibility_source"] == "local"
+    assert plan["secondary_eligibility_source"] == "analysis"
 
 
 def test_automatic_ai_revalidates_explicit_local_only_selection(app, tmp_path):
@@ -202,7 +214,7 @@ def test_automatic_ai_revalidates_explicit_local_only_selection(app, tmp_path):
         service.publish(["automatic-local-only"], "test")
     except ValueError as exc:
         assert "automatic-local-only" in str(exc)
-        assert "正式分析" in str(exc)
+        assert "v6 AI 安全分析" in str(exc)
     else:
         raise AssertionError("automatic_ai must revalidate automatic local-only selection")
 

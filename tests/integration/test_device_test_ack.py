@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 from PIL import Image
 
 from inktime.app.domain.rendering import DeviceTestReleaseStore
+from tests.security.test_device_release_authorization import certified_release_metadata
 
 
 def test_one_time_device_release_remains_retryable_until_verified_display_ack(client, app):
@@ -14,6 +15,7 @@ def test_one_time_device_release_remains_retryable_until_verified_display_ack(cl
     formal = publisher.publish(
         [("formal", Image.new("RGB", (480, 800), "white"))],
         profile_key="safe_4c",
+        metadata=certified_release_metadata(app),
     )
     app.extensions["inktime_release_coordinator"].publish(
         [formal],
@@ -118,6 +120,7 @@ def test_device_status_rejects_future_poisoning_and_clamps_small_future_skew(cli
     formal = publisher.publish(
         [("formal", Image.new("RGB", (480, 800), "white"))],
         profile_key="safe_4c",
+        metadata=certified_release_metadata(app),
     )
     app.extensions["inktime_release_coordinator"].publish(
         [formal],

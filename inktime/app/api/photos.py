@@ -761,7 +761,7 @@ def photo_detail(photo_id: str):
                     "screenshot": "截圖",
                     "document_record": "文件／紀錄照片",
                 }
-                analysis["display_exclusion_label"] = labels.get(exclusion.get("category"), "未知")
+                analysis["display_exclusion_label"] = labels.get(str(exclusion.get("category") or ""), "未知")
                 analysis["display_exclusion_confidence"] = exclusion.get("confidence")
         if score_kind == LOCAL_QUALITY_SCORE_KIND:
             try:

@@ -486,16 +486,12 @@ def test_virtual_display_inbox_scans_and_publishes_without_provider(client, app,
     assert job["status"] == "completed"
     profile_key = str(app.extensions["inktime_settings_repository"].get("render.profile"))
     manifest = client.get(f"/api/v1/virtual-display/manifest?profile={profile_key}")
-    if has_content:
-        assert manifest.status_code == 200
-        assert manifest.json["files"][0]["source_photo_id"]
-    else:
-        assert manifest.status_code == 404
-        with app.extensions["inktime_database"].session() as connection:
-            item = connection.execute("SELECT result_json,attempts FROM job_items WHERE job_id=?", (job_id,)).fetchone()
-        assert json.loads(item["result_json"])["outcome"] == "no_content"
-        assert item["attempts"] == 1
-        assert WorkerRunner(app).run_once() == 0
+    assert manifest.status_code == 404
+    with app.extensions["inktime_database"].session() as connection:
+        item = connection.execute("SELECT result_json,attempts FROM job_items WHERE job_id=?", (job_id,)).fetchone()
+    assert json.loads(item["result_json"])["outcome"] == "no_content"
+    assert item["attempts"] == 1
+    assert WorkerRunner(app).run_once() == 0
     with app.extensions["inktime_database"].session() as connection:
         assert connection.execute("SELECT COUNT(*) FROM photos").fetchone()[0] == 1
         assert connection.execute("SELECT COUNT(*) FROM api_usage").fetchone()[0] == 0

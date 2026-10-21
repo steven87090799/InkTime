@@ -1,7 +1,9 @@
 from PIL import Image
 import pytest
 
+from inktime.app.domain.analysis.scoring import SEMANTIC_SCORE_KIND
 from tests.integration.test_dual_photo_caption_layout import _photo
+from tests.unit.test_analysis_schema import valid_result
 
 
 LAYOUTS = ("photo_info", "photo_pair", "photo_pair_caption")
@@ -14,6 +16,11 @@ def _photos(app, tmp_path, count):
     for index, color in enumerate(("#cc2211", "#1133cc", "#22cc44")[:count]):
         identifier = f"layout-{index}"
         _photo(app, root, identifier, (1600, 900), "2020-01-01T00:00:00+00:00", color)
+        app.extensions["inktime_photo_repository"].save_analysis(
+            identifier, None, "single", "test-ai", "test-model",
+            valid_result(types=["其他"]), "{}", score_kind=SEMANTIC_SCORE_KIND,
+            ranking_score=80, final_ranking_score=80,
+        )
         identifiers.append(identifier)
     return identifiers
 

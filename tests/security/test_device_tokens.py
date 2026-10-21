@@ -374,10 +374,12 @@ def test_device_auth_endpoints_share_identical_missing_token_behavior(client, pa
 def test_device_downloads_versioned_manifest_and_verified_file(client, app):
     from PIL import Image
     from hashlib import sha256
+    from tests.security.test_device_release_authorization import certified_release_metadata
 
     _, token = app.extensions["inktime_device_repository"].create("客廳")
     manifest = app.extensions["inktime_release_publisher"].publish(
-        [("photo-1", Image.new("RGB", (480, 800), "white"))]
+        [("photo-1", Image.new("RGB", (480, 800), "white"))],
+        metadata=certified_release_metadata(app),
     )
     app.extensions["inktime_release_coordinator"].publish(
         [manifest],
@@ -1173,6 +1175,7 @@ def test_offline_schedule_version_is_acknowledged_without_allowing_device_to_rai
 
 def test_device_receives_only_its_panel_profile_release(client, app):
     from PIL import Image
+    from tests.security.test_device_release_authorization import certified_release_metadata
 
     _, token = app.extensions["inktime_device_repository"].create("六色電子紙", panel_profile="gdep073e01_6c")
     publisher = app.extensions["inktime_release_publisher"]
@@ -1180,11 +1183,13 @@ def test_device_receives_only_its_panel_profile_release(client, app):
         [("photo-six", Image.new("RGB", (480, 800), "blue"))],
         profile_key="gdep073e01_6c",
         dither="none",
+        metadata=certified_release_metadata(app),
     )
     seven_color = publisher.publish(
         [("photo-seven", Image.new("RGB", (480, 800), "orange"))],
         profile_key="gdey073d46_7c",
         dither="none",
+        metadata=certified_release_metadata(app),
     )
     app.extensions["inktime_release_coordinator"].publish(
         [six_color, seven_color],

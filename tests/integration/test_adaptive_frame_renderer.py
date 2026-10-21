@@ -9,6 +9,7 @@ import pytest
 
 from inktime.app.domain.analysis.scoring import SEMANTIC_SCORE_KIND
 from inktime.app.domain.rendering import Rect
+from inktime.app.domain.rendering.adaptive_layout import InsufficientPhotoContentError
 from inktime.app.services import rendering as rendering_service
 from tests.conftest import create_admin
 from tests.unit.test_analysis_schema import valid_result
@@ -199,7 +200,7 @@ def test_default_batch_photo_plans_reserve_distinct_portrait_sources(app, tmp_pa
     assert all(plan["footer_alignment"] == {"caption": "left", "date": "right"} for plan in plans)
 
 
-def test_auto_photo_pairs_local_scanner_photos_without_ai_rows(app, tmp_path):
+def test_auto_photo_holds_local_scanner_photos_without_ai_rows(app, tmp_path):
     root = tmp_path / "photos"
     root.mkdir()
     _analyzed_photo(app, root, "primary", (900, 1600), "2024-07-01T10:00:00+00:00")
@@ -214,14 +215,8 @@ def test_auto_photo_pairs_local_scanner_photos_without_ai_rows(app, tmp_path):
         connection.execute("UPDATE photos SET local_candidate_score=80, "
                            "captured_date=substr(captured_at,1,10),captured_month_day=substr(captured_at,6,5)")
     service = app.extensions["inktime_render_service"]
-    plan = service.resolve_render_plan("primary", layout="auto_photo", orientation="landscape")
-    assert plan["layout"] == "photo_pair"
-    assert plan["secondary_photo_id"] == "secondary"
-    assert plan["capture_date_labels"] == {"primary": "2024年7月1日", "secondary": "2024年7月2日"}
-    assert plan["primary_caption"]["source"] == "local_footer_fallback"
-    assert plan["photo_footer_lines"]["primary"] == "2024年7月1日 · 把這一刻，好好收藏。"
-    image = service._render_plan_image(plan)
-    assert image.size == (480, 800)
+    with pytest.raises(InsufficientPhotoContentError):
+        service.resolve_render_plan("primary", layout="auto_photo", orientation="landscape")
 
 
 def test_adaptive_landscape_single_contains_matching_photo_and_keeps_footer(app, tmp_path):

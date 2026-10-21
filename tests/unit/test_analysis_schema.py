@@ -113,8 +113,8 @@ def test_only_v4_v5_and_v6_are_supported(version):
         ("types", []),
         ("types", ["人物", "人物"]),
         ("types", ["人物", "日常", "活動", "旅行"]),
-        ("side_caption", "字" * 7),
-        ("side_caption", "字" * 17),
+        ("side_caption", ""),
+        ("side_caption", "字" * 21),
         ("content_filter", {"exclude_code": "screenshot", "confidence": 0.99}),
         ("content_filter", {"exclude_code": "none", "confidence": 0.99, "exclude": True}),
         ("content_filter", {"exclude_code": "none", "confidence": 0.99}),
@@ -216,7 +216,8 @@ def test_side_caption_controls_cannot_publish_a_contract_the_validator_rejects()
 
 def test_v5_exact_fields_and_legacy_v4_remains_readable():
     assert set(ANALYSIS_JSON_SCHEMA["schema"]["properties"]) == REQUIRED_FIELDS
-    assert set(LEGACY_V4_JSON_SCHEMA["schema"]["properties"]) > REQUIRED_FIELDS
+    assert "display_exclusion" not in LEGACY_V4_JSON_SCHEMA["schema"]["properties"]
+    assert {"caption", "people_count", "special_codes"} <= set(LEGACY_V4_JSON_SCHEMA["schema"]["properties"])
     assert validate_analysis_result(legacy_v4_result()) == legacy_v4_result()
 
 
@@ -225,7 +226,7 @@ def test_new_model_ingress_rejects_legacy_v4():
         validate_model_response(legacy_v4_result())
 
 
-@pytest.mark.parametrize("length,valid", [(7, False), (8, True), (16, True), (17, False)])
+@pytest.mark.parametrize("length,valid", [(0, False), (1, True), (20, True), (21, False)])
 def test_side_caption_length_contract(length, valid):
     value = valid_result(side_caption="字" * length)
     if valid:

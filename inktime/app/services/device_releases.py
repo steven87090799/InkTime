@@ -992,7 +992,9 @@ class DeviceReleaseService:
         manifest = authorization.manifest or {}
         options = manifest.get("render_options")
         plans = options.get("render_plans") if isinstance(options, dict) else None
-        explicit_test_upload = authorization.source in {"test_assignment", "stock_direct_test"} and not plans
+        explicit_test_upload = authorization.source in {
+            "test_assignment", "stock_direct_test", "stock_direct_test_expired",
+        } and not plans
         if not explicit_test_upload and not self._formal_content_is_current(manifest):
             raise ValueError("Release 照片已排除、變更或等待人工判斷")
         entry = self.payload_entry_for_authorization(
