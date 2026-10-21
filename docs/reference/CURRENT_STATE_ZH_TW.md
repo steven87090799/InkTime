@@ -1,6 +1,6 @@
 # InkTime 現行版本與功能基線
 
-本分支更新日期：2026-10-17；基底為 `origin/main=80f3121`，NAS 可靠性修復見 PR #162。下表 PhotoPainter `2.8.9` 包含完整 HTTP JSON 接收修復，仍須以該提交的 Hosted CI 結果確認編譯；原碼版本不表示已部署或刷機。部署中的版本請從「診斷」核對 Git revision，實體裝置則核對回報的韌體版本。
+本分支更新日期：2026-10-21；基底為 `origin/main=5908c28`，v6 顯示安全變更見 Draft PR #167。下表 PhotoPainter `2.8.9` 包含完整 HTTP JSON 接收修復，仍須以該提交的 Hosted CI 結果確認編譯；原碼版本不表示已部署或刷機。部署中的版本請從「診斷」核對 Git revision，實體裝置則核對回報的韌體版本。
 
 ## 版本不是同一個數字
 
@@ -8,7 +8,7 @@
 |---|---|---|
 | Python 套件 | `2.0.0.dev0`，部署／CI 支援 Python 3.12（`>=3.12,<3.13`） | [`inktime/_version.py`](../../inktime/_version.py)、[`pyproject.toml`](../../pyproject.toml) |
 | SQLite Migration | 連續 `1–70`；64–66 保護配送／渲染輸入並支援雙圖附說明，67 索引活動清理，68 永久保存照片內容版本與模型證據，69 加入 Batch 候選分頁索引與逐項失敗重試授權，70 支援橫單直雙與拍攝日期的自動版型；保留歷史／外鍵 | [`migrations.py`](../../inktime/app/db/migrations.py) |
-| AI Analysis Schema | 嚴格 v5；保留 v4 相容閱讀與既有結果，不為精簡欄位重新付費 | [`plan.py`](../../inktime/app/domain/analysis/plan.py)、[`schema.py`](../../inktime/app/domain/analysis/schema.py) |
+| AI Analysis Schema | 嚴格 v6；保留 v4/v5 相容閱讀。正式發布要求 v6 安全分析，舊結果不自動重付費 | [`plan.py`](../../inktime/app/domain/analysis/plan.py)、[`schema.py`](../../inktime/app/domain/analysis/schema.py) |
 | ESP32 7C／PhotoPainter 韌體 | `2.8.9`（本分支；未刷機） | [`ink-display-7C-photo.ino`](../../esp32/ink-display-7C-photo/ink-display-7C-photo.ino) |
 | ESP32 Config Store payload | v5，讀取 v1–v5；舊容量 12、新 payload 24 slots read compatibility | [`device_config_store_core.h`](../../esp32/ink-display-7C-photo/device_config_store_core.h) |
 | PhotoPainter Enhanced storage | Internal FFat；40 formal frames hard limit；16 offline slots/day capability；microSD not required | [`photopainter_support.cpp`](../../esp32/ink-display-7C-photo/photopainter_support.cpp)、[partition table](../../esp32/ink-display-7C-photo/inktime_photopainter_3M_16MB.csv) |
@@ -20,15 +20,15 @@ Config Store v5 是裝置本機儲存格式，不是所有 HTTP Manifest 的版�
 ## 執行與分析
 
 - 三程序為 Web（`server:app`）、Worker（`inktime.app.workers.runner`）、Scheduler（`inktime.app.workers.scheduler`），共用 `/data` 與唯讀 `/photos`。
-- 新安裝 `analysis.execution_mode=local_only`。只有設定 Provider 不會開啟 AI；一般 AI 工作需要 `automatic_ai`，單張手動 AI 可使用 `local_with_manual_ai`。`disabled` 拒絕新分析，但既有照片與 Release 仍可讀。
+- 新安裝 `analysis.execution_mode=local_only`。只有設定 Provider 不會開啟 AI；一般 AI 工作需要 `automatic_ai`，單張手動 AI 可使用 `local_with_manual_ai`。`disabled` 拒絕新分析。正式相框發布要求 v6 視覺安全分析，純本機分析不產生可發布照片。
 - 新策略為 `local`／`single`；舊的 `low_cost`、`smart`、`smart_two_stage`、`high_quality`、`single_high`、`custom` 正規化成 `single`，不恢復兩階段圖片分析。一次分析計畫最多一次圖片 Vision，只在本機抽取 JSON 並嚴格驗證，不追加模型 JSON 修復或長描述請求；另建重跑工作仍可能產生新費用。
-- 新分析提示詞為 `photo-analysis-v5-complete-literary-v2-20261011`，逐字保留原版規則，再補充文青表達、分類信心、EXIF 與完整精簡 JSON 要求；舊原版、672 字元版及第一個完整版本的凍結工作各自使用原文字。實際請求與費用預覽共用最高 512 output tokens；圖片輸入 Token 依模型與像素計費，預覽只是情境而非保證上限。
+- 新分析提示詞為 `photo-analysis-v6-display-guard-20261021`，保留一句 8–16 字有餘味的文青短句、評分、內容分類與 EXIF 後旋轉，新增 AV 封面、商業模特、截圖與文件紀錄分類；凍結的 v5 工作仍用原文字與 v5 Schema。實際請求與費用預覽共用最高 512 output tokens；圖片輸入 Token 依模型與像素計費，預覽只是情境而非保證上限。
 - 同步分析的候選選取與保存共用指紋，顯示控制與停用的修復策略不影響是否已完成。定期分析先凍結 Provider／模型／提示詞／規則與執行模式；只有自動 AI 模式允許建立定期雲端分析工作。
 - SQLite 連線採 WAL／`synchronous=FULL`／外鍵檢查，優先保留已提交的分析與費用紀錄；仍需本機可靠檔案系統、完整備份及還原驗證，不能據此宣稱硬體斷電驗收。
 - Web 的 `analysis.image_max_side` 預設 1024、可選 1600；底層 plan／benchmark 額外支援 512。不要把低解析度誤寫成第一階段。
 - Migration 51 增加有界 AI Trace；Migration 52 增加 `providers.model`。Provider 專屬模型優先於全域模型，留白才沿用；OpenRouter 必須使用完整模型 ID。
-- 現行 v5 與相容 v4 採 `ranking-v5-ai-first`：回憶 67%、視覺 33%、本機品質 0%，再套用 special bonus 與最愛提升。本機品質現在是 candidate qualification／quality gate，不是 ranking weight；它只負責本機特徵完成、品質與來源資格判斷，不與 semantic 分數混比或補位。E6 只參與顯示分數；內容分類有獨立門檻與人工恢復保護，見 [現行 Vision Schema](../VISION_SCHEMA.md)。
-- 照片庫優先顯示現行 v5／相容 v4 模型，再顯示已保存的歷史模型紀錄及本機分析；歷史描述／短句可搜尋、原始評分可查閱，v1–v3 歷史分數不參與現行 semantic 排名。儀表板分開標示含本機的完成狀態與依照片去重的模型結果。
+- 現行 v6 與相容 v4/v5 採 `ranking-v5-ai-first`：回憶 67%、視覺 33%、本機品質 0%，再套用 special bonus 與最愛提升。本機品質現在是 candidate qualification／quality gate，不是 ranking weight；它只負責本機特徵完成、品質與來源資格判斷，不與 semantic 分數混比或補位。E6 只參與顯示分數；v6 明確顯示風險固定排除，低信心疑似內容與方向須人工確認，見 [現行 Vision Schema](../VISION_SCHEMA.md)。
+- 照片庫優先顯示現行 v6／相容 v4/v5 模型，再顯示已保存的歷史模型紀錄及本機分析；歷史描述／短句可搜尋、原始評分可查閱，v1–v3 歷史分數不參與現行 semantic 排名。儀表板分開標示含本機的完成狀態與依照片去重的模型結果。
 - `completed` 只表示工作結束；本機、預篩排除、繼承或 cache hit 不證明有新 API 請求。請合併工作策略、AI Trace attempts、`api_usage` 與時間戳判讀。
 
 操作見[管理員指南](../guides/ADMIN_GUIDE_ZH_TW.md)、[本機選片](../guides/LOCAL_ONLY_SELECTION_ZH_TW.md)與[Activity／AI Trace](../guides/ACTIVITY_AI_TRACE_ZH_TW.md)。設定頁完整列出設定，提供全文、分類、風險與生效方式篩選；功能與設定說明大全位於 `/help/controls`。
