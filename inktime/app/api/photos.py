@@ -22,6 +22,7 @@ from inktime.app.core.idempotency import (
 from inktime.app.api.photo_derivatives import photo_derivative_response
 from inktime.app.core.paths import UnsafePathError, safe_join
 from inktime.app.domain.analysis.schema import ALLOWED_TYPES
+from inktime.app.repositories.photo_locations import PhotoLocationRepository
 from inktime.app.domain.analysis.plan import stored_analysis_fingerprint, fingerprint
 from inktime.app.domain.analysis.execution_mode import execution_mode, permits_automatic_ai, permits_manual_ai
 from inktime.app.domain.analysis.scoring import (
@@ -642,7 +643,8 @@ def photo_detail(photo_id: str):
     if not source_available and photo["sha256"]:
         with current_app.extensions["inktime_thumbnail_cache"].acquire_existing(str(photo["sha256"]), 1600) as cached:
             retained_preview = cached is not None
-    location_name = current_app.extensions["inktime_location_resolver"].resolve(
+    photo_place = PhotoLocationRepository(current_app.extensions["inktime_database"]).get(photo)
+    location_name = (photo_place.display_label if photo_place else "") or current_app.extensions["inktime_location_resolver"].resolve(
         photo["gps_lat"],
         photo["gps_lon"],
         max_distance_km=float(
@@ -807,6 +809,7 @@ def photo_detail(photo_id: str):
         events=events,
         allowed_types=sorted(ALLOWED_TYPES),
         location_name=location_name,
+        photo_place=photo_place,
         prefilter=prefilter,
         orientation=orientation,
     )

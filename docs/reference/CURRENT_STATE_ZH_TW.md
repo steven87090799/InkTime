@@ -1,13 +1,13 @@
 # InkTime 現行版本與功能基線
 
-本分支更新日期：2026-10-21；基底為 `origin/main=5908c28`，v6 顯示安全變更見 Draft PR #167。下表 PhotoPainter `2.8.9` 包含完整 HTTP JSON 接收修復，仍須以該提交的 Hosted CI 結果確認編譯；原碼版本不表示已部署或刷機。部署中的版本請從「診斷」核對 Git revision，實體裝置則核對回報的韌體版本。
+本分支更新日期：2026-10-22；基底為 `origin/main=17563d7`，保留已合併的 v6 顯示安全契約。本分支加入獨立的 [GPS／地標原型](../experiments/GPS_LOCATION_20261022.md)，需手動查詢／匯入；未啟用自動地址查詢或變更正式模型。下表 PhotoPainter `2.8.9` 包含完整 HTTP JSON 接收修復，仍須以該提交的 Hosted CI 結果確認編譯；原碼版本不表示已部署或刷機。部署中的版本請從「診斷」核對 Git revision，實體裝置則核對回報的韌體版本。
 
 ## 版本不是同一個數字
 
 | 項目 | 原始碼值 | 權威來源 |
 |---|---|---|
 | Python 套件 | `2.0.0.dev0`，部署／CI 支援 Python 3.12（`>=3.12,<3.13`） | [`inktime/_version.py`](../../inktime/_version.py)、[`pyproject.toml`](../../pyproject.toml) |
-| SQLite Migration | 連續 `1–70`；64–66 保護配送／渲染輸入並支援雙圖附說明，67 索引活動清理，68 永久保存照片內容版本與模型證據，69 加入 Batch 候選分頁索引與逐項失敗重試授權，70 支援橫單直雙與拍攝日期的自動版型；保留歷史／外鍵 | [`migrations.py`](../../inktime/app/db/migrations.py) |
+| SQLite Migration | 連續 `1–71`；64–66 保護配送／渲染輸入並支援雙圖附說明，67 索引活動清理，68 永久保存照片內容版本與模型證據，69 加入 Batch 候選分頁索引與逐項失敗重試授權，70 支援橫單直雙與拍攝日期的自動版型，71 新增獨立地點證據與精確 GPS 快取；保留歷史／外鍵 | [`migrations.py`](../../inktime/app/db/migrations.py) |
 | AI Analysis Schema | 嚴格 v6；保留 v4/v5 相容閱讀。正式發布要求 v6 安全分析，舊結果不自動重付費 | [`plan.py`](../../inktime/app/domain/analysis/plan.py)、[`schema.py`](../../inktime/app/domain/analysis/schema.py) |
 | ESP32 7C／PhotoPainter 韌體 | `2.8.9`（本分支；未刷機） | [`ink-display-7C-photo.ino`](../../esp32/ink-display-7C-photo/ink-display-7C-photo.ino) |
 | ESP32 Config Store payload | v5，讀取 v1–v5；舊容量 12、新 payload 24 slots read compatibility | [`device_config_store_core.h`](../../esp32/ink-display-7C-photo/device_config_store_core.h) |
