@@ -2454,6 +2454,9 @@ class RenderService:
                     f"""
                     WITH ranked_candidates AS (
                     SELECT p.id,p.library_id,p.relative_path,p.captured_at,p.captured_date,p.captured_month_day,
+                           p.width,p.height,p.orientation,p.exif_orientation_original,
+                           p.manual_orientation_rotation_cw,p.visual_orientation_rotation_cw,
+                           p.visual_orientation_confidence,p.visual_orientation_ambiguous,
                            p.sha256,p.perceptual_hash,p.difference_hash,p.duplicate_group_id,p.gps_lat,p.gps_lon,
                            p.e6_score,p.e6_contrast_score,
                            p.e6_subject_score,p.e6_skin_score,p.e6_text_score,
