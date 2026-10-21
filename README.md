@@ -58,7 +58,7 @@ Provider 連線／合成圖片診斷有自己的操作入口，圖片測試、�
 
 - 以 SHA-256、pHash、dHash、EXIF、亮度、對比、模糊與曝光做本地預處理；符合內容與請求相容性的結果可重用，避免重複呼叫模型。
 - 512／1024／1600px 內容雜湊縮圖快取；預設不傳原始 4K／8K 圖片。
-- 單一分析請求回傳 Schema v6：類型、回憶與視覺分數、特殊程度、8–16 字短文案、內容分類與方向；本機抽取 JSON 後嚴格驗證，不追加模型修復或長描述請求。既有 v4 描述與結果保留可讀。
+- 單一分析請求回傳 Schema v6：類型、回憶與視覺分數、特殊程度、依照片生成且不超過 20 字的一句短文案、內容分類與方向；本機抽取 JSON 後嚴格驗證，不追加模型修復或長描述請求。既有 v4 描述與結果保留可讀。
 - 正式 OpenRouter Provider contract：受控 routing／privacy options、reasoning 與 session routing；OpenRouter 不進入 InkTime Batch 路徑。完整設定見 [OpenRouter Provider 文件](docs/providers/OPENROUTER_ZH_TW.md)。
 - 每筆 usage 區分 `provider_reported`／`estimated`／`unknown`；unknown 不會被當作 US$0，預算與新請求採 fail-closed。Token、cache 與 request-size 指標見 [Token 與成本指南](docs/reference/TOKEN_COST_GUIDE_ZH_TW.md)。
 - 提供預設 offline、bounded、可重現的 [模型 Benchmark](docs/providers/MODEL_BENCHMARK_ZH_TW.md)；不會修改 production DB、analysis、release 或 AI cache。

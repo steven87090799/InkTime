@@ -31,8 +31,8 @@ def test_defaults_and_settings_ui(app, client):
         assert settings.get(key) is True
     assert settings.get("analysis.content_filter_min_confidence") == 0.85
     assert settings.get("analysis.female_glamour_min_confidence") == 0.9
-    assert settings.get("analysis.side_caption_min_chars") == 8
-    assert settings.get("analysis.side_caption_max_chars") == 16
+    assert settings.get("analysis.side_caption_min_chars") == 1
+    assert settings.get("analysis.side_caption_max_chars") == 20
     assert settings.get("analysis.side_caption_custom_rules") == ""
     assert settings.get("render.e6_weight") == 20
     response = client.get("/settings?mode=all")

@@ -1894,9 +1894,8 @@ INKTIME_GUNICORN_LOG_LEVEL=warning
 <tr><td>analysis.caption_min_chars</td><td>照片描述與相框文案</td><td>10</td><td>10 ~ 100</td><td>詳細照片描述最少字元數</td><td>必須與目標、上限保持 min ≤ target ≤ max</td></tr>
 <tr><td>analysis.caption_target_chars</td><td>照片描述與相框文案</td><td>60</td><td>10 ~ 100</td><td>詳細照片描述的大致目標字元數，不要求模型精確湊字數</td><td>必須與最少、上限保持 min ≤ target ≤ max</td></tr>
 <tr><td>analysis.caption_max_chars</td><td>照片描述與相框文案</td><td>100</td><td>10 ~ 100</td><td>詳細照片描述最多字元數</td><td>必須與最少、目標保持 min ≤ target ≤ max</td></tr>
-<tr><td>analysis.side_caption_min_chars</td><td>照片描述與相框文案</td><td>8</td><td>8 ~ 16</td><td>相框一句話最少字元數</td><td>必須與目標、上限保持 min ≤ target ≤ max</td></tr>
-<tr><td>analysis.side_caption_target_chars</td><td>照片描述與相框文案</td><td>12</td><td>8 ~ 16</td><td>相框一句話的大致目標字元數</td><td>必須與最少、上限保持 min ≤ target ≤ max</td></tr>
-<tr><td>analysis.side_caption_max_chars</td><td>照片描述與相框文案</td><td>16</td><td>8 ~ 16</td><td>相框一句話最多字元數</td><td>必須與最少、目標保持 min ≤ target ≤ max</td></tr>
+<tr><td>analysis.side_caption_min_chars</td><td>照片描述與相框文案</td><td>1</td><td>1 ~ 20</td><td>相框一句話最少字元數；預設只要求非空</td><td>必須與上限保持 min ≤ max</td></tr>
+<tr><td>analysis.side_caption_max_chars</td><td>照片描述與相框文案</td><td>20</td><td>1 ~ 20</td><td>相框一句話最多字元數</td><td>必須與最少字數保持 min ≤ max</td></tr>
 <tr><td>analysis.copy_default_style</td><td>照片描述與相框文案</td><td>literary</td><td>natural／warm／literary／humorous／minimal</td><td>單一相框文案的生成風格；有舊候選時也用於選擇顯示版本</td><td>修改後的新分析會使用不同文案風格與快取指紋</td></tr>
 <tr><td>analysis.copy_humor_level</td><td>照片描述與相框文案</td><td>1</td><td>0 ~ 5</td><td>相框文案幽默程度（0 為不刻意幽默）</td><td>過高可能降低正式場合的適用性</td></tr>
 <tr><td>analysis.copy_poetic_level</td><td>照片描述與相框文案</td><td>2</td><td>0 ~ 5</td><td>相框文案詩意程度（0 為最直白）</td><td>過高可能讓文案較含蓄</td></tr>

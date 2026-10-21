@@ -178,9 +178,9 @@ def _renderer_request() -> dict:
 def _simulator_caption_max_chars(settings=None) -> int:
     repository = settings or current_app.extensions["inktime_settings_repository"]
     try:
-        maximum = int(repository.get("analysis.side_caption_max_chars", 16))
+        maximum = int(repository.get("analysis.side_caption_max_chars", 20))
     except (TypeError, ValueError):
-        maximum = 16
+        maximum = 20
     return max(1, min(maximum, 120))
 
 

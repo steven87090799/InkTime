@@ -12,8 +12,10 @@ PREVIOUS_SCHEMA_VERSION = 5
 LEGACY_SCHEMA_VERSION = 4
 SUPPORTED_ANALYSIS_SCHEMA_VERSIONS = frozenset({LEGACY_SCHEMA_VERSION, PREVIOUS_SCHEMA_VERSION, SCHEMA_VERSION})
 CAPTION_MAX_CHARS = 100
-SIDE_CAPTION_MIN_CHARS = 8
-SIDE_CAPTION_MAX_CHARS = 16
+SIDE_CAPTION_MIN_CHARS = 1
+SIDE_CAPTION_MAX_CHARS = 20
+LEGACY_SIDE_CAPTION_MIN_CHARS = 8
+LEGACY_SIDE_CAPTION_MAX_CHARS = 16
 CAPTION_VARIANT_STYLES = ("natural", "warm", "literary", "humorous", "minimal")
 ALLOWED_TYPES = {
     "人物",
@@ -128,8 +130,8 @@ LEGACY_V4_JSON_SCHEMA: dict[str, Any] = {
             "caption": {"type": "string", "minLength": 10, "maxLength": CAPTION_MAX_CHARS},
             "side_caption": {
                 "type": "string",
-                "minLength": SIDE_CAPTION_MIN_CHARS,
-                "maxLength": SIDE_CAPTION_MAX_CHARS,
+                "minLength": LEGACY_SIDE_CAPTION_MIN_CHARS,
+                "maxLength": LEGACY_SIDE_CAPTION_MAX_CHARS,
             },
             "content_filter": _object(
                 {
@@ -169,8 +171,8 @@ V5_ANALYSIS_JSON_SCHEMA: dict[str, Any] = {
             "special_level": {"type": "integer", "minimum": 0, "maximum": 4},
             "side_caption": {
                 "type": "string",
-                "minLength": SIDE_CAPTION_MIN_CHARS,
-                "maxLength": SIDE_CAPTION_MAX_CHARS,
+                "minLength": LEGACY_SIDE_CAPTION_MIN_CHARS,
+                "maxLength": LEGACY_SIDE_CAPTION_MAX_CHARS,
             },
             "content_filter": _object(
                 {
@@ -196,6 +198,9 @@ V5_ANALYSIS_JSON_SCHEMA: dict[str, Any] = {
 }
 ANALYSIS_JSON_SCHEMA: dict[str, Any] = deepcopy(V5_ANALYSIS_JSON_SCHEMA)
 ANALYSIS_JSON_SCHEMA["schema"]["properties"]["schema_version"]["const"] = SCHEMA_VERSION
+ANALYSIS_JSON_SCHEMA["schema"]["properties"]["side_caption"].update(
+    minLength=SIDE_CAPTION_MIN_CHARS, maxLength=SIDE_CAPTION_MAX_CHARS,
+)
 ANALYSIS_JSON_SCHEMA["schema"]["properties"]["display_exclusion"] = _object(
     {
         "category": {"type": "string", "enum": sorted(DISPLAY_EXCLUSION_CATEGORIES)},
@@ -229,7 +234,7 @@ PROVIDER_CONTRACT_JSON_SCHEMA: dict[str, Any] = {
 
 
 def normalize_caption_controls(controls: dict[str, Any]) -> dict[str, Any]:
-    """Bound side-caption settings to the fixed v5 safety contract."""
+    """Bound current side-caption settings to one nonempty sentence, at most 20 chars."""
     normalized = dict(controls)
     custom_rules = " ".join(str(controls.get("side_caption_custom_rules", "")).split())[:1000].strip()
     side_upper = max(
@@ -295,9 +300,18 @@ def json_schema_for_stage(
     schema = deepcopy(V5_ANALYSIS_JSON_SCHEMA if schema_version == PREVIOUS_SCHEMA_VERSION else ANALYSIS_JSON_SCHEMA)
     if caption_controls:
         controls = normalize_caption_controls(caption_controls)
+        if schema_version == PREVIOUS_SCHEMA_VERSION:
+            minimum = max(LEGACY_SIDE_CAPTION_MIN_CHARS, min(
+                LEGACY_SIDE_CAPTION_MAX_CHARS, int(caption_controls.get("side_caption_min_chars", LEGACY_SIDE_CAPTION_MIN_CHARS)),
+            ))
+            maximum = max(minimum, min(
+                LEGACY_SIDE_CAPTION_MAX_CHARS, int(caption_controls.get("side_caption_max_chars", LEGACY_SIDE_CAPTION_MAX_CHARS)),
+            ))
+        else:
+            minimum = controls["side_caption_min_chars"]
+            maximum = controls["side_caption_max_chars"]
         schema["schema"]["properties"]["side_caption"].update(
-            minLength=controls["side_caption_min_chars"],
-            maxLength=controls["side_caption_max_chars"],
+            minLength=minimum, maxLength=maximum,
         )
     return schema
 

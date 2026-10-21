@@ -211,7 +211,7 @@ def test_side_caption_controls_cannot_publish_a_contract_the_validator_rejects()
     schema = json_schema_for_stage('full', caption_controls={
         'side_caption_min_chars': 0, 'side_caption_max_chars': 20,
     })['schema']['properties']['side_caption']
-    assert schema['minLength'] == 8 and schema['maxLength'] == 16
+    assert schema['minLength'] == 1 and schema['maxLength'] == 20
 
 
 def test_v5_exact_fields_and_legacy_v4_remains_readable():

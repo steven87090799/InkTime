@@ -147,7 +147,7 @@ SETTING_DEFINITIONS: dict[str, dict[str, Any]] = {
     },
     "analysis.side_caption_min_chars": {
         "category": "照片描述與相框文案",
-        "default": 8,
+        "default": SIDE_CAPTION_MIN_CHARS,
         "type": "integer",
         "description": "相框一句話最少字元數",
         "risk": "必須與上限保持 min ≤ max",
@@ -157,7 +157,7 @@ SETTING_DEFINITIONS: dict[str, dict[str, Any]] = {
     },
     "analysis.side_caption_max_chars": {
         "category": "照片描述與相框文案",
-        "default": 16,
+        "default": SIDE_CAPTION_MAX_CHARS,
         "type": "integer",
         "description": "相框一句話最多字元數",
         "risk": "必須與最少字數保持 min ≤ max",

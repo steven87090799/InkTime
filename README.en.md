@@ -49,7 +49,7 @@ Provider diagnostics, scoring-lab tests and live benchmarks are separate operati
 
 ### Schema and selection
 
-New responses use [Schema v6](docs/VISION_SCHEMA.md): `types`, `memory_score`, `visual_score`, `special_level`, `side_caption`, `content_filter`, `display_exclusion` and `visual_orientation`, plus `schema_version`. The short caption is 8–16 characters. New output no longer requires a long caption, people count, special codes or composition/text-safe-area fields.
+New responses use [Schema v6](docs/VISION_SCHEMA.md): `types`, `memory_score`, `visual_score`, `special_level`, `side_caption`, `content_filter`, `display_exclusion` and `visual_orientation`, plus `schema_version`. The caption is one photo-specific sentence of at most 20 characters, with no fixed length target. New output no longer requires a long caption, people count, special codes or composition/text-safe-area fields.
 
 Normal photo analysis extracts JSON locally and validates it. It does not request a second model call for JSON repair or long-caption generation. Provider diagnostics, scoring-lab tests and benchmark repair are separate bounded flows. Legacy strategy names normalize to `single`; they do not restore two-stage image analysis.
 

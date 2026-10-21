@@ -65,7 +65,7 @@ def build_local_caption(
     source_detail: dict[str, Any] | None = None,
     source_updated_at: str | None = None,
     orientation: str | None = None,
-    maximum_characters: int = 16,
+    maximum_characters: int = 20,
 ) -> dict[str, Any]:
     """Resolve one photo's text without inferring people, events, or emotion."""
     _ = (selection_mode, orientation)  # part of the explicit stable contract

@@ -22,7 +22,7 @@ Config Store v5 是裝置本機儲存格式，不是所有 HTTP Manifest 的版�
 - 三程序為 Web（`server:app`）、Worker（`inktime.app.workers.runner`）、Scheduler（`inktime.app.workers.scheduler`），共用 `/data` 與唯讀 `/photos`。
 - 新安裝 `analysis.execution_mode=local_only`。只有設定 Provider 不會開啟 AI；一般 AI 工作需要 `automatic_ai`，單張手動 AI 可使用 `local_with_manual_ai`。`disabled` 拒絕新分析。正式相框發布要求 v6 視覺安全分析，純本機分析不產生可發布照片。
 - 新策略為 `local`／`single`；舊的 `low_cost`、`smart`、`smart_two_stage`、`high_quality`、`single_high`、`custom` 正規化成 `single`，不恢復兩階段圖片分析。一次分析計畫最多一次圖片 Vision，只在本機抽取 JSON 並嚴格驗證，不追加模型 JSON 修復或長描述請求；另建重跑工作仍可能產生新費用。
-- 新分析提示詞為 `photo-analysis-v6-display-guard-20261021`，保留一句 8–16 字有餘味的文青短句、評分、內容分類與 EXIF 後旋轉，新增 AV 封面、商業模特、截圖與文件紀錄分類；凍結的 v5 工作仍用原文字與 v5 Schema。實際請求與費用預覽共用最高 512 output tokens；圖片輸入 Token 依模型與像素計費，預覽只是情境而非保證上限。
+- 新分析提示詞為 `photo-analysis-v6-literary20-20261021`，保留一句依照片生成、不超過 20 字且避免流水帳的文青短句、評分、內容分類與 EXIF 後旋轉，新增 AV 封面、商業模特、截圖與文件紀錄分類；凍結的 v5 工作仍用原文字與 v5 Schema。實際請求與費用預覽共用最高 512 output tokens；圖片輸入 Token 依模型與像素計費，預覽只是情境而非保證上限。
 - 同步分析的候選選取與保存共用指紋，顯示控制與停用的修復策略不影響是否已完成。定期分析先凍結 Provider／模型／提示詞／規則與執行模式；只有自動 AI 模式允許建立定期雲端分析工作。
 - SQLite 連線採 WAL／`synchronous=FULL`／外鍵檢查，優先保留已提交的分析與費用紀錄；仍需本機可靠檔案系統、完整備份及還原驗證，不能據此宣稱硬體斷電驗收。
 - Web 的 `analysis.image_max_side` 預設 1024、可選 1600；底層 plan／benchmark 額外支援 512。不要把低解析度誤寫成第一階段。

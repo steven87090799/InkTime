@@ -12,7 +12,7 @@
 | types | 1–3 個不重複分類，值見 ALLOWED_TYPES |
 | memory_score / visual_score | 有限數值 0–100；一般回看價值／視覺吸引力 |
 | special_level | 整數 0–4 |
-| side_caption | 8–16 字的相框短句 |
+| side_caption | 依照片寫成完整一句，1–20 字；預設只限制非空與最多 20 字，不要求固定長度 |
 | content_filter | sexualized_content、explicit_nudity、female_glamour_portrait；各含 detected boolean 與 confidence 0–1 |
 | display_exclusion | none、adult_media_cover、commercial_model_photo、screenshot、document_record 之一；含 confidence 0–1 |
 | visual_orientation | rotation_cw（0/90/180/270 或 null）、confidence 0–1、ambiguous boolean、1–6 個不重複 evidence（ORIENTATION_EVIDENCE） |

@@ -936,7 +936,7 @@ class RenderService:
             existing_caption_is_ai_generated=is_ai_caption if caption else None,
             source_detail=source_detail,
             source_updated_at=str((analysis or {}).get("created_at") or "") or None,
-            maximum_characters=int(self.settings.get("analysis.side_caption_max_chars", 16)),
+            maximum_characters=int(self.settings.get("analysis.side_caption_max_chars", 20)),
         )
         # Freeze the visible date together with the caption's photo identity.
         # A queued render must not read a different date or visibility setting.

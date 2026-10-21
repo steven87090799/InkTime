@@ -67,10 +67,21 @@ def _prompt_preview(rules: str | None = None) -> dict:
     for row in current_app.extensions["inktime_provider_repository"].list():
         if not row["enabled"] or (usable_ids is not None and str(row["id"]) not in usable_ids):
             continue
-        response_format = analysis_response_format(
-            effective_provider_kind(str(row.get("kind") or "openai_compatible"), str(row["base_url"])),
-            "single", supports_json_schema=bool(row["supports_json_schema"]), caption_controls=controls,
+        provider_kind = effective_provider_kind(
+            str(row.get("kind") or "openai_compatible"), str(row["base_url"]),
         )
+        response_format = analysis_response_format(
+            provider_kind, "single", supports_json_schema=bool(row["supports_json_schema"]),
+            caption_controls=controls,
+        )
+        fallback_system_prompt = None
+        if response_format is None:
+            provider_schema = analysis_response_format(
+                provider_kind, "single", supports_json_schema=True, caption_controls=controls,
+            )["json_schema"]["schema"]
+            fallback_system_prompt = prompt + "\n完整 JSON Schema：" + json.dumps(
+                provider_schema, ensure_ascii=False, separators=(",", ":"),
+            )
         providers.append({
             "name": row["name"],
             "model": row.get("model") or (
@@ -78,6 +89,8 @@ def _prompt_preview(rules: str | None = None) -> dict:
             ),
             "response_format": response_format,
             "schema_chars": len(json.dumps(response_format, ensure_ascii=False)) if response_format else 0,
+            "fallback_system_prompt": fallback_system_prompt,
+            "fallback_prompt_chars": len(fallback_system_prompt) if fallback_system_prompt else 0,
         })
     return {
         "scope": scope,

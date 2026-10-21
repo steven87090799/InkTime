@@ -16,8 +16,8 @@ from inktime.app.services.analysis import FULL_ANALYSIS_TOKEN_CAP, PROMPT_VERSIO
 
 def _controls(**updates):
     value = {
-        "side_caption_min_chars": 8,
-        "side_caption_max_chars": 16,
+        "side_caption_min_chars": 1,
+        "side_caption_max_chars": 20,
         "side_caption_custom_rules": "",
     }
     value.update(updates)
@@ -25,8 +25,8 @@ def _controls(**updates):
 
 
 def test_only_minimal_side_caption_settings_are_registered():
-    assert SETTING_DEFINITIONS["analysis.side_caption_min_chars"]["default"] == 8
-    assert SETTING_DEFINITIONS["analysis.side_caption_max_chars"]["default"] == 16
+    assert SETTING_DEFINITIONS["analysis.side_caption_min_chars"]["default"] == 1
+    assert SETTING_DEFINITIONS["analysis.side_caption_max_chars"]["default"] == 20
     custom = SETTING_DEFINITIONS["analysis.side_caption_custom_rules"]
     assert custom["default"] == "" and custom["max_length"] == 1000 and custom["multiline"]
     removed = {
@@ -62,7 +62,7 @@ def test_complete_prompt_and_schema_have_no_advanced_caption_contract(tmp_path):
     )
     prompt = provider.system_prompt
     assert "輕微冷幽默" in prompt
-    assert "不要描述畫面" in prompt
+    assert "不寫流水帳" in prompt
     assert "完整一句" in prompt
     for removed in (
         "caption target",
@@ -76,7 +76,8 @@ def test_complete_prompt_and_schema_have_no_advanced_caption_contract(tmp_path):
     ):
         assert removed not in prompt
     assert prompt.startswith(COMMON_PROMPT + "\n\n")
-    assert COMMON_PROMPT.startswith(LEGACY_V5_COMMON_PROMPT + "\n\n補充要求：")
+    assert "Schema v6 單行 JSON" not in COMMON_PROMPT
+    assert "8～16 字" in LEGACY_V5_COMMON_PROMPT
     assert FULL_ANALYSIS_TOKEN_CAP == 512
     assert PhotoAnalysisService._prompt_version(None) == PROMPT_VERSION
 
@@ -90,6 +91,7 @@ def test_complete_prompt_and_schema_have_no_advanced_caption_contract(tmp_path):
         "special_level",
         "side_caption",
         "content_filter",
+        "display_exclusion",
         "visual_orientation",
     }
 
@@ -111,13 +113,13 @@ def test_complete_prompt_and_schema_have_no_advanced_caption_contract(tmp_path):
     provider.close()
 
 
-def test_side_caption_bounds_are_clamped_to_eight_through_sixteen():
+def test_side_caption_bounds_are_clamped_to_one_through_twenty():
     schema = json_schema_for_stage(
         "single",
         caption_controls=_controls(side_caption_min_chars=0, side_caption_max_chars=200),
     )
     assert schema["schema"]["properties"]["side_caption"] == {
         "type": "string",
-        "minLength": 8,
-        "maxLength": 16,
+        "minLength": 1,
+        "maxLength": 20,
     }

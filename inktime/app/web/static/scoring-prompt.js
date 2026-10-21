@@ -34,7 +34,10 @@
       if (provider.response_format) {
         article.append(node('p', `Schema 封裝 ${provider.schema_chars} 字元`), node('pre', JSON.stringify(provider.response_format, null, 2), 'prompt-text'));
       } else {
-        article.append(node('p', '此服務未啟用 JSON Schema；請求不附 response_format，回應仍受伺服器的 Schema v6 驗證。'));
+        article.append(node('p', `此服務將完整 JSON Schema 附加到 System（共 ${provider.fallback_prompt_chars} 字元），回應仍受伺服器的 Schema v6 驗證。`));
+        const details = document.createElement('details');
+        details.append(node('summary', '查看實際 System 文字'), node('pre', provider.fallback_system_prompt, 'prompt-text'));
+        article.append(details);
       }
       formats.append(article);
     });

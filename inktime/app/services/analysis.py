@@ -64,7 +64,7 @@ class AnalysisDisabledError(RuntimeError):
     code = "ANALYSIS-DISABLED"
 
 
-PROMPT_VERSION = "photo-analysis-v6-display-guard-20261021"
+PROMPT_VERSION = "photo-analysis-v6-literary20-20261021"
 # The compact eight-field response still needs enough headroom to complete
 # strict JSON without truncation.
 LOGGER = logging.getLogger("analysis")
@@ -171,8 +171,8 @@ class PhotoAnalysisService:
         if settings is None:
             return normalize_caption_controls({})
         return normalize_caption_controls({
-            "side_caption_min_chars": int(settings.get("analysis.side_caption_min_chars", 8)),
-            "side_caption_max_chars": int(settings.get("analysis.side_caption_max_chars", 16)),
+            "side_caption_min_chars": int(settings.get("analysis.side_caption_min_chars", 1)),
+            "side_caption_max_chars": int(settings.get("analysis.side_caption_max_chars", 20)),
             "side_caption_custom_rules": str(
                 settings.get("analysis.side_caption_custom_rules", "")
             ),

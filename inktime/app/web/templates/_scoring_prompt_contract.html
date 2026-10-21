@@ -9,7 +9,7 @@
     <div class="table-wrap"><table><thead><tr><th>必填欄位 · 已鎖定</th><th>格式與允許值 · 已鎖定</th></tr></thead><tbody>
       {% for field in prompt_preview.fields %}<tr><td><code>{{ field.name }}</code></td><td><pre class="prompt-constraint">{{ field.constraints }}</pre></td></tr>{% endfor %}
     </tbody></table></div>
-    <p>side_caption 可在設定頁調整字數，但只能在程式允許的 8～16 字範圍內；上表顯示目前生效限制。</p>
+    <p>side_caption 依照片寫成一句話，預設不設最低字數目標、最多 20 字；設定頁可調整為 1～20 字範圍，上表顯示目前生效限制。</p>
   </details>
   {% for section in prompt_preview.sections if section.key in ['contract', 'scoring_contract'] %}
   <details><summary>{{ section.label }} · 唯讀原文</summary><pre class="prompt-text">{{ section.text }}</pre></details>
