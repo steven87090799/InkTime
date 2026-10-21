@@ -2457,6 +2457,7 @@ class RenderService:
                            p.width,p.height,p.orientation,p.exif_orientation_original,
                            p.manual_orientation_rotation_cw,p.visual_orientation_rotation_cw,
                            p.visual_orientation_confidence,p.visual_orientation_ambiguous,
+                           p.exif_json,p.exclusion_status,p.manual_override,a.raw_json,
                            p.sha256,p.perceptual_hash,p.difference_hash,p.duplicate_group_id,p.gps_lat,p.gps_lon,
                            p.e6_score,p.e6_contrast_score,
                            p.e6_subject_score,p.e6_skin_score,p.e6_text_score,
@@ -2504,8 +2505,11 @@ class RenderService:
             if not rows:
                 break
             for stored in rows:
-                if self.candidates.available(stored):
-                    result.append(dict(stored))
+                if self.candidates.available(stored) and self.candidates.safety_passed(stored):
+                    candidate = dict(stored)
+                    candidate.pop("raw_json", None)
+                    candidate.pop("exif_json", None)
+                    result.append(candidate)
                     if len(result) >= max(limit, 1):
                         break
             last_score = float(rows[-1]["combined_score"])

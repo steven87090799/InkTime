@@ -40,7 +40,9 @@ def evaluate_content_filter(content_filter: dict, settings=None, *, strict: bool
         threshold = DISPLAY_RISK_MIN_CONFIDENCE if strict else float(policy[threshold_key])
         enabled = True if strict else bool(policy[switch])
         matched = bool(classification["detected"]) and enabled and confidence >= threshold
-        uncertain = bool(classification["detected"]) and strict and confidence < threshold
+        # Confidence describes the whole yes/no judgement. A weak negative is
+        # still unresolved evidence, rather than proof that display is safe.
+        uncertain = strict and confidence < threshold
         value = {
             "detected": classification["detected"], "confidence": confidence,
             "threshold": threshold, "enabled": enabled, "matched": matched,

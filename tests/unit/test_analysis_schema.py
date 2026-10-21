@@ -236,6 +236,21 @@ def test_side_caption_length_contract(length, valid):
             validate_analysis_result(value)
 
 
+@pytest.mark.parametrize("caption", [" ", "\t\n", "\u3000"])
+def test_v6_caption_cannot_disappear_after_trimming(caption):
+    for validator in (validate_model_response, validate_analysis_result):
+        with pytest.raises(AnalysisValidationError):
+            validator(valid_result(side_caption=caption))
+
+
+def test_v6_custom_caption_minimum_applies_to_visible_text():
+    with pytest.raises(AnalysisValidationError):
+        validate_model_response(
+            valid_result(side_caption=" 字 "),
+            caption_controls={"side_caption_min_chars": 3, "side_caption_max_chars": 20},
+        )
+
+
 @pytest.mark.parametrize("code", ["sexualized_content", "explicit_nudity", "female_glamour_portrait"])
 @pytest.mark.parametrize("invalid", [
     {"detected": True},

@@ -17,6 +17,7 @@ from typing import Any, Mapping
 
 from inktime.app.core.paths import UnsafePathError
 from inktime.app.db import Database
+from inktime.app.domain.photos.orientation import original_exif_orientation, resolve_effective_orientation
 from inktime.app.domain.rendering import DeviceTestReleaseStore
 from inktime.app.domain.rendering.release import (
     DEVICE_TEST_INDEX_DIRECTORY,
@@ -278,15 +279,42 @@ class DeviceReleaseService:
         versions = self._formal_photo_versions(manifest)
         if versions is None:
             return False
+        options = manifest.get("render_options")
+        orientations = options.get("photo_orientations") if isinstance(options, dict) else None
+        if not isinstance(orientations, list):
+            return False
+        rotations: dict[str, int] = {}
+        for item in orientations:
+            if not isinstance(item, dict) or not isinstance(item.get("photo_id"), str):
+                return False
+            orientation = item.get("orientation")
+            rotation = orientation.get("rotation_degrees") if isinstance(orientation, dict) else None
+            if isinstance(rotation, bool) or not isinstance(rotation, int) or rotation not in {0, 90, 180, 270}:
+                return False
+            photo_id = item["photo_id"]
+            if photo_id in rotations and rotations[photo_id] != rotation:
+                return False
+            rotations[photo_id] = rotation
+        if not versions.keys() <= rotations.keys():
+            return False
         try:
             rows = RenderCandidateRepository(self.database).require_for_execution_mode(
                 versions, "automatic_ai"
             )
-        except ValueError:
+            for row in rows:
+                effective = resolve_effective_orientation(
+                    exif_orientation=original_exif_orientation(row),
+                    manual_rotation_cw=row.get("manual_orientation_rotation_cw"),
+                    ai_rotation_cw=row.get("visual_orientation_rotation_cw"),
+                    ai_confidence=row.get("visual_orientation_confidence"),
+                    ai_ambiguous=bool(row.get("visual_orientation_ambiguous")),
+                )
+                if (str(row.get("sha256") or "").lower() != versions[str(row["id"])]
+                        or effective.rotation_degrees != rotations[str(row["id"])]):
+                    return False
+        except (ValueError, TypeError, KeyError):
             return False
-        return len(rows) == len(versions) and all(
-            str(row.get("sha256") or "").lower() == versions[str(row["id"])] for row in rows
-        )
+        return len(rows) == len(versions)
 
     def _source(
         self,

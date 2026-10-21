@@ -365,6 +365,12 @@ class ResilienceRepository:
         feedback_id: int | None = None
         with self.database.transaction() as connection:
             if table == "photo_feedback":
+                if kind == "RESTORE":
+                    from inktime.app.repositories.photos import PhotoRepository
+                    photo = connection.execute("SELECT * FROM photos WHERE id=?", (photo_id,)).fetchone()
+                    if photo is None:
+                        raise ValueError("FEEDBACK-001 照片不存在")
+                    PhotoRepository.require_restore_allowed(connection, dict(photo))
                 # SQLite UNIQUE treats NULL scopes as distinct.  Replace the precise
                 # nullable scope explicitly so repeated no-device feedback is idempotent.
                 connection.execute(
@@ -402,7 +408,7 @@ class ResilienceRepository:
                         (photo_id,),
                     )
                     connection.execute(
-                        "UPDATE photos SET eligible=1,exclusion_status='manually_restored',reject_reason=NULL,updated_at=? WHERE id=?",
+                        "UPDATE photos SET eligible=1,exclusion_status='manually_restored',reject_reason=NULL,manual_override=1,updated_at=? WHERE id=?",
                         (now, photo_id),
                     )
                 connection.execute(
@@ -466,11 +472,27 @@ class ResilienceRepository:
             ).fetchone()
             if row is None:
                 return False
-            if str(row["feedback_type"]) in {"NEVER_SHOW", "SKIP_TEMPORARILY"}:
-                connection.execute(
-                    "UPDATE photos SET eligible=1,exclusion_status='manually_restored',reject_reason=NULL,updated_at=? WHERE id=?",
-                    (utc_now(), row["photo_id"]),
-                )
+            if str(row["feedback_type"]) == "NEVER_SHOW":
+                from inktime.app.repositories.photos import PhotoRepository
+                photo = connection.execute("SELECT * FROM photos WHERE id=?", (row["photo_id"],)).fetchone()
+                if photo is not None and photo["exclusion_status"] == "manually_excluded" and photo["reject_reason"] == "USER_EXCLUDED":
+                    try:
+                        PhotoRepository.require_restore_allowed(connection, dict(photo))
+                    except ValueError:
+                        # Removing a personal ban restores an existing review
+                        # task, rather than releasing or hiding an unsafe photo.
+                        try:
+                            details = json.loads(photo["reject_details_json"] or "{}")
+                        except (TypeError, ValueError):
+                            details = {}
+                        if (isinstance(details, dict) and details.get("decision") == "pending_review"
+                                and PhotoRepository.current_v6_display_risk(connection, str(row["photo_id"])) is None):
+                            PhotoRepository._apply_content_review(connection, str(row["photo_id"]), details, utc_now())
+                    else:
+                        connection.execute(
+                            "UPDATE photos SET eligible=1,exclusion_status='manually_restored',reject_reason=NULL,manual_override=1,updated_at=? WHERE id=?",
+                            (utc_now(), row["photo_id"]),
+                        )
             connection.execute("DELETE FROM photo_feedback WHERE id=?", (feedback_id,))
         return True
 

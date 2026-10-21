@@ -65,7 +65,7 @@ class AnalysisDisabledError(RuntimeError):
 
 
 PROMPT_VERSION = "photo-analysis-v6-literary20-20261021"
-# The compact eight-field response still needs enough headroom to complete
+# The compact response still needs enough headroom to complete
 # strict JSON without truncation.
 LOGGER = logging.getLogger("analysis")
 

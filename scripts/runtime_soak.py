@@ -185,10 +185,13 @@ def _seed_release(app, device_id: str, index: int) -> dict[str, Any]:
         "pixel_format": "2bpp",
         "created_at": datetime.now(timezone.utc).isoformat(),
         "files": [{"name": "photo_1.bin", "size": len(payload), "sha256": digest}],
-        "render_options": {"render_plans": [{
-            "primary_photo_id": "soak-safe-source", "primary_sha256": source_sha,
-            "secondary_photo_id": None, "secondary_sha256": None,
-        }]},
+        "render_options": {
+            "render_plans": [{
+                "primary_photo_id": "soak-safe-source", "primary_sha256": source_sha,
+                "secondary_photo_id": None, "secondary_sha256": None,
+            }],
+            "photo_orientations": [{"photo_id": "soak-safe-source", "orientation": {"rotation_degrees": 0}}],
+        },
     }
     release_dir = app.config["INKTIME_RELEASE_DIR"] / release_id
     release_dir.mkdir(parents=True)

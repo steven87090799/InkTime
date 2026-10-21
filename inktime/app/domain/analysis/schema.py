@@ -377,6 +377,8 @@ def validate_model_response(raw: str | dict, *, caption_controls: dict[str, Any]
             raise AnalysisValidationError("模型回傳無效 JSON") from exc
     _validate_unicode(raw)
     value = to_taiwan_traditional(deepcopy(raw), protected=PROTOCOL_ENUM_VALUES)
+    if schema_version == SCHEMA_VERSION and isinstance(value, dict) and isinstance(value.get("side_caption"), str):
+        value["side_caption"] = value["side_caption"].strip()
     _validate(value, json_schema_for_stage(
         "single", caption_controls=caption_controls, schema_version=schema_version,
     )["schema"], "analysis")
@@ -419,6 +421,8 @@ def validate_analysis_result(
         else V5_ANALYSIS_JSON_SCHEMA if version == PREVIOUS_SCHEMA_VERSION
         else ANALYSIS_JSON_SCHEMA
     )
+    if version == SCHEMA_VERSION and isinstance(value.get("side_caption"), str):
+        value["side_caption"] = value["side_caption"].strip()
     _validate(value, schema["schema"], "analysis")
     orientation = value["visual_orientation"]
     if orientation["rotation_cw"] is None and not orientation["ambiguous"]:

@@ -69,13 +69,23 @@ class RenderCandidateRepository:
     @staticmethod
     def safety_passed(row: Any) -> bool:
         """Recheck stored model evidence even after an operator status change."""
+        from inktime.app.repositories.photos import PhotoRepository
+
         try:
             analysis = validate_analysis_result(json.loads(row["raw_json"]))
-            return (
-                analysis["schema_version"] == 6
-                and evaluate_content_filter(analysis["content_filter"], strict=True)["decision"] != "auto_excluded"
-                and evaluate_display_exclusion(analysis["display_exclusion"])["decision"] != "auto_excluded"
+            if analysis["schema_version"] != 6:
+                return False
+            decisions = (
+                evaluate_content_filter(analysis["content_filter"], strict=True)["decision"],
+                evaluate_display_exclusion(analysis["display_exclusion"])["decision"],
             )
+            if "auto_excluded" in decisions:
+                return False
+            if "pending_review" in decisions and not (
+                row["exclusion_status"] == "manually_restored" and row["manual_override"]
+            ):
+                return False
+            return PhotoRepository._orientation_review(dict(row), analysis["visual_orientation"]) is None
         except (ValueError, TypeError, KeyError, json.JSONDecodeError):
             return False
 

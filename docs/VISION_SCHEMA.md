@@ -23,10 +23,13 @@ insufficient_visual_cues 時只保留該 evidence、rotation_cw=null、
 ambiguous=true、confidence≤0.5。不捏造旋轉或提高信心。
 
 v6 的顯示安全門檻固定為 0.60：`content_filter` 明確陽性，或
-`display_exclusion` 非 `none` 且達門檻時自動排除；低信心疑似內容、
+`display_exclusion` 非 `none` 且達門檻時自動排除；內容分類低信心（包含否定判斷）、
 `none` 但低信心，以及無法確定的方向進入 `/review/photos`。待確認時
 `eligible=0`，人工確認前不送相框；明確安全排除不可人工恢復。
 正式發布與裝置下載都要求照片目前具有 v6 語意安全分析。
+舊回饋入口不得解除安全待審；清除必要的人工方向會重新待審，方向變更後的
+舊 Release 不可下載，須重新產生。已人工接受的同一份安全證據不因快取重用
+而再次待審；新風險證據仍重新判斷。
 
 ## 相容性與相關契約
 新模型回應使用 v6；儲存結果驗證仍接受 v4/v5/v6，按版本驗證完整形狀。

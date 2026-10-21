@@ -1323,13 +1323,10 @@ class PhotoRepository:
                 if row is None:
                     raise KeyError(photo_id)
                 photo = dict(row)
-                v6_risk = self.current_v6_display_risk(connection, photo_id)
+                v6_risk = self.current_v6_display_risk(connection, photo_id) if action in {"candidate", "reanalyze"} else None
                 changes: dict[str, Any]
                 if action == "restore":
-                    if v6_risk:
-                        raise ValueError(f"v6 安全分析已排除照片：{v6_risk}")
-                    if photo["exclusion_status"] == "pending_review":
-                        raise ValueError("待確認照片請在人工審核頁完成判斷")
+                    self.require_restore_allowed(connection, photo)
                     values = (1, "manually_restored", 1, now, photo_id)
                     event = "manual_restore"
                     changes = {"manual_override": True, "eligible": True}
@@ -2268,6 +2265,46 @@ class PhotoRepository:
                 return str(evaluation["primary_reason"])
         return None
 
+    @classmethod
+    def require_restore_allowed(cls, connection, photo: dict) -> None:
+        """Every restore entry point must preserve the same safety hold."""
+        risk = cls.current_v6_display_risk(connection, str(photo["id"]))
+        if risk:
+            raise ValueError(f"v6 安全分析已排除照片：{risk}")
+        review = connection.execute(
+            "SELECT review_state FROM photo_reviews WHERE photo_id=? AND analysis_id IS NULL",
+            (photo["id"],),
+        ).fetchone()
+        if photo["exclusion_status"] == "pending_review" or (review is not None and review["review_state"] == "needs_review"):
+            raise ValueError("待確認照片請在人工審核頁完成判斷")
+        latest = connection.execute(
+            "SELECT schema_version,raw_json FROM photo_analysis WHERE photo_id=? AND score_kind=? "
+            "ORDER BY created_at DESC,id DESC LIMIT 1", (photo["id"], SEMANTIC_SCORE_KIND),
+        ).fetchone()
+        if latest is not None and latest["schema_version"] == 6:
+            result = validate_analysis_result(latest["raw_json"])
+            if cls._orientation_review(photo, result["visual_orientation"]) is not None:
+                raise ValueError("待確認照片請在人工審核頁確認方向")
+
+    @staticmethod
+    def _matches_reviewed_safety(connection, photo: dict, result: dict) -> bool:
+        """An identical cached result must not undo an explicit human approval."""
+        if photo["exclusion_status"] != "manually_restored" or not photo["manual_override"]:
+            return False
+        previous = connection.execute(
+            "SELECT a.raw_json FROM photo_analysis a WHERE a.photo_id=? AND a.score_kind=? "
+            "AND EXISTS(SELECT 1 FROM photo_reviews r WHERE r.photo_id=a.photo_id "
+            "AND r.analysis_id IS NULL AND r.review_state='keep') "
+            "ORDER BY a.created_at DESC,a.id DESC LIMIT 1", (photo["id"], SEMANTIC_SCORE_KIND),
+        ).fetchone()
+        if previous is None:
+            return False
+        try:
+            saved = validate_analysis_result(previous["raw_json"], accepted_versions=frozenset({6}))
+        except (ValueError, TypeError):
+            return False
+        return all(saved[key] == result[key] for key in ("content_filter", "display_exclusion", "visual_orientation"))
+
     @staticmethod
     def _apply_content_exclusion(connection, photo_id, evaluation, now) -> None:
         connection.execute(
@@ -2576,7 +2613,7 @@ class PhotoRepository:
                         )
                         current["eligible"] = 0
                         current["exclusion_status"] = "auto_excluded"
-                    elif review_hold is not None:
+                    elif review_hold is not None and not self._matches_reviewed_safety(connection, current, canonical):
                         self._apply_content_review(
                             connection, photo_id, {**review_hold, "related_checks": related_checks}, now
                         )
@@ -2736,7 +2773,7 @@ class PhotoRepository:
             raise ValueError("旋轉角度不合法")
         now = datetime.now(timezone.utc).isoformat()
         with self.database.transaction() as connection:
-            row = connection.execute("SELECT id FROM photos WHERE id=?", (photo_id,)).fetchone()
+            row = connection.execute("SELECT * FROM photos WHERE id=?", (photo_id,)).fetchone()
             if row is None:
                 raise KeyError(photo_id)
             connection.execute(
@@ -2753,4 +2790,19 @@ class PhotoRepository:
                 "INSERT INTO photo_events(photo_id,event,changes_json,changed_by,created_at) VALUES (?,'manual_orientation',?,?,?)",
                 (photo_id, json.dumps({"rotation_cw": rotation_cw}, ensure_ascii=False), changed_by, now),
             )
+            if rotation_cw is None and row["exclusion_status"] in {"eligible", "manually_restored", "pending_review"}:
+                analysis = connection.execute(
+                    "SELECT schema_version,raw_json FROM photo_analysis WHERE photo_id=? AND score_kind=? "
+                    "ORDER BY created_at DESC,id DESC LIMIT 1",
+                    (photo_id, SEMANTIC_SCORE_KIND),
+                ).fetchone()
+                if analysis is not None and analysis["schema_version"] == 6:
+                    result = validate_analysis_result(analysis["raw_json"])
+                    evaluation = self._orientation_review(
+                        {**dict(row), "manual_orientation_rotation_cw": None}, result["visual_orientation"],
+                    )
+                    if evaluation is not None:
+                        self._apply_content_review(connection, photo_id, evaluation, now)
+                        self._mark_library_ranking_dirty(connection, str(row["library_id"]), now)
+        invalidate_score_population_cache()
         return {"rotation_cw": rotation_cw}
