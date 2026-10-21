@@ -27,9 +27,9 @@ def certified_release_metadata(app) -> dict:
     library_id = photos.ensure_library("Security release sources", source_root)
     with app.extensions["inktime_database"].transaction() as connection:
         connection.execute(
-            """INSERT INTO photos(id,library_id,relative_path,sha256,status,eligible,
+            """INSERT INTO photos(id,library_id,relative_path,sha256,width,height,status,eligible,
                    lifecycle_status,exclusion_status,local_features_status,created_at,updated_at)
-               VALUES (?,?,?,?,'analyzed',1,'active','eligible','complete',?,?)""",
+               VALUES (?,?,?,?,480,800,'analyzed',1,'active','eligible','complete',?,?)""",
             (photo_id, library_id, source_path.name, digest,
              datetime.now(timezone.utc).isoformat(), datetime.now(timezone.utc).isoformat()),
         )

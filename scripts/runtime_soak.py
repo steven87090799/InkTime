@@ -142,16 +142,16 @@ def _seed_release(app, device_id: str, index: int) -> dict[str, Any]:
     source_root.mkdir(exist_ok=True)
     source_path = source_root / "safe-source.jpg"
     if not source_path.exists():
-        Image.new("RGB", (32, 32), "white").save(source_path)
+        Image.new("RGB", (480, 800), "white").save(source_path)
         source_sha = sha256(source_path.read_bytes()).hexdigest()
         photos = app.extensions["inktime_photo_repository"]
         library_id = photos.ensure_library("Soak source", source_root)
         now = datetime.now(timezone.utc).isoformat()
         with app.extensions["inktime_database"].transaction() as connection:
             connection.execute(
-                """INSERT INTO photos(id,library_id,relative_path,sha256,status,eligible,
+                """INSERT INTO photos(id,library_id,relative_path,sha256,width,height,status,eligible,
                        lifecycle_status,exclusion_status,local_features_status,created_at,updated_at)
-                   VALUES (?,?,?,?,'analyzed',1,'active','eligible','complete',?,?)""",
+                   VALUES (?,?,?,?,480,800,'analyzed',1,'active','eligible','complete',?,?)""",
                 ("soak-safe-source", library_id, source_path.name, source_sha, now, now),
             )
         analysis = {
