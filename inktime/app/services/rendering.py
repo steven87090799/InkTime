@@ -2722,26 +2722,9 @@ class RenderService:
         limit = max(1, min(int(limit), pool_bound if composition_pool else 50))
         target = target_date or self._today()
         mode = execution_mode(self.settings)
-        if mode in {"local_only", "local_with_manual_ai", "disabled"}:
-            result = LocalSelectionPolicy(
-                self.database, self.settings, self.resilience, self.locations
-            ).select(
-                target=target,
-                orientation=str(self.settings.get("render.frame_orientation", "landscape")),
-                quantity=limit,
-                layout=str(self.settings.get("render.layout", "auto_photo")),
-                candidate_years=candidate_years,
-            )
-            selected = result["selected"][:limit]
-            if composition_pool:
-                exact = {str(row["id"]) for row in result["exact_pool"]}
-                nearby = {str(row["id"]) for row in result["nearby_pool"]}
-                selected = [{**row, "match_type": "exact_day" if str(row["id"]) in exact
-                             else "nearby_day" if str(row["id"]) in nearby else "ranked_fallback"}
-                            for row in selected]
-            return selected
-
-        if mode == "automatic_ai":
+        if mode in {"local_only", "local_with_manual_ai", "disabled", "automatic_ai"}:
+            # Content safety requires a current semantic judgement even when
+            # scheduling/scoring is configured for local-only operation.
             return self._select_candidates_for_score_kind(
                 target=target,
                 limit=limit,

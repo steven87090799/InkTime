@@ -22,10 +22,15 @@ from inktime.app.domain.analysis.scoring import (
     ranking_components,
     resolve_score_kind,
 )
-from inktime.app.domain.analysis.content_filter import CONTENT_FILTER_DEFAULTS, evaluate_content_filter
+from inktime.app.domain.analysis.content_filter import (
+    CONTENT_FILTER_DEFAULTS,
+    evaluate_content_filter,
+    evaluate_display_exclusion,
+)
 from inktime.app.domain.analysis.schema import (
     ANALYSIS_JSON_SCHEMA,
     LEGACY_V4_JSON_SCHEMA,
+    V5_ANALYSIS_JSON_SCHEMA,
     SUPPORTED_ANALYSIS_SCHEMA_VERSIONS,
     validate_analysis_result,
 )
@@ -42,7 +47,7 @@ from inktime.app.domain.photos.dates import materialized_capture_fields, parse_p
 
 LOCAL_QUALITY_RULE = "local-quality"
 LOCAL_QUALITY_RULE_VERSION = QUALITY_POLICY_VERSION
-EXCLUDED_STATUSES = frozenset({"auto_excluded", "manually_excluded"})
+EXCLUDED_STATUSES = frozenset({"auto_excluded", "manually_excluded", "pending_review"})
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _SCORE_POPULATION_TTL_SECONDS = 45.0
 _SCORE_POPULATION_LOCK = Lock()
@@ -78,7 +83,7 @@ def _must_preserve_exclusion(photo: dict | None, *, reapply_rules: bool = False)
     if not photo:
         return False
     status = str(photo.get("exclusion_status") or "eligible")
-    if status == "manually_excluded":
+    if status in {"manually_excluded", "pending_review"}:
         return True
     return status == "auto_excluded" and not reapply_rules
 
@@ -1149,7 +1154,7 @@ class PhotoRepository:
                 JOIN photos source ON source.sha256=target.sha256 AND source.id<>target.id
                 JOIN photo_analysis a ON a.photo_id=source.id
                 WHERE target.id=?
-                  AND a.schema_version IN (4,5)
+                  AND a.schema_version IN (4,5,6)
                   AND (?='' OR a.analysis_fingerprint=? OR ?)
                 ORDER BY {preferred_analysis_order_sql('a')}
                 """,
@@ -1318,8 +1323,13 @@ class PhotoRepository:
                 if row is None:
                     raise KeyError(photo_id)
                 photo = dict(row)
+                v6_risk = self.current_v6_display_risk(connection, photo_id)
                 changes: dict[str, Any]
                 if action == "restore":
+                    if v6_risk:
+                        raise ValueError(f"v6 安全分析已排除照片：{v6_risk}")
+                    if photo["exclusion_status"] == "pending_review":
+                        raise ValueError("待確認照片請在人工審核頁完成判斷")
                     values = (1, "manually_restored", 1, now, photo_id)
                     event = "manual_restore"
                     changes = {"manual_override": True, "eligible": True}
@@ -1356,22 +1366,24 @@ class PhotoRepository:
                     event = "added_to_favorites"
                     changes = {"favorite": True}
                 elif action == "candidate":
+                    if v6_risk:
+                        raise ValueError(f"v6 安全分析已排除照片：{v6_risk}")
                     connection.execute(
                         """
-                        UPDATE photos SET eligible=1,exclusion_status='pending_review',manual_override=1,
+                        UPDATE photos SET eligible=0,exclusion_status='pending_review',manual_override=1,
                             updated_at=? WHERE id=?
                         """,
                         (now, photo_id),
                     )
                     event = "added_to_candidate_pool"
-                    changes = {"eligible": True, "candidate_pool": True}
+                    changes = {"eligible": False, "candidate_pool": True}
                 elif action == "reanalyze":
                     evaluation_photo = {**photo, "manual_override": 0, "favorite": 0, "exclusion_status": "eligible"} if reapply_rules else photo
                     exclusion = _stored_exclusion(evaluation_photo, settings=self._local_quality_settings(connection))
                     if reapply_rules and exclusion is None:
                         analysis = connection.execute(
                             "SELECT content_filter_json FROM photo_analysis "
-                            "WHERE photo_id=? AND schema_version IN (4,5) AND score_kind=? "
+                            "WHERE photo_id=? AND schema_version IN (4,5,6) AND score_kind=? "
                             "ORDER BY created_at DESC,id DESC LIMIT 1",
                             (photo_id, SEMANTIC_SCORE_KIND),
                         ).fetchone()
@@ -1379,9 +1391,16 @@ class PhotoRepository:
                             content = evaluate_content_filter(json.loads(analysis["content_filter_json"]), self._content_settings(connection))
                             if content["decision"] == "auto_excluded":
                                 exclusion = content["primary_reason"], content
-                    protected = _must_preserve_exclusion(
-                        photo, reapply_rules=reapply_rules
-                    ) or ((bool(photo.get("manual_override")) or photo.get("exclusion_status") == "manually_restored") and not reapply_rules)
+                    protected = (
+                        bool(v6_risk)
+                        or photo["exclusion_status"] == "pending_review"
+                        or (photo["reject_rule_version"] in {
+                            "content-filter-v5-strict-display", "display-exclusion-v1",
+                            "visual-orientation-review-v1",
+                        } and photo["exclusion_status"] == "auto_excluded")
+                        or _must_preserve_exclusion(photo, reapply_rules=reapply_rules)
+                        or ((bool(photo.get("manual_override")) or photo.get("exclusion_status") == "manually_restored") and not reapply_rules)
+                    )
                     if protected:
                         connection.execute(
                             "UPDATE photos SET local_candidate_score=?,feature_version=?,updated_at=? WHERE id=?",
@@ -1613,13 +1632,13 @@ class PhotoRepository:
     def eligible_photo_ids(self, *, limit: int | None = None, include_all_active: bool = False) -> list[str]:
         where = "p.lifecycle_status='active' AND p.local_features_status='complete' AND COALESCE(p.never_upload,0)=0"
         if not include_all_active:
-            where += " AND p.eligible=1 AND COALESCE(p.exclusion_status,'') NOT IN ('auto_excluded','manually_excluded')"
+            where += " AND p.eligible=1 AND p.exclusion_status IN ('eligible','manually_restored')"
         # Advance through pending photos on successive bounded runs. Technical
         # quality is a gate, not a permanent top-N admission score for the AI.
         query = f"""SELECT p.id FROM photos p WHERE {where}
             ORDER BY EXISTS(
                 SELECT 1 FROM photo_analysis a WHERE a.photo_id=p.id
-                AND a.schema_version IN (4,5) AND a.score_kind='semantic'
+                AND a.schema_version IN (4,5,6) AND a.score_kind='semantic'
                 AND a.ranking_score IS NOT NULL
             ),p.captured_at DESC,p.id"""  # noqa: S608 -- fixed internal predicate
         params: tuple = () if limit is None else (max(1, min(int(limit), 100_000)),)
@@ -1632,8 +1651,8 @@ class PhotoRepository:
         with self.database.session() as connection:
             row = connection.execute(
                 "SELECT COUNT(*) FROM photos WHERE lifecycle_status='active' AND eligible=1 "
-                "AND COALESCE(never_upload,0)=0 AND COALESCE(exclusion_status,'') "
-                "NOT IN ('auto_excluded','manually_excluded')"
+                "AND COALESCE(never_upload,0)=0 AND exclusion_status "
+                "IN ('eligible','manually_restored')"
             ).fetchone()
         return int(row[0] or 0)
 
@@ -1682,8 +1701,8 @@ class PhotoRepository:
                     str(row["id"])
                     for row in connection.execute(
                         f"SELECT id FROM photos WHERE lifecycle_status='active' AND eligible=1 "
-                        f"AND COALESCE(never_upload,0)=0 AND COALESCE(exclusion_status,'') "
-                        f"NOT IN ('auto_excluded','manually_excluded') AND id IN ({placeholders})",  # noqa: S608
+                        f"AND COALESCE(never_upload,0)=0 AND exclusion_status "
+                        f"IN ('eligible','manually_restored') AND id IN ({placeholders})",  # noqa: S608
                         tuple(chunk),
                     ).fetchall()
                 )
@@ -1695,7 +1714,7 @@ class PhotoRepository:
         """完整照片庫模式以年份或第一層資料夾拆成可暫停／續跑的既有工作。"""
         where = "p.lifecycle_status='active' AND COALESCE(p.never_upload,0)=0"
         if not include_all_active:
-            where += " AND p.eligible=1 AND COALESCE(p.exclusion_status,'') NOT IN ('auto_excluded','manually_excluded')"
+            where += " AND p.eligible=1 AND p.exclusion_status IN ('eligible','manually_restored')"
         remaining = max(1, min(int(limit), 100_000))
         with self.database.session() as connection:
             rows = connection.execute(
@@ -1703,7 +1722,7 @@ class PhotoRepository:
                 SELECT p.id,p.relative_path,p.captured_at,p.created_at FROM photos p WHERE {where}
                 ORDER BY EXISTS (
                     SELECT 1 FROM photo_analysis a WHERE a.photo_id=p.id
-                    AND a.schema_version IN (4,5) AND a.score_kind='semantic'
+                    AND a.schema_version IN (4,5,6) AND a.score_kind='semantic'
                     AND a.ranking_score IS NOT NULL
                 ),COALESCE(p.captured_at,p.created_at),p.relative_path,p.id
                 LIMIT ?
@@ -2150,7 +2169,7 @@ class PhotoRepository:
             clauses.append("a.types_json LIKE ?")
             parameters.append(f'%"{photo_type}"%')
         if minimum_score is not None:
-            clauses.append("a.schema_version IN (4,5) AND a.score_kind=? AND a.memory_score>=?")
+            clauses.append("a.schema_version IN (4,5,6) AND a.score_kind=? AND a.memory_score>=?")
             parameters.append(SEMANTIC_SCORE_KIND)
             parameters.append(minimum_score)
         if duplicate_only:
@@ -2201,9 +2220,9 @@ class PhotoRepository:
                     FROM photo_analysis a
                     JOIN photos p ON p.id=a.photo_id
                     JOIN libraries l ON l.id=p.library_id
-                    WHERE a.ranking_score IS NOT NULL AND a.schema_version IN (4,5)
+                    WHERE a.ranking_score IS NOT NULL AND a.schema_version IN (4,5,6)
                       AND a.score_kind=?
-                      AND p.eligible=1 AND p.exclusion_status NOT IN ('auto_excluded','manually_excluded')
+                      AND p.eligible=1 AND p.exclusion_status IN ('eligible','manually_restored')
                       AND p.lifecycle_status='active' AND l.enabled=1
                       AND (? IS NULL OR p.library_id=?)
                       AND a.id=(
@@ -2227,6 +2246,28 @@ class PhotoRepository:
         rows = connection.execute("SELECT key,value_json FROM settings WHERE key IN (?,?,?,?,?)", tuple(CONTENT_FILTER_DEFAULTS)).fetchall()
         return CONTENT_FILTER_DEFAULTS | {row["key"]: json.loads(row["value_json"]) for row in rows}
 
+    @classmethod
+    def current_v6_display_risk(cls, connection, photo_id: str) -> str | None:
+        """Return a non-overridable risk from the latest semantic v6 result."""
+        row = connection.execute(
+            """SELECT schema_version,raw_json FROM photo_analysis
+               WHERE photo_id=? AND score_kind=?
+               ORDER BY created_at DESC,id DESC LIMIT 1""",
+            (photo_id, SEMANTIC_SCORE_KIND),
+        ).fetchone()
+        if row is None or row["schema_version"] != 6:
+            return None
+        try:
+            result = validate_analysis_result(json.loads(row["raw_json"]))
+            content = evaluate_content_filter(result["content_filter"], strict=True)
+            display = evaluate_display_exclusion(result["display_exclusion"])
+        except (ValueError, TypeError, KeyError, json.JSONDecodeError):
+            return "invalid_v6_analysis"
+        for evaluation in (content, display):
+            if evaluation["decision"] == "auto_excluded":
+                return str(evaluation["primary_reason"])
+        return None
+
     @staticmethod
     def _apply_content_exclusion(connection, photo_id, evaluation, now) -> None:
         connection.execute(
@@ -2234,6 +2275,72 @@ class PhotoRepository:
             (evaluation["primary_reason"], evaluation["rule"], evaluation["rule_version"], json.dumps(evaluation), now, now, photo_id),
         )
         connection.execute("INSERT INTO photo_events(photo_id,event,changes_json,created_at) VALUES (?,'automatic_exclusion',?,?)", (photo_id, json.dumps(evaluation), now))
+
+    @staticmethod
+    def _apply_content_review(connection, photo_id, evaluation, now) -> None:
+        """Hold uncertain visual risk until a human resolves the durable review row."""
+        details = json.dumps(evaluation, ensure_ascii=False, sort_keys=True)
+        connection.execute(
+            """UPDATE photos SET eligible=0,exclusion_status='pending_review',reject_reason=?,
+               reject_rule=?,reject_rule_version=?,reject_details_json=?,rejected_at=?,
+               manual_override=0,updated_at=? WHERE id=?""",
+            (evaluation["primary_reason"], evaluation["rule"], evaluation["rule_version"],
+             details, now, now, photo_id),
+        )
+        updated = connection.execute(
+            """UPDATE photo_reviews SET review_state='needs_review',candidate_pool=1,
+               accepted_at=NULL,version=version+1,updated_by=NULL,updated_at=?
+               WHERE photo_id=? AND analysis_id IS NULL""",
+            (now, photo_id),
+        )
+        if updated.rowcount == 0:
+            connection.execute(
+                """INSERT INTO photo_reviews(photo_id,analysis_id,review_state,candidate_pool,
+                   version,updated_at) VALUES (?,NULL,'needs_review',1,0,?)""",
+                (photo_id, now),
+            )
+        connection.execute(
+            "INSERT INTO photo_events(photo_id,event,changes_json,created_at) VALUES (?,'automatic_review_hold',?,?)",
+            (photo_id, details, now),
+        )
+
+    @staticmethod
+    def _has_explicit_exif_orientation(photo: dict) -> bool:
+        """The scanner's numeric orientation defaults to 1 even without EXIF."""
+        try:
+            exif = json.loads(str(photo.get("exif_json") or "{}"))
+            orientation = exif.get("Orientation") if isinstance(exif, dict) else None
+            return type(orientation) in (int, str) and int(orientation) in range(1, 9)
+        except (TypeError, ValueError):
+            return False
+
+    @classmethod
+    def _orientation_review(cls, photo: dict, visual: dict) -> dict | None:
+        """Hold only orientation advice the renderer would ignore without proof."""
+        if photo.get("manual_orientation_rotation_cw") in {0, 90, 180, 270}:
+            return None
+        rotation = visual["rotation_cw"]
+        confidence = float(visual["confidence"])
+        ambiguous = bool(visual["ambiguous"])
+        evidence = list(visual["evidence"])
+        threshold = 0.98 if rotation == 180 else 0.95
+        uncertain_turn = rotation in {90, 180, 270} and (ambiguous or confidence < threshold)
+        no_visual_cues = rotation is None and "insufficient_visual_cues" in evidence
+        has_exif = cls._has_explicit_exif_orientation(photo)
+        if not uncertain_turn and not (no_visual_cues and not has_exif):
+            return None
+        return {
+            "decision": "pending_review",
+            "primary_reason": "orientation_unverified",
+            "rule": "visual-orientation",
+            "rule_version": "visual-orientation-review-v1",
+            "rotation_cw": rotation,
+            "confidence": confidence,
+            "ambiguous": ambiguous,
+            "evidence": evidence,
+            "threshold": threshold if uncertain_turn else None,
+            "explicit_exif_orientation": has_exif,
+        }
 
     @staticmethod
     def _mark_library_ranking_dirty(connection, library_id: str, now: str | None = None) -> None:
@@ -2295,9 +2402,9 @@ class PhotoRepository:
     def _refresh_library_ranking(connection, library_id: str) -> None:
         """Recompute current semantic rows with the AI-first ranking contract."""
         peers = """SELECT a.*,p.favorite FROM photos p
-            JOIN photo_analysis a ON a.id=(SELECT id FROM photo_analysis WHERE photo_id=p.id AND schema_version IN (4,5) AND score_kind=? ORDER BY created_at DESC,id DESC LIMIT 1)
+            JOIN photo_analysis a ON a.id=(SELECT id FROM photo_analysis WHERE photo_id=p.id AND schema_version IN (4,5,6) AND score_kind=? ORDER BY created_at DESC,id DESC LIMIT 1)
             WHERE p.library_id=? AND p.eligible=1 AND p.lifecycle_status='active'
-              AND p.exclusion_status NOT IN ('auto_excluded','manually_excluded')"""
+              AND p.exclusion_status IN ('eligible','manually_restored')"""
         cursor = connection.execute(peers, (SEMANTIC_SCORE_KIND, library_id))
         while batch := cursor.fetchmany(500):
             updates = []
@@ -2327,7 +2434,7 @@ class PhotoRepository:
     def _refresh_favorite_ranking(connection, photo_id: str) -> None:
         row = connection.execute(
             "SELECT a.*,p.favorite FROM photo_analysis a JOIN photos p ON p.id=a.photo_id "
-            "WHERE a.photo_id=? AND a.schema_version IN (4,5) AND a.score_kind=? "
+            "WHERE a.photo_id=? AND a.schema_version IN (4,5,6) AND a.score_kind=? "
             "ORDER BY a.created_at DESC,a.id DESC LIMIT 1",
             (photo_id, SEMANTIC_SCORE_KIND),
         ).fetchone()
@@ -2430,19 +2537,76 @@ class PhotoRepository:
                     )
                 result_version = result.get("schema_version")
                 result_schema = (
-                    LEGACY_V4_JSON_SCHEMA
-                    if result_version == 4
-                    else ANALYSIS_JSON_SCHEMA
+                    LEGACY_V4_JSON_SCHEMA if result_version == 4 else
+                    V5_ANALYSIS_JSON_SCHEMA if result_version == 5 else
+                    ANALYSIS_JSON_SCHEMA
                 )
                 result_fields = set(result_schema["schema"]["required"])
                 canonical = validate_analysis_result({key: result[key] for key in result_fields})
                 current = dict(connection.execute("SELECT * FROM photos WHERE id=?", (photo_id,)).fetchone())
-                content_evaluation = evaluate_content_filter(canonical["content_filter"], self._content_settings(connection))
+                strict_display = canonical["schema_version"] >= 6
+                content_evaluation = evaluate_content_filter(
+                    canonical["content_filter"], self._content_settings(connection), strict=strict_display
+                )
+                display_evaluation = (
+                    evaluate_display_exclusion(canonical["display_exclusion"])
+                    if strict_display else None
+                )
+                orientation_evaluation = (
+                    self._orientation_review(current, canonical["visual_orientation"])
+                    if strict_display else None
+                )
                 protected = bool(current["manual_override"]) or current["exclusion_status"] in {"manually_restored", "manually_excluded"}
-                if provider != "local" and content_evaluation["decision"] == "auto_excluded" and not protected:
-                    self._apply_content_exclusion(connection, photo_id, content_evaluation, now)
-                    current["eligible"] = 0
-                    current["exclusion_status"] = "auto_excluded"
+                if provider != "local" and current["exclusion_status"] != "manually_excluded" and (strict_display or not protected):
+                    safety_checks = [content_evaluation]
+                    if display_evaluation is not None:
+                        safety_checks.append(display_evaluation)
+                    if orientation_evaluation is not None:
+                        safety_checks.append(orientation_evaluation)
+                    auto_exclusion = next(
+                        (item for item in safety_checks if item["decision"] == "auto_excluded"), None
+                    )
+                    review_hold = next(
+                        (item for item in safety_checks if item["decision"] == "pending_review"), None
+                    )
+                    related_checks = [item for item in safety_checks if item["decision"] != "pass"]
+                    if auto_exclusion is not None:
+                        self._apply_content_exclusion(
+                            connection, photo_id, {**auto_exclusion, "related_checks": related_checks}, now
+                        )
+                        current["eligible"] = 0
+                        current["exclusion_status"] = "auto_excluded"
+                    elif review_hold is not None:
+                        self._apply_content_review(
+                            connection, photo_id, {**review_hold, "related_checks": related_checks}, now
+                        )
+                        current["eligible"] = 0
+                        current["exclusion_status"] = "pending_review"
+                    elif (
+                        strict_display
+                        and current["exclusion_status"] == "pending_review"
+                        and not current["manual_override"]
+                        and current["reject_rule_version"] in {
+                            "content-filter-v5-strict-display", "display-exclusion-v1",
+                            "visual-orientation-review-v1",
+                        }
+                    ):
+                        # A later decisive model result can resolve a system
+                        # hold without adding a needless human-review task.
+                        connection.execute(
+                            """UPDATE photos SET eligible=1,exclusion_status='eligible',reject_reason=NULL,
+                               reject_rule=NULL,reject_rule_version=NULL,reject_details_json=NULL,
+                               rejected_at=NULL,updated_at=? WHERE id=?""",
+                            (now, photo_id),
+                        )
+                        connection.execute(
+                            """UPDATE photo_reviews SET review_state='unreviewed',candidate_pool=0,
+                               accepted_at=NULL,version=version+1,updated_at=?
+                               WHERE photo_id=? AND analysis_id IS NULL AND updated_by IS NULL""",
+                            (now, photo_id),
+                        )
+                        current["eligible"] = 1
+                        current["exclusion_status"] = "eligible"
                 quality_evaluation = evaluate_local_quality(current, settings=self._local_quality_settings(connection))
                 if current["eligible"] and quality_evaluation["decision"] == "auto_excluded" and not protected:
                     self._apply_content_exclusion(connection, photo_id, {
@@ -2491,6 +2655,7 @@ class PhotoRepository:
                             for key in (
                                 "special_level",
                                 "content_filter",
+                                "display_exclusion",
                                 "visual_orientation",
                                 "people_count",
                                 "subject_position",

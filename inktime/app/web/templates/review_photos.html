@@ -7,12 +7,16 @@
   .review-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:1rem}
   .review-card{border:1px solid var(--border);border-radius:14px;background:var(--surface);overflow:hidden;display:grid;grid-template-rows:auto 1fr}
   .review-card.selected{outline:3px solid var(--accent)}
-  .review-card img{width:100%;aspect-ratio:1.25;object-fit:cover;background:#111;display:block}
+  .review-image-stage{width:100%;aspect-ratio:5/4;display:grid;place-items:center;overflow:hidden;background:#111}
+  .review-image-stage img{width:100%;height:100%;object-fit:contain;display:block;transform:rotate(var(--review-rotation)) scale(var(--review-scale))}
   .review-image-error{display:grid;place-items:center;min-height:10rem;padding:1rem;background:#171b18;color:var(--muted);text-align:center}
   .review-card-body{padding:.8rem;display:grid;gap:.35rem}
   .review-card-body small{color:var(--muted)}
+  .review-release-status{display:block;padding:.3rem .55rem;border-radius:8px;background:var(--surface-raised,var(--surface));border:1px solid var(--border);font-weight:700}
+  .review-release-status.is-held{border-color:var(--accent)}
   .review-actions{display:flex;flex-wrap:wrap;gap:.35rem;margin-top:.35rem}
   .review-actions button{font-size:.8rem}
+  .review-actions button[aria-pressed="true"]{outline:2px solid var(--accent)}
   .review-card textarea{width:100%;min-height:3rem;resize:vertical}
   .review-status{min-height:1.4rem;color:var(--muted)}
   .review-summary{display:flex;gap:1rem;flex-wrap:wrap;color:var(--muted)}
@@ -20,10 +24,10 @@
 </style>
 {% endblock %}
 {% block content %}
-<div class="page-head"><div><p class="eyebrow">照片人工判讀</p><h1>Review 工作台</h1><p>縮圖、分析摘要與排除證據集中在同一個可恢復工作面；不載入原始照片、不改動來源檔。</p></div></div>
+<div class="page-head"><div><p class="eyebrow">照片人工判讀</p><h1>照片人工審核</h1><p>預設只列出模型或方向無法確定的照片。確認前不會送往相框；縮圖依最終旋轉預覽，不改動來源檔。</p></div></div>
 <form id="review-filter" class="review-toolbar">
   <label>搜尋<input name="q" placeholder="路徑片段"></label>
-  <label>狀態<select name="review_state"><option value="">全部狀態</option><option value="unreviewed">未判讀</option><option value="keep">保留</option><option value="exclude">排除</option><option value="needs_review">待確認</option></select></label>
+  <label>狀態<select name="review_state"><option value="needs_review" selected>待確認</option><option value="all">全部狀態</option><option value="unreviewed">未判讀</option><option value="keep">保留</option><option value="exclude">排除</option></select></label>
   <label>年份<input name="year" inputmode="numeric" maxlength="4" placeholder="2026"></label>
   <label>月份<input name="month" inputmode="numeric" maxlength="2" placeholder="06"></label>
   <label>日期<input name="day" inputmode="numeric" maxlength="2" placeholder="15"></label>
@@ -33,7 +37,7 @@
   <button>套用</button>
 </form>
 <div class="review-summary" id="review-summary" aria-live="polite">讀取中…</div>
-<p class="review-status" id="review-status">快捷鍵：K 保留、X 排除、N 待確認、F 候選池、←/→ 選取卡片。篩選條件會保留在網址。</p>
+<p class="review-status" id="review-status">快捷鍵：K 確認可顯示、X 排除、N 待確認、←/→ 選取卡片。篩選條件會保留在網址。</p>
 <section class="review-grid" id="review-grid" aria-live="polite"></section>
 <div style="display:flex;justify-content:center;margin:1.2rem"><button class="secondary" id="review-more" hidden>載入更多</button></div>
 {% endblock %}

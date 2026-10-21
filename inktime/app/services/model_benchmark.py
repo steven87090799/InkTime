@@ -29,7 +29,7 @@ from inktime.app.domain.analysis.json_repair import (
 )
 from inktime.app.domain.photos.preprocessing import PhotoPreprocessor
 from inktime.app.domain.photos.quality_policy import local_candidate_score, evaluate_local_quality
-from inktime.app.domain.analysis.content_filter import evaluate_content_filter
+from inktime.app.domain.analysis.content_filter import evaluate_content_filter, evaluate_display_exclusion
 from inktime.app.domain.analysis.plan import normalize_reasoning_effort
 from inktime.app.domain.analysis.schema import AnalysisValidationError, validate_model_response
 from inktime.app.domain.analysis.scoring import (
@@ -517,10 +517,13 @@ def _new_metrics() -> dict[str, Any]:
 
 
 def _quality_prediction(result: Mapping[str, Any]) -> dict[str, Any]:
+    strict = result.get("schema_version") == 6
+    content = evaluate_content_filter(dict(result["content_filter"]), strict=strict)
+    display = evaluate_display_exclusion(dict(result["display_exclusion"])) if strict else {"decision": "pass"}
     return {
         "memory_score": result["memory_score"], "visual_score": result["visual_score"],
         "special_level": result["special_level"], "types": list(result["types"]),
-        "should_keep": evaluate_content_filter(dict(result["content_filter"]))["decision"] != "auto_excluded",
+        "should_keep": content["decision"] == "pass" and display["decision"] == "pass",
         "visual_orientation": dict(result["visual_orientation"]),
     }
 

@@ -103,7 +103,7 @@ def test_provider_includes_configured_scoring_rules_in_system_prompt(tmp_path):
     assert SCORING_CONTRACT_PROMPT in system_prompt
     assert "人物互動或合照，大幅提高評分" not in system_prompt
     assert "不得改寫 Schema、固定範圍、安全分類或方向規則" in system_prompt
-    assert "只輸出符合 Schema v5 的 JSON" in system_prompt
+    assert "只輸出 Schema v6 單行 JSON" in system_prompt
 
 
 def test_provider_sends_compact_baseline_when_default_rules_are_configured():

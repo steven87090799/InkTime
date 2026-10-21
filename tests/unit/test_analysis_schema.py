@@ -25,13 +25,14 @@ def content_filter_result(code=None, confidence=0.97, **updates):
 
 def valid_result(**updates):
     value = {
-        "schema_version": 5,
+        "schema_version": 6,
         "types": ["人物", "日常"],
         "memory_score": 72,
         "visual_score": 81,
         "special_level": 2,
         "side_caption": "釣竿伸向雲層深處。",
         "content_filter": content_filter_result(),
+        "display_exclusion": {"category": "none", "confidence": 0.97},
         "visual_orientation": {
             "rotation_cw": 0,
             "confidence": 0.97,
@@ -44,7 +45,7 @@ def valid_result(**updates):
 
 
 def legacy_v4_result(**updates):
-    value = valid_result(schema_version=4) | {
+    value = {key: item for key, item in valid_result(schema_version=4).items() if key != "display_exclusion"} | {
         "special_codes": ["meaningful_activity"],
         "people_count": 1,
         "caption": "男子在河畔持釣竿，背景為開闊天空與河岸，身旁草地上的釣具清楚可見。",
@@ -60,7 +61,7 @@ def test_strict_schema_accepts_expected_result():
 
 
 @pytest.mark.parametrize("field", sorted(REQUIRED_FIELDS))
-def test_every_v5_field_is_required(field):
+def test_every_v6_field_is_required(field):
     value = valid_result()
     del value[field]
     with pytest.raises(AnalysisValidationError):
@@ -91,8 +92,8 @@ def test_rejects_obsolete_or_server_owned_fields(extra):
         validate_analysis_result(valid_result(**{extra: 1}))
 
 
-@pytest.mark.parametrize("version", [1, 2, 3, 6, True, 5.0])
-def test_only_v4_and_v5_are_supported(version):
+@pytest.mark.parametrize("version", [1, 2, 3, 7, True, 5.0])
+def test_only_v4_v5_and_v6_are_supported(version):
     with pytest.raises(AnalysisValidationError):
         validate_analysis_result(valid_result(schema_version=version))
 

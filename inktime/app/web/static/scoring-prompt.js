@@ -34,7 +34,7 @@
       if (provider.response_format) {
         article.append(node('p', `Schema 封裝 ${provider.schema_chars} 字元`), node('pre', JSON.stringify(provider.response_format, null, 2), 'prompt-text'));
       } else {
-        article.append(node('p', '此服務未啟用 JSON Schema；請求不附 response_format，回應仍受伺服器的 Schema v4 驗證。'));
+        article.append(node('p', '此服務未啟用 JSON Schema；請求不附 response_format，回應仍受伺服器的 Schema v6 驗證。'));
       }
       formats.append(article);
     });

@@ -100,6 +100,7 @@
         <dt>排序組成</dt><dd>一般回看價值 {{ a.memory_score }} × 67% ＋ AI 視覺 {{ a.visual_score }} × 33% ＋ 特殊加分 {{ a.special_bonus|default(0) }}（有效等級 {{ a.effective_special_level }}）</dd>
         <dt>本機品質門檻</dt><dd>{% if photo.local_features_status == 'complete' %}已完成 · {{ prefilter.decision_label }}{% else %}尚未完成，不進入自動顯示{% endif %}。本機品質參考分 {{ a.local_quality_score if a.local_quality_score is not none else '未記錄' }}，不加入 AI 排序；完整指標見下方。</dd>
         <dt>內容過濾檢查</dt><dd>{% for item in a.content_filter_items|default([]) %}{{ item.label }}：{{ '有標記' if item.detected else '未標記' }}{% if item.detected %}（判斷信心 {{ '%.0f'|format(item.confidence * 100) }}%）{% endif %}{{ '；' if not loop.last else '' }}{% else %}未記錄{% endfor %}。這是排除項目檢查，不是照片類型或加分。</dd>
+        {% if a.display_exclusion_label is defined %}<dt>展示排除判斷</dt><dd>{{ a.display_exclusion_label }}；判斷信心 {{ '%.0f'|format((a.display_exclusion_confidence or 0) * 100) }}%。</dd>{% endif %}
         <dt>視覺方向</dt><dd>AI 建議 {{ photo.visual_orientation_rotation_cw if photo.visual_orientation_rotation_cw is not none else 'unknown' }}°；信心 {{ photo.visual_orientation_confidence if photo.visual_orientation_confidence is not none else '—' }}；ambiguous {{ 'true' if photo.visual_orientation_ambiguous else 'false' }}</dd>
         <dt>評分版本</dt><dd>{{ a.scoring_version_name or '舊版／未記錄' }}</dd>
         <dt>排序規則</dt><dd>{{ a.ranking_rule_version }}</dd>

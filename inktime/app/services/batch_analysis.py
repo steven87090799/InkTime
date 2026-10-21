@@ -531,7 +531,7 @@ class BatchAnalysisService:
                     "actual_provider": provider_id,
                     "model": model,
                     "prompt_version": str(plan["prompt_version"]),
-                    "schema_version": SCHEMA_VERSION,
+                    "schema_version": int(plan["schema_version"]),
                     "schema_kind": "full",
                     "reasoning_effort": str(plan["reasoning_effort"]),
                     "provider_prompt_contract_sha256": str(plan.get("provider_prompt_contract_sha256") or ""),
@@ -543,7 +543,7 @@ class BatchAnalysisService:
                 provider=provider_id,
                 model_name=model,
                 prompt_version=str(plan["prompt_version"]),
-                schema_version=SCHEMA_VERSION,
+                schema_version=int(plan["schema_version"]),
                 schema_kind="full",
                 vision_request_fingerprint=vision_fp,
             )
@@ -1026,7 +1026,7 @@ class BatchAnalysisService:
             blocked = connection.execute(
                 "SELECT 1 FROM analysis_batch_items i LEFT JOIN photos p ON p.id=i.photo_id "
                 "WHERE i.batch_id=? AND (p.id IS NULL OR p.never_upload<>0 OR p.lifecycle_status<>'active' "
-                "OR p.eligible<>1 OR p.exclusion_status IN ('auto_excluded','manually_excluded') "
+                "OR p.eligible<>1 OR p.exclusion_status NOT IN ('eligible','manually_restored') "
                 "OR COALESCE(p.sha256,'')<>i.content_sha256) LIMIT 1",
                 (batch_id,),
             ).fetchone()
@@ -2321,7 +2321,7 @@ class BatchAnalysisService:
                 "actual_provider": str(batch["provider_id"]),
                 "model": str(batch["model"]),
                 "prompt_version": str(plan["prompt_version"]),
-                "schema_version": SCHEMA_VERSION,
+                "schema_version": int(plan["schema_version"]),
                 "schema_kind": "full",
                 "provider_prompt_contract_sha256": str(plan.get("provider_prompt_contract_sha256") or ""),
                 **vision_input,
@@ -2363,7 +2363,10 @@ class BatchAnalysisService:
             )
             return "schema_invalid"
         try:
-            result = validate_model_response(raw_content, caption_controls=plan.get("caption_controls"))
+            result = validate_model_response(
+                raw_content, caption_controls=plan.get("caption_controls"),
+                schema_version=int(plan["schema_version"]),
+            )
         except (ValueError, TypeError, json.JSONDecodeError, AnalysisValidationError) as exc:
             self._mark_item_error(
                 item, "schema_invalid", str(exc), "schema_invalid", job_id=str(batch["job_id"])
@@ -2412,7 +2415,7 @@ class BatchAnalysisService:
                 provider=str(batch["provider_id"]),
                 model_name=str(batch["model"]),
                 prompt_version=str(plan["prompt_version"]),
-                schema_version=SCHEMA_VERSION,
+                schema_version=int(plan["schema_version"]),
                 schema_kind="full",
                 result=canonical_result,
                 raw_json=raw_content,

@@ -14,9 +14,15 @@ from typing import Any
 
 from inktime.app.db import Database
 from inktime.app.domain.analysis.scoring import SEMANTIC_SCORE_KIND
+from inktime.app.domain.photos.orientation import original_exif_orientation, resolve_effective_orientation
 
 
 REVIEW_STATES = {"unreviewed", "keep", "exclude", "needs_review"}
+PENDING_RISK_REASONS = {
+    "adult_media_cover", "commercial_model_photo", "screenshot", "document_record",
+    "sexualized_content", "explicit_nudity", "female_glamour_portrait",
+    "orientation_unverified", "document_or_receipt", "display_risk_uncertain",
+}
 _MAX_PAGE = 80
 LOW_CONFIDENCE_THRESHOLD = 0.6
 
@@ -35,6 +41,23 @@ def _now() -> str:
 
 def _json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def _orientation_review_required(reason: Any, details: Any) -> bool:
+    if reason == "orientation_unverified":
+        return True
+    if isinstance(details, str):
+        try:
+            details = json.loads(details)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return False
+    if not isinstance(details, dict):
+        return False
+    related = details.get("related_checks")
+    return isinstance(related, list) and any(
+        isinstance(check, dict) and check.get("primary_reason") == "orientation_unverified"
+        for check in related
+    )
 
 
 def _preferred_analysis_sql(photo_expression: str) -> str:
@@ -92,14 +115,20 @@ class ReviewRepository:
             params.extend([like, like, like])
         state = str(filters.get("review_state") or filters.get("review_status") or "").strip()
         state = {"accepted": "keep", "rejected": "exclude", "kept": "keep"}.get(state, state)
+        if state == "all":
+            state = ""
         if state:
             if state not in REVIEW_STATES:
                 raise ValueError("REVIEW-001 review_state 不合法")
-            clauses.append(
-                "CASE WHEN decision.id IS NOT NULL THEN decision.review_state "
-                "ELSE COALESCE(feedback.review_state,'unreviewed') END=?"
-            )
-            params.append(state)
+            if state == "needs_review":
+                clauses.append("p.exclusion_status='pending_review'")
+            else:
+                clauses.append(
+                    "CASE WHEN p.exclusion_status='pending_review' THEN 'needs_review' "
+                    "WHEN decision.id IS NOT NULL THEN decision.review_state "
+                    "ELSE COALESCE(feedback.review_state,'unreviewed') END=?"
+                )
+                params.append(state)
         if filters.get("candidate_pool") is not None:
             clauses.append(
                 "CASE WHEN decision.id IS NOT NULL THEN decision.candidate_pool "
@@ -200,7 +229,7 @@ class ReviewRepository:
                    COALESCE(p.review_taken_at,p.captured_at,p.created_at) AS review_taken_at,
                    COALESCE(p.review_date_source,CASE WHEN p.captured_at IS NULL THEN 'created_at' ELSE 'captured_at' END) AS review_date_source,
                    COALESCE(feedback.analysis_id,decision.analysis_id) AS review_analysis_id,
-                   CASE WHEN decision.id IS NOT NULL THEN decision.review_state ELSE COALESCE(feedback.review_state,'unreviewed') END AS review_state,
+                   CASE WHEN p.exclusion_status='pending_review' THEN 'needs_review' WHEN decision.id IS NOT NULL THEN decision.review_state ELSE COALESCE(feedback.review_state,'unreviewed') END AS review_state,
                    CASE WHEN decision.id IS NOT NULL THEN decision.caption_override ELSE feedback.caption_override END AS caption_override,
                    CASE WHEN decision.id IS NOT NULL THEN decision.candidate_pool ELSE COALESCE(feedback.candidate_pool,0) END AS candidate_pool,
                    CASE WHEN decision.id IS NOT NULL THEN decision.note ELSE feedback.note END AS note,
@@ -216,8 +245,10 @@ class ReviewRepository:
                    a.analysis_fingerprint,a.created_at AS analysis_created_at,a.caption,a.side_caption,
                    a.types_json,a.memory_score,a.visual_score,a.local_quality_score,
                    a.ranking_score,a.local_score,a.final_ranking_score,a.score_kind,a.semantic_json,
+                   a.content_filter_json,
                    p.visual_orientation_rotation_cw,p.visual_orientation_confidence,
-                   p.visual_orientation_ambiguous,p.visual_orientation_evidence_json
+                   p.visual_orientation_ambiguous,p.visual_orientation_evidence_json,
+                   p.exif_orientation_original,p.orientation,p.manual_orientation_rotation_cw
             FROM photos p
             LEFT JOIN latest_analysis a ON a.photo_id=p.id
             LEFT JOIN photo_reviews decision ON decision.photo_id=p.id AND decision.analysis_id IS NULL
@@ -244,11 +275,26 @@ class ReviewRepository:
                 semantic = {}
         else:
             semantic = {}
-        classifications = (semantic.get("values") or {}).get("content_filter") or {}
-        confidences = [classifications.get(code, {}).get("confidence") for code in (
-            "sexualized_content", "explicit_nudity", "female_glamour_portrait"
-        )]
-        value["confidence"] = min(confidences) if all(type(c) in (int, float) for c in confidences) else None
+        try:
+            stored_filter = json.loads(str(value.pop("content_filter_json", None) or "{}"))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            stored_filter = {}
+        classifications = (semantic.get("values") or {}).get("content_filter") or stored_filter
+        if not isinstance(classifications, dict):
+            classifications = {}
+        confidences = [entry.get("confidence") for entry in classifications.values() if isinstance(entry, dict)]
+        valid_confidences = [float(c) for c in confidences if type(c) in (int, float)]
+        value["confidence"] = min(valid_confidences) if valid_confidences else None
+        value["content_filter"] = classifications
+        risk = classifications.get(str(value.get("reject_reason") or ""))
+        details = value.get("reject_details")
+        value["reject_confidence"] = (
+            risk.get("confidence") if isinstance(risk, dict)
+            else details.get("confidence") if isinstance(details, dict) else None
+        )
+        value["orientation_review_required"] = _orientation_review_required(
+            value.get("reject_reason"), value.get("reject_details")
+        )
         value["analysis_details"] = semantic.get("values") if isinstance(semantic.get("values"), dict) else {}
         confidence = value.get("confidence")
         try:
@@ -262,6 +308,16 @@ class ReviewRepository:
         value["review_state"] = value.get("review_state") or "unreviewed"
         value["review_status"] = value["review_state"]
         value["human_side_caption"] = value.get("caption_override")
+        effective = resolve_effective_orientation(
+            exif_orientation=original_exif_orientation(value),
+            manual_rotation_cw=value.get("manual_orientation_rotation_cw"),
+            ai_rotation_cw=value.get("visual_orientation_rotation_cw"),
+            ai_confidence=value.get("visual_orientation_confidence"),
+            ai_ambiguous=bool(value.get("visual_orientation_ambiguous")),
+        )
+        value["effective_visual_orientation"] = effective.rotation_degrees
+        value["orientation_source"] = effective.source
+        value["exif_normalized"] = effective.exif_normalized
         for key in ("understanding_incorrect", "caption_bad", "scores_unreasonable"):
             value[key] = bool(value.get(key))
         value["thumbnail_url"] = f"/api/v1/review/photos/{value['id']}/thumbnail"
@@ -303,7 +359,8 @@ class ReviewRepository:
                 ).fetchone()[0]
             )
             states = connection.execute(
-                "SELECT CASE WHEN decision.id IS NOT NULL THEN decision.review_state "  # noqa: S608 -- clauses are fixed above
+                "SELECT CASE WHEN p.exclusion_status='pending_review' THEN 'needs_review' "  # noqa: S608 -- clauses are fixed above
+                "WHEN decision.id IS NOT NULL THEN decision.review_state "
                 "ELSE COALESCE(feedback.review_state,'unreviewed') END AS state,COUNT(*) AS count FROM photos p "  # noqa: S608 -- clauses are fixed above
                 f"LEFT JOIN photo_analysis a ON a.id={_preferred_analysis_sql('p.id')} "
                 "LEFT JOIN photo_reviews decision ON decision.photo_id=p.id AND decision.analysis_id IS NULL "
@@ -420,11 +477,23 @@ class ReviewRepository:
             raise ValueError("REVIEW-001 note 長度不合法")
         now = _now()
         with self.database.transaction() as connection:
+            from inktime.app.repositories.photos import PhotoRepository, invalidate_score_population_cache
             photo = connection.execute(
-                "SELECT id,library_id,lifecycle_status FROM photos WHERE id=?", (photo_id,)
+                "SELECT id,library_id,lifecycle_status,reject_reason,reject_details_json,manual_orientation_rotation_cw FROM photos WHERE id=?",
+                (photo_id,),
             ).fetchone()
             if photo is None or str(photo["lifecycle_status"]) in {"deleted", "archived"}:
                 raise KeyError(photo_id)
+            if state == "keep":
+                risk = PhotoRepository.current_v6_display_risk(connection, photo_id)
+                if risk:
+                    raise ValueError(f"REVIEW-001 v6 安全分析已排除照片：{risk}")
+            if (
+                state == "keep"
+                and _orientation_review_required(photo["reject_reason"], photo["reject_details_json"])
+                and photo["manual_orientation_rotation_cw"] not in {0, 90, 180, 270}
+            ):
+                raise ValueError("REVIEW-001 請先確認照片方向並儲存 0°、90°、180° 或 270°")
             latest = connection.execute(
                 "SELECT " + _preferred_analysis_sql("?") + " AS id", (photo_id,)
             ).fetchone()
@@ -508,6 +577,8 @@ class ReviewRepository:
                 raise ReviewConflictError(self._current_from_row(logical_current))
             before = self._current_from_row(logical_current)
             next_state = state or str(logical_current["review_state"])
+            if state == "unreviewed" and str(logical_current["review_state"]) != "unreviewed":
+                raise ValueError("REVIEW-001 已有人工作業的照片須明確選擇接受或排除")
             next_caption = caption.strip() if caption_key and caption is not None else (
                 None if caption_key else logical_current["caption_override"]
             )
@@ -521,12 +592,11 @@ class ReviewRepository:
                     raise ValueError("REVIEW-001 exclude 不得同時加入 candidate_pool")
                 next_pool = 0
             elif next_state == "needs_review":
-                # Pending review is an eligible, explicit selection candidate;
-                # it must never retain the permanent-exclude projection.
+                # This pool flag marks the review queue, not release eligibility.
                 if "candidate_pool" in payload and not next_pool:
                     raise ValueError("REVIEW-001 needs_review 必須保留在 candidate_pool")
                 next_pool = 1
-            elif next_state == "unreviewed":
+            elif next_state == "unreviewed" and state is not None:
                 next_pool = 0
             next_note = note if "note" in payload else logical_current["note"]
             next_favorite = self._bool_payload(payload, "favorite") if "favorite" in payload else None
@@ -605,15 +675,13 @@ class ReviewRepository:
                         latest_analysis_id,
                     ),
                 )
-            if next_state == "keep":
+            if state == "keep":
                 connection.execute("UPDATE photos SET eligible=1,exclusion_status='manually_restored',reject_reason=NULL,manual_override=1,updated_at=? WHERE id=?", (now, photo_id))
-            elif next_state == "exclude":
+            elif state == "exclude":
                 connection.execute("UPDATE photos SET eligible=0,exclusion_status='manually_excluded',reject_reason='REVIEW_EXCLUDED',manual_override=1,updated_at=? WHERE id=?", (now, photo_id))
-            elif next_state == "needs_review":
-                connection.execute("UPDATE photos SET eligible=1,exclusion_status='pending_review',reject_reason='REVIEW_PENDING',manual_override=1,updated_at=? WHERE id=?", (now, photo_id))
-            elif next_state == "unreviewed":
-                connection.execute("UPDATE photos SET eligible=1,exclusion_status='eligible',reject_reason=NULL,manual_override=0,updated_at=? WHERE id=?", (now, photo_id))
-            from inktime.app.repositories.photos import PhotoRepository, invalidate_score_population_cache
+            elif state == "needs_review":
+                reason = photo["reject_reason"] if photo["reject_reason"] in PENDING_RISK_REASONS else "REVIEW_PENDING"
+                connection.execute("UPDATE photos SET eligible=0,exclusion_status='pending_review',reject_reason=?,manual_override=1,updated_at=? WHERE id=?", (reason, now, photo_id))
             PhotoRepository._mark_library_ranking_dirty(
                 connection, str(photo["library_id"]), now
             )

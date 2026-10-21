@@ -191,6 +191,11 @@ def photos_page():
         "sexualized_content": "偏色情／性感內容",
         "explicit_nudity": "成人裸露",
         "female_glamour_portrait": "女性單人寫真",
+        "adult_media_cover": "AV／成人媒體封面",
+        "commercial_model_photo": "商業模特照",
+        "document_record": "文件／紀錄照片",
+        "orientation_unverified": "照片方向待確認",
+        "display_risk_uncertain": "顯示內容分類待確認",
     }
     photos = []
     for stored_row in rows:
@@ -198,7 +203,7 @@ def photos_page():
         score_kind = str(photo.get("score_kind") or "")
         ranking_score = (
             photo.get("ranking_score")
-            if score_kind == SEMANTIC_SCORE_KIND and photo.get("schema_version") in {4, 5}
+            if score_kind == SEMANTIC_SCORE_KIND and photo.get("schema_version") in {4, 5, 6}
             else None
         )
         e6_score = photo.get("e6_score")
@@ -742,6 +747,22 @@ def photo_detail(photo_id: str):
                 for code, value in content_filter.items()
                 if isinstance(value, dict)
             ]
+        if score_kind == SEMANTIC_SCORE_KIND and analysis.get("schema_version") == 6:
+            try:
+                raw_analysis = json.loads(str(analysis.get("raw_json") or "{}"))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                raw_analysis = {}
+            exclusion = raw_analysis.get("display_exclusion") if isinstance(raw_analysis, dict) else None
+            if isinstance(exclusion, dict):
+                labels = {
+                    "none": "一般照片",
+                    "adult_media_cover": "AV／成人媒體封面",
+                    "commercial_model_photo": "商業模特照",
+                    "screenshot": "截圖",
+                    "document_record": "文件／紀錄照片",
+                }
+                analysis["display_exclusion_label"] = labels.get(exclusion.get("category"), "未知")
+                analysis["display_exclusion_confidence"] = exclusion.get("confidence")
         if score_kind == LOCAL_QUALITY_SCORE_KIND:
             try:
                 payload = json.loads(str(analysis.get("semantic_json") or "{}"))

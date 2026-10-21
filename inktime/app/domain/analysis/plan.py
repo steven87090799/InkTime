@@ -10,7 +10,7 @@ from typing import Any, Mapping, Sequence
 VISION_INPUT_VERSION = "vision-input-v3"
 PROVIDER_PROMPT_CONTRACT_VERSION = "provider-prompt-contract-v3"
 AI_IMAGE_JPEG_QUALITY = 88
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 REASONING_EFFORTS = ("none", "low", "medium", "high", "xhigh", "max")
 SINGLE_ANALYSIS_STRATEGIES = {"single", "single_high", "high_quality"}
 LEGACY_ANALYSIS_STRATEGIES = {"custom", "low_cost", "smart", "smart_two_stage"}
@@ -256,7 +256,12 @@ def normalize_analysis_plan(plan: Mapping[str, Any]) -> dict[str, Any]:
     raw["caption_display_controls"] = display_controls
     raw["strategy"] = strategy
     raw["schema_kind"] = "basic" if strategy == "local" else "full"
-    raw["schema_version"] = SCHEMA_VERSION
+    # A previously frozen v5 request must keep its v5 response contract.  An
+    # old plan without an explicit schema_version also predates v6.
+    frozen_schema_version = int(raw.get("schema_version") or 5)
+    if frozen_schema_version not in {5, SCHEMA_VERSION}:
+        raise ValueError("分析計畫的 Schema 版本不支援")
+    raw["schema_version"] = frozen_schema_version
     has_scoring_contract = "scoring_rules" in raw or "scoring_rules_sha256" in raw
     if has_scoring_contract:
         scoring_rules = str(raw.get("scoring_rules", ""))
