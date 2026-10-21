@@ -89,6 +89,7 @@ RUNNER_SUITE_TEST_PATHS: dict[str, tuple[str, ...]] = {
         "tests/integration/test_device_test_ack.py",
         "tests/integration/test_offline_queue_ack.py",
         "tests/integration/test_resilience_runtime.py",
+        "tests/integration/test_v6_display_safety.py",
     ),
     "persistence_owner": (
         "tests/integration/test_auto_photo_selection_regressions.py",
@@ -131,6 +132,7 @@ RUNNER_SUITE_TEST_PATHS: dict[str, tuple[str, ...]] = {
         "tests/integration/test_adaptive_frame_renderer.py",
         "tests/integration/test_dual_photo_caption_layout.py",
         "tests/integration/test_render_candidate_contract.py",
+        "tests/integration/test_v6_display_safety.py",
         "tests/integration/test_device_layout_delivery.py",
         "tests/integration/test_photo_crop_state.py",
     ),
@@ -181,6 +183,7 @@ RUNNER_SUITE_TEST_PATHS: dict[str, tuple[str, ...]] = {
         "tests/integration/test_photo_analysis_retention_api.py",
         "tests/integration/test_review_workbench.py",
         "tests/integration/test_vision_v4.py",
+        "tests/integration/test_v6_display_safety.py",
     ),
     "backup_restore_owner": ("tests/unit/test_backups.py",),
     "unit_owner": ("tests/unit",),

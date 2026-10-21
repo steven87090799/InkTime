@@ -60,7 +60,9 @@ def test_authoritative_exclusion_retains_analysis_orientation(app, code, confide
     settings.update(CONTENT_FILTER_SWITCHES[code], enabled, changed_by=actor, source_ip="test")
     repo = app.extensions["inktime_photo_repository"]
     photo_id = add_photos(app, 1)[0]
-    result = save(repo, photo_id, content_filter=content_filter_result(code, confidence))
+    result = save(repo, photo_id, content_filter=content_filter_result(
+        **{code: {"detected": True, "confidence": confidence}},
+    ))
     photo = repo.get_with_path(photo_id)
     assert photo["eligible"] == 0
     assert photo["exclusion_status"] == status
