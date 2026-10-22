@@ -8,7 +8,7 @@ from PIL import Image
 import pytest
 
 import inktime.app.db.migrations as migrations_module
-from inktime.app.db import Database, migrate
+from inktime.app.db import Database, MigrationError, migrate
 from inktime.app.domain.rendering import encode_image
 from inktime.app.domain.rendering import natural_d
 from inktime.app.domain.rendering.release import AtomicReleasePublisher
@@ -138,3 +138,43 @@ def test_settings_expose_natural_d_and_keep_existing_modes():
     definition = SETTING_DEFINITIONS["render.dither"]
     assert definition["default"] == "natural_d"
     assert {"natural_d", "warm_vivid_c", "gooddisplay"} <= set(definition["choices"])
+
+
+def test_draft_color_schema_upgrades_without_skipping_gps_tables(tmp_path, monkeypatch):
+    full = migrations_module.MIGRATIONS
+    natural = next(m for m in full if m.version == 75)
+    draft = (*full[:70], migrations_module.Migration(71, natural.name, natural.statements))
+    monkeypatch.setattr(migrations_module, "MIGRATIONS", draft)
+    database = Database(tmp_path / "draft-color.db")
+    migrate(database)
+    monkeypatch.setattr(migrations_module, "MIGRATIONS", full)
+    backups = tmp_path / "backups"
+    assert migrate(database, backups) == [71, 72, 73, 74]
+    assert any(backups.iterdir())
+    assert migrate(database) == []
+    with database.session() as connection:
+        stored = dict(connection.execute("SELECT version,name FROM schema_migrations"))
+        assert stored[71] == full[70].name
+        assert stored[75] == natural.name
+        assert connection.execute("SELECT schema_version FROM migration_history WHERE migration_name=?",
+                                  (natural.name,)).fetchone()[0] == 75
+        assert connection.execute("SELECT COUNT(*) FROM photo_locations").fetchone()[0] == 0
+        assert connection.execute("SELECT COUNT(*) FROM reverse_geocode_cache").fetchone()[0] == 0
+        assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+
+
+def test_draft_color_schema_with_unexpected_tables_stops_before_writing(tmp_path, monkeypatch):
+    full = migrations_module.MIGRATIONS
+    natural = next(m for m in full if m.version == 75)
+    monkeypatch.setattr(migrations_module, "MIGRATIONS",
+                        (*full[:70], migrations_module.Migration(71, natural.name, natural.statements)))
+    database = Database(tmp_path / "unknown-color.db")
+    migrate(database)
+    with database.transaction() as connection:
+        connection.execute("CREATE TABLE photo_locations(unrecognized TEXT)")
+    monkeypatch.setattr(migrations_module, "MIGRATIONS", full)
+    with pytest.raises(MigrationError, match="MIGRATION-004"):
+        migrate(database)
+    with database.session() as connection:
+        assert connection.execute("SELECT name FROM schema_migrations WHERE version=71").fetchone()[0] == natural.name
+        assert connection.execute("SELECT COUNT(*) FROM schema_migrations WHERE version=75").fetchone()[0] == 0

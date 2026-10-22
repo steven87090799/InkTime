@@ -125,6 +125,7 @@ RUNNER_SUITE_TEST_PATHS: dict[str, tuple[str, ...]] = {
         "tests/integration/test_device_test_ack.py",
     ),
     "render_release_owner": (
+        "tests/unit/test_nas_resource_bounds.py",
         "tests/integration/test_photo_display_history.py",
         "tests/integration/test_photo_places.py",
         "tests/unit/test_compact_pair_geometry.py",
@@ -176,6 +177,7 @@ RUNNER_SUITE_TEST_PATHS: dict[str, tuple[str, ...]] = {
         "tests/integration/test_budget_calendar.py",
     ),
     "provider_analysis_owner": (
+        "tests/unit/test_batch_multipart.py",
         "tests/integration/test_seasonal_analysis.py",
         "tests/integration/test_budget_offset_regressions.py",
         "tests/unit/test_analysis_plan.py",

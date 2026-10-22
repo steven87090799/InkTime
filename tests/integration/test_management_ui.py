@@ -89,6 +89,11 @@ def test_primary_management_pages_render(client, app):
     assert "尚未設定 Provider。" in providers
     assert "要使用哪一個模型" in providers
     assert 'name="model_mode"' in providers
+    assert 'class="provider-dialog"' in providers
+    assert "OpenRouter（多模型路由；支援免費路由與路由規則）" in providers
+    assert "停用（保留設定，但不會被新工作選用）" in providers
+    assert "流量限制與可靠性" in providers
+    assert "支援嚴格 JSON Schema" in providers
 
     jobs = client.get("/jobs").get_data(as_text=True)
     assert 'type="submit" class="primary">確認建立' in jobs
@@ -210,6 +215,10 @@ def test_control_glossary_lists_every_setting_options_actions_and_jumps(client, 
     assert 'href="/help/controls"' in settings
     assert 'id="setting-analysis-execution_mode"' in settings
     assert 'href="/help/controls#setting-analysis-execution_mode"' in settings
+    assert "完全停用（不建立任何照片分析流程；既有結果仍保留）" in settings
+    assert "僅使用本機選片（只做本機特徵與品質判斷；不使用 Provider、不產生模型費用）" in settings
+    assert "本機選片＋手動 AI（平時只做本機分析；只有手動送入 AI 時才呼叫模型）" in settings
+    assert "自動 AI 分析（排程與新工作可自動使用已啟用的 Provider；可能產生 Token 與費用）" in settings
 
 def test_shared_confirmation_dialog_resets_and_normalizes_cancel_state(client, app):
     create_admin(app)

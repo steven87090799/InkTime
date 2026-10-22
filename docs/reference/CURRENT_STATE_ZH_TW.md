@@ -1,13 +1,13 @@
 # InkTime 現行版本與功能基線
 
-本分支更新日期：2026-10-22；基底為 `origin/main=1c208f1`，新增可選的歷年同期按需分析模式，保留已合併的 v6 顯示安全契約。本分支加入獨立的 [GPS／地標原型](../experiments/GPS_LOCATION_20261022.md)，需手動查詢／匯入；未啟用自動地址查詢或變更正式模型。下表 PhotoPainter `2.8.9` 包含完整 HTTP JSON 接收修復，仍須以該提交的 Hosted CI 結果確認編譯；原碼版本不表示已部署或刷機。部署中的版本請從「診斷」核對 Git revision，實體裝置則核對回報的韌體版本。
+更新日期：2026-10-23；基底為 `origin/main=799e5bb`，整合 NAS 記憶體優化、D 色彩／雙圖版面與 Python 3.12 依賴更新；保留 v6 顯示安全、同期分析、顯示歷史與分析失敗通知。獨立的 [GPS／地標原型](../experiments/GPS_LOCATION_20261022.md) 仍需手動查詢／匯入，不自動呼叫外部服務。原始碼、Hosted CI、部署及實體相框驗收是不同狀態；部署版本請從「診斷」核對 Git revision，實體裝置則核對回報的韌體版本。
 
 ## 版本不是同一個數字
 
 | 項目 | 原始碼值 | 權威來源 |
 |---|---|---|
 | Python 套件 | `2.0.0.dev0`，部署／CI 支援 Python 3.12（`>=3.12,<3.13`） | [`inktime/_version.py`](../../inktime/_version.py)、[`pyproject.toml`](../../pyproject.toml) |
-| SQLite Migration | 連續 `1–74`；64–66 保護配送／渲染輸入並支援雙圖附說明，67 索引活動清理，68 永久保存照片內容版本與模型證據，69 加入 Batch 候選分頁索引與逐項失敗重試授權，70 支援橫單直雙與拍攝日期的自動版型，71 新增獨立地點證據與精確 GPS 快取，72 保存顯示／選定次數與完整選片快照，73 加入分析失敗持久通知，74 保存同期分析任務、去重與重跑確認；保留歷史／外鍵 | [`migrations.py`](../../inktime/app/db/migrations.py) |
+| SQLite Migration | 連續 `1–75`；64–66 保護配送／渲染輸入並支援雙圖附說明，67 索引活動清理，68 永久保存照片內容版本與模型證據，69 加入 Batch 候選分頁索引與逐項失敗重試授權，70 支援橫單直雙與拍攝日期的自動版型，71 新增獨立地點證據與精確 GPS 快取，72 保存顯示／選定次數與完整選片快照，73 加入分析失敗持久通知，74 保存同期分析任務、去重與重跑確認，75 僅將未經管理員另選的 C 預設更新為 D；保留歷史／外鍵 | [`migrations.py`](../../inktime/app/db/migrations.py) |
 | AI Analysis Schema | 嚴格 v6；保留 v4/v5 相容閱讀。正式發布要求 v6 安全分析，舊結果不自動重付費 | [`plan.py`](../../inktime/app/domain/analysis/plan.py)、[`schema.py`](../../inktime/app/domain/analysis/schema.py) |
 | ESP32 7C／PhotoPainter 韌體 | `2.8.9`（本分支；未刷機） | [`ink-display-7C-photo.ino`](../../esp32/ink-display-7C-photo/ink-display-7C-photo.ino) |
 | ESP32 Config Store payload | v5，讀取 v1–v5；舊容量 12、新 payload 24 slots read compatibility | [`device_config_store_core.h`](../../esp32/ink-display-7C-photo/device_config_store_core.h) |
@@ -38,8 +38,9 @@ Config Store v5 是裝置本機儲存格式，不是所有 HTTP Manifest 的版�
 
 - 9 種版型：`auto_photo`、`full`、`postcard`、`photo_info`、`photo_pair`、`photo_pair_caption`、`adaptive_memory`、`calendar`、`weather_sensor`；後兩者限直向。
 - 3 種 480×800 Profile：`safe_4c`（2bpp，96,000 bytes）、`gdep073e01_6c`、`gdey073d46_7c`（indexed4，192,000 bytes）。PhotoPainter 在裝置端轉為原生 800×480。
-- 11 個抖動選項（含別名／無抖動）：`warm_vivid_c`、`none`、`floyd_steinberg`、`gooddisplay`、`photo_smooth`、`atkinson`、`bayer4`、`bayer8`、`nearest`、`bayer_ordered`、`serpentine_floyd_steinberg`。
-- 新安裝渲染預設為 `gdep073e01_6c`、`warm_vivid_c`、`auto_photo`、`landscape`、`cover`；新增裝置的預設 Profile 同為 `gdep073e01_6c`，仍必須另外與實板匹配。
+- 12 個抖動選項（含別名／無抖動）：`natural_d`、`warm_vivid_c`、`none`、`floyd_steinberg`、`gooddisplay`、`photo_smooth`、`atkinson`、`bayer4`、`bayer8`、`nearest`、`bayer_ordered`、`serpentine_floyd_steinberg`。
+- 新安裝渲染預設為 `gdep073e01_6c`、`natural_d`、`auto_photo`、`landscape`、`cover`；新增裝置的預設 Profile 同為 `gdep073e01_6c`，仍必須另外與實板匹配。
+- D 使用 epdoptimize 1.3.0 balanced 衍生配方，HSL 飽和度微降 5%、固定白平衡與亮部保白；保留 C 與原版選項。僅接受不超過 480×800 的已排版影像，每塊最多 2,048 像素；Release 記錄實際色盤及配方。橫向自動雙圖每張左側保留 44px 欄，短句靠上、完整日期小字直排靠下，照片等比例置中填滿或依明確選擇 contain；不採用主體／焦點或額外放大。預覽與 Release 共用凍結版面與文字遮罩。
 - Enhanced offline schedule 的 PhotoPainter 2.8.7 以後正式 capability 上限為 16 slots/day；Config Store v5 仍可讀 24-slot payload，能力不明的舊裝置需 repair／重新配對，不直接推定為 16。
 - 2.8.7 以後 PhotoPainter KEY1 雙擊顯示唯讀電源頁，顯示後停留 30 秒，再驗證 Internal Flash 的正式 frame 並恢復原圖；無有效 frame 才回正常網路流程。GPIO0 BOOT、GPIO5 PWR、GPIO21 TG28 IRQ 保持安全邊界。
 - 13.3 吋程式是保留的 beta 舊協定實作；目前 Web 沒有相應正式 Profile。不能直接使用本版 7.3 吋 Release。

@@ -3291,11 +3291,37 @@ def _applied_versions(database: Database) -> set[int]:
         return {int(row[0]) for row in connection.execute("SELECT version FROM schema_migrations")}
 
 
+def _draft_natural_d_migration(database: Database) -> bool:
+    """Recognize only PR #166's exact former color-only migration 71."""
+    expected = {migration.version: migration.name for migration in MIGRATIONS}
+    if 75 not in expected:
+        return False
+    with database.session() as connection:
+        if not _table_exists(connection, "schema_migrations"):
+            return False
+        stored = dict(connection.execute("SELECT version,name FROM schema_migrations WHERE version>=71"))
+        if stored.get(71) != expected[75]:
+            if 71 in stored and stored[71] != expected[71]:
+                raise MigrationError("MIGRATION-004 相同 Migration 編號的內容不同；停止啟動，保留原資料")
+            return False
+        valid = set(stored) == {71} and not any(
+            _table_exists(connection, table)
+            for table in ("photo_locations", "reverse_geocode_cache", "photo_selection_runs",
+                          "seasonal_analysis_tasks", "seasonal_rerun_confirmations")
+        )
+        valid = valid and "display_count" not in {
+            row[1] for row in connection.execute("PRAGMA table_info(photos)")
+        }
+        if not valid:
+            raise MigrationError("MIGRATION-004 D 色彩分支 Schema 與已知版本不符；停止啟動，保留原資料")
+        return True
+
+
 def _draft_seasonal_migration(database: Database) -> bool:
     """Recognize the exact unreleased seasonal branch's former version 72.
 
-    Main ends at 71. The two drafts independently allocated 72; only the
-    seasonal schema moves to 74. Never treat an unknown same-number schema as
+    The drafts based on main 71 independently allocated 72; only the
+    seasonal schema moved to 74. Never treat an unknown same-number schema as
     an applied migration, or recreate its tables and lose the saved tasks.
     """
     expected = {migration.version: migration.name for migration in MIGRATIONS}
@@ -3497,6 +3523,9 @@ def migrate(database: Database, backup_dir: Path | None = None) -> list[int]:
             raise MigrationError(
                 f"MIGRATION-003 資料庫 Schema Version {newest} 高於本程式可支援版本；停止啟動以避免降級寫入"
             )
+        legacy_natural_d = _draft_natural_d_migration(database)
+        if legacy_natural_d:
+            applied_versions = (applied_versions - {71}) | {75}
         legacy_seasonal = _draft_seasonal_migration(database)
         if legacy_seasonal:
             applied_versions = (applied_versions - {72}) | {74}
@@ -3515,6 +3544,16 @@ def migrate(database: Database, backup_dir: Path | None = None) -> list[int]:
         backup_path = None
         if backup_dir is not None and had_database and has_pending_migrations:
             backup_path = backup_database(database, backup_dir)
+
+        if legacy_natural_d:
+            # Preserve the draft's completed color update while freeing 71 for
+            # its released GPS schema. The recovery backup retains old numbers.
+            with database.transaction(operation="schema_migration") as connection:
+                connection.execute("UPDATE schema_migrations SET version=75 WHERE version=71")
+                connection.execute(
+                    "UPDATE migration_history SET schema_version=75 WHERE schema_version=71 AND migration_name=?",
+                    (next(m.name for m in MIGRATIONS if m.version == 75),),
+                )
 
         if legacy_seasonal:
             # The pre-migration backup still has the original branch numbering.

@@ -484,3 +484,36 @@ pre { white-space: pre-wrap; word-break: break-word; max-height: 420px; overflow
 .frame-demo[data-layout="auto_photo"] .frame-demo-caption { align-items: center; align-content: normal; justify-content: space-between; grid-template-columns: minmax(0, 1fr) auto; gap: 4px; padding: 0 3px; border: 0; font-size: 5px; }
 .frame-demo[data-layout="auto_photo"] .frame-demo-caption strong { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; text-align: left; }
 .frame-demo[data-layout="auto_photo"] .frame-demo-caption span { flex: none; white-space: nowrap; text-align: right; }
+
+/* Provider form layout. */
+.provider-dialog { width: min(980px, calc(100vw - 32px)); max-width: 980px; max-height: 92vh; padding: 0; overflow: hidden; }
+.provider-form { gap: 0; max-height: 92vh; margin: 0; overflow: auto; }
+.provider-form-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 30px; padding: 26px 30px 22px; border-bottom: 1px solid var(--line); background: color-mix(in srgb, var(--surface) 72%, var(--card)); }
+.provider-form-head h2 { margin: 3px 0 0; font-size: 24px; }
+.provider-form-head > p { max-width: 500px; margin: 4px 0 0; color: var(--muted); font-size: 13px; line-height: 1.65; }
+.provider-form-section { display: grid; gap: 18px; margin: 0; padding: 24px 30px; border: 0; border-bottom: 1px solid var(--line); }
+.provider-section-head { display: flex; align-items: flex-start; gap: 12px; }
+.provider-section-head > span, .provider-model-picker legend > span { display: inline-flex; width: 28px; height: 28px; align-items: center; justify-content: center; flex: 0 0 auto; border-radius: 50%; background: var(--accent2); color: var(--accent); font-size: 12px; font-weight: 850; }
+.provider-section-head h3 { margin: 1px 0 3px; font-size: 17px; }
+.provider-section-head p, .provider-section-intro { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.55; }
+.provider-field-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+.provider-runtime-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; }
+.provider-field-wide { grid-column: 1 / -1; }
+.provider-form label { min-width: 0; }
+.provider-form label > small { display: block; margin-top: 7px; color: var(--muted); font-size: 11px; font-weight: 450; line-height: 1.5; }
+.provider-form select, .provider-form textarea { margin-top: 7px; }
+.provider-form textarea { width: 100%; padding: 12px 13px; border: 1px solid var(--field-line); border-radius: 9px; background: var(--field); color: var(--ink); font: 13px/1.55 ui-monospace, SFMono-Regular, Menlo, monospace; resize: vertical; }
+.provider-choice-guide { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 9px; }
+.provider-choice-guide article { padding: 12px; border: 1px solid var(--line); border-radius: 10px; background: color-mix(in srgb, var(--paper) 78%, transparent); }
+.provider-choice-guide strong, .provider-choice-guide span { display: block; }
+.provider-choice-guide span { margin-top: 2px; color: var(--accent); font-size: 10px; font-weight: 750; }
+.provider-choice-guide p { margin: 7px 0 0; color: var(--muted); font-size: 11px; line-height: 1.5; }
+.provider-model-picker legend { display: flex; align-items: center; gap: 9px; padding: 0; font-size: 17px; font-weight: 800; }
+.provider-mode-help { margin: 0; padding: 11px 13px; border-radius: 9px; background: var(--surface); color: var(--muted); font-size: 12px; line-height: 1.55; }
+.provider-capability-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.provider-capability { display: flex; gap: 11px; padding: 14px; border: 1px solid var(--line); border-radius: 11px; background: color-mix(in srgb, var(--paper) 78%, transparent); cursor: pointer; }
+.provider-capability input { width: auto; margin: 2px 0 0; flex: 0 0 auto; }
+.provider-capability strong, .provider-capability small { display: block; }
+.provider-capability small { margin-top: 4px; }
+.provider-form-actions { position: sticky; bottom: 0; display: flex; justify-content: flex-end; gap: 10px; padding: 18px 30px; background: color-mix(in srgb, var(--card) 94%, transparent); backdrop-filter: blur(12px); box-shadow: 0 -10px 28px rgba(0,0,0,.12); }
+@media (max-width: 760px) { .provider-form-head { display: grid; gap: 10px; padding: 22px 20px; } .provider-form-section { padding: 22px 20px; } .provider-field-grid, .provider-runtime-grid, .provider-capability-grid { grid-template-columns: 1fr; } .provider-choice-guide { grid-template-columns: repeat(2, minmax(0, 1fr)); } .provider-form-actions { padding: 15px 20px; } }
