@@ -87,7 +87,7 @@ def test_primary_management_pages_render(client, app):
     assert 'id="provider-action-status"' in providers
     assert "alert(" not in providers
     assert "尚未設定 Provider。" in providers
-    assert "要使用哪一個模型" in providers
+    assert "模型選擇" in providers
     assert 'name="model_mode"' in providers
     assert 'class="provider-dialog"' in providers
     assert "OpenRouter（多模型路由；支援免費路由與路由規則）" in providers
