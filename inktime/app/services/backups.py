@@ -37,6 +37,10 @@ IMPORTANT_TABLES = (
     "releases",
     "device_events",
     "display_history",
+    "photo_selection_runs",
+    "photo_selection_candidates",
+    "photo_selection_releases",
+    "device_notifications",
     "settings_snapshots",
     "settings_snapshot_items",
 )
@@ -61,6 +65,10 @@ _COUNT_SQL = {
     "releases": "SELECT COUNT(*) FROM releases",
     "device_events": "SELECT COUNT(*) FROM device_events",
     "display_history": "SELECT COUNT(*) FROM display_history",
+    "photo_selection_runs": "SELECT COUNT(*) FROM photo_selection_runs",
+    "photo_selection_candidates": "SELECT COUNT(*) FROM photo_selection_candidates",
+    "photo_selection_releases": "SELECT COUNT(*) FROM photo_selection_releases",
+    "device_notifications": "SELECT COUNT(*) FROM device_notifications",
     "settings_snapshots": "SELECT COUNT(*) FROM settings_snapshots",
     "settings_snapshot_items": "SELECT COUNT(*) FROM settings_snapshot_items",
 }

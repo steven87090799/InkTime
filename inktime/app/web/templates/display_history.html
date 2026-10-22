@@ -1,0 +1,42 @@
+{% extends "base.html" %}
+{% block title %}選片與顯示歷史｜InkTime{% endblock %}
+{% block head %}<link rel="stylesheet" href="{{ url_for('static', filename='display-history.css') }}">{% endblock %}
+{% block content %}
+<div class="page-head"><div><p class="eyebrow">照片輪替紀錄</p><h1>選片與顯示歷史</h1><p>優先選未顯示照片；需要重用時，優先選次數較少、較久沒出現的照片。</p></div><a href="/rendering">相框與發布</a></div>
+{% if detail %}
+<section class="panel">
+  <div class="panel-head"><h2>{{ detail.target_date }} 的選片</h2><a href="{{ url_for('display_history.history_page', date=detail.target_date) }}">返回當天歷史</a></div>
+  <p>{{ detail.created_at }} · {{ '自動挑選' if detail.method == 'automatic' else '手動指定' }} · 候選共 {{ detail.candidate_count }} 張 · 已發布 {{ detail.published_photo_ids|length }} 張</p>
+  {% if detail.method == 'automatic' %}<p>模式：{{ {'history_today':'歷史今日','top_ranked':'所有日期'}.get(detail.context.selection_mode, detail.context.selection_mode) }}；日期不足時：{{ {'nearby_then_ranked':'鄰近日期，再擴大範圍','nearby_only':'只放寬至鄰近日期','ranked':'擴大至其他日期','none':'不放寬日期'}.get(detail.context.fallback, detail.context.fallback) }}。保存本次實際考慮的完整候選池，包含未選中的照片。</p>{% endif %}
+  {% for release in detail.releases %}<p>{{ release.device_name or '共用發布' }} · {{ release.release_id or '發布檔已依保留政策移除' }} · {{ '已收到顯示成功回報' if release.confirmed_count else '尚無顯示成功回報' }}{% if release.status %} · {{ release.status }}{% endif %}</p>{% else %}<p>尚未成功發布。候選快照仍保留供查詢。</p>{% endfor %}
+  {% if detail.published_photos %}<h3>系統選定並發布的照片</h3><div class="history-published">{% for photo in detail.published_photos %}<div>{% if photo.photo_id %}<a href="/photos/{{ photo.photo_id|urlencode }}"><img loading="lazy" src="/api/v1/photos/{{ photo.photo_id|urlencode }}/thumbnail" alt="{{ photo.relative_path or photo.id }}"><span>{{ photo.relative_path or photo.id }}</span></a>{% else %}<span>{{ photo.relative_path or photo.id }}（照片已移除）</span>{% endif %}</div>{% endfor %}</div>{% endif %}
+</section>
+<section class="panel">
+  <h2>所有候選照片</h2>
+  <div class="history-candidates">
+  {% for row in detail.candidates %}
+    <article class="history-photo {{ 'history-selected' if row.published else '' }}">
+      {% if row.photo_id %}<a href="/photos/{{ row.photo_id|urlencode }}"><img loading="lazy" src="/api/v1/photos/{{ row.photo_id|urlencode }}/thumbnail" alt="{{ row.snapshot.relative_path or '照片' }}"></a>{% endif %}
+      <div><strong>#{{ row.rank }} {{ row.snapshot.relative_path or row.snapshot.id }}</strong><p>{{ row.snapshot.captured_date or '拍攝日期不明' }} · 分數 {{ '%.2f'|format(row.score) if row.score is not none else '—' }}</p>
+      <p>選片時已確認顯示 {{ row.snapshot.display_count or 0 }} 次 · 系統選定 {{ row.snapshot.selection_count or 0 }} 次{% if row.snapshot.last_displayed_at %} · 上次顯示 {{ row.snapshot.last_displayed_at }}{% endif %}</p>
+      <p>{{ {'exact_day':'歷史同日','nearby_day':'鄰近日期','ranked_fallback':'其他日期候補','top_ranked':'所有日期'}.get(row.snapshot.match_type, '手動指定') }} · <strong>{{ '已選定並發布' if row.published else '系統建議選取，尚未發布' if row.selected and not detail.releases else '未選中' }}</strong></p>
+      {% if row.photo_id %}<a href="{{ url_for('display_history.history_page', photo_id=row.photo_id, tab='displays') }}">查看這張照片的顯示紀錄</a>{% else %}<span>照片已移除，保留選片快照</span>{% endif %}</div>
+    </article>
+  {% else %}<p>本次沒有符合資格的候選照片。</p>{% endfor %}
+  </div>
+  <div class="history-pagination">{% if detail.page > 1 %}<a href="{{ url_for('display_history.history_detail', run_id=detail.id, page=detail.page-1) }}">上一頁</a>{% endif %}<span>第 {{ detail.page }} 頁 · 共 {{ detail.candidate_count }} 張</span>{% if detail.page * detail.page_size < detail.candidate_count %}<a href="{{ url_for('display_history.history_detail', run_id=detail.id, page=detail.page+1) }}">下一頁</a>{% endif %}</div>
+</section>
+{% else %}
+<section class="panel">
+  <form class="inline-form" method="get"><label>日期<input type="date" name="date" value="{{ filters.target_date }}"></label><label>照片 ID<input name="photo_id" value="{{ filters.photo_id }}" placeholder="選填"></label><label>紀錄種類<select name="tab"><option value="selections" {% if filters.tab == 'selections' %}selected{% endif %}>系統選片與所有候選</option><option value="displays" {% if filters.tab == 'displays' %}selected{% endif %}>顯示與舊發布紀錄</option></select></label><button>查詢</button><a href="/display-history">清除篩選</a></form>
+  <p>顯示次數只累計裝置的成功回報。系統選定次數另行保存，讓無法回報的舊裝置也能避免重複。歷史發布紀錄保留為「未確認」。完整候選快照從功能啟用後開始保存。</p>
+</section>
+<section class="panel">
+  <h2>{{ '顯示與發布紀錄' if filters.tab == 'displays' else '系統選片紀錄' }} <small>共 {{ result.total }} 筆</small></h2>
+  <div class="table-wrap"><table><thead><tr>{% if filters.tab == 'displays' %}<th>時間與日期</th><th>照片</th><th>狀態</th><th>累計顯示</th>{% else %}<th>目標日期</th><th>挑選時間</th><th>候選</th><th>選定並發布</th><th>明細</th>{% endif %}</tr></thead><tbody>
+  {% for item in result['items'] %}<tr>{% if filters.tab == 'displays' %}<td>{{ item.history_date }}<br><small>{{ item.displayed_at }}</small></td><td><a href="/photos/{{ item.photo_id|urlencode }}">{{ item.relative_path }}</a></td><td>{{ '裝置已回報顯示成功' if item.confirmed else '歷史發布／未確認顯示' }}</td><td>{{ item.display_count }} 次</td>{% else %}<td>{{ item.target_date }}</td><td>{{ item.created_at }}<br><small>{{ '自動挑選' if item.method == 'automatic' else '手動指定' }}</small></td><td>{{ item.candidate_count }} 張</td><td>{{ item.published_photo_ids|length }} 張 · {{ item.release_count }} 個發布</td><td><a href="{{ url_for('display_history.history_detail', run_id=item.id) }}">查看選定照片與所有候選</a></td>{% endif %}</tr>{% else %}<tr><td colspan="5">目前沒有符合條件的紀錄。</td></tr>{% endfor %}
+  </tbody></table></div>
+  <div class="history-pagination">{% if result.page > 1 %}<a href="{{ url_for('display_history.history_page', date=filters.target_date, photo_id=filters.photo_id, tab=filters.tab, page=result.page-1) }}">上一頁</a>{% endif %}<span>第 {{ result.page }} 頁</span>{% if result.page * result.page_size < result.total %}<a href="{{ url_for('display_history.history_page', date=filters.target_date, photo_id=filters.photo_id, tab=filters.tab, page=result.page+1) }}">下一頁</a>{% endif %}</div>
+</section>
+{% endif %}
+{% endblock %}

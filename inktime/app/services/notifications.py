@@ -65,6 +65,32 @@ class DeviceNotificationService:
         url = str(self.settings.get("notification.webhook_url", "")).strip()
         return "pending" if enabled and url else "disabled"
 
+    def unread_analysis(self) -> dict:
+        with self.database.session() as connection:
+            count = connection.execute(
+                "SELECT COUNT(*) FROM device_notifications WHERE kind='analysis_failure' AND read_at IS NULL"
+            ).fetchone()[0]
+        return {"count": int(count)}
+
+    def mark_read(self, notification_id: int) -> bool:
+        with self.database.transaction() as connection:
+            cursor = connection.execute(
+                "UPDATE device_notifications SET read_at=COALESCE(read_at,?) WHERE id=?",
+                (datetime.now(timezone.utc).isoformat(), notification_id),
+            )
+        return bool(cursor.rowcount)
+
+    def history(self, *, page: int = 1) -> dict:
+        size = 50
+        with self.database.session() as connection:
+            total = connection.execute("SELECT COUNT(*) FROM device_notifications").fetchone()[0]
+            rows = connection.execute(
+                """SELECT n.*,d.name device_name FROM device_notifications n LEFT JOIN devices d ON d.id=n.device_id
+                ORDER BY n.created_at DESC,n.id DESC LIMIT ? OFFSET ?""", (size, (page - 1) * size),
+            ).fetchall()
+        return {"items": [{**dict(row), "details": json.loads(row["details_json"])} for row in rows],
+                "total": int(total), "page": page, "page_size": size}
+
     def _insert_notification(
         self,
         connection,

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from inktime.app.domain.photos.rotation import exposure_count
+
 from datetime import datetime, timezone
 from math import radians, cos, sin, asin, sqrt
 from typing import Any
@@ -86,6 +88,7 @@ def select_auto_photo_frames(
         scored = [(pair_score(primary, row, desired_orientation=desired), i) for i, row in enumerate(peers)]
         valid = [(score, i) for score, i in scored if score is not None]
         valid.sort(key=lambda item: (
+            -exposure_count(peers[item[1]]),
             not peers[item[1]].get("recently_displayed"), item[0],
             str(peers[item[1]].get("captured_at") or ""), str(peers[item[1]]["id"]),
         ), reverse=True)
@@ -275,6 +278,8 @@ def select_pair_candidate(
     available = [(score, candidate) for score, candidate in scored if score is not None]
     if not available:
         return None
+    minimum_count = min(exposure_count(item[1]) for item in available)
+    available = [item for item in available if exposure_count(item[1]) == minimum_count]
     fresh = [item for item in available if not item[1].get("recently_displayed")]
     pool = fresh or available
     return max(

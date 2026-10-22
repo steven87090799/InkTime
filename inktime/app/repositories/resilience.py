@@ -1002,8 +1002,9 @@ class ResilienceRepository:
                     manifest = json.loads(str(release["manifest_json"])) if release else {}
                 except (TypeError, ValueError, json.JSONDecodeError):
                     manifest = {}
-                for file_item in manifest.get("files", []):
-                    photo_id = str(file_item.get("source_photo_id", ""))
+                from inktime.app.domain.rendering.release_sources import release_source_photo_ids
+
+                for photo_id in release_source_photo_ids(manifest):
                     if (
                         photo_id
                         and connection.execute("SELECT 1 FROM photos WHERE id=?", (photo_id,)).fetchone()
@@ -1011,7 +1012,8 @@ class ResilienceRepository:
                         connection.execute(
                             """INSERT INTO display_history(photo_id,history_date,selection_method,release_id,displayed_at,metadata_json)
                             SELECT ?,?,'device_queue_ack',?,?,? WHERE NOT EXISTS
-                            (SELECT 1 FROM display_history WHERE photo_id=? AND release_id=? AND selection_method='device_queue_ack')""",
+                            (SELECT 1 FROM display_history WHERE photo_id=? AND release_id=? AND selection_method='device_queue_ack'
+                             AND json_extract(metadata_json,'$.queue_item_id')=?)""",
                             (
                                 photo_id,
                                 history_date,
@@ -1026,6 +1028,7 @@ class ResilienceRepository:
                                 ),
                                 photo_id,
                                 item["release_id"],
+                                item_id,
                             ),
                         )
             self._record_rollout_ack_locked(connection, item_id, device_id, event, payload, now)

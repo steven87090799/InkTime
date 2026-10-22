@@ -2,13 +2,42 @@
 
 ## 資格先於排名
 本機品質是 quality gate，不是 AI 排名權重。automatic_ai 候選須本機特徵完成、
-具有有效 semantic 分析（現行 v5 或相容 v4）、非空 ranking_score、合格且存在
-的原檔；本機／AI 未完成就等待，不以本機分數補入 AI 候選。明確選擇的
-local_only 模式保留。候選與正式發布須維持相同資格邊界。
+具有現行 v6 semantic 安全分析、非空 ranking_score、合格且存在的原檔；
+本機／AI 未完成就等待，不以本機分數補入 AI 候選。v4/v5 分析仍可閱讀，
+所有執行模式的正式發布均須通過 v6 安全檢查。候選與正式發布維持相同資格邊界。
 
 來源：`inktime/app/repositories/render_candidates.py` 的
 `SEMANTIC_SQL_PREDICATE`；發布追 `inktime/app/services/display_prepare.py`。
 品質細節按需查 `evaluate_local_quality`，不要為排名載入掃描歷史。
+
+## 避免反覆顯示
+Migration 72 保存每張照片的 `display_count`／`last_displayed_at` 與
+`selection_count`／`last_selected_at`。只有 `DISPLAY_COMPLETED` 成功回報
+會增加顯示次數；下載、渲染與發布均不代表實際顯示。雙照片版面兩張各計一次，
+相同 Queue Item 的重複 ACK 不重計，不同裝置的成功顯示分別計次。
+既有成功 ACK 回填；既有發布紀錄保留為未確認顯示，不虛增顯示次數。
+
+自動選片先比較 `max(display_count, selection_count)`，在允許的日期候補範圍
+內優先未使用的合格照片。需要重用時優先次數較少者，再依日期階段與距離、
+較久未使用、原始 AI 分數與多樣性選擇。`history_today_fallback=none` 仍不
+跨出同日範圍。配對先嘗試未使用來源，仍須符合方向與非重複內容檢查。
+系統選定次數與成功發布在同一交易保存，讓沒有顯示 ACK 的舊裝置也能輪替；
+未發布成功不增加選定次數。此規則不改寫模型的原始 AI 分數。
+
+Web「墨水屏 → 選片與顯示歷史」(`/display-history`) 可按日期／照片 ID 查詢。
+每次自動選片保存完整的實際候選池（依各階段上限，合計最多 3000 張），
+包括未選中的照片、分數、拍攝日期、當時次數、選定與發布結果。
+候選分頁展示，不受舊 Decision Trace 前 50 名或 60 天清理限制；納入 DB 備份。
+升級前未保存的候選無法回溯重建。手動指定仍按操作者的選擇發布。
+
+## 分析失敗通知
+Migration 73 在失敗狀態的同一 DB 交易寫入通知：一般模型失敗、逾時、
+請求結果未確認，以及沒有 AI Trace 的 Batch 項目／分析工作失敗均涵蓋。
+通知保留至使用者標記已讀，各頁顯示未讀警示，開啟頁面每 30 秒更新。
+`/notifications` 連到照片、工作與實際 AI Trace；通知不會重送付費模型請求。
+已啟用 Webhook 且已設定網址時，新通知沿用既有 outbox、去重與傳送重試。
+未啟用 Webhook 仍有站內警示；未設定外部通知時，使用者需開啟平台查看。
+通知只帶識別碼與錯誤代碼，不包含模型請求／回應或 Provider 憑證。
 
 ## AI 分數與最愛
 ```text

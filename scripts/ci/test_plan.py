@@ -222,6 +222,8 @@ INTEGRATION_TEST_OWNER_SUITES: dict[str, tuple[str, ...]] = {
         "web_api_owner",
     ),
     "tests/integration/test_render_candidate_contract.py": ("render_release_owner",),
+    "tests/integration/test_photo_display_history.py": ("render_release_owner", "web_api_owner", "device_delivery_owner"),
+    "tests/integration/test_analysis_failure_notifications.py": ("notifications_observability_owner", "web_api_owner"),
     "tests/integration/test_device_layout_delivery.py": ("render_release_owner", "device_api_contract_owner"),
     "tests/integration/test_photo_crop_state.py": ("render_release_owner", "web_api_owner"),
     "tests/integration/test_photo_places.py": (

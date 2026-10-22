@@ -19,6 +19,49 @@ from inktime.app.repositories.resilience import ResilienceRepository
 CURRENT_SCHEMA_VERSION = max(migration.version for migration in MIGRATIONS)
 
 
+def test_display_counter_upgrade_preserves_unconfirmed_history_and_webhook_state(tmp_path, monkeypatch):
+    monkeypatch.setattr(migrations_module, "MIGRATIONS", MIGRATIONS[:71])
+    database = Database(tmp_path / "history-upgrade.db")
+    migrate(database)
+    with database.transaction() as connection:
+        connection.execute("INSERT INTO libraries(id,name,root_path,created_at,updated_at) VALUES ('lib','lib','/photos','2026','2026')")
+        connection.execute("INSERT INTO photos(id,library_id,relative_path,status,created_at,updated_at) VALUES ('p','lib','p.jpg','analyzed','2026','2026')")
+        connection.executemany(
+            """INSERT INTO display_history(photo_id,history_date,selection_method,release_id,displayed_at)
+            VALUES ('p','2026-10-22',?,?,?)""",
+            [("scheduled", "published", "2026-10-22T00:00:00+00:00"),
+             ("device_queue_ack", "confirmed", "2026-10-22T01:00:00+00:00")],
+        )
+        connection.execute(
+            """INSERT INTO device_notifications(id,kind,level,title,message,webhook_status,
+            webhook_attempts,webhook_idempotency_key,webhook_claimed_until,created_at)
+            VALUES (9,'test','info','existing','existing','retrying',3,'existing-key','2026-10-23','2026-10-22')""",
+        )
+        connection.execute(
+            "INSERT INTO device_notifications(id,kind,level,title,message,created_at) VALUES (100,'test','info','deleted','deleted','2026')"
+        )
+        connection.execute("DELETE FROM device_notifications WHERE id=100")
+    monkeypatch.setattr(migrations_module, "MIGRATIONS", MIGRATIONS)
+    assert migrate(database) == [72, 73]
+    with database.session() as connection:
+        photo = connection.execute("SELECT * FROM photos WHERE id='p'").fetchone()
+        assert photo["display_count"] == 1
+        assert photo["selection_count"] == 2
+        assert photo["last_displayed_at"] == "2026-10-22T01:00:00+00:00"
+        assert connection.execute("SELECT COUNT(*) FROM display_history").fetchone()[0] == 2
+        notification = connection.execute("SELECT * FROM device_notifications WHERE id=9").fetchone()
+        assert notification["webhook_status"] == "retrying"
+        assert notification["webhook_attempts"] == 3
+        assert notification["webhook_claimed_until"] == "2026-10-23"
+        assert notification["webhook_idempotency_key"] == "existing-key"
+        assert notification["read_at"] is None
+        cursor = connection.execute(
+            "INSERT INTO device_notifications(kind,level,title,message,created_at) VALUES ('test','info','new','new','2026')"
+        )
+        assert cursor.lastrowid > 100
+    assert database.integrity_check() == "ok"
+
+
 def _run_capture_date_backfill(database_path: str, start, results) -> None:
     if not start.wait(10):
         results.put({"error": "start timeout"})
@@ -32,7 +75,7 @@ def _run_capture_date_backfill(database_path: str, start, results) -> None:
 
 
 def test_fresh_database_is_migrated(tmp_path):
-    assert CURRENT_SCHEMA_VERSION == 71
+    assert CURRENT_SCHEMA_VERSION == 73
     database = Database(tmp_path / "inktime.db")
     assert migrate(database) == list(range(1, CURRENT_SCHEMA_VERSION + 1))
     assert database.integrity_check() == "ok"

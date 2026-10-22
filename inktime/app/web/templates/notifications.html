@@ -1,0 +1,19 @@
+{% extends "base.html" %}
+{% block title %}通知紀錄｜InkTime{% endblock %}
+{% block content %}
+<div class="page-head"><div><p class="eyebrow">分析與裝置事件</p><h1>通知紀錄</h1><p>模型失敗、逾時、請求結果未確認與批次分析失敗都會保留通知。未讀的分析失敗會持續顯示於各頁上方。</p></div><a href="/settings">通知設定</a></div>
+<section class="panel">
+  <p>啟用 Webhook 並設定接收網址後，新的失敗通知也會送到該網址。通知已讀不會重試模型分析。</p>
+  {% for item in result['items'] %}
+  <article class="panel">
+    <div class="panel-head"><h2>{{ item.title }}{% if not item.read_at %} · 未讀{% endif %}</h2><small>{{ item.created_at }}</small></div>
+    <p>{{ item.message }}</p>
+    {% if item.details.error_code %}<p>錯誤代碼：{{ item.details.error_code }}</p>{% endif %}
+    <p>{% if item.details.trace_id %}<a href="/ai/traces/{{ item.details.trace_id|urlencode }}">查看失敗請求與原因</a> · {% endif %}{% if item.details.job_id %}<a href="/jobs/{{ item.details.job_id|urlencode }}">查看分析工作</a> · {% endif %}{% if item.details.photo_id %}<a href="/photos/{{ item.details.photo_id|urlencode }}">查看照片</a>{% endif %}</p>
+    <p>Webhook：{{ {'disabled':'尚未啟用','pending':'等待傳送','retrying':'等待重試','delivered':'已送達','failed':'傳送失敗'}.get(item.webhook_status, item.webhook_status) }}{% if item.webhook_last_error %} · {{ item.webhook_last_error }}{% endif %}</p>
+    {% if not item.read_at and g.user.role == 'administrator' %}<form method="post" action="{{ url_for('notifications.mark_read', notification_id=item.id) }}"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button class="secondary">標記已讀</button></form>{% endif %}
+  </article>
+  {% else %}<p>目前沒有通知。</p>{% endfor %}
+  <div class="inline-form">{% if result.page > 1 %}<a href="{{ url_for('notifications.notifications_page', page=result.page-1) }}">上一頁</a>{% endif %}<span>第 {{ result.page }} 頁 · 共 {{ result.total }} 筆</span>{% if result.page * result.page_size < result.total %}<a href="{{ url_for('notifications.notifications_page', page=result.page+1) }}">下一頁</a>{% endif %}</div>
+</section>
+{% endblock %}

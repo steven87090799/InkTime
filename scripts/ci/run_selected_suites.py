@@ -57,6 +57,8 @@ RUNNER_SUITE_TEST_PATHS: dict[str, tuple[str, ...]] = {
         "tests/integration/test_management_ui.py",
     ),
     "web_api_owner": (
+        "tests/integration/test_photo_display_history.py",
+        "tests/integration/test_analysis_failure_notifications.py",
         "tests/integration/test_photo_places.py",
         "tests/integration/test_auto_photo_review_regressions.py",
         "tests/integration/test_photo_crop_state.py",
@@ -112,6 +114,7 @@ RUNNER_SUITE_TEST_PATHS: dict[str, tuple[str, ...]] = {
         "tests/integration/test_photopainter_stock_api.py",
     ),
     "device_delivery_owner": (
+        "tests/integration/test_photo_display_history.py",
         "tests/integration/test_offline_download_display.py",
         "tests/integration/test_auto_photo_review_boundaries.py",
         "tests/unit/test_device_delivery_contract.py",
@@ -119,6 +122,7 @@ RUNNER_SUITE_TEST_PATHS: dict[str, tuple[str, ...]] = {
         "tests/integration/test_device_test_ack.py",
     ),
     "render_release_owner": (
+        "tests/integration/test_photo_display_history.py",
         "tests/integration/test_photo_places.py",
         "tests/unit/test_photo_pair_matching.py",
         "tests/integration/test_auto_publish_pool_regression.py",
@@ -152,6 +156,7 @@ RUNNER_SUITE_TEST_PATHS: dict[str, tuple[str, ...]] = {
         "tests/integration/test_vision_v4.py",
     ),
     "notifications_observability_owner": (
+        "tests/integration/test_analysis_failure_notifications.py",
         "tests/unit/test_observability.py",
         "tests/unit/test_webhook_retry.py",
         "tests/integration/test_device_notifications.py",

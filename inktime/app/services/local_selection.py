@@ -9,6 +9,7 @@ from typing import Any
 
 from inktime.app.core.paths import UnsafePathError, safe_join
 from inktime.app.domain.photos.quality_policy import evaluate_local_quality
+from inktime.app.domain.photos.rotation import exposure_count, last_exposure_at
 from inktime.app.domain.rendering.contrast_risk import calculate_epaper_contrast_risk
 
 
@@ -28,16 +29,14 @@ class LocalSelectionPolicy:
         with self.database.session() as connection:
             rows = connection.execute(
                 """
-                SELECT p.*,l.root_path,
-                  (SELECT count(*) FROM display_history dh WHERE dh.photo_id=p.id) AS display_count,
-                  (SELECT max(displayed_at) FROM display_history dh WHERE dh.photo_id=p.id) AS last_displayed_at
+                SELECT p.*,l.root_path
                 FROM photos p JOIN libraries l ON l.id=p.library_id
                 WHERE p.lifecycle_status='active' AND p.eligible=1 AND l.enabled=1
                   AND p.exclusion_status NOT IN ('auto_excluded','manually_excluded')
                   AND p.local_features_status='complete' AND p.local_candidate_score IS NOT NULL
                   AND (?=0 OR CAST(substr(p.captured_date,1,4) AS INTEGER)
                       IN (SELECT value FROM json_each(?)))
-                ORDER BY CASE WHEN p.captured_month_day=? THEN 0 ELSE 1 END,
+                ORDER BY MAX(p.display_count,p.selection_count) ASC,CASE WHEN p.captured_month_day=? THEN 0 ELSE 1 END,
                          p.local_candidate_score DESC,p.captured_at ASC,p.id ASC LIMIT ?
                 """,
                 (int(bool(candidate_years)), json.dumps(candidate_years or []), month_day, limit),
@@ -239,6 +238,8 @@ class LocalSelectionPolicy:
         return sorted(
             result,
             key=lambda row: (
+                exposure_count(row),
+                last_exposure_at(row),
                 -float(row["local_display_score"]),
                 str(row.get("captured_at") or ""),
                 str(row["id"]),

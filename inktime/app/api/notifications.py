@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from flask import Blueprint, abort, current_app, g, request
+from flask import Blueprint, abort, current_app, g, redirect, render_template, request, url_for
 
 from inktime.app.core.json_values import JsonScalarError, json_bool, json_object_payload
 from inktime.app.services.notifications import WEBHOOK_SECRET_KEY
@@ -8,6 +8,31 @@ from inktime.app.web.access import administrator_required, login_required
 
 
 bp = Blueprint("notifications", __name__)
+
+
+@bp.get("/notifications")
+@login_required
+def notifications_page():
+    try:
+        page = max(1, min(int(request.args.get("page", 1)), 100000))
+    except ValueError:
+        abort(400, description="頁碼必須是整數")
+    result = current_app.extensions["inktime_notification_service"].history(page=page)
+    return render_template("notifications.html", result=result)
+
+
+@bp.get("/api/v1/notifications/unread-analysis")
+@login_required
+def unread_analysis():
+    return current_app.extensions["inktime_notification_service"].unread_analysis()
+
+
+@bp.post("/notifications/<int:notification_id>/read")
+@administrator_required
+def mark_read(notification_id: int):
+    if not current_app.extensions["inktime_notification_service"].mark_read(notification_id):
+        abort(404)
+    return redirect(url_for("notifications.notifications_page"))
 
 
 @bp.get("/api/v1/notifications")

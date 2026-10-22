@@ -1,6 +1,6 @@
 # InkTime｜照片分析與電子紙回憶管理平台
 
-> 本分支文件更新 2026-10-22；原始碼基準以目前 checkout 為準；部署中的版本請從 Web「診斷」頁確認 Git revision。SQLite Migration 71、AI Schema v6、ESP32 2.8.9（HTTP JSON 接收修復；尚未刷機）；本分支增加手動啟用的 [GPS／地標原型與成本研究](docs/experiments/GPS_LOCATION_20261022.md)，不自動呼叫外部服務。詳細版本、預設值與驗收邊界見[現行基線](docs/reference/CURRENT_STATE_ZH_TW.md)。
+> 本分支文件更新 2026-10-22；原始碼基準以目前 checkout 為準；部署中的版本請從 Web「診斷」頁確認 Git revision。SQLite Migration 73、AI Schema v6、ESP32 2.8.9（HTTP JSON 接收修復；尚未刷機）；本分支增加手動啟用的 [GPS／地標原型與成本研究](docs/experiments/GPS_LOCATION_20261022.md)，不自動呼叫外部服務。詳細版本、預設值與驗收邊界見[現行基線](docs/reference/CURRENT_STATE_ZH_TW.md)。
 
 [English README](README.en.md) · [HTML 手冊與文件入口](USER_MANUAL.html) · [完整 Markdown 文件地圖](docs/README.md) · [完整程式流程圖](#完整程式流程圖從啟動照片分析到電子紙顯示) · [快速開始](docs/getting-started/QUICK_START_ZH_TW.md) · [電子紙模擬器](docs/guides/EPAPER_SIMULATOR_ZH_TW.md) · [N100 Docker 部署規格](docs/operations/DOCKER_GUIDE_ZH_TW.md) · [完整上線指南](docs/operations/PRODUCTION_DEPLOYMENT_GUIDE_ZH_TW.md) · [NAS Tag 更新](docs/operations/NAS_TAG_DEPLOYMENT_ZH_TW.md) · [ESP32／電子紙指南](docs/devices/ESP32_GUIDE_ZH_TW.md) · [ESP32 自動配對與憑證](docs/devices/ESP32_AUTOMATIC_PAIRING_ZH_TW.md) · [Waveshare PhotoPainter](docs/devices/WAVESHARE_PHOTOPAINTER_ZH_TW.md) · [ESP32 TLS／配網信任根](docs/devices/ESP32_TLS_PROVISIONING_ZH_TW.md) · [OpenRouter Provider](docs/providers/OPENROUTER_ZH_TW.md) · [模型 Benchmark](docs/providers/MODEL_BENCHMARK_ZH_TW.md) · [資源與低功耗](docs/operations/N100_RESOURCE_GUIDE_ZH_TW.md) · [Log 指南](docs/operations/LOGGING_GUIDE_ZH_TW.md)
 
@@ -321,6 +321,8 @@ flowchart TD
 ```
 
 程式入口：`repositories/render_candidates.py`，由 `services/rendering.py` 與 `services/display_prepare.py` 共用。
+
+每張照片分開保存已確認顯示與系統選定次數；自動選片優先未使用照片，沒有合適的新照片才重用。Web「墨水屏 → 選片與顯示歷史」可查看每次選定照片與完整候選。模型分析失敗會留下未讀警示，並沿用已設定的 Webhook。詳細行為見[選片與通知契約](docs/analysis/PHOTO_SELECTION_AI_FIRST_ZH_TW.md)。
 
 ### 5. 歷史選片與同日重抽
 

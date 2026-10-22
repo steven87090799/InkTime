@@ -15,6 +15,7 @@ from inktime.app.core.logging import log_event
 from inktime.app.domain.rendering import AtomicReleasePublisher, DeviceTestReleaseStore
 from inktime.app.domain.rendering.release import fsync_directory, release_metadata_guard
 from inktime.app.domain.rendering.palette import get_display_profile
+from inktime.app.repositories.display_history import DisplayHistoryRepository
 
 
 LOGGER = logging.getLogger("release")
@@ -127,6 +128,7 @@ class ReleaseCoordinator:
         history: dict[str, str] | None = None,
         device_assignments: dict[str, str] | None = None,
         activate_pointers: bool = True,
+        selection_run_ids: list[str] | None = None,
     ) -> list[dict[str, Any]]:
         started = time.monotonic()
         if not manifests:
@@ -241,6 +243,10 @@ class ReleaseCoordinator:
                             ) VALUES (?,?,?,?,?,?)
                             """,
                             rows,
+                        )
+                    if selection_run_ids:
+                        DisplayHistoryRepository(self.database).attach_releases(
+                            selection_run_ids, verified, photo_ids, connection=connection,
                         )
             except Exception as exc:
                 log_event(
