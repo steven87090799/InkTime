@@ -2499,6 +2499,18 @@ MIGRATIONS = (
         "允許依照片方向自動排版並保留裝置身分與播放清單",
         (),
     ),
+    Migration(
+        71,
+        "保存獨立地址與地標證據，按精確 GPS 快取反向地理編碼",
+        (
+            "CREATE TABLE photo_locations("
+            "photo_id TEXT PRIMARY KEY REFERENCES photos(id) ON DELETE CASCADE,"
+            "content_sha256 TEXT NOT NULL,gps_key TEXT NOT NULL,place_json TEXT NOT NULL,updated_at TEXT NOT NULL)",
+            "CREATE TABLE reverse_geocode_cache("
+            "gps_key TEXT NOT NULL,provider TEXT NOT NULL,language TEXT NOT NULL,version TEXT NOT NULL,"
+            "place_json TEXT NOT NULL,updated_at TEXT NOT NULL,PRIMARY KEY(gps_key,provider,language,version))",
+        ),
+    ),
 )
 
 

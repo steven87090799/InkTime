@@ -6,6 +6,8 @@
 
 ## 先從這裡開始
 
+- [GPS／地標原型與 OpenRouter 模型成本研究（2026-10-22）](experiments/GPS_LOCATION_20261022.md)：測試分支決策、已確認的排版與尚未完成的實際模型／地址品質驗收。
+
 | 你要做什麼 | 先讀 |
 |---|---|
 | AI agent 修改專案、減少重複讀取 | [AGENTS.md](../AGENTS.md)；已知位置直接 TARGETED，探索才用 [AI 修改導航](AI_NAVIGATION.md)／[機器可讀任務索引](AI_CONTEXT_INDEX.json)；AGENTS.md 為唯一 Agent 規則入口 |

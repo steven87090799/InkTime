@@ -52,6 +52,11 @@
         <div><dt>尺寸</dt><dd>{{ photo.width }} × {{ photo.height }} {{ photo.format }}</dd></div>
         <div><dt>拍攝時間</dt><dd>{{ photo.captured_at or '無資料' }}</dd></div>
         <div><dt>地點</dt><dd>{{ location_name or ('有 GPS，但附近找不到城市' if photo.gps_lat is not none and photo.gps_lon is not none else '照片沒有 GPS') }}</dd></div>
+        {% if photo_place %}
+        <div><dt>地址</dt><dd>{{ photo_place.full_address or '地圖資料未提供地址' }}{% if photo_place.precision %}（地圖精度：{{ photo_place.precision }}）{% endif %}</dd></div>
+        {% if photo_place.landmark %}<div><dt>地標（模型判斷）</dt><dd>{{ photo_place.landmark }} · 信心 {{ '%.0f%%'|format(photo_place.landmark_confidence * 100) }}{% if photo_place.landmark_confidence < 0.90 %}（未用於相框）{% endif %}</dd></div>{% endif %}
+        {% if photo_place.source %}<div><dt>地址來源</dt><dd>{{ photo_place.source }}{% if photo_place.attribution %} · <a href="https://www.geoapify.com/" target="_blank" rel="noopener noreferrer">Powered by Geoapify</a> · <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener noreferrer">© OpenStreetMap contributors</a>{% endif %}</dd></div>{% endif %}
+        {% endif %}
         <div><dt>亮度</dt><dd>{{ '%.2f'|format(photo.brightness) if photo.brightness is not none else '無資料' }}</dd></div>
         <div><dt>對比</dt><dd>{{ '%.2f'|format(photo.contrast) if photo.contrast is not none else '無資料' }}</dd></div>
         <div><dt>模糊分數</dt><dd>{{ '%.2f'|format(photo.blur_score) if photo.blur_score is not none else '無資料' }}（越低越模糊）</dd></div>

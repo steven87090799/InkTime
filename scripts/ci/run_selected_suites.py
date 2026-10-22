@@ -57,6 +57,7 @@ RUNNER_SUITE_TEST_PATHS: dict[str, tuple[str, ...]] = {
         "tests/integration/test_management_ui.py",
     ),
     "web_api_owner": (
+        "tests/integration/test_photo_places.py",
         "tests/integration/test_auto_photo_review_regressions.py",
         "tests/integration/test_photo_crop_state.py",
         "tests/integration/test_management_ui.py",
@@ -92,6 +93,7 @@ RUNNER_SUITE_TEST_PATHS: dict[str, tuple[str, ...]] = {
         "tests/integration/test_v6_display_safety.py",
     ),
     "persistence_owner": (
+        "tests/integration/test_photo_places.py",
         "tests/integration/test_auto_photo_selection_regressions.py",
         "tests/unit/test_backups.py",
         "tests/unit/test_photo_analysis_retention.py",
@@ -117,6 +119,7 @@ RUNNER_SUITE_TEST_PATHS: dict[str, tuple[str, ...]] = {
         "tests/integration/test_device_test_ack.py",
     ),
     "render_release_owner": (
+        "tests/integration/test_photo_places.py",
         "tests/unit/test_photo_pair_matching.py",
         "tests/integration/test_auto_publish_pool_regression.py",
         "tests/integration/test_auto_photo_review_boundaries.py",
@@ -137,6 +140,7 @@ RUNNER_SUITE_TEST_PATHS: dict[str, tuple[str, ...]] = {
         "tests/integration/test_photo_crop_state.py",
     ),
     "scanner_photos_owner": (
+        "tests/unit/test_photo_place_domain.py",
         "tests/unit/test_local_selection.py",
         "tests/unit/test_photo_dates.py",
         "tests/unit/test_preprocessing.py",
@@ -169,6 +173,7 @@ RUNNER_SUITE_TEST_PATHS: dict[str, tuple[str, ...]] = {
         "tests/unit/test_photo_analysis_retention.py",
         "tests/unit/test_provider_batch.py",
         "tests/unit/test_provider_config.py",
+        "tests/unit/test_photo_place_domain.py",
         "tests/unit/test_provider_contracts.py",
         "tests/unit/test_provider_router.py",
         "tests/unit/test_scoring.py",

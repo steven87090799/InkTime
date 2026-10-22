@@ -1,0 +1,725 @@
+{
+  "fetched_at_utc": "2026-10-21T17:08:28.550955+00:00",
+  "source": "https://openrouter.ai/api/v1/models",
+  "models": [
+    {
+      "id": "openai/gpt-6-luna",
+      "architecture": {
+        "modality": "text+image+file->text",
+        "input_modalities": [
+          "file",
+          "image",
+          "text"
+        ],
+        "output_modalities": [
+          "text"
+        ],
+        "tokenizer": "GPT",
+        "instruct_type": null
+      },
+      "pricing": {
+        "prompt": "0.0000001",
+        "completion": "0.0000005",
+        "web_search": "0.01",
+        "input_cache_read": "0.00000001",
+        "input_cache_write": "0.000000125",
+        "overrides": [
+          {
+            "min_prompt_tokens": 272000,
+            "prompt": "0.0000002",
+            "completion": "0.00000075",
+            "input_cache_read": "0.00000002",
+            "input_cache_write": "0.00000025"
+          }
+        ]
+      },
+      "supported_parameters": [
+        "include_reasoning",
+        "max_completion_tokens",
+        "max_tokens",
+        "reasoning",
+        "reasoning_effort",
+        "response_format",
+        "seed",
+        "structured_outputs",
+        "tool_choice",
+        "tools",
+        "verbosity"
+      ],
+      "reasoning": {
+        "mandatory": false,
+        "default_enabled": true,
+        "supported_efforts": [
+          "max",
+          "xhigh",
+          "high",
+          "medium",
+          "low",
+          "none"
+        ],
+        "default_effort": "medium"
+      },
+      "links": {
+        "details": "/api/v1/models/openai/gpt-6-luna-20260922/endpoints"
+      },
+      "endpoints": [
+        {
+          "name": "OpenAI | openai/gpt-6-luna-20260922",
+          "provider_name": "OpenAI",
+          "tag": "openai/flex",
+          "pricing": {
+            "prompt": "0.00000005",
+            "completion": "0.00000025",
+            "web_search": "0.01",
+            "input_cache_read": "0.000000005",
+            "input_cache_write": "0.0000000625",
+            "discount": 0,
+            "overrides": [
+              {
+                "min_prompt_tokens": 272000,
+                "prompt": "0.0000001",
+                "completion": "0.000000375",
+                "input_cache_read": "0.00000001",
+                "input_cache_write": "0.000000125"
+              }
+            ]
+          },
+          "supported_parameters": [
+            "reasoning",
+            "include_reasoning",
+            "seed",
+            "max_tokens",
+            "response_format",
+            "structured_outputs",
+            "tools",
+            "tool_choice",
+            "verbosity",
+            "reasoning_effort"
+          ],
+          "quantization": "unknown",
+          "status": -5
+        },
+        {
+          "name": "OpenAI | openai/gpt-6-luna-20260922",
+          "provider_name": "OpenAI",
+          "tag": "openai",
+          "pricing": {
+            "prompt": "0.0000001",
+            "completion": "0.0000005",
+            "web_search": "0.01",
+            "input_cache_read": "0.00000001",
+            "input_cache_write": "0.000000125",
+            "discount": 0,
+            "overrides": [
+              {
+                "min_prompt_tokens": 272000,
+                "prompt": "0.0000002",
+                "completion": "0.00000075",
+                "input_cache_read": "0.00000002",
+                "input_cache_write": "0.00000025"
+              }
+            ]
+          },
+          "supported_parameters": [
+            "reasoning",
+            "include_reasoning",
+            "seed",
+            "max_tokens",
+            "response_format",
+            "structured_outputs",
+            "tools",
+            "tool_choice",
+            "verbosity",
+            "reasoning_effort"
+          ],
+          "quantization": "unknown",
+          "status": 0
+        },
+        {
+          "name": "Azure | openai/gpt-6-luna-20260922",
+          "provider_name": "Azure",
+          "tag": "azure",
+          "pricing": {
+            "prompt": "0.0000001",
+            "completion": "0.0000005",
+            "web_search": "0.01",
+            "input_cache_read": "0.00000001",
+            "input_cache_write": "0.000000125",
+            "discount": 0,
+            "overrides": [
+              {
+                "min_prompt_tokens": 272000,
+                "prompt": "0.0000002",
+                "completion": "0.00000075",
+                "input_cache_read": "0.00000002",
+                "input_cache_write": "0.00000025"
+              }
+            ]
+          },
+          "supported_parameters": [
+            "reasoning",
+            "include_reasoning",
+            "max_completion_tokens",
+            "tools",
+            "tool_choice",
+            "seed",
+            "response_format",
+            "structured_outputs",
+            "verbosity",
+            "reasoning_effort"
+          ],
+          "quantization": "unknown",
+          "status": 0
+        }
+      ],
+      "endpoint_count": 7,
+      "active_structured_endpoint_count": 6
+    },
+    {
+      "id": "deepseek/deepseek-v4.1-flash",
+      "architecture": {
+        "modality": "text+image->text",
+        "input_modalities": [
+          "text",
+          "image"
+        ],
+        "output_modalities": [
+          "text"
+        ],
+        "tokenizer": "DeepSeek",
+        "instruct_type": null
+      },
+      "pricing": {
+        "prompt": "0.00000002394",
+        "completion": "0.000000375",
+        "input_cache_read": "0.000000000342"
+      },
+      "supported_parameters": [
+        "frequency_penalty",
+        "include_reasoning",
+        "logit_bias",
+        "logprobs",
+        "max_tokens",
+        "min_p",
+        "presence_penalty",
+        "reasoning",
+        "reasoning_effort",
+        "repetition_penalty",
+        "response_format",
+        "seed",
+        "stop",
+        "structured_outputs",
+        "temperature",
+        "tool_choice",
+        "tools",
+        "top_k",
+        "top_logprobs",
+        "top_p"
+      ],
+      "reasoning": {
+        "mandatory": false,
+        "default_enabled": true,
+        "supported_efforts": [
+          "max",
+          "high",
+          "low",
+          "none"
+        ],
+        "default_effort": "high"
+      },
+      "links": {
+        "details": "/api/v1/models/deepseek/deepseek-v4.1-flash-20260910/endpoints"
+      },
+      "endpoints": [
+        {
+          "name": "OpenInference | deepseek/deepseek-v4.1-flash-20260910",
+          "provider_name": "OpenInference",
+          "tag": "open-inference/fp4",
+          "pricing": {
+            "prompt": "0.00000002394",
+            "completion": "0.000000375",
+            "input_cache_read": "0.000000000342",
+            "discount": 0
+          },
+          "supported_parameters": [
+            "reasoning",
+            "include_reasoning",
+            "temperature",
+            "max_tokens",
+            "stop",
+            "seed",
+            "top_p",
+            "frequency_penalty",
+            "presence_penalty",
+            "top_k",
+            "min_p",
+            "logit_bias",
+            "repetition_penalty",
+            "response_format",
+            "structured_outputs",
+            "tools",
+            "tool_choice",
+            "reasoning_effort"
+          ],
+          "quantization": "fp4",
+          "status": 0
+        },
+        {
+          "name": "Baidu | deepseek/deepseek-v4.1-flash-20260910",
+          "provider_name": "Baidu",
+          "tag": "baidu/fp8",
+          "pricing": {
+            "prompt": "0.0000000342",
+            "completion": "0.0000001368",
+            "input_cache_read": "0.000000000684",
+            "discount": 0.886
+          },
+          "supported_parameters": [
+            "reasoning",
+            "include_reasoning",
+            "temperature",
+            "top_p",
+            "max_tokens",
+            "stop",
+            "response_format",
+            "structured_outputs",
+            "tools",
+            "tool_choice",
+            "reasoning_effort"
+          ],
+          "quantization": "fp8",
+          "status": 0
+        }
+      ],
+      "endpoint_count": 37,
+      "active_structured_endpoint_count": 30
+    },
+    {
+      "id": "nex-agi/nex-n2.5-mini",
+      "architecture": {
+        "modality": "text+image->text",
+        "input_modalities": [
+          "text",
+          "image"
+        ],
+        "output_modalities": [
+          "text"
+        ],
+        "tokenizer": "Qwen3",
+        "instruct_type": null
+      },
+      "pricing": {
+        "prompt": "0.000000025",
+        "completion": "0.0000001",
+        "input_cache_read": "0.0000000025"
+      },
+      "supported_parameters": [
+        "include_reasoning",
+        "logprobs",
+        "max_tokens",
+        "reasoning",
+        "reasoning_effort",
+        "structured_outputs",
+        "temperature",
+        "top_k",
+        "top_logprobs",
+        "top_p"
+      ],
+      "reasoning": {
+        "mandatory": false,
+        "supported_efforts": [
+          "high",
+          "medium",
+          "none"
+        ],
+        "default_effort": "high"
+      },
+      "links": {
+        "details": "/api/v1/models/nex-agi/nex-n2.5-mini-20260908/endpoints"
+      },
+      "endpoints": [
+        {
+          "name": "Nex AGI | nex-agi/nex-n2.5-mini-20260908",
+          "provider_name": "Nex AGI",
+          "tag": "nex-agi/bf16",
+          "pricing": {
+            "prompt": "0.000000025",
+            "completion": "0.0000001",
+            "input_cache_read": "0.0000000025",
+            "discount": 0
+          },
+          "supported_parameters": [
+            "reasoning",
+            "include_reasoning",
+            "max_tokens",
+            "temperature",
+            "top_k",
+            "top_p",
+            "structured_outputs",
+            "logprobs",
+            "top_logprobs",
+            "reasoning_effort"
+          ],
+          "quantization": "bf16",
+          "status": 0
+        }
+      ],
+      "endpoint_count": 1,
+      "active_structured_endpoint_count": 1
+    },
+    {
+      "id": "z-ai/glm-5.3-flash",
+      "architecture": {
+        "modality": "text+image+video->text",
+        "input_modalities": [
+          "text",
+          "image",
+          "video"
+        ],
+        "output_modalities": [
+          "text"
+        ],
+        "tokenizer": "Other",
+        "instruct_type": null
+      },
+      "pricing": {
+        "prompt": "0.000000041191",
+        "completion": "0.00000012",
+        "input_cache_read": "0.00000000375"
+      },
+      "supported_parameters": [
+        "frequency_penalty",
+        "include_reasoning",
+        "logit_bias",
+        "logprobs",
+        "max_tokens",
+        "min_p",
+        "parallel_tool_calls",
+        "presence_penalty",
+        "reasoning",
+        "reasoning_effort",
+        "repetition_penalty",
+        "response_format",
+        "seed",
+        "stop",
+        "structured_outputs",
+        "temperature",
+        "tool_choice",
+        "tools",
+        "top_k",
+        "top_logprobs",
+        "top_p"
+      ],
+      "reasoning": {
+        "mandatory": true,
+        "default_enabled": true,
+        "supported_efforts": [
+          "max",
+          "high",
+          "low"
+        ],
+        "default_effort": "max"
+      },
+      "links": {
+        "details": "/api/v1/models/z-ai/glm-5.3-flash-20260826/endpoints"
+      },
+      "endpoints": [
+        {
+          "name": "OpenInference | z-ai/glm-5.3-flash-20260826",
+          "provider_name": "OpenInference",
+          "tag": "open-inference/fp4",
+          "pricing": {
+            "prompt": "0.000000051691",
+            "completion": "0.00000012",
+            "input_cache_read": "0.00000000375",
+            "discount": 0
+          },
+          "supported_parameters": [
+            "reasoning",
+            "include_reasoning",
+            "temperature",
+            "max_tokens",
+            "stop",
+            "seed",
+            "response_format",
+            "structured_outputs",
+            "top_p",
+            "frequency_penalty",
+            "presence_penalty",
+            "top_k",
+            "min_p",
+            "logit_bias",
+            "repetition_penalty",
+            "tools",
+            "tool_choice",
+            "reasoning_effort"
+          ],
+          "quantization": "fp4",
+          "status": 0
+        },
+        {
+          "name": "Wafer | z-ai/glm-5.3-flash-20260826",
+          "provider_name": "Wafer",
+          "tag": "wafer/nvfp4",
+          "pricing": {
+            "prompt": "0.000000074",
+            "completion": "0.0000002",
+            "input_cache_read": "0.00000006",
+            "discount": 0
+          },
+          "supported_parameters": [
+            "reasoning",
+            "include_reasoning",
+            "temperature",
+            "top_p",
+            "top_k",
+            "min_p",
+            "frequency_penalty",
+            "presence_penalty",
+            "repetition_penalty",
+            "stop",
+            "seed",
+            "max_tokens",
+            "logit_bias",
+            "response_format",
+            "tools",
+            "tool_choice",
+            "structured_outputs",
+            "logprobs",
+            "top_logprobs",
+            "reasoning_effort"
+          ],
+          "quantization": "nvfp4",
+          "status": 0
+        }
+      ],
+      "endpoint_count": 35,
+      "active_structured_endpoint_count": 28
+    },
+    {
+      "id": "qwen/qwen3.7-flash",
+      "architecture": {
+        "modality": "text+image+video->text",
+        "input_modalities": [
+          "text",
+          "image",
+          "video"
+        ],
+        "output_modalities": [
+          "text"
+        ],
+        "tokenizer": "Qwen",
+        "instruct_type": null
+      },
+      "pricing": {
+        "prompt": "0.00000003",
+        "completion": "0.00000013",
+        "input_cache_read": "0.000000006",
+        "input_cache_write": "0.000000038",
+        "overrides": [
+          {
+            "min_prompt_tokens": 32000,
+            "prompt": "0.0000001",
+            "completion": "0.0000004",
+            "input_cache_read": "0.00000002",
+            "input_cache_write": "0.000000125"
+          },
+          {
+            "min_prompt_tokens": 256000,
+            "prompt": "0.0000002",
+            "completion": "0.0000008",
+            "input_cache_read": "0.00000004",
+            "input_cache_write": "0.00000025"
+          }
+        ]
+      },
+      "supported_parameters": [
+        "include_reasoning",
+        "logprobs",
+        "max_tokens",
+        "presence_penalty",
+        "reasoning",
+        "response_format",
+        "seed",
+        "temperature",
+        "tool_choice",
+        "tools",
+        "top_logprobs",
+        "top_p"
+      ],
+      "reasoning": {
+        "mandatory": false,
+        "default_enabled": true,
+        "supports_max_tokens": true
+      },
+      "links": {
+        "details": "/api/v1/models/qwen/qwen3.7-flash-20260727/endpoints"
+      },
+      "endpoints": [
+        {
+          "name": "Alibaba | qwen/qwen3.7-flash-20260727",
+          "provider_name": "Alibaba",
+          "tag": "alibaba",
+          "pricing": {
+            "prompt": "0.00000003",
+            "completion": "0.00000013",
+            "input_cache_read": "0.000000006",
+            "input_cache_write": "0.000000038",
+            "discount": 0,
+            "overrides": [
+              {
+                "min_prompt_tokens": 32000,
+                "prompt": "0.0000001",
+                "completion": "0.0000004",
+                "input_cache_read": "0.00000002",
+                "input_cache_write": "0.000000125"
+              },
+              {
+                "min_prompt_tokens": 256000,
+                "prompt": "0.0000002",
+                "completion": "0.0000008",
+                "input_cache_read": "0.00000004",
+                "input_cache_write": "0.00000025"
+              }
+            ]
+          },
+          "supported_parameters": [
+            "reasoning",
+            "include_reasoning",
+            "max_tokens",
+            "temperature",
+            "top_p",
+            "seed",
+            "presence_penalty",
+            "response_format",
+            "logprobs",
+            "top_logprobs",
+            "tools",
+            "tool_choice"
+          ],
+          "quantization": "unknown",
+          "status": 0
+        }
+      ],
+      "endpoint_count": 2,
+      "active_structured_endpoint_count": 0
+    },
+    {
+      "id": "google/gemini-2.5-flash-lite",
+      "architecture": {
+        "modality": "text+image+file+audio+video->text",
+        "input_modalities": [
+          "text",
+          "image",
+          "file",
+          "audio",
+          "video"
+        ],
+        "output_modalities": [
+          "text"
+        ],
+        "tokenizer": "Gemini",
+        "instruct_type": null
+      },
+      "pricing": {
+        "prompt": "0.0000001",
+        "completion": "0.0000004",
+        "image": "0.0000001",
+        "audio": "0.0000003",
+        "input_audio_cache": "0.00000003",
+        "web_search": "0.014",
+        "internal_reasoning": "0.0000004",
+        "input_cache_read": "0.00000001",
+        "input_cache_write": "0.0000000833333333333333"
+      },
+      "supported_parameters": [
+        "include_reasoning",
+        "max_tokens",
+        "reasoning",
+        "response_format",
+        "seed",
+        "stop",
+        "structured_outputs",
+        "temperature",
+        "tool_choice",
+        "tools",
+        "top_p"
+      ],
+      "reasoning": {
+        "mandatory": false
+      },
+      "links": {
+        "details": "/api/v1/models/google/gemini-2.5-flash-lite/endpoints"
+      },
+      "endpoints": [
+        {
+          "name": "Google AI Studio | google/gemini-2.5-flash-lite",
+          "provider_name": "Google AI Studio",
+          "tag": "google-ai-studio/flex",
+          "pricing": {
+            "prompt": "0.00000005",
+            "completion": "0.0000002",
+            "image": "0.00000005",
+            "audio": "0.00000015",
+            "input_audio_cache": "0.000000015",
+            "web_search": "0.014",
+            "internal_reasoning": "0.0000002",
+            "input_cache_read": "0.000000005",
+            "input_cache_write": "0.0000000416666666666667",
+            "discount": 0
+          },
+          "supported_parameters": [
+            "reasoning",
+            "include_reasoning",
+            "structured_outputs",
+            "response_format",
+            "max_tokens",
+            "temperature",
+            "top_p",
+            "seed",
+            "tools",
+            "tool_choice",
+            "stop"
+          ],
+          "quantization": "unknown",
+          "status": 0
+        },
+        {
+          "name": "Google AI Studio | google/gemini-2.5-flash-lite",
+          "provider_name": "Google AI Studio",
+          "tag": "google-ai-studio",
+          "pricing": {
+            "prompt": "0.0000001",
+            "completion": "0.0000004",
+            "image": "0.0000001",
+            "audio": "0.0000003",
+            "input_audio_cache": "0.00000003",
+            "web_search": "0.014",
+            "internal_reasoning": "0.0000004",
+            "input_cache_read": "0.00000001",
+            "input_cache_write": "0.0000000833333333333333",
+            "discount": 0
+          },
+          "supported_parameters": [
+            "reasoning",
+            "include_reasoning",
+            "structured_outputs",
+            "response_format",
+            "max_tokens",
+            "temperature",
+            "top_p",
+            "seed",
+            "tools",
+            "tool_choice",
+            "stop"
+          ],
+          "quantization": "unknown",
+          "status": 0
+        }
+      ],
+      "endpoint_count": 3,
+      "active_structured_endpoint_count": 2
+    }
+  ],
+  "snapshot_note": "Model metadata plus cheapest eligible endpoint samples and inactive Luna Flex; endpoint counts refer to the complete response captured at this time."
+}

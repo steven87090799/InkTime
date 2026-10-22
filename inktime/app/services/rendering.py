@@ -20,6 +20,8 @@ from inktime.app.core.paths import safe_join
 from inktime.app.domain.photos.formats import assert_source_content, load_rgb
 from inktime.app.db import Database
 from inktime.app.domain.photos import LocationResolver, parse_photo_date
+from inktime.app.domain.photos.places import place_date_label
+from inktime.app.repositories.photo_locations import PhotoLocationRepository
 from inktime.app.domain.rendering import (
     AtomicReleasePublisher,
     DISPLAY_PROFILES,
@@ -374,10 +376,15 @@ class RenderService:
                 if bool(self.settings.get("render.show_capture_date", True)) else ""
                 for photo in (primary, secondary) if photo is not None
             }
+            location_labels = {
+                str(photo["id"]): self.location_name(photo)
+                for photo in (primary, secondary) if photo is not None
+            }
             photo_footer_lines = {
                 str(record["photo_id"]): " · ".join(
                     part for part in (
-                        capture_date_labels[str(record["photo_id"])],
+                        place_date_label(location_labels[str(record["photo_id"])],
+                                         capture_date_labels[str(record["photo_id"])]),
                         " ".join(str(record.get("text") or "").split()),
                     ) if part
                 )
@@ -387,6 +394,7 @@ class RenderService:
                 str(record["photo_id"]): {
                     "caption": " ".join(str(record.get("text") or "").split()),
                     "date": capture_date_labels[str(record["photo_id"])],
+                    "location": location_labels[str(record["photo_id"])],
                 }
                 for record in (primary_caption, resolved_secondary_caption) if record is not None
             }
@@ -738,7 +746,12 @@ class RenderService:
         }
 
     def location_name(self, photo) -> str:
-        if self.locations is None or not bool(self.settings.get("render.show_location", True)):
+        if not bool(self.settings.get("render.show_location", True)):
+            return ""
+        place = PhotoLocationRepository(self.photos.database).get(photo)
+        if place and place.display_label:
+            return place.display_label
+        if self.locations is None:
             return ""
         return self.locations.resolve(
             photo["gps_lat"],
@@ -1488,6 +1501,14 @@ class RenderService:
             date_font = ImageFont.truetype(font.path, 14)
             part = parts[photo_id]
             date_label = part.get("date", "")
+            location_label = part.get("location", "")
+            # Keep the full date. Shorten the place first, reserving room for
+            # the caption even in a two-photo portrait footer.
+            date_pixels = draw.textlength(date_label, font=date_font) if date_label else 0
+            separator_pixels = draw.textlength("・", font=date_font) if date_label else 0
+            place_budget = int(max(0, rect.width * 0.62 - date_pixels - separator_pixels))
+            location_label = self._fit_line(draw, location_label, date_font, place_budget) if place_budget >= 14 else ""
+            date_label = place_date_label(location_label, date_label)
             date_width = draw.textlength(date_label, font=date_font) if date_label else 0
             available = max(1, rect.width - 16 - date_width - (12 if date_label else 0))
             text = self._fit_line(draw, part.get("caption", ""), font, int(available))

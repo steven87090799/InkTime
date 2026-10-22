@@ -1,6 +1,6 @@
 # InkTime · Photo analysis and e-ink memory frames
 
-> Branch documentation updated on 2026-10-21 from `origin/main=5908c28` for Draft PR #167. SQLite Migration 70, AI Schema v6, firmware 2.8.9 (HTTP JSON reception fix; not flashed), Config Store v5 and NAS deployment contract 3 are separate versions. Check the deployed Git revision in Diagnostics; see the [source baseline](docs/reference/CURRENT_STATE_ZH_TW.md).
+> Branch documentation updated on 2026-10-22 from `origin/main=17563d7`. SQLite Migration 71, AI Schema v6, firmware 2.8.9 (HTTP JSON reception fix; not flashed), Config Store v5 and NAS deployment contract 3 are separate versions. The [GPS/landmark experiment](docs/experiments/GPS_LOCATION_20261022.md) requires explicit invocation and makes no automatic external calls. Check the deployed Git revision in Diagnostics; see the [source baseline](docs/reference/CURRENT_STATE_ZH_TW.md).
 
 [繁體中文](README.md) · [Documentation map](docs/README.md) · [HTML manual](USER_MANUAL.html) · [Quick start](docs/getting-started/QUICK_START_ZH_TW.md)
 
