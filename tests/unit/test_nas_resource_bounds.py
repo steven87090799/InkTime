@@ -44,7 +44,7 @@ def test_palette_statistics_native_histogram_preserves_palette_counts():
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="Hosted Linux/macOS RSS contract")
-@pytest.mark.parametrize(("operation", "limit_mib"), [("warm", 32), ("statistics", 16)])
+@pytest.mark.parametrize(("operation", "limit_mib"), [("warm", 32), ("natural_d", 32), ("statistics", 16)])
 def test_frame_operation_peak_is_bounded_in_a_fresh_process(operation, limit_mib):
     # A lightweight second launcher prevents a large pytest parent RSS from
     # contaminating the measured child's startup/lifetime maximum.
@@ -77,6 +77,11 @@ def _memory_probe(operation):
         if operation == "warm":
             with _warm_vivid_c(image) as rendered:
                 assert rendered.size == image.size
+        elif operation == "natural_d":
+            from inktime.app.domain.rendering import encode_image
+            encoded = encode_image(image, profile_key="gdep073e01_6c", dither="natural_d")
+            assert len(encoded.payload) == 192000
+            encoded.preview.close()
         elif operation == "statistics":
             assert len(RenderWorkloadService._palette_statistics(
                 image, get_display_profile("gdep073e01_6c").colors

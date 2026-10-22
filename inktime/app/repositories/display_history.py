@@ -36,6 +36,7 @@ class DisplayHistoryRepository:
                 snapshot = {key: row.get(key) for key in (
                     "id", "relative_path", "captured_date", "captured_month_day", "display_count",
                     "last_displayed_at", "selection_count", "last_selected_at", "match_type", "day_distance", "selection_score", "score_kind",
+                    "seasonal_priority", "exposure_count", "content_last_exposure_at",
                 )}
                 connection.execute(
                     """INSERT INTO photo_selection_candidates

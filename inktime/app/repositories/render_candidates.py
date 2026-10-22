@@ -71,8 +71,11 @@ class RenderCandidateRepository:
     def safety_passed(row: Any) -> bool:
         """Recheck stored model evidence even after an operator status change."""
         from inktime.app.repositories.photos import PhotoRepository
+        from inktime.app.domain.photos.quality_policy import is_confirmed_screenshot
 
         try:
+            if is_confirmed_screenshot(dict(row)):
+                return False
             analysis = validate_analysis_result(json.loads(row["raw_json"]))
             if analysis["schema_version"] != 6:
                 return False

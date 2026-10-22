@@ -1119,6 +1119,8 @@ def test_photo_console_shows_prefilter_metrics_scores_orientation_and_side_capti
     assert "模糊分數" in body
     assert "過曝占比" in body
     assert "一般回看價值" in body
+    assert "AI 選片分" in body and "排序組成" in body
+    assert "AI 視覺" in body and "內容過濾檢查" in body
     assert "視覺方向" in body
     assert "產生的一句話（電子紙短文案）" in body
     assert result["side_caption"] in body

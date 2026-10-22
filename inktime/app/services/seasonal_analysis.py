@@ -7,7 +7,6 @@ from zoneinfo import ZoneInfo
 
 from inktime.app.domain.analysis.execution_mode import execution_mode, permits_manual_ai
 from inktime.app.domain.analysis.plan import stored_analysis_fingerprint
-from inktime.app.domain.photos.quality_policy import is_confirmed_screenshot
 from inktime.app.repositories.analysis_reservations import AnalysisReservationConflict
 from inktime.app.repositories.billable_operations import SeasonalAlreadyProcessedError
 from inktime.app.repositories.seasonal_analysis import utc_now
@@ -60,9 +59,45 @@ class SeasonalAnalysisService:
             return {"waiting": False, "job_id": None}
         target = target or self.today()
         self.repository.refresh()
-        rows = self.repository.candidates(target, self.window())
-        self.repository.adopt_history(rows, target)
-        rows = self.repository.candidates(target, self.window())
+        missing: list[dict] = []
+        waiting = False
+        reuse_remaining = self.CHUNK_SIZE
+        for rows in self.repository.candidate_pages(target, self.window()):
+            self.repository.adopt_history(rows, target)
+            if reuse_remaining:
+                reuse_remaining -= self._reuse_completed(rows, reuse_remaining)
+            # History adoption cannot create an eligible new paid request:
+            # those rows already have an analysis or an unresolved paid state.
+            for row in rows:
+                if (row["task_id"] is None and row["existing_analysis_id"] is None
+                        and row["paid_state"] is None and not row["reserved"]):
+                    waiting = True
+                    if len(missing) < self.CHUNK_SIZE:
+                        missing.append(row)
+                waiting = waiting or bool(row["reserved"])
+            # Restart after enqueue/start interruption without creating another
+            # job; each query and the retained new-work list stay bounded.
+            with self.repository.database.session() as connection:
+                active = connection.execute(
+                    """SELECT DISTINCT j.id,j.status FROM seasonal_analysis_tasks t JOIN jobs j ON j.id=t.job_id
+                       WHERE t.content_sha256 IN (SELECT value FROM json_each(?)) AND t.status IN ('queued','running')""",
+                    (json.dumps([row["sha256"] for row in rows]),),
+                ).fetchall()
+            waiting = waiting or bool(active)
+            for job in active:
+                if job["status"] == "pending":
+                    self.job_service.start(str(job["id"]))
+            if len(missing) == self.CHUNK_SIZE:
+                break
+        job_id = None
+        if missing:
+            try:
+                job_id = self._create(missing, target, "system")
+            except AnalysisReservationConflict:
+                return {"waiting": True, "job_id": None}
+        return {"waiting": waiting, "job_id": job_id}
+
+    def _reuse_completed(self, rows: list[dict], limit: int) -> int:
         # Reuse a completed result for exact copies, giving each copy its own
         # record. No plan/model fingerprint is required for historical reuse.
         with self.repository.database.session() as connection:
@@ -74,8 +109,8 @@ class SeasonalAnalysisService:
                    AND EXISTS (SELECT 1 FROM seasonal_analysis_tasks t WHERE t.content_sha256=p.sha256
                        AND t.id=(SELECT max(latest.id) FROM seasonal_analysis_tasks latest WHERE latest.content_sha256=p.sha256)
                        AND t.status='completed' AND json_extract(t.analysis_snapshot_json,'$.score_kind')='semantic')
-                   ORDER BY p.id LIMIT 500""",  # noqa: S608 -- fixed repository eligibility predicate
-                (json.dumps([row["sha256"] for row in rows if row["existing_analysis_id"] or row["task_id"]]),),
+                   ORDER BY p.id LIMIT ?""",  # noqa: S608 -- fixed repository eligibility predicate
+                (json.dumps([row["sha256"] for row in rows if row["existing_analysis_id"] or row["task_id"]]), limit),
             ).fetchall()
         for duplicate in duplicates:
             try:
@@ -87,27 +122,7 @@ class SeasonalAnalysisService:
                     self.repository.notify_failure(connection,
                         key=f"analysis:reuse:{duplicate['id']}:{duplicate['sha256']}",
                         photo_id=duplicate["id"], job_id=None, error_code="SEASONAL-REUSE-FAILED", status="failed")
-        missing = [row for row in rows if row["task_id"] is None and row["existing_analysis_id"] is None
-                   and row["paid_state"] is None and not row["reserved"] and not is_confirmed_screenshot(row)]
-        job_id = None
-        if missing:
-            try:
-                job_id = self._create(missing[:self.CHUNK_SIZE], target, "system")
-            except AnalysisReservationConflict:
-                return {"waiting": True, "job_id": None}
-        # Restart after enqueue/start interruption without creating another job.
-        with self.repository.database.session() as connection:
-            active = connection.execute(
-                """SELECT DISTINCT j.id,j.status FROM seasonal_analysis_tasks t JOIN jobs j ON j.id=t.job_id
-                   WHERE t.content_sha256 IN (SELECT value FROM json_each(?)) AND t.status IN ('queued','running')""",
-                (json.dumps([row["sha256"] for row in rows]),),
-            ).fetchall()
-        for job in active:
-            if job["status"] == "pending":
-                self.job_service.start(str(job["id"]))
-        # Paused/budget-blocked work is visible in /jobs. Publish only when all
-        # automatically processable candidates have reached a terminal state.
-        return {"waiting": bool(missing or active or any(row["reserved"] for row in rows)), "job_id": job_id}
+        return len(duplicates)
 
     def before_render(self, settings: dict, *, job_id: str | None = None) -> bool:
         if not self.enabled():

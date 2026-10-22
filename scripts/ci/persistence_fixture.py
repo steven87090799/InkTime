@@ -38,7 +38,7 @@ def seed_lan_release_source(connection, directory: Path, *, runtime_root: str) -
                                "evidence": ["faces_upright", "horizon_level"]},
     }
     connection.execute(
-        "INSERT INTO photo_analysis(photo_id,schema_version,stage,provider,model_name,"
+        "INSERT INTO photo_analysis(photo_id,schema_version,stage,provider,model,"
         "caption,side_caption,types_json,raw_json,score_kind,ranking_score,final_ranking_score,created_at) "
         "VALUES (?,6,'single','ci-fixture','synthetic','CI source',?,'[]',?,'semantic',99,99,?)",
         (LAN_SOURCE_ID, result["side_caption"], json.dumps(result), now),

@@ -1136,7 +1136,7 @@ class RenderService:
         with self.database.session() as connection:
             rows = connection.execute(
                 f"""
-                SELECT p.*,l.root_path,a.types_json,a.semantic_json,
+                SELECT p.*,l.root_path,a.types_json,a.semantic_json,a.raw_json,
                        EXISTS(SELECT 1 FROM display_history dh WHERE dh.photo_id=p.id) ever_displayed,
                        EXISTS(SELECT 1 FROM display_history dh WHERE dh.photo_id=p.id
                               AND dh.displayed_at>=datetime('now','-14 days')) recently_displayed
@@ -1186,7 +1186,7 @@ class RenderService:
         candidates: list[dict[str, Any]] = []
         for stored in rows:
             row = dict(stored)
-            if not self.candidates.available(row):
+            if not self.candidates.available(row) or not self.candidates.safety_passed(row):
                 continue
             try:
                 semantic = json.loads(str(row.get("semantic_json") or "{}"))
@@ -2586,7 +2586,8 @@ class RenderService:
                 # A high AI score cannot repeatedly displace an unseen safe
                 # candidate. Once all have appeared, rotate least-shown first.
                 return (
-                    exposure_count(row), stage, distance,
+                    exposure_count(row), row.get("seasonal_priority", stage),
+                    0 if row.get("seasonal_priority") == 1000 else distance,
                     last_exposure_at(row), -adjusted,
                     diversity if semantic else 0.0, index, str(row.get("id") or ""),
                 )
@@ -2606,6 +2607,8 @@ class RenderService:
         limit: int,
         candidate_years: list[int] | None = None,
         score_kind: str = SEMANTIC_SCORE_KIND,
+        date_priorities: dict[str, int] | None = None,
+        priority_min_score: float = 0,
     ) -> list[dict[str, Any]]:
         if score_kind not in {SEMANTIC_SCORE_KIND, LOCAL_QUALITY_SCORE_KIND}:
             raise ValueError("RENDER-005 不支援的選片評分來源")
@@ -2624,7 +2627,9 @@ class RenderService:
         result: list[dict[str, Any]] = []
         last_score: float | None = None
         last_count = 0
+        last_priority = 0
         last_id = ""
+        seen_contents: set[str] = set()
         # 檔案存在性無法安全地交給 SQLite；用固定批次掃描 SQL 已排序結果，
         # 每次只保留真正可用的候選，避免把大型照片庫 materialize 成 Dict。
         # photos has no durable burst_group_id column; captured_at is the
@@ -2633,12 +2638,17 @@ class RenderService:
             with self.database.session() as connection:
                 rows = connection.execute(
                     f"""
-                    WITH ranked_candidates AS (
+                    WITH content_exposure AS (
+                        SELECT sha256,MAX(MAX(display_count,selection_count)) AS used_count,
+                               MAX(MAX(COALESCE(last_displayed_at,''),COALESCE(last_selected_at,''))) AS used_at
+                        FROM photos WHERE length(sha256)=64 AND (display_count>0 OR selection_count>0)
+                        GROUP BY sha256
+                    ), ranked_candidates AS (
                     SELECT p.id,p.library_id,p.relative_path,p.captured_at,p.captured_date,p.captured_month_day,
                            p.width,p.height,p.orientation,p.exif_orientation_original,
                            p.manual_orientation_rotation_cw,p.visual_orientation_rotation_cw,
                            p.visual_orientation_confidence,p.visual_orientation_ambiguous,
-                           p.exif_json,p.exclusion_status,p.manual_override,a.raw_json,
+                           p.exif_json,p.screenshot_likelihood,p.exclusion_status,p.manual_override,a.raw_json,
                            p.sha256,p.perceptual_hash,p.difference_hash,p.duplicate_group_id,p.gps_lat,p.gps_lon,
                            p.e6_score,p.e6_contrast_score,
                            p.e6_subject_score,p.e6_skin_score,p.e6_text_score,
@@ -2649,10 +2659,15 @@ class RenderService:
                            a.memory_score,
                            a.score_kind,a.local_score,p.local_candidate_score,
                            p.display_count,p.last_displayed_at,p.selection_count,p.last_selected_at,
-                           MAX(p.display_count,p.selection_count) exposure_count,
+                           MAX(p.display_count,p.selection_count,COALESCE(exposure.used_count,0)) exposure_count,
+                           exposure.used_at AS content_last_exposure_at,
+                           CASE WHEN ?=0 THEN 0 WHEN {score_expression}>=? THEN
+                               COALESCE((SELECT value FROM json_each(?) WHERE key=p.captured_month_day),1000)
+                               ELSE 1000 END date_priority,
                            {combined_expression} combined_score
                     FROM photos p
                     JOIN libraries l ON l.id=p.library_id
+                    LEFT JOIN content_exposure exposure ON exposure.sha256=p.sha256
                     JOIN photo_analysis a ON a.id=(
                         SELECT latest.id FROM photo_analysis latest WHERE latest.photo_id=p.id
                         ORDER BY {preferred_analysis_order_sql('latest')} LIMIT 1
@@ -2668,10 +2683,14 @@ class RenderService:
                     )
                     SELECT * FROM ranked_candidates
                     WHERE (? IS NULL OR exposure_count>? OR (exposure_count=? AND
-                        (combined_score<? OR (combined_score=? AND id>?))))
-                    ORDER BY exposure_count ASC,combined_score DESC,id LIMIT 250
+                        (date_priority>? OR (date_priority=? AND
+                        (combined_score<? OR (combined_score=? AND id>?))))))
+                    ORDER BY exposure_count ASC,date_priority ASC,combined_score DESC,id LIMIT 250
                     """,  # noqa: S608 -- eligibility predicate is a fixed class constant
                     (
+                        int(date_priorities is not None),
+                        priority_min_score,
+                        json.dumps(date_priorities or {}),
                         int(month_days is not None),
                         json.dumps(month_days or []),
                         int(older_only),
@@ -2681,6 +2700,8 @@ class RenderService:
                         last_score,
                         last_count,
                         last_count,
+                        last_priority,
+                        last_priority,
                         last_score,
                         last_score,
                         last_id,
@@ -2690,6 +2711,11 @@ class RenderService:
                 break
             for stored in rows:
                 if self.candidates.available(stored) and self.candidates.safety_passed(stored):
+                    content = str(stored["sha256"] or "")
+                    if date_priorities is not None and len(content) == 64:
+                        if content in seen_contents:
+                            continue
+                        seen_contents.add(content)
                     candidate = dict(stored)
                     candidate.pop("raw_json", None)
                     candidate.pop("exif_json", None)
@@ -2698,6 +2724,7 @@ class RenderService:
                         break
             last_score = float(rows[-1]["combined_score"])
             last_count = int(rows[-1]["exposure_count"])
+            last_priority = int(rows[-1]["date_priority"])
             last_id = str(rows[-1]["id"])
             if len(rows) < 250:
                 break
@@ -2791,13 +2818,28 @@ class RenderService:
                 pool[identifier] = row
 
         if execution_mode(self.settings) == "seasonal_ai":
-            append(self._candidate_query(
+            window = int(self.settings.get("analysis.seasonal_window_days", 5))
+            anchor = date(2000, target.month, target.day)
+            priorities = {target.strftime("%m-%d"): 0}
+            seasonal_distances = {target.strftime("%m-%d"): 0}
+            for offset in range(1, window + 1):
+                for sign, priority in ((-1, offset * 2 - 1), (1, offset * 2)):
+                    day = (anchor + timedelta(days=sign * offset)).strftime("%m-%d")
+                    priorities[day], seasonal_distances[day] = priority, offset
+            rows = self._candidate_query(
                 target=target,
-                month_days=seasonal_month_days(target, int(self.settings.get("analysis.seasonal_window_days", 5))),
+                month_days=seasonal_month_days(target, window),
                 older_only=False,
                 limit=max(20, min(int(self.settings.get("render.local_candidate_limit", 200)), 1000)),
                 candidate_years=candidate_years, score_kind=score_kind,
-            ), "seasonal_window")
+                date_priorities=priorities,
+                priority_min_score=float(self.settings.get("render.seasonal_priority_min_score", 60)),
+            )
+            append(rows, "seasonal_window", seasonal_distances)
+            for row in pool.values():
+                row["seasonal_priority"] = int(row["date_priority"])
+                row["match_type"] = ("seasonal_low_score" if row["seasonal_priority"] == 1000
+                                     else "exact_day" if row["day_distance"] == 0 else "nearby_day")
         elif mode == "top_ranked":
             append(self._candidate_query(
                 target=target,
@@ -2837,8 +2879,9 @@ class RenderService:
                 ), "ranked_fallback")
         ordered = sorted(pool.values(), key=lambda row: (
             exposure_count(row),
-            {"exact_day": 0, "nearby_day": 1, "ranked_fallback": 2}.get(str(row.get("match_type") or ""), 0),
-            int(row.get("day_distance") or 0), last_exposure_at(row),
+            row.get("seasonal_priority",
+                    {"exact_day": 0, "nearby_day": 1, "ranked_fallback": 2}.get(str(row.get("match_type") or ""), 0)),
+            0 if row.get("seasonal_priority") == 1000 else int(row.get("day_distance") or 0), last_exposure_at(row),
             -float(row.get("combined_score") or 0), str(row["id"]),
         ))
         if candidate_pool is not None:
@@ -2851,10 +2894,11 @@ class RenderService:
     def _auto_candidate_stages(rows: list[dict[str, Any]]):
         """Try every unseen composition before admitting displayed sources."""
         allowed: list[dict[str, Any]] = []
+        def priority(row):
+            return row.get("seasonal_priority", {"exact_day": 0, "nearby_day": 1}.get(row.get("match_type"), 2))
         for count in sorted({exposure_count(row) for row in rows}):
-            for stage in ({"exact_day"}, {"nearby_day"}, {"ranked_fallback", "top_ranked", "seasonal_window"}):
-                added = [row for row in rows if exposure_count(row) == count
-                         and row.get("match_type", "top_ranked") in stage]
+            for stage in sorted({priority(row) for row in rows if exposure_count(row) == count}):
+                added = [row for row in rows if exposure_count(row) == count and priority(row) == stage]
                 if added:
                     allowed.extend(added)
                     yield list(allowed)
@@ -2921,9 +2965,10 @@ class RenderService:
                 target=target, candidates=pool, selected=selected, method="automatic",
                 context={"selection_mode": self.settings.get("render.selection_mode", "history_today"),
                          "execution_mode": mode, "seasonal_window_days": self.settings.get("analysis.seasonal_window_days", 5),
+                         "seasonal_priority_min_score": self.settings.get("render.seasonal_priority_min_score", 60),
                          "fallback": self.settings.get("render.history_today_fallback", "nearby_then_ranked"),
                          "candidate_years": candidate_years or [], "requested_count": limit,
-                         "composition_pool": composition_pool, "policy": "least_displayed_v1"},
+                         "composition_pool": composition_pool, "policy": "least_displayed_seasonal_date_v2"},
             )
             for row in selected:
                 row["selection_run_id"] = run_id

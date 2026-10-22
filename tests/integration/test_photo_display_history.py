@@ -58,7 +58,7 @@ def test_seasonal_window_rotates_unused_and_keeps_complete_history(app, tmp_path
     run = DisplayHistoryRepository(app.extensions["inktime_database"]).detail(rows[0]["selection_run_id"])
     assert run["target_date"] == "2027-01-01"
     assert {row["photo_id"] for row in run["candidates"]} == {"seen-in-window", "unused-in-window"}
-    assert all(row["snapshot"]["match_type"] == "seasonal_window" for row in run["candidates"])
+    assert {row["snapshot"]["match_type"] for row in run["candidates"]} == {"nearby_day", "seasonal_low_score"}
     assert [row["id"] for row in service.select_auto_photo_candidates(
         1, frame_orientation="landscape", target_date=date(2027, 1, 1),
     )] == ["unused-in-window"]
@@ -260,3 +260,40 @@ def test_failed_release_keeps_snapshot_and_does_not_increment_selection(app, tmp
     assert run["release_count"] == 0
     assert json.loads(run["published_photo_ids_json"]) == []
     assert app.extensions["inktime_photo_repository"].get_with_path("pair-a")["selection_count"] == 0
+
+
+def test_seasonal_day_priority_quality_and_cross_year_rotation(app, tmp_path):
+    root = tmp_path / "day-priority"
+    for identifier, score, day in (("same-old-year", 75, "10-22"), ("same-poor", 40, "10-22"),
+                                    ("previous-day", 65, "10-21"), ("following-day", 99, "10-23"),
+                                    ("outside", 100, "10-16")):
+        _photo(app, root, identifier, score, day)
+    with app.extensions["inktime_database"].transaction() as connection:
+        connection.execute("UPDATE photos SET captured_date='2012-10-22',captured_at='2012-10-22' WHERE id='same-old-year'")
+    _setting(app, "analysis.execution_mode", "seasonal_ai")
+    service = app.extensions["inktime_render_service"]
+    def chosen(target):
+        return [row["id"] for row in service.select_auto_photo_candidates(1, frame_orientation="landscape", target_date=target)]
+    target = date(2026, 10, 22)
+    assert chosen(target) == ["same-old-year"]
+    _seen(app, "same-old-year", "2026-10-22T00:00:00+00:00")
+    assert chosen(target) == ["previous-day"]
+    assert chosen(date(2027, 10, 22)) == ["previous-day"]
+    assert chosen(date(2026, 10, 23)) == ["following-day"]
+    _setting(app, "render.seasonal_priority_min_score", 80)
+    assert chosen(target) == ["following-day"]
+
+
+def test_copied_content_cannot_reset_the_rotation_counter(app, tmp_path):
+    root = tmp_path / "copied-content"
+    for identifier, score in (("shown", 95), ("copy", 95), ("fresh", 65)):
+        _photo(app, root, identifier, score)
+    with app.extensions["inktime_database"].transaction() as connection:
+        connection.execute("UPDATE photos SET sha256=? WHERE id IN ('shown','copy')", ("a" * 64,))
+        connection.execute("UPDATE photos SET sha256=? WHERE id='fresh'", ("b" * 64,))
+    _seen(app, "shown")
+    _setting(app, "analysis.execution_mode", "seasonal_ai")
+    rows = app.extensions["inktime_render_service"].select_candidates_details(3, target_date=date(2027, 10, 22))
+    assert rows[0]["id"] == "fresh"
+    assert len(rows) == 2
+    assert rows[1]["exposure_count"] == 1

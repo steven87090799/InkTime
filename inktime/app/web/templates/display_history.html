@@ -19,7 +19,7 @@
       {% if row.photo_id %}<a href="/photos/{{ row.photo_id|urlencode }}"><img loading="lazy" src="/api/v1/photos/{{ row.photo_id|urlencode }}/thumbnail" alt="{{ row.snapshot.relative_path or '照片' }}"></a>{% endif %}
       <div><strong>#{{ row.rank }} {{ row.snapshot.relative_path or row.snapshot.id }}</strong><p>{{ row.snapshot.captured_date or '拍攝日期不明' }} · 分數 {{ '%.2f'|format(row.score) if row.score is not none else '—' }}</p>
       <p>選片時已確認顯示 {{ row.snapshot.display_count or 0 }} 次 · 系統選定 {{ row.snapshot.selection_count or 0 }} 次{% if row.snapshot.last_displayed_at %} · 上次顯示 {{ row.snapshot.last_displayed_at }}{% endif %}</p>
-      <p>{{ {'exact_day':'歷史同日','nearby_day':'鄰近日期','ranked_fallback':'其他日期候補','top_ranked':'所有日期','seasonal_window':'歷年同期'}.get(row.snapshot.match_type, '手動指定') }} · <strong>{{ '已選定並發布' if row.published else '系統建議選取，尚未發布' if row.selected and not detail.releases else '未選中' }}</strong></p>
+      <p>{{ {'exact_day':'歷史同日','nearby_day':'鄰近日期','ranked_fallback':'其他日期候補','top_ranked':'所有日期','seasonal_window':'歷年同期','seasonal_low_score':'同期低分候補'}.get(row.snapshot.match_type, '手動指定') }} · <strong>{{ '已選定並發布' if row.published else '系統建議選取，尚未發布' if row.selected and not detail.releases else '未選中' }}</strong></p>
       {% if row.photo_id %}<a href="{{ url_for('display_history.history_page', photo_id=row.photo_id, tab='displays') }}">查看這張照片的顯示紀錄</a>{% else %}<span>照片已移除，保留選片快照</span>{% endif %}</div>
     </article>
   {% else %}<p>本次沒有符合資格的候選照片。</p>{% endfor %}
