@@ -25,8 +25,8 @@ def test_model_failure_is_durable_unread_and_idempotent(client, app, tmp_path, s
     notification = service.list()[0]
     assert notification["kind"] == "analysis_failure"
     assert "private provider payload" not in notification["details_json"]
-    assert client.get("/api/v1/notifications/unread-analysis").status_code == 401
     create_admin(app)
+    assert client.get("/api/v1/notifications/unread-analysis").status_code == 401
     login(client)
     assert client.get("/api/v1/notifications/unread-analysis").get_json()["count"] == 1
     page = client.get("/notifications")

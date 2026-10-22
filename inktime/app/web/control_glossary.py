@@ -28,6 +28,7 @@ CHOICE_EXPLANATIONS: dict[str, dict[Any, tuple[str, str]]] = {
         "local_only": ("僅使用本機選片", "只執行本機特徵與品質判斷，不會使用 Provider。"),
         "local_with_manual_ai": ("本機選片＋手動 AI", "平時只做本機分析；只有你按下送入 AI 或建立 AI 工作時才呼叫模型。"),
         "automatic_ai": ("自動 AI 分析", "排程或新工作可自動使用已啟用的 Vision Provider，可能產生 Token 與費用。"),
+        "seasonal_ai": ("歷年同期按需 AI 分析", "只補齊顯示日期前後指定天數、歷年同期缺資料的照片。逐張分析後以既有資料排名；失敗需手動重試。"),
     },
     "analysis.ai_mode": {
         "off": ("關閉 AI", "即使 Provider 已設定也不會把照片送入模型。"),

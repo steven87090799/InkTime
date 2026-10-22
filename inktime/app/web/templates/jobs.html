@@ -3,6 +3,7 @@
 {% block content %}
 <div class="page-head"><div><p class="eyebrow">背景工作</p><a href="/paid-operations">付費操作對帳與重送批准</a><h1>分析工作</h1><p>工作可暫停、續跑、取消，Docker 重啟後會從資料庫恢復。</p></div>{% if g.user.role == 'administrator' %}<button class="primary" id="new-job" data-help="開啟建立工作精靈；送出前會先估算照片數量與模型成本，不會因為開啟精靈就開始分析。">建立工作</button>{% endif %}</div>
 {% include "_ai_readiness.html" %}
+<p><a href="/analysis/seasonal">歷年同期分析進度、失敗重試與全部重跑</a></p>
 <section class="panel"><div class="table-wrap"><table><thead><tr><th>名稱</th><th>狀態</th><th>進度</th><th>已花費</th><th>建立時間</th></tr></thead><tbody>
 {% for job in jobs %}<tr><td><a href="/jobs/{{ job.id }}"><strong>{{ job.name }}</strong></a><small>{{ '僅本機分析' if job.strategy == 'local' else 'Vision 模型分析' }}</small></td><td><span class="status status-{{ job.status }}">{{ job_status_labels.get(job.status,job.status) }}</span></td><td><strong>{{ job.completed_items + job.failed_items }} / {{ job.total_items }}</strong>{% if job.status == 'budget_exceeded' %}<small>成本安全規則已暫停，請進入工作查看原因</small>{% elif job.status in ['running','retrying'] %}<small>Worker 正在處理</small>{% endif %}</td><td>US$ {{ '%.4f'|format(job.spent) }}</td><td>{{ job.created_at }}</td></tr>{% else %}<tr><td colspan="5" class="empty">尚未建立分析工作。</td></tr>{% endfor %}
 </tbody></table></div></section>

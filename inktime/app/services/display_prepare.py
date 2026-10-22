@@ -423,7 +423,7 @@ class DisplayPreparationService:
         )
         candidates = (
             self.render_service.select_auto_photo_candidates(
-                len(schedule_times), frame_orientation=frame_orientation, target_date=target
+                len(schedule_times), frame_orientation=frame_orientation, target_date=target, record_history=True
             ) if layout == "auto_photo" else self.render_service.select_candidates_details(
                 required_candidates, target_date=target, record_history=True
             )
@@ -490,6 +490,7 @@ class DisplayPreparationService:
                     device_configs={device_id: frame_device},
                     activate_pointers=False,
                     assign_device_releases=False,
+                    target_date=target,
                     selection_run_ids=list(dict.fromkeys(
                         str(row["selection_run_id"]) for row in frame_candidates if row.get("selection_run_id")
                     )),

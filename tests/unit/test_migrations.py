@@ -19,6 +19,53 @@ from inktime.app.repositories.resilience import ResilienceRepository
 CURRENT_SCHEMA_VERSION = max(migration.version for migration in MIGRATIONS)
 
 
+@pytest.mark.parametrize("source", ["seasonal", "history"])
+def test_both_draft_schemas_upgrade_without_losing_records(tmp_path, monkeypatch, source):
+    seasonal = next(migration for migration in MIGRATIONS if migration.version == 74)
+    branch = (*MIGRATIONS[:71], Migration(72, seasonal.name, seasonal.statements)) if source == "seasonal" else MIGRATIONS[:73]
+    monkeypatch.setattr(migrations_module, "MIGRATIONS", branch)
+    database = Database(tmp_path / f"{source}.db")
+    migrate(database)
+    with database.transaction() as connection:
+        if source == "seasonal":
+            connection.execute(
+                "INSERT INTO seasonal_analysis_tasks(content_sha256,status,analysis_snapshot_json,created_at,updated_at) "
+                "VALUES (?,'completed',?,'2026','2026')", ("a" * 64, '{"model":"original"}'),
+            )
+        else:
+            connection.execute(
+                "INSERT INTO photo_selection_runs(id,target_date,method,candidate_count,created_at) "
+                "VALUES ('saved','2026-10-22','automatic',0,'2026')"
+            )
+    monkeypatch.setattr(migrations_module, "MIGRATIONS", MIGRATIONS)
+    backups = tmp_path / "backups"
+    assert migrate(database, backups) == ([72, 73] if source == "seasonal" else [74])
+    assert any(backups.iterdir())
+    assert migrate(database) == []
+    with database.session() as connection:
+        assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+        assert dict(connection.execute("SELECT version,name FROM schema_migrations"))[74] == seasonal.name
+        if source == "seasonal":
+            assert connection.execute("SELECT analysis_snapshot_json FROM seasonal_analysis_tasks").fetchone()[0] == '{"model":"original"}'
+            assert connection.execute("SELECT schema_version FROM migration_history WHERE migration_name=?", (seasonal.name,)).fetchone()[0] == 74
+        else:
+            assert connection.execute("SELECT id FROM photo_selection_runs").fetchone()[0] == "saved"
+
+
+def test_same_number_unknown_draft_schema_stops_before_writing(tmp_path, monkeypatch):
+    database = Database(tmp_path / "unknown-draft.db")
+    monkeypatch.setattr(migrations_module, "MIGRATIONS", MIGRATIONS[:71])
+    migrate(database)
+    with database.transaction() as connection:
+        connection.execute("INSERT INTO schema_migrations VALUES (72,'unknown branch schema','2026')")
+    monkeypatch.setattr(migrations_module, "MIGRATIONS", MIGRATIONS)
+    with pytest.raises(MigrationError, match="MIGRATION-004"):
+        migrate(database)
+    with database.session() as connection:
+        assert "display_count" not in {row[1] for row in connection.execute("PRAGMA table_info(photos)")}
+        assert connection.execute("SELECT name FROM schema_migrations WHERE version=72").fetchone()[0] == "unknown branch schema"
+
+
 def test_display_counter_upgrade_preserves_unconfirmed_history_and_webhook_state(tmp_path, monkeypatch):
     monkeypatch.setattr(migrations_module, "MIGRATIONS", MIGRATIONS[:71])
     database = Database(tmp_path / "history-upgrade.db")
@@ -42,7 +89,7 @@ def test_display_counter_upgrade_preserves_unconfirmed_history_and_webhook_state
         )
         connection.execute("DELETE FROM device_notifications WHERE id=100")
     monkeypatch.setattr(migrations_module, "MIGRATIONS", MIGRATIONS)
-    assert migrate(database) == [72, 73]
+    assert migrate(database) == [72, 73, 74]
     with database.session() as connection:
         photo = connection.execute("SELECT * FROM photos WHERE id='p'").fetchone()
         assert photo["display_count"] == 1
@@ -75,7 +122,7 @@ def _run_capture_date_backfill(database_path: str, start, results) -> None:
 
 
 def test_fresh_database_is_migrated(tmp_path):
-    assert CURRENT_SCHEMA_VERSION == 73
+    assert CURRENT_SCHEMA_VERSION == 74
     database = Database(tmp_path / "inktime.db")
     assert migrate(database) == list(range(1, CURRENT_SCHEMA_VERSION + 1))
     assert database.integrity_check() == "ok"
@@ -622,7 +669,8 @@ def test_deployed_main_schema54_upgrades_without_rewriting_history(monkeypatch, 
         assert {key: profile[key] for key in expected_profile} == expected_profile
         assert profile["is_active"] == 0 and profile["ranking_contract_version"] == 3
         assert profile["visual_weight"] is None and profile["local_weight"] is None
-        assert [dict(row) for row in connection.execute("SELECT * FROM photos WHERE id<>'e6' ORDER BY id")] == protected_before
+        assert [{key: row[key] for key in protected_before[0]}
+                for row in connection.execute("SELECT * FROM photos WHERE id<>'e6' ORDER BY id")] == protected_before
         e6 = connection.execute("SELECT * FROM photos WHERE id='e6'").fetchone()
         assert e6["eligible"] == 1 and e6["exclusion_status"] == "eligible"
         assert e6["reject_reason"] is None and e6["manual_override"] == 0
@@ -2056,7 +2104,8 @@ def test_migration_58_recomposes_ai_scores_without_rewriting_evidence(monkeypatc
     assert migrate(database) == list(range(58, CURRENT_SCHEMA_VERSION + 1))
     assert migrate(database) == []
     with database.session() as connection:
-        assert [dict(row) for row in connection.execute("SELECT * FROM photos ORDER BY id")] == photos_before
+        assert [{key: row[key] for key in photos_before[0]}
+                for row in connection.execute("SELECT * FROM photos ORDER BY id")] == photos_before
         assert [dict(row) for row in connection.execute(
             "SELECT * FROM photo_analysis WHERE score_kind<>'semantic' ORDER BY id"
         )] == non_semantic_before

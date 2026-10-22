@@ -13,6 +13,11 @@ class UnreconciledOperationError(RuntimeError):
     ambiguous = True
 
 
+class SeasonalAlreadyProcessedError(RuntimeError):
+    code = "SEASONAL-ALREADY-PROCESSED"
+    not_sent = True
+
+
 class BillableOperationRepository:
     """A paid request outlives worker leases; a crash must never authorize resend."""
 
@@ -63,6 +68,19 @@ class BillableOperationRepository:
                 if payload.get("call_trace"):
                     payload["call_trace"] = ProviderCallTrace(**payload["call_trace"])
                 return str(saved["id"]), ProviderResponse(**payload)
+            # Recheck at the last durable boundary, not only when candidates
+            # were selected. An older job/provider can finish in between.
+            seasonal = connection.execute(
+                "SELECT j.force_recompute,json_extract(j.settings_json,'$.seasonal_retry_task_id') AS retry_task "
+                "FROM seasonal_analysis_tasks t JOIN jobs j ON j.id=t.job_id "
+                "WHERE t.job_id=? AND t.content_sha256=? LIMIT 1",
+                ((context or {}).get("job_id"), content_sha256),
+            ).fetchone()
+            if seasonal is not None and not seasonal["force_recompute"] and not seasonal["retry_task"] and connection.execute(
+                "SELECT 1 FROM billable_operations WHERE content_sha256=? AND state IN ('response','completed') LIMIT 1",
+                (content_sha256,),
+            ).fetchone():
+                raise SeasonalAlreadyProcessedError("相同內容已有付費回應，沿用原資料；不因模型規格不同再次送出")
             assert_no_batch_content_owner(connection, content_sha256)
             operation_id = str(uuid4())
             connection.execute(

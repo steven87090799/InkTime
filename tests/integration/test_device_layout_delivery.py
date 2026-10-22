@@ -70,10 +70,11 @@ def test_mixed_devices_select_enough_candidates_before_truncation_and_show_real_
     pair, _ = devices.create("pair", layout_mode="photo_pair_caption")
     service = app.extensions["inktime_render_service"]
     selected_limits = []
-    def select(limit):
+    original_select = service.select_candidates_details
+    def select(limit, **kwargs):
         selected_limits.append(limit)
-        return identifiers[:limit]
-    monkeypatch.setattr(service, "select_candidates", select)
+        return original_select(limit, **kwargs)
+    monkeypatch.setattr(service, "select_candidates_details", select)
     captured = {}
     original = service._render_plan_image
     def render(plan, **kwargs):

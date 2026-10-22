@@ -57,7 +57,7 @@ def _setup_overview(connection) -> dict:
     scan_ready = bool(last_scan and str(last_scan["status"]) in {"completed", "completed_with_warnings"})
 
     mode = str(readiness["execution_mode"])
-    uses_ai = mode in {"automatic_ai", "local_with_manual_ai"}
+    uses_ai = mode in {"automatic_ai", "local_with_manual_ai", "seasonal_ai"}
     ai_mode = str(settings.get("analysis.ai_mode", "off"))
     strategy = str(settings.get("analysis.strategy", "single"))
     ai_mode_label = {

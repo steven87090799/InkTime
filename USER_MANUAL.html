@@ -1240,7 +1240,7 @@
     <main class="main-content">
         <article class="markdown-body" id="content">
             <h1 id="inktime-墨水屏電子相框系統-終極百科全書級操作手冊與開發者指南" class="doc-h1">InkTime 墨水屏電子相框系統 終極百科全書級操作手冊與開發者指南</h1>
-<p class="doc-p"><a class="doc-link" href="docs/AI_NAVIGATION.md">AI 修改導航</a> · <a class="doc-link" href="docs/AI_CONTEXT_INDEX.json">機器可讀任務索引</a> · <a class="doc-link" href="AGENTS.md">AGENTS.md</a>。<strong>選片與通知：</strong>新增顯示成功／系統選定次數、優先未使用照片、完整候選歷史頁，以及模型失敗的持久未讀警示與既有 Webhook 通知。<strong>2026-10-22 本分支文件更新：</strong>功能基準為目前 checkout 原始碼，Migration 73、嚴格 AI Schema v6、ESP32 2.8.9（HTTP JSON 接收修復；尚未刷機），新增安裝預設 <code>local_only</code>。本分支加入需手動啟用的<a href="docs/experiments/GPS_LOCATION_20261022.md">GPS／地標原型與模型成本研究</a>，不自動呼叫外部服務。版本與驗證範圍見<a class="doc-link" href="docs/reference/CURRENT_STATE_ZH_TW.md">現行基線</a>；歷史 CI 與實板量測保留原日期。</p>
+<p class="doc-p"><a class="doc-link" href="docs/AI_NAVIGATION.md">AI 修改導航</a> · <a class="doc-link" href="docs/AI_CONTEXT_INDEX.json">機器可讀任務索引</a> · <a class="doc-link" href="AGENTS.md">AGENTS.md</a>。<strong>選片與通知：</strong>新增顯示成功／系統選定次數、優先未使用照片、完整候選歷史頁，以及模型失敗的持久未讀警示與既有 Webhook 通知。<strong>2026-10-22 本分支文件更新：</strong>功能基準為目前 checkout 原始碼，Migration 74、嚴格 AI Schema v6、ESP32 2.8.9（HTTP JSON 接收修復；尚未刷機），新增安裝預設 <code>local_only</code>。本分支加入需手動啟用的<a href="docs/experiments/GPS_LOCATION_20261022.md">GPS／地標原型與模型成本研究</a>，不自動呼叫外部服務。版本與驗證範圍見<a class="doc-link" href="docs/reference/CURRENT_STATE_ZH_TW.md">現行基線</a>；歷史 CI 與實板量測保留原日期。</p>
 
 
 <hr class="doc-divider">
@@ -2059,7 +2059,7 @@ INKTIME_GUNICORN_LOG_LEVEL=warning
 <hr class="doc-divider">
 <p class="doc-p"><strong>文件與 AI 閱讀政策（2026-09-22）：</strong>現行版本集中於 <a href="docs/reference/CURRENT_STATE_ZH_TW.md">版本基線</a>；AI 以 <a href="AGENTS.md">AGENTS.md</a> 為唯一入口，已知位置不載入整份手冊。首輪最多 3 檔／300 行，導航工具預設只列路徑。正常照片分析僅一次 Vision，不追加模型 JSON 修復；診斷／評分台的修復另計。Migration 62／63 加入密鑰指紋、定點 enum 修復及保留政策更正，詳見 <a href="docs/operations/MIGRATION_GUIDE_ZH_TW.md">遷移指南</a> 與 <a href="docs/resilience/DATA_RETENTION_ZH_TW.md">資料保留</a>。歷史報告維持原日期，不代表目前驗收。</p>
 <ul class="doc-list"><li><a href="docs/devices/PHOTOPAINTER_SAFETY_CONTRACT.md">PhotoPainter 精簡安全契約</a></li><li><a href="docs/operations/REVIEW_REMEDIATION_20260916.md">2026-09-16 修復歷史</a></li><li><a href="docs/operations/CODE_REVIEW_FOLLOWUP_20260921.md">2026-09-21 修復歷史</a></li><li><a href="docs/CODE_REVIEW_REPORT.md">原審查歷史快照</a></li></ul>
-<ul class="doc-list"><li><a href="docs/analysis/PHOTO_SELECTION_AI_FIRST_ZH_TW.md">現行選片契約</a></li><li><a href="docs/archive/analysis/PHOTO_SELECTION_AI_FIRST_20260905.md">2026-09-05 選片歷史</a></li></ul>
+<ul class="doc-list"><li><a href="docs/analysis/PHOTO_SELECTION_AI_FIRST_ZH_TW.md">現行選片契約</a></li><li><a href="docs/analysis/SEASONAL_ANALYSIS_ZH_TW.md">歷年同期按需分析、失敗重試與全部重跑</a></li><li><a href="docs/archive/analysis/PHOTO_SELECTION_AI_FIRST_20260905.md">2026-09-05 選片歷史</a></li></ul>
 <h2 id="sec-15" class="doc-h2"><span class="h2-anchor-icon">#</span> 十五、 文件地圖與 Markdown 索引</h2>
 <p class="doc-p">本章保留原手冊的完整閱讀方式，並提供目前專案內 <strong>全部 Markdown 文件</strong> 的單一入口。每一列都列出實際相對路徑、檔名、用途與可直接開啟的連結；文件移動後，應同步更新本章與 <a href="docs/README.md" class="doc-link">docs/README.md</a>。</p>
 <p class="doc-p">本手冊的既有章節適合連續閱讀；遇到安裝、維運、裝置、架構或歷史決策等需要深入查核的議題，請依下列連結前往對應的 Markdown 原始文件。<strong>archive/</strong> 下的內容是歷史證據，不應作為現行行為規格。</p>

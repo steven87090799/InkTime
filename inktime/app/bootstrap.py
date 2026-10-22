@@ -44,6 +44,8 @@ from inktime.app.services.photopainter_stock import StockCompatibilityService
 from inktime.app.services.diagnostics import DiagnosticsService
 from inktime.app.services.display_prepare import DisplayPreparationService
 from inktime.app.services.jobs import JobService
+from inktime.app.services.seasonal_analysis import SeasonalAnalysisService
+from inktime.app.repositories.seasonal_analysis import SeasonalAnalysisRepository
 from inktime.app.services.notifications import DeviceNotificationService
 from inktime.app.services.observability import ObservabilityService
 from inktime.app.services.providers import ProviderService
@@ -379,6 +381,10 @@ def bootstrap_services(
             "inktime_provider_service": provider_service,
             "inktime_process_boundary": process_boundary,
             "inktime_analysis_service": analysis_service,
+            "inktime_seasonal_analysis_service": SeasonalAnalysisService(
+                SeasonalAnalysisRepository(database), job_repository, job_service, photo_repository,
+                analysis_service, settings_repository, provider_service, scoring_repository,
+            ),
             "inktime_analysis_batch_repository": analysis_batch_repository,
             "inktime_batch_analysis_service": batch_analysis_service,
             "inktime_scoring_lab_service": ScoringLabService(

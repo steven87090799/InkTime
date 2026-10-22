@@ -2654,6 +2654,32 @@ MIGRATIONS = (
             END""",
         ),
     ),
+    Migration(
+        74,
+        "保存歷年同期逐張分析任務、內容去重與重跑確認",
+        (
+            """CREATE TABLE seasonal_analysis_tasks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                content_sha256 TEXT NOT NULL,
+                photo_id TEXT REFERENCES photos(id) ON DELETE SET NULL,
+                job_id TEXT REFERENCES jobs(id) ON DELETE RESTRICT,
+                analysis_id INTEGER REFERENCES photo_analysis(id) ON DELETE SET NULL,
+                analysis_snapshot_json TEXT,
+                status TEXT NOT NULL CHECK(status IN ('queued','running','completed','failed','unknown')),
+                error_code TEXT, target_date TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+                UNIQUE(job_id,content_sha256)
+            )""",
+            "CREATE INDEX idx_seasonal_content ON seasonal_analysis_tasks(content_sha256,id DESC)",
+            "CREATE INDEX idx_seasonal_status ON seasonal_analysis_tasks(status,job_id)",
+            "CREATE UNIQUE INDEX idx_seasonal_active_content ON seasonal_analysis_tasks(content_sha256) "
+            "WHERE status IN ('queued','running')",
+            """CREATE TABLE seasonal_rerun_confirmations (
+                token TEXT PRIMARY KEY, actor TEXT NOT NULL, stage INTEGER NOT NULL,
+                snapshot TEXT NOT NULL, plan_fingerprint TEXT NOT NULL, photo_count INTEGER NOT NULL,
+                expires_at TEXT NOT NULL, job_id TEXT REFERENCES jobs(id) ON DELETE RESTRICT
+            )""",
+        ),
+    ),
 )
 
 
@@ -3256,6 +3282,40 @@ def _applied_versions(database: Database) -> set[int]:
         return {int(row[0]) for row in connection.execute("SELECT version FROM schema_migrations")}
 
 
+def _draft_seasonal_migration(database: Database) -> bool:
+    """Recognize the exact unreleased seasonal branch's former version 72.
+
+    Main ends at 71. The two drafts independently allocated 72; only the
+    seasonal schema moves to 74. Never treat an unknown same-number schema as
+    an applied migration, or recreate its tables and lose the saved tasks.
+    """
+    expected = {migration.version: migration.name for migration in MIGRATIONS}
+    with database.session() as connection:
+        if not _table_exists(connection, "schema_migrations"):
+            return False
+        stored = dict(connection.execute("SELECT version,name FROM schema_migrations WHERE version>=72"))
+        legacy = stored.get(72) == expected.get(74) and 72 in stored and 74 in expected
+        if legacy:
+            required = {
+                "seasonal_analysis_tasks": {"id", "content_sha256", "photo_id", "job_id", "analysis_id",
+                    "analysis_snapshot_json", "status", "error_code", "target_date", "created_at", "updated_at"},
+                "seasonal_rerun_confirmations": {"token", "actor", "stage", "snapshot", "plan_fingerprint",
+                    "photo_count", "expires_at", "job_id"},
+            }
+            valid = set(stored) == {72} and all(
+                {row[1] for row in connection.execute(f"PRAGMA table_info({table})")} == columns
+                for table, columns in required.items()  # fixed internal table names
+            )
+            valid = valid and "display_count" not in {
+                row[1] for row in connection.execute("PRAGMA table_info(photos)")
+            }
+            if not valid:
+                raise MigrationError("MIGRATION-004 同期分支 Schema 與已知版本不符；停止啟動，保留原資料")
+        elif any(expected.get(version) != name for version, name in stored.items()):
+            raise MigrationError("MIGRATION-004 相同 Migration 編號的內容不同；停止啟動，保留原資料")
+        return legacy
+
+
 def _assert_no_unfinished_migration(database: Database) -> None:
     unfinished = None
     try:
@@ -3428,6 +3488,9 @@ def migrate(database: Database, backup_dir: Path | None = None) -> list[int]:
             raise MigrationError(
                 f"MIGRATION-003 資料庫 Schema Version {newest} 高於本程式可支援版本；停止啟動以避免降級寫入"
             )
+        legacy_seasonal = _draft_seasonal_migration(database)
+        if legacy_seasonal:
+            applied_versions = (applied_versions - {72}) | {74}
         has_pending_migrations = any(migration.version not in applied_versions for migration in MIGRATIONS)
         if not has_pending_migrations:
             log_event(
@@ -3443,6 +3506,16 @@ def migrate(database: Database, backup_dir: Path | None = None) -> list[int]:
         backup_path = None
         if backup_dir is not None and had_database and has_pending_migrations:
             backup_path = backup_database(database, backup_dir)
+
+        if legacy_seasonal:
+            # The pre-migration backup still has the original branch numbering.
+            # Both ledgers move atomically; tables, task IDs and evidence stay put.
+            with database.transaction(operation="schema_migration") as connection:
+                connection.execute("UPDATE schema_migrations SET version=74 WHERE version=72")
+                connection.execute(
+                    "UPDATE migration_history SET schema_version=74 WHERE schema_version=72 AND migration_name=?",
+                    (next(m.name for m in MIGRATIONS if m.version == 74),),
+                )
 
         applied: list[int] = []
         for migration in MIGRATIONS:

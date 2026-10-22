@@ -181,13 +181,14 @@ SETTING_DEFINITIONS: dict[str, dict[str, Any]] = {
         "default": "local_only",
         "type": "string",
         "description": "分析執行模式；本機選片不會讀取 Provider 或產生模型費用",
-        "risk": "自動 AI 分析才會依既有排程與 Provider 設定執行模型工作",
-        "choices": ["disabled", "local_only", "local_with_manual_ai", "automatic_ai"],
+        "risk": "自動 AI 或歷年同期按需模式會依 Provider 設定執行付費模型工作",
+        "choices": ["disabled", "local_only", "local_with_manual_ai", "automatic_ai", "seasonal_ai"],
         "choice_labels": {
             "disabled": "完全停用",
             "local_only": "僅使用本機選片",
             "local_with_manual_ai": "本機選片＋手動 AI",
             "automatic_ai": "自動 AI 分析",
+            "seasonal_ai": "歷年同期按需 AI 分析",
         },
         "restart": False,
     },
@@ -205,6 +206,16 @@ SETTING_DEFINITIONS: dict[str, dict[str, Any]] = {
             "full_library": "分析完整照片庫",
             "on_demand": "按需分析",
         },
+        "restart": False,
+    },
+    "analysis.seasonal_window_days": {
+        "category": "分析執行模式",
+        "default": 5,
+        "type": "integer",
+        "description": "歷年同期按需模式：顯示日期前後幾天的照片需要補齊模型資料",
+        "risk": "範圍越大，首次分析的照片與費用越多；已有結果不會因模型升級重送",
+        "min": 1,
+        "max": 31,
         "restart": False,
     },
     "analysis.ai_top_n": {
@@ -1307,6 +1318,7 @@ _LABEL_OVERRIDES = {
     "general.timezone": "系統時區",
     "analysis.strategy": "新工作分析策略",
     "analysis.execution_mode": "分析執行模式",
+    "analysis.seasonal_window_days": "同期日期範圍（前後天數）",
     "analysis.ai_mode": "AI 分析模式",
     "analysis.ai_top_n": "AI 候選照片上限",
     "analysis.ai_daily_photo_limit": "每日 AI 分析照片上限",
@@ -1390,7 +1402,7 @@ def _metadata_dependencies(key: str) -> list[dict[str, Any]]:
         "analysis.max_retries",
         "analysis.concurrency",
     }:
-        return [{"key": "analysis.execution_mode", "one_of": ["local_with_manual_ai", "automatic_ai"]}]
+        return [{"key": "analysis.execution_mode", "one_of": ["local_with_manual_ai", "automatic_ai", "seasonal_ai"]}]
     return []
 
 

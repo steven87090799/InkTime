@@ -50,28 +50,36 @@ class DisplayHistoryRepository:
     ) -> None:
         context = self.database.transaction() if connection is None else nullcontext(connection)
         with context as connection:
+            previous_publications: set[str] = set()
+            new_publications: set[str] = set()
             for run_id in dict.fromkeys(run_ids):
                 run = connection.execute("SELECT * FROM photo_selection_runs WHERE id=?", (run_id,)).fetchone()
                 if run is None:
                     raise ValueError("找不到選片歷史")
-                candidate_ids = {row[0] for row in connection.execute(
-                    "SELECT photo_id FROM photo_selection_candidates WHERE run_id=?", (run_id,),
-                )}
-                if run["method"] == "manual":
-                    for identifier in set(photo_ids) - candidate_ids:
-                        photo = connection.execute("SELECT * FROM photos WHERE id=?", (identifier,)).fetchone()
-                        if photo is None:
-                            continue
-                        connection.execute(
-                            """INSERT INTO photo_selection_candidates(run_id,photo_id,rank,selected,snapshot_json)
-                            VALUES (?,?,?,1,?)""",
-                            (run_id, identifier, len(candidate_ids) + 1, json.dumps({key: photo[key] for key in (
-                                "id", "relative_path", "captured_date", "display_count", "selection_count",
-                                "last_displayed_at", "last_selected_at",
-                            )}, ensure_ascii=False)),
-                        )
-                        candidate_ids.add(identifier)
-                    connection.execute("UPDATE photo_selection_runs SET candidate_count=? WHERE id=?", (len(candidate_ids), run_id))
+                candidates = connection.execute(
+                    "SELECT photo_id,rank FROM photo_selection_candidates WHERE run_id=?", (run_id,),
+                ).fetchall()
+                candidate_ids = {row["photo_id"] for row in candidates if row["photo_id"] is not None}
+                candidate_count = len(candidates)
+                next_rank = max((row["rank"] for row in candidates), default=0)
+                # Layout resolution may add a second source after the initial
+                # ranking. Always retain and count every actual published source.
+                for identifier in set(photo_ids) - candidate_ids:
+                    photo = connection.execute("SELECT * FROM photos WHERE id=?", (identifier,)).fetchone()
+                    if photo is None:
+                        continue
+                    next_rank += 1
+                    candidate_count += 1
+                    connection.execute(
+                        """INSERT INTO photo_selection_candidates(run_id,photo_id,rank,selected,snapshot_json)
+                        VALUES (?,?,?,1,?)""",
+                        (run_id, identifier, next_rank, json.dumps({key: photo[key] for key in (
+                            "id", "relative_path", "captured_date", "display_count", "selection_count",
+                            "last_displayed_at", "last_selected_at", "captured_month_day",
+                        )}, ensure_ascii=False)),
+                    )
+                    candidate_ids.add(identifier)
+                connection.execute("UPDATE photo_selection_runs SET candidate_count=? WHERE id=?", (candidate_count, run_id))
                 actual_ids = [identifier for identifier in photo_ids if identifier in candidate_ids]
                 for release in releases:
                     options = release.get("render_options") or {}
@@ -86,15 +94,19 @@ class DisplayHistoryRepository:
                 # Pairing can choose a subset of the proposed source pool. Keep
                 # the actual published selection separate from proposed flags.
                 previous_ids = json.loads(run["published_photo_ids_json"])
-                for photo_id in set(actual_ids) - set(previous_ids):
-                    connection.execute(
-                        "UPDATE photos SET selection_count=selection_count+1,last_selected_at=? WHERE id=?",
-                        (datetime.now(timezone.utc).isoformat(), photo_id),
-                    )
+                previous_publications.update(previous_ids)
+                new_publications.update(actual_ids)
                 published_ids = list(dict.fromkeys([*previous_ids, *actual_ids]))
                 connection.execute(
                     "UPDATE photo_selection_runs SET published_photo_ids_json=? WHERE id=?",
                     (json.dumps(published_ids), run_id),
+                )
+            # One publication can evaluate portrait and landscape pools. A
+            # source in both pools is still one selection, not two.
+            for photo_id in new_publications - previous_publications:
+                connection.execute(
+                    "UPDATE photos SET selection_count=selection_count+1,last_selected_at=? WHERE id=?",
+                    (datetime.now(timezone.utc).isoformat(), photo_id),
                 )
 
     @staticmethod
