@@ -51,7 +51,7 @@ class SeasonalAnalysisRepository:
         ).fetchall()
         # Exact copies share one paid request. Every copy can inherit its own
         # analysis row through PhotoRepository without calling the Provider.
-        unique = {}
+        unique: dict[str, dict] = {}
         for row in rows:
             item = dict(row)
             if not is_confirmed_screenshot(item):
