@@ -37,6 +37,7 @@ from inktime.app.domain.rendering import (
     resolve_layout_geometry,
 )
 from inktime.app.domain.analysis.execution_mode import execution_mode
+from inktime.app.domain.analysis.seasonal import seasonal_month_days
 from inktime.app.domain.analysis.scoring import (
     LOCAL_QUALITY_SCORE_KIND,
     SEMANTIC_SCORE_KIND,
@@ -1136,7 +1137,7 @@ class RenderService:
         return SEMANTIC_SCORE_KIND
 
     def _photo_score_kind(self, photo: dict[str, Any]) -> str:
-        if execution_mode(self.settings) == "automatic_ai":
+        if execution_mode(self.settings) in {"automatic_ai", "seasonal_ai"}:
             return SEMANTIC_SCORE_KIND
         value = str(photo.get("score_kind") or photo.get("latest_score_kind") or "").strip()
         if value in {SEMANTIC_SCORE_KIND, LOCAL_QUALITY_SCORE_KIND}:
@@ -2110,12 +2111,19 @@ class RenderService:
             auto_orientations.add(str(self.settings.get("render.frame_orientation", "landscape")))
         selected = list(dict.fromkeys(photo_ids)) if auto_orientations else photo_ids[:source_limit]
         if not selected:
+            selection_target = (
+                date.fromisoformat(str(history["history_date"]))
+                if execution_mode(self.settings) == "seasonal_ai" and history and history.get("history_date")
+                else None
+            )
             if auto_orientations:
                 selected = list(dict.fromkeys(
                     str(row["id"])
                     for orientation in sorted(auto_orientations)
-                    for row in self.select_auto_photo_candidates(quantity, frame_orientation=orientation)
+                    for row in self.select_auto_photo_candidates(quantity, frame_orientation=orientation, target_date=selection_target)
                 ))
+            elif selection_target is not None:
+                selected = [str(row["id"]) for row in self.select_candidates_details(source_limit, target_date=selection_target)]
             else:
                 selected = self.select_candidates(source_limit)
         # 明確指定與自動選片都必須在發布前重新驗證；不得使用過期候選或遺失來源契約。
@@ -2619,6 +2627,22 @@ class RenderService:
         selected: list[dict[str, Any]] = []
         selected_ids = {str(row["id"]) for row in context}
 
+        if execution_mode(self.settings) == "seasonal_ai":
+            rows = self._candidate_query(
+                target=target,
+                month_days=seasonal_month_days(target, int(self.settings.get("analysis.seasonal_window_days", 5))),
+                older_only=False,
+                limit=max(20, min(int(self.settings.get("render.local_candidate_limit", 200)), 1000)),
+                candidate_years=candidate_years,
+                score_kind=score_kind,
+            )
+            selected = self._pick_diverse_candidates(
+                [row for row in rows if str(row["id"]) not in selected_ids], limit=limit, already_selected=context,
+            )
+            for row in selected:
+                row["match_type"], row["day_distance"] = "seasonal_window", None
+            return selected
+
         if mode == "top_ranked":
             rows = self._candidate_query(
                 target=target,
@@ -2703,7 +2727,7 @@ class RenderService:
     def _auto_candidate_stages(rows: list[dict[str, Any]]):
         """Expand only through the configured fallback stages, in order."""
         allowed: list[dict[str, Any]] = []
-        for stage in ({"exact_day"}, {"nearby_day"}, {"ranked_fallback", "top_ranked"}):
+        for stage in ({"exact_day"}, {"nearby_day"}, {"ranked_fallback", "top_ranked", "seasonal_window"}):
             added = [row for row in rows if row.get("match_type", "top_ranked") in stage]
             if added:
                 allowed.extend(added)

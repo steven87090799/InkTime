@@ -10,6 +10,7 @@ MODE_LABELS = {
     "local_only": "僅使用本機選片",
     "local_with_manual_ai": "本機選片＋手動 AI",
     "automatic_ai": "自動 AI 分析",
+    "seasonal_ai": "歷年同期按需 AI 分析",
 }
 
 
@@ -58,9 +59,9 @@ def ai_readiness_snapshot(settings, provider_repository, provider_service) -> di
         {
             "key": "execution_mode",
             "label": "分析執行模式",
-            "ready": mode == "automatic_ai",
+            "ready": mode in {"automatic_ai", "seasonal_ai"},
             "current": MODE_LABELS.get(mode, mode),
-            "required": "必須設為「自動 AI 分析」",
+            "required": "必須設為「自動 AI 分析」或「歷年同期按需 AI 分析」",
             "action_label": "前往設定並直接搜尋",
             "action_url": "/settings?search=分析執行模式",
         },

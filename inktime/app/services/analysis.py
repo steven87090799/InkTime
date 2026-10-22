@@ -1431,10 +1431,13 @@ class PhotoAnalysisService:
         force_actor: str = "system",
         force_recompute: bool = False,
         analysis_plan: dict | None = None,
+        expected_content_sha256: str | None = None,
     ) -> dict:
         photo = self.photos.get_with_path(photo_id)
         if photo is None:
             raise FileNotFoundError("SCAN-001 找不到照片資料")
+        if expected_content_sha256 is not None and photo["sha256"] != expected_content_sha256:
+            raise ValueError("IMG-CHANGED 照片內容已變更，不得沿用舊任務送出")
         source = safe_join(Path(photo["root_path"]), str(photo["relative_path"]), decode_url=False)
         if not source.is_file():
             raise FileNotFoundError("SCAN-001 找不到照片檔案")

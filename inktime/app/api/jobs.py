@@ -28,6 +28,76 @@ bp = Blueprint("jobs", __name__)
 JOB_ITEM_PAGE_SIZE = 100
 
 
+def _seasonal():
+    return current_app.extensions["inktime_seasonal_analysis_service"]
+
+
+def _seasonal_status():
+    page = request.args.get("page", 1, type=int)
+    if page is None or not 1 <= page <= 100000:
+        abort(400, description="分頁不合法")
+    service = _seasonal()
+    return service.repository.status(service.today(), service.window(), offset=(page - 1) * 100)
+
+
+@bp.get("/analysis/seasonal")
+@administrator_required
+def seasonal_page():
+    return render_template("seasonal_analysis.html", state=_seasonal_status(), enabled=_seasonal().enabled())
+
+
+@bp.get("/api/v1/analysis/seasonal")
+@administrator_required
+def seasonal_status():
+    return _seasonal_status()
+
+
+@bp.post("/api/v1/analysis/seasonal/run")
+@administrator_required
+def seasonal_run():
+    service = _seasonal()
+    if not service.enabled():
+        return {"message": "請先在設定啟用「歷年同期按需 AI 分析」"}, 409
+    try:
+        result = service.ensure()
+    except ValueError as exc:
+        return {"message": str(exc)}, 409
+    return result
+
+
+@bp.post("/api/v1/analysis/seasonal/tasks/<int:task_id>/retry")
+@administrator_required
+def seasonal_retry(task_id: int):
+    payload = _payload()
+    try:
+        job_id = _seasonal().retry(task_id, str(g.user["id"]), accept_possible_charge=payload.get("accept_possible_charge") is True)
+    except ValueError as exc:
+        return {"message": str(exc)}, 409
+    return {"id": job_id, "detail_url": f"/jobs/{job_id}"}, 201
+
+
+@bp.post("/api/v1/analysis/seasonal/rerun/<stage>")
+@administrator_required
+def seasonal_rerun(stage: str):
+    payload = _payload()
+    service, actor = _seasonal(), str(g.user["id"])
+    try:
+        if stage == "preview":
+            return service.rerun_preview(actor)
+        if stage == "acknowledge":
+            if payload.get("accept_additional_cost") is not True:
+                raise ValueError("必須確認全部重跑將再次計費")
+            service.rerun_acknowledge(str(payload.get("token", "")), actor)
+            return {"stage": 2}
+        if stage == "execute":
+            job_id = service.rerun(str(payload.get("token", "")), actor,
+                str(payload.get("confirmation_phrase", "")), payload.get("accept_additional_cost") is True)
+            return {"id": job_id, "detail_url": f"/jobs/{job_id}"}, 201
+        abort(404)
+    except ValueError as exc:
+        return {"message": str(exc)}, 409
+
+
 JOB_STATUS_LABELS = {
     "pending": "等待啟動",
     "preparing": "準備中",
@@ -384,7 +454,7 @@ def _available_job_actions(job) -> list[str]:
         actions.append("resume")
     if status not in {"completed", "completed_with_errors", "failed", "cancelled"}:
         actions.append("cancel")
-    if status in {"failed", "completed_with_errors"} and int(job["failed_items"] or 0) > 0:
+    if status in {"failed", "completed_with_errors"} and int(job["failed_items"] or 0) > 0 and not json.loads(job["settings_json"]).get("seasonal_analysis"):
         actions.append("retry-failed")
     return actions
 
@@ -402,8 +472,11 @@ def jobs_page():
     mode = execution_mode(settings_repository)
     usable_routes = provider_service.usable_route_snapshot()
     automatic_ai_enabled = permits_automatic_ai(mode)
-    model_provider_available = bool(automatic_ai_enabled and usable_routes)
-    if not automatic_ai_enabled:
+    model_provider_available = bool(automatic_ai_enabled and usable_routes and mode != "seasonal_ai")
+    if mode == "seasonal_ai":
+        model_provider_message = "歷年同期模式請從「同期分析進度」補齊照片、手動重試或確認全部重跑。"
+        model_provider_action = ("同期分析進度", "/analysis/seasonal")
+    elif not automatic_ai_enabled:
         mode_label = {
             "disabled": "完全停用",
             "local_only": "僅使用本機選片",
@@ -504,6 +577,8 @@ def create_job():
         strategy = normalize_analysis_strategy(payload.get("strategy", "single"))
     except ValueError as exc:
         return {"message": str(exc)}, 400
+    if strategy != "local" and execution_mode(current_app.extensions["inktime_settings_repository"]) == "seasonal_ai":
+        return {"error_code": "SEASONAL-SCOPE", "message": "歷年同期模式請使用同期分析頁面；全部重跑需要三階段確認。", "detail_url": "/analysis/seasonal"}, 409
     # Creating a Vision job is an explicit administrator action.  Every
     # eligible photo frozen into that job must therefore cross the Provider
     # boundary; the background top-candidate policy is for automatic runs and
@@ -615,7 +690,9 @@ def selection_preview():
 @bp.post("/api/v1/jobs/<job_id>/<action>")
 @administrator_required
 def control_job(job_id: str, action: str):
-    _job_or_404(job_id)
+    job = _job_or_404(job_id)
+    if action == "retry-failed" and json.loads(job["settings_json"]).get("seasonal_analysis"):
+        return {"message": "同期分析失敗項目請至同期分析頁面逐張確認重試", "detail_url": "/analysis/seasonal"}, 409
     actions = {
         "start": _service().start,
         "pause": _service().pause,

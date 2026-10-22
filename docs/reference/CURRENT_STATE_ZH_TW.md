@@ -1,13 +1,13 @@
 # InkTime 現行版本與功能基線
 
-本分支更新日期：2026-10-22；基底為 `origin/main=17563d7`，保留已合併的 v6 顯示安全契約。本分支加入獨立的 [GPS／地標原型](../experiments/GPS_LOCATION_20261022.md)，需手動查詢／匯入；未啟用自動地址查詢或變更正式模型。下表 PhotoPainter `2.8.9` 包含完整 HTTP JSON 接收修復，仍須以該提交的 Hosted CI 結果確認編譯；原碼版本不表示已部署或刷機。部署中的版本請從「診斷」核對 Git revision，實體裝置則核對回報的韌體版本。
+本分支更新日期：2026-10-22；基底為 `origin/main=1c208f1`，新增可選的歷年同期按需分析模式，保留已合併的 v6 顯示安全契約。本分支加入獨立的 [GPS／地標原型](../experiments/GPS_LOCATION_20261022.md)，需手動查詢／匯入；未啟用自動地址查詢或變更正式模型。下表 PhotoPainter `2.8.9` 包含完整 HTTP JSON 接收修復，仍須以該提交的 Hosted CI 結果確認編譯；原碼版本不表示已部署或刷機。部署中的版本請從「診斷」核對 Git revision，實體裝置則核對回報的韌體版本。
 
 ## 版本不是同一個數字
 
 | 項目 | 原始碼值 | 權威來源 |
 |---|---|---|
 | Python 套件 | `2.0.0.dev0`，部署／CI 支援 Python 3.12（`>=3.12,<3.13`） | [`inktime/_version.py`](../../inktime/_version.py)、[`pyproject.toml`](../../pyproject.toml) |
-| SQLite Migration | 連續 `1–71`；64–66 保護配送／渲染輸入並支援雙圖附說明，67 索引活動清理，68 永久保存照片內容版本與模型證據，69 加入 Batch 候選分頁索引與逐項失敗重試授權，70 支援橫單直雙與拍攝日期的自動版型，71 新增獨立地點證據與精確 GPS 快取；保留歷史／外鍵 | [`migrations.py`](../../inktime/app/db/migrations.py) |
+| SQLite Migration | 連續 `1–72`；64–66 保護配送／渲染輸入並支援雙圖附說明，67 索引活動清理，68 永久保存照片內容版本與模型證據，69 加入 Batch 候選分頁索引與逐項失敗重試授權，70 支援橫單直雙與拍攝日期的自動版型，71 新增獨立地點證據與精確 GPS 快取，72 保存同期分析任務、內容去重與重跑確認；保留歷史／外鍵 | [`migrations.py`](../../inktime/app/db/migrations.py) |
 | AI Analysis Schema | 嚴格 v6；保留 v4/v5 相容閱讀。正式發布要求 v6 安全分析，舊結果不自動重付費 | [`plan.py`](../../inktime/app/domain/analysis/plan.py)、[`schema.py`](../../inktime/app/domain/analysis/schema.py) |
 | ESP32 7C／PhotoPainter 韌體 | `2.8.9`（本分支；未刷機） | [`ink-display-7C-photo.ino`](../../esp32/ink-display-7C-photo/ink-display-7C-photo.ino) |
 | ESP32 Config Store payload | v5，讀取 v1–v5；舊容量 12、新 payload 24 slots read compatibility | [`device_config_store_core.h`](../../esp32/ink-display-7C-photo/device_config_store_core.h) |
@@ -21,6 +21,7 @@ Config Store v5 是裝置本機儲存格式，不是所有 HTTP Manifest 的版�
 
 - 三程序為 Web（`server:app`）、Worker（`inktime.app.workers.runner`）、Scheduler（`inktime.app.workers.scheduler`），共用 `/data` 與唯讀 `/photos`。
 - 新安裝 `analysis.execution_mode=local_only`。只有設定 Provider 不會開啟 AI；一般 AI 工作需要 `automatic_ai`，單張手動 AI 可使用 `local_with_manual_ai`。`disabled` 拒絕新分析。正式相框發布要求 v6 視覺安全分析，純本機分析不產生可發布照片。
+- 可選 `seasonal_ai` 歷年同期按需模式：以顯示日期前後 `analysis.seasonal_window_days` 天（預設 5）搜尋各年照片，逐張補齊缺少的模型資料，再以既有資料排名。日期以閏年日曆循環計算，支援跨年及 2 月 29 日；非當期新照片等到有顯示需求才處理。服務重啟、日期重疊或模型升級均不自動重送已處理內容。詳見[同期分析](../analysis/SEASONAL_ANALYSIS_ZH_TW.md)。
 - 新策略為 `local`／`single`；舊的 `low_cost`、`smart`、`smart_two_stage`、`high_quality`、`single_high`、`custom` 正規化成 `single`，不恢復兩階段圖片分析。一次分析計畫最多一次圖片 Vision，只在本機抽取 JSON 並嚴格驗證，不追加模型 JSON 修復或長描述請求；另建重跑工作仍可能產生新費用。
 - 新分析提示詞為 `photo-analysis-v6-literary20-20261021`，保留一句依照片生成、不超過 20 字且避免流水帳的文青短句、評分、內容分類與 EXIF 後旋轉，新增 AV 封面、商業模特、截圖與文件紀錄分類；凍結的 v5 工作仍用原文字與 v5 Schema。實際請求與費用預覽共用最高 512 output tokens；圖片輸入 Token 依模型與像素計費，預覽只是情境而非保證上限。
 - 同步分析的候選選取與保存共用指紋，顯示控制與停用的修復策略不影響是否已完成。定期分析先凍結 Provider／模型／提示詞／規則與執行模式；只有自動 AI 模式允許建立定期雲端分析工作。

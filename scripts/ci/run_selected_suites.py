@@ -57,6 +57,7 @@ RUNNER_SUITE_TEST_PATHS: dict[str, tuple[str, ...]] = {
         "tests/integration/test_management_ui.py",
     ),
     "web_api_owner": (
+        "tests/integration/test_seasonal_analysis.py",
         "tests/integration/test_photo_places.py",
         "tests/integration/test_auto_photo_review_regressions.py",
         "tests/integration/test_photo_crop_state.py",
@@ -71,6 +72,7 @@ RUNNER_SUITE_TEST_PATHS: dict[str, tuple[str, ...]] = {
         "tests/integration/test_deployment_modes.py",
     ),
     "runtime_scheduler_owner": (
+        "tests/integration/test_seasonal_analysis.py",
         "tests/integration/test_auto_publish_pool_regression.py",
         "tests/unit/test_runtime_concurrency.py",
         "tests/unit/test_runtime_config.py",
@@ -93,6 +95,7 @@ RUNNER_SUITE_TEST_PATHS: dict[str, tuple[str, ...]] = {
         "tests/integration/test_v6_display_safety.py",
     ),
     "persistence_owner": (
+        "tests/integration/test_seasonal_analysis.py",
         "tests/integration/test_photo_places.py",
         "tests/integration/test_auto_photo_selection_regressions.py",
         "tests/unit/test_backups.py",
@@ -165,6 +168,7 @@ RUNNER_SUITE_TEST_PATHS: dict[str, tuple[str, ...]] = {
         "tests/integration/test_budget_calendar.py",
     ),
     "provider_analysis_owner": (
+        "tests/integration/test_seasonal_analysis.py",
         "tests/integration/test_budget_offset_regressions.py",
         "tests/unit/test_analysis_plan.py",
         "tests/unit/test_analysis_schema.py",

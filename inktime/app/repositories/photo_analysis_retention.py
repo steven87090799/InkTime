@@ -127,6 +127,8 @@ class PhotoAnalysisRetentionRepository:
                 SELECT analysis_id
                 FROM photo_review_events
                 WHERE analysis_id IS NOT NULL
+                UNION
+                SELECT analysis_id FROM seasonal_analysis_tasks WHERE analysis_id IS NOT NULL
             ),
             inherited_references AS (
                 SELECT DISTINCT CAST(CASE WHEN json_valid(semantic_json)=1 THEN

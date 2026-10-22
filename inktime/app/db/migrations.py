@@ -2511,6 +2511,32 @@ MIGRATIONS = (
             "place_json TEXT NOT NULL,updated_at TEXT NOT NULL,PRIMARY KEY(gps_key,provider,language,version))",
         ),
     ),
+    Migration(
+        72,
+        "保存歷年同期逐張分析任務、內容去重與重跑確認",
+        (
+            """CREATE TABLE seasonal_analysis_tasks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                content_sha256 TEXT NOT NULL,
+                photo_id TEXT REFERENCES photos(id) ON DELETE SET NULL,
+                job_id TEXT REFERENCES jobs(id) ON DELETE RESTRICT,
+                analysis_id INTEGER REFERENCES photo_analysis(id) ON DELETE SET NULL,
+                analysis_snapshot_json TEXT,
+                status TEXT NOT NULL CHECK(status IN ('queued','running','completed','failed','unknown')),
+                error_code TEXT, target_date TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+                UNIQUE(job_id,content_sha256)
+            )""",
+            "CREATE INDEX idx_seasonal_content ON seasonal_analysis_tasks(content_sha256,id DESC)",
+            "CREATE INDEX idx_seasonal_status ON seasonal_analysis_tasks(status,job_id)",
+            "CREATE UNIQUE INDEX idx_seasonal_active_content ON seasonal_analysis_tasks(content_sha256) "
+            "WHERE status IN ('queued','running')",
+            """CREATE TABLE seasonal_rerun_confirmations (
+                token TEXT PRIMARY KEY, actor TEXT NOT NULL, stage INTEGER NOT NULL,
+                snapshot TEXT NOT NULL, plan_fingerprint TEXT NOT NULL, photo_count INTEGER NOT NULL,
+                expires_at TEXT NOT NULL, job_id TEXT REFERENCES jobs(id) ON DELETE RESTRICT
+            )""",
+        ),
+    ),
 )
 
 
