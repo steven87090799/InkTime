@@ -8,11 +8,42 @@ from pathlib import Path
 from PIL import Image
 import pytest
 
+from inktime.app.web.datetime_display import format_display_datetime
 from inktime.app.repositories.settings import SETTING_DEFINITIONS
 from inktime.app.workers.runner import WorkerRunner
 from tests.conftest import create_admin, csrf, login
 from tests.integration.test_jobs import add_photos
 from tests.unit.test_analysis_schema import valid_result
+
+
+@pytest.mark.parametrize("value,zone,expected", [
+    ("2026-10-17T18:26:01.815629+00:00", "Asia/Taipei", "2026/10/18 02:26:01"),
+    ("2026-10-22T19:13:41.802144+00:00", "Asia/Taipei", "2026/10/23 03:13:41"),
+    ("2026-01-01T00:30:00Z", "America/Los_Angeles", "2025/12/31 16:30:00"),
+    ("2026-07-01T00:30:00Z", "America/Los_Angeles", "2026/06/30 17:30:00"),
+    ("2026-10-22T23:59:00", "Asia/Taipei", "2026/10/23 07:59:00"),
+    ("2026-10-22", "Asia/Taipei", "2026/10/22"),
+    ("not-a-date", "Asia/Taipei", "not-a-date"),
+    (None, "Asia/Taipei", "—"),
+])
+def test_ui_time_conversion_respects_offsets_dst_and_unzoned_photo_dates(value, zone, expected):
+    assert format_display_datetime(value, zone) == expected
+    assert format_display_datetime("2026-10-22T23:59:00", zone, naive_is_utc=False) == "2026/10/22 23:59:00"
+
+
+def test_error_dates_render_as_configured_local_time_without_changing_storage(client, app):
+    create_admin(app)
+    login(client)
+    raw = "2026-10-17T18:26:01.815629+00:00"
+    with app.extensions["inktime_database"].session() as c:
+        c.execute("INSERT INTO job_errors(component,error_code,fingerprint,severity,message,first_seen_at,last_seen_at) "
+                  "VALUES ('fixture','DATE-FIXTURE','date-fixture','warning','fixture',?,?)", (raw, raw))
+    body = client.get("/errors").get_data(as_text=True)
+    assert "2026/10/18 02:26:01" in body
+    assert 'data-display-timezone="Asia/Taipei"' in body
+    assert '/static/datetime-display.js' in body
+    with app.extensions["inktime_database"].session() as c:
+        assert c.execute("SELECT first_seen_at FROM job_errors WHERE fingerprint='date-fixture'").fetchone()[0] == raw
 
 
 def test_primary_management_pages_render(client, app):

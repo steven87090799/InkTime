@@ -33,6 +33,8 @@ Config Store v5 是裝置本機儲存格式，不是所有 HTTP Manifest 的版�
 - 現行 v6 與相容 v4/v5 採 `ranking-v5-ai-first`：回憶 67%、視覺 33%、本機品質 0%，再套用 special bonus 與最愛提升。本機品質現在是 candidate qualification／quality gate，不是 ranking weight；它只負責本機特徵完成、品質與來源資格判斷，不與 semantic 分數混比或補位。E6 只參與顯示分數；v6 明確顯示風險固定排除，低信心疑似內容與方向須人工確認，見 [現行 Vision Schema](../VISION_SCHEMA.md)。
 - 照片庫優先顯示現行 v6／相容 v4/v5 模型，再顯示已保存的歷史模型紀錄及本機分析；歷史描述／短句可搜尋、原始評分可查閱，v1–v3 歷史分數不參與現行 semantic 排名。儀表板分開標示含本機的完成狀態與依照片去重的模型結果。
 - `completed` 只表示工作結束；本機、預篩排除、繼承或 cache hit 不證明有新 API 請求。請合併工作策略、AI Trace attempts、`api_usage` 與時間戳判讀。
+- Web 顯示時間統一為 `YYYY/MM/DD HH:mm:ss`，依 `general.timezone`（預設台北）換算，包含即時插入的監控資料；沒有時區的照片拍攝日期保留原時刻。表單提交值、原始 JSON、資料庫與裝置通訊仍保留原有格式與精度。
+- 裝置改用離線排程／佇列後，監控會保留並結束不再適用的舊版 Release 警告，不會偽造 SHA 或顯示 ACK；舊版連線模式仍依同一 Release 的持久驗證證據檢查逾期。
 
 操作見[管理員指南](../guides/ADMIN_GUIDE_ZH_TW.md)、[本機選片](../guides/LOCAL_ONLY_SELECTION_ZH_TW.md)與[Activity／AI Trace](../guides/ACTIVITY_AI_TRACE_ZH_TW.md)。設定頁完整列出設定，提供全文、分類、風險與生效方式篩選；功能與設定說明大全位於 `/help/controls`。
 

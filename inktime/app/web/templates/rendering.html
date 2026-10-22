@@ -99,7 +99,7 @@
             data-text="{{ photo.e6_text_score if photo.e6_text_score is not none else '' }}"
             data-crop-method="{{ photo.crop_method or 'center' }}"
             data-faces="{{ photo.crop_face_count or 0 }}">
-            {{ photo.captured_at or '日期未知' }}｜{{ '歷年同日' if photo.match_type == 'exact_day' else ('前後 ' ~ photo.day_distance ~ ' 日' if photo.match_type == 'nearby_day' else '高分補位') }}｜{{ photo.relative_path }}
+            {{ (photo.captured_at or '日期未知')|human_photo_datetime }}｜{{ '歷年同日' if photo.match_type == 'exact_day' else ('前後 ' ~ photo.day_distance ~ ' 日' if photo.match_type == 'nearby_day' else '高分補位') }}｜{{ photo.relative_path }}
           </option>
           {% endfor %}
         </select>
@@ -107,7 +107,7 @@
       <label id="secondary-photo-field" hidden>第二張照片
         <select id="composition-secondary-photo">
           <option value="">依目前設定自動配對</option>
-          {% for photo in candidate_photos %}<option value="{{ photo.id }}">{{ photo.captured_at or '日期未知' }}｜{{ photo.relative_path }}</option>{% endfor %}
+          {% for photo in candidate_photos %}<option value="{{ photo.id }}">{{ (photo.captured_at or '日期未知')|human_photo_datetime }}｜{{ photo.relative_path }}</option>{% endfor %}
         </select>
       </label>
       <label>水平裁切焦點 <output id="crop-x-value">50%</output><input id="crop-x" type="range" min="0" max="100" value="50"></label>

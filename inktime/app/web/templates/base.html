@@ -1,10 +1,12 @@
 {% from "components/error_notice.html" import error_notice with context %}
 <!doctype html>
-<html lang="zh-Hant-TW">
+<html lang="zh-Hant-TW" data-display-timezone="{{ display_timezone }}">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="csrf-token" content="{{ csrf_token() }}">
+  <meta name="display-timezone" content="{{ display_timezone }}">
+  <script src="{{ url_for('static', filename='datetime-display.js') }}"></script>
   <title>{% block title %}InkTime{% endblock %}</title>
   <script nonce="{{ csp_nonce }}">
     (() => {
@@ -79,6 +81,7 @@
         </div>
       </aside>
     {% endif %}
+    <p class="muted ui-timezone">時間顯示：{{ '台北時間' if display_timezone == 'Asia/Taipei' else display_timezone }}（24 小時制）</p>
   </main>
   <div class="context-help-popover" id="context-help-popover" role="tooltip" hidden></div>
   <dialog id="inktime-confirm-dialog" aria-labelledby="inktime-confirm-title">

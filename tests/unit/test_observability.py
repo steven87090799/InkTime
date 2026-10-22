@@ -3,11 +3,15 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 import subprocess
+import json
+
+import pytest
 
 from inktime.app.core.security import redact
 from inktime.app.db import Database, migrate
 from inktime.app.repositories import settings as settings_module
 from inktime.app.repositories.settings import SettingsRepository
+from inktime.app.repositories.devices import DeviceRepository
 from inktime.app.services.diagnostics import DiagnosticsService
 from inktime.app.services.observability import ObservabilityService
 
@@ -18,6 +22,69 @@ def _service(tmp_path):
     settings = SettingsRepository(database)
     settings.ensure_defaults()
     return database, settings, ObservabilityService(database, settings, None)
+
+
+def _legacy_device_watchdog(tmp_path):
+    database, _, service = _service(tmp_path)
+    now = datetime(2026, 10, 23, 12, tzinfo=timezone.utc)
+    service._now = lambda: now
+    device, _ = DeviceRepository(database, "test-pepper").create("Watchdog fixture")
+    assigned = (now - timedelta(days=3)).isoformat()
+    downloaded = (now - timedelta(hours=4)).isoformat()
+    with database.session() as c:
+        c.execute("INSERT INTO releases(id,display_type,width,height,pixel_format,manifest_json,status,created_at) "
+                  "VALUES ('legacy-release','epd',480,800,'2bpp','{}','published',?)", (assigned,))
+        c.execute("INSERT INTO device_render_releases(device_id,release_id,assigned_at) VALUES (?,'legacy-release',?)",
+                  (device, assigned))
+        c.execute("UPDATE devices SET last_release_id='legacy-release',last_download_at=?,config_version=2,acked_config_version=2 WHERE id=?",
+                  (downloaded, device))
+    return database, service, device, now
+
+
+@pytest.mark.parametrize("mode", ["inktime_offline_schedule", "stock_compat"])
+def test_queue_mode_retires_only_legacy_delivery_alerts_without_fabricating_ack(tmp_path, mode):
+    database, service, device, now = _legacy_device_watchdog(tmp_path)
+    for code in ("DEVICE-DOWNLOAD-OVERDUE", "DEVICE-VERIFY-OVERDUE", "DEVICE-ACK-OVERDUE"):
+        service.alert("device", code, "old pointer", subject=f"{device}:legacy-release")
+    service.alert("device", "DEVICE-DISPLAY-FAILED", "legacy failures", subject=device)
+    with database.session() as c:
+        c.execute("UPDATE devices SET delivery_mode=?,offline_prefetch_allowed=?,acked_config_version=1,download_failure_count=4 WHERE id=?",
+                  (mode, int(mode == "inktime_offline_schedule"), device))
+    service._check_devices(now)
+    with database.session() as c:
+        unresolved = {r[0] for r in c.execute("SELECT error_code FROM job_errors WHERE resolved_at IS NULL")}
+        assert unresolved == {"DEVICE-CONFIG-ACK-OVERDUE"}
+        notes = [r[0] for r in c.execute("SELECT resolution_note FROM job_errors WHERE resolved_at IS NOT NULL")]
+        assert len(notes) == 4 and all("舊版 Release 警告已不適用" in note for note in notes)
+        assert c.execute("SELECT count(*) FROM device_events").fetchone()[0] == 0
+        assert c.execute("SELECT last_release_id FROM devices WHERE id=?", (device,)).fetchone()[0] == "legacy-release"
+
+
+def test_legacy_delivery_still_requires_matching_verification_and_keeps_old_evidence(tmp_path):
+    database, service, device, now = _legacy_device_watchdog(tmp_path)
+    service._check_devices(now)
+    with database.session() as c:
+        assert c.execute("SELECT error_code FROM job_errors WHERE resolved_at IS NULL").fetchone()[0] == "DEVICE-VERIFY-OVERDUE"
+        for index in range(26):
+            details = {"release_id": "legacy-release" if index == 0 else "other-release",
+                       "payload_sha256_verified": True, "display_updated": True}
+            c.execute("INSERT INTO device_events(device_id,level,event,message,details_json,created_at) "
+                      "VALUES (?,'INFO','status_report','fixture',?,?)",
+                      (device, json.dumps(details), (now - timedelta(hours=3) + timedelta(minutes=index)).isoformat()))
+        c.execute("INSERT INTO device_events(device_id,level,event,message,details_json,created_at) "
+                  "VALUES (?,'INFO','status_report','legacy malformed','{bad}',?)", (device, now.isoformat()))
+    service._check_devices(now)
+    with database.session() as c:
+        assert c.execute("SELECT count(*) FROM job_errors WHERE resolved_at IS NULL").fetchone()[0] == 0
+
+
+def test_a_different_release_download_cannot_satisfy_the_legacy_assignment(tmp_path):
+    database, service, device, now = _legacy_device_watchdog(tmp_path)
+    with database.session() as c:
+        c.execute("UPDATE devices SET last_release_id='other-release' WHERE id=?", (device,))
+    service._check_devices(now)
+    with database.session() as c:
+        assert {r[0] for r in c.execute("SELECT error_code FROM job_errors WHERE resolved_at IS NULL")} == {"DEVICE-DOWNLOAD-OVERDUE"}
 
 
 def test_alert_escalation_bypasses_throttle_and_does_not_silently_downgrade(tmp_path):

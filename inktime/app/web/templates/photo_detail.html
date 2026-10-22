@@ -51,7 +51,7 @@
     <div class="photo-facts-column">
       <dl class="photo-facts-grid">
         <div><dt>尺寸</dt><dd>{{ photo.width }} × {{ photo.height }} {{ photo.format }}</dd></div>
-        <div><dt>拍攝時間</dt><dd>{{ photo.captured_at or '無資料' }}</dd></div>
+        <div><dt>拍攝時間</dt><dd>{{ (photo.captured_at or '無資料')|human_photo_datetime }}</dd></div>
         <div><dt>地點</dt><dd>{{ location_name or ('有 GPS，但附近找不到城市' if photo.gps_lat is not none and photo.gps_lon is not none else '照片沒有 GPS') }}</dd></div>
         {% if photo_place %}
         <div><dt>地址</dt><dd>{{ photo_place.full_address or '地圖資料未提供地址' }}{% if photo_place.precision %}（地圖精度：{{ photo_place.precision }}）{% endif %}</dd></div>
