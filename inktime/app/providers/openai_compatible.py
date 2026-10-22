@@ -10,7 +10,7 @@ import os
 from pathlib import Path
 import re
 import time
-from typing import Any, cast
+from typing import Any, BinaryIO, cast
 from uuid import uuid4
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -38,6 +38,7 @@ from inktime.app.providers.config import (
     validate_model_id,
 )
 from .base import MAX_BATCH_RESULT_BYTES, ProviderCallTrace, ProviderResponse, Usage, VisionAttemptState, VisionProvider
+from .multipart import BatchMultipartBody
 
 
 LOGGER = logging.getLogger("provider_transport")
@@ -1273,36 +1274,27 @@ class OpenAICompatibleProvider(VisionProvider):
             raise ProviderHTTPError("OpenRouter 不支援 InkTime Batch 生命週期", "BATCH-OPENROUTER-001")
         if not batch_requests or len(batch_requests) > 50_000:
             raise ValueError("單一 Batch 必須包含 1 到 50,000 個請求")
-        content = BytesIO()
-        for index, request_item in enumerate(batch_requests):
-            item = dict(request_item)
-            item.setdefault("custom_id", f"inktime-{index}")
-            item.setdefault("method", "POST")
-            item.setdefault("url", "/v1/chat/completions")
-            if "body" not in item:
-                raise ValueError("Batch 每個請求都需要 body")
-            content.write(json.dumps(item, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
-            content.write(b"\n")
-        data = content.getvalue()
-        if len(data) > 200 * 1024 * 1024:
-            raise ValueError("Batch JSONL 不可超過 200 MB")
-        upload_headers = {}
-        if self.api_key:
-            upload_headers["Authorization"] = f"Bearer {self.api_key}"
-        upload = self._send(
-            "POST",
-            "/files",
-            retry_policy=AMBIGUOUS_UPLOAD,
-            headers=upload_headers,
-            data={"purpose": "batch"},
-            files={"file": (f"inktime-batch-{uuid4()}.jsonl", data, "application/jsonl")},
-            timeout=self.request_timeout,
-        )
-        payload = self._json_response(upload, error_code="BATCH-UPLOAD-REJECTED", ambiguous_on_invalid=True)
-        input_file_id = payload.get("id")
-        if not input_file_id:
-            raise ProviderHTTPError("Batch 上傳回應缺少 file id", "BATCH-UPLOAD-UNKNOWN", ambiguous=True)
-        return str(self.create_batch(str(input_file_id), completion_window=completion_window)["id"])
+        # Compatibility API: retain one JSONL buffer, without a second getvalue
+        # copy or an additional full multipart body. NAS shards use the file
+        # path below and never need this whole-JSONL compatibility buffer.
+        with BytesIO() as content:
+            for index, request_item in enumerate(batch_requests):
+                item = dict(request_item)
+                item.setdefault("custom_id", f"inktime-{index}")
+                item.setdefault("method", "POST")
+                item.setdefault("url", "/v1/chat/completions")
+                if "body" not in item:
+                    raise ValueError("Batch 每個請求都需要 body")
+                content.write(json.dumps(item, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+                content.write(b"\n")
+                if content.tell() > 200 * 1024 * 1024:
+                    raise ValueError("Batch JSONL 不可超過 200 MB")
+            size = content.tell()
+            content.seek(0)
+            input_file_id = self._upload_batch_stream(
+                content, size=size, filename=f"inktime-batch-{uuid4()}.jsonl"
+            )
+        return str(self.create_batch(input_file_id, completion_window=completion_window)["id"])
 
     def upload_batch_file(self, path: Path, *, remote_filename: str | None = None) -> str:
         if self.kind == "openrouter":
@@ -1310,15 +1302,23 @@ class OpenAICompatibleProvider(VisionProvider):
         if not path.is_file():
             raise FileNotFoundError("BATCH-FILE-001 找不到本機 JSONL")
         with path.open("rb") as stream:
-            response = self._send(
-                "POST",
-                "/files",
-                retry_policy=AMBIGUOUS_UPLOAD,
-                headers={"Authorization": f"Bearer {self.api_key}"} if self.api_key else {},
-                data={"purpose": "batch"},
-                files={"file": (remote_filename or path.name, stream, "application/jsonl")},
-                timeout=self.request_timeout,
+            return self._upload_batch_stream(
+                stream, size=os.fstat(stream.fileno()).st_size, filename=remote_filename or path.name
             )
+
+    def _upload_batch_stream(self, stream: BinaryIO, *, size: int, filename: str) -> str:
+        body = BatchMultipartBody(stream, size=size, filename=filename)
+        headers = {"Content-Type": body.content_type}
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+        response = self._send(
+            "POST",
+            "/files",
+            retry_policy=AMBIGUOUS_UPLOAD,
+            headers=headers,
+            data=body,
+            timeout=self.request_timeout,
+        )
         payload = self._json_response(response, error_code="BATCH-UPLOAD-REJECTED", ambiguous_on_invalid=True)
         file_id = payload.get("id")
         if not isinstance(file_id, str) or not file_id:
