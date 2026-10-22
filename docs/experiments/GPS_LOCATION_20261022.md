@@ -107,6 +107,14 @@ python scripts/experiments/photo_places.py import-landmark --database /tmp/test-
 
 尚未完成：實際地址提供者覆蓋／準確率、付費模型品質比較、正式 Worker／Batch 整合、10 萬張真實 NAS 資源與面板效果驗收。未遷移正式資料庫、未部署、未更換正式模型、未刷韌體。
 
+### 09:00 交接檢查
+
+2026-10-22 早上只檢查一次 PR #168 的當時最新提交 `13f8fe7`：[Hosted CI #1245](https://github.com/steven87090799/InkTime/actions/runs/39641894317) 失敗，容器安全／Benchmark 契約通過；Migration、靜態檢查、Web E2E 也通過，但不能因此宣稱全部測試成功。
+
+兩個明確失敗已修正：舊 Schema 70 回歸測試的升級清單改為包含 69 之後所有已知 Migration；新 `test_photo_places.py` 整合測試登記到 render／persistence／web API 的 CI owner 與 runner。另將地點 unit 測試加入 scanner／provider owner，避免未來單獨更動相關來源時漏跑。本地只做語法、Lint、文件與測試路由靜態驗證，不跑 pytest。修正推送後的新 CI 尚待確認（`CI_STATUS=CI_PENDING`）；本次交接不輪詢或重跑舊 CI。
+
+本次一次性早上交接完成後刪除提醒排程，不建立後續監控。
+
 ## 一手來源
 
 - [OpenRouter GPT-6 Luna](https://openrouter.ai/openai/gpt-6-luna)、[模型目錄 API](https://openrouter.ai/api/v1/models)、[Luna endpoints](https://openrouter.ai/api/v1/models/openai/gpt-6-luna-20260922/endpoints)

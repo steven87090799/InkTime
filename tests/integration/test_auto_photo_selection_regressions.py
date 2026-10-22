@@ -91,7 +91,7 @@ def test_schema_70_restores_views_before_their_instead_of_triggers(tmp_path, mon
         connection.execute("CREATE TRIGGER custom_view_update INSTEAD OF UPDATE OF name ON custom_device_names "
                            "BEGIN UPDATE devices SET name=NEW.name WHERE id=OLD.id; END")
     monkeypatch.setattr(migrations, "MIGRATIONS", full)
-    assert migrations.migrate(database) == [70]
+    assert migrations.migrate(database) == [migration.version for migration in full if migration.version > 69]
 
 
 def test_greedy_auto_pairing_keeps_a_complete_valid_pair_assignment():
