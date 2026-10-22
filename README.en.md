@@ -1,6 +1,6 @@
 # InkTime · Photo analysis and e-ink memory frames
 
-> Branch documentation updated on 2026-10-22 from `origin/main=17563d7`. SQLite Migration 71, AI Schema v6, firmware 2.8.9 (HTTP JSON reception fix; not flashed), Config Store v5 and NAS deployment contract 3 are separate versions. The [GPS/landmark experiment](docs/experiments/GPS_LOCATION_20261022.md) requires explicit invocation and makes no automatic external calls. Check the deployed Git revision in Diagnostics; see the [source baseline](docs/reference/CURRENT_STATE_ZH_TW.md).
+> Branch documentation updated on 2026-10-22 from `origin/main=1c208f1`. SQLite Migration 74, AI Schema v6, firmware 2.8.9 (HTTP JSON reception fix; not flashed), Config Store v5 and NAS deployment contract 3 are separate versions. The [GPS/landmark experiment](docs/experiments/GPS_LOCATION_20261022.md) requires explicit invocation and makes no automatic external calls. Check the deployed Git revision in Diagnostics; see the [source baseline](docs/reference/CURRENT_STATE_ZH_TW.md).
 
 [繁體中文](README.md) · [Documentation map](docs/README.md) · [HTML manual](USER_MANUAL.html) · [Quick start](docs/getting-started/QUICK_START_ZH_TW.md)
 
@@ -62,7 +62,7 @@ bonus = [0, 2, 5, 9, 14][effective_special_level]
 ranking_score = round(clamp(base + bonus, 0, 100), 2)
 ```
 
-Local quality is a candidate gate, not a ranking weight. E6 suitability affects display suitability, not this formula. Favorites raise the special level by one and do not bypass AI content exclusions. See the [selection contract](docs/analysis/PHOTO_SELECTION_AI_FIRST_ZH_TW.md).
+Local quality is a candidate gate, not a ranking weight. E6 suitability affects display suitability, not this formula. Favorites raise the special level by one and do not bypass AI content exclusions. Automatic selection prefers unused eligible photos, then less-used photos. The Display History page retains each selection and its complete candidate pool. Confirmed display and publication counts are separate. Model failures create persistent unread alerts and use the configured webhook. See the [selection contract](docs/analysis/PHOTO_SELECTION_AI_FIRST_ZH_TW.md).
 
 ## Architecture
 

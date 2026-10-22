@@ -250,7 +250,11 @@ def _execute_job_item(app, item, *, job, settings, provider, provider_error, ana
         return app.extensions["inktime_notification_service"].deliver_one(
             int(settings["notification_id"])
         )
-    return analysis.analyze_photo(
+    analyze = (
+        app.extensions["inktime_seasonal_analysis_service"].analyze_item
+        if settings.get("seasonal_analysis") else analysis.analyze_photo
+    )
+    return analyze(
         photo_id=item["photo_id"],
         job_id=job["id"],
         provider=provider,
@@ -327,6 +331,16 @@ class WorkerRunner:
             except (ValueError, TypeError):
                 repository.fail_invalid_settings(str(job["id"]))
                 continue
+            seasonal = self.app.extensions.get("inktime_seasonal_analysis_service")
+            if str(job["kind"]) == "render" and seasonal is not None:
+                try:
+                    if seasonal.before_render(settings, job_id=str(job["id"])):
+                        continue
+                except ValueError as exc:
+                    # No paid request is made here. Keep the render job queued
+                    # while the operator repairs Provider/configuration state.
+                    log_event(LOGGER, logging.WARNING, str(exc), event="seasonal_render_waiting", job_id=job["id"])
+                    continue
             analysis_plan = (
                 json.loads(str(job["analysis_spec_json"] or "{}")) if str(job["kind"]) == "analysis" else {}
             )

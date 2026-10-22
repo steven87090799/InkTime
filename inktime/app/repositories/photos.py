@@ -1138,7 +1138,9 @@ class PhotoRepository:
             return connection.execute("SELECT * FROM scan_runs WHERE id=?", (scan_id,)).fetchone()
 
     def inherit_existing_analysis(
-        self, photo_id: str, job_id: str | None, *, analysis_context: dict | None = None
+        self, photo_id: str, job_id: str | None, *, analysis_context: dict | None = None,
+        include_self: bool = False,
+        semantic_only: bool = False,
     ) -> dict | None:
         required_fingerprint = str((analysis_context or {}).get("analysis_fingerprint") or "")
         required_spec = str((analysis_context or {}).get("analysis_spec_json") or "")
@@ -1146,19 +1148,21 @@ class PhotoRepository:
         if required_spec:
             reusable_fingerprint = reusable_analysis_fingerprint(json.loads(required_spec))
         with self.database.session() as connection:
+            target_content = connection.execute("SELECT sha256 FROM photos WHERE id=?", (photo_id,)).fetchone()
             candidates = connection.execute(
                 f"""
                 SELECT a.*,source.local_candidate_score AS source_local_candidate_score,
                        source.visual_orientation_rotation_cw,source.visual_orientation_confidence,
                        source.visual_orientation_ambiguous,source.visual_orientation_evidence_json FROM photos target
-                JOIN photos source ON source.sha256=target.sha256 AND source.id<>target.id
+                JOIN photos source ON source.sha256=target.sha256 AND (source.id<>target.id OR ?)
                 JOIN photo_analysis a ON a.photo_id=source.id
                 WHERE target.id=?
                   AND a.schema_version IN (4,5,6)
+                  AND (?=0 OR a.score_kind='semantic')
                   AND (?='' OR a.analysis_fingerprint=? OR ?)
                 ORDER BY {preferred_analysis_order_sql('a')}
                 """,
-                (photo_id, required_fingerprint, required_fingerprint, reusable_fingerprint is not None),
+                (int(include_self), photo_id, int(semantic_only), required_fingerprint, required_fingerprint, reusable_fingerprint is not None),
             )
             row = None
             for candidate in candidates:
@@ -1172,6 +1176,18 @@ class PhotoRepository:
                         break
                 except (TypeError, ValueError):
                     continue
+            if row is None and target_content is not None:
+                archived = connection.execute(
+                    "SELECT analysis_snapshot_json FROM seasonal_analysis_tasks WHERE content_sha256=? "
+                    "AND analysis_snapshot_json IS NOT NULL ORDER BY id DESC LIMIT 1", (target_content["sha256"],)
+                ).fetchone()
+                if archived:
+                    snapshot = json.loads(archived["analysis_snapshot_json"])
+                    source_spec = json.loads(snapshot.get("analysis_spec_json") or "{}")
+                    if (not semantic_only or snapshot.get("score_kind") == SEMANTIC_SCORE_KIND) and (
+                        not required_fingerprint or snapshot.get("analysis_fingerprint") == required_fingerprint or
+                        (reusable_fingerprint is not None and source_spec and reusable_analysis_fingerprint(source_spec) == reusable_fingerprint)):
+                        row = snapshot
         if row is None:
             return None
         if row["schema_version"] not in SUPPORTED_ANALYSIS_SCHEMA_VERSIONS:
@@ -1217,6 +1233,7 @@ class PhotoRepository:
                 "analysis_fingerprint": str(row["analysis_fingerprint"] or ""),
                 "vision_request_fingerprint": str(row["vision_request_fingerprint"] or ""),
             },
+            expected_content_sha256=str(target_content["sha256"]) if target_content else None,
         )
         return result
 
@@ -2735,7 +2752,17 @@ class PhotoRepository:
                 }
                 columns = ",".join(record)
                 placeholders = ",".join("?" for _ in record)
-                connection.execute(f"INSERT INTO photo_analysis ({columns}) VALUES ({placeholders})", tuple(record.values()))  # noqa: S608 -- fixed internal column names
+                cursor = connection.execute(f"INSERT INTO photo_analysis ({columns}) VALUES ({placeholders})", tuple(record.values()))  # noqa: S608 -- fixed internal column names
+                if semantic_available and job_id:
+                    # Persist the result with the task in the same transaction.
+                    # Scanner replacement can archive/delete the live analysis;
+                    # the original content still retains its complete result.
+                    snapshot = {**record, "id": cursor.lastrowid}
+                    connection.execute(
+                        "UPDATE seasonal_analysis_tasks SET analysis_id=?,analysis_snapshot_json=?,updated_at=? "
+                        "WHERE job_id=? AND photo_id=? AND content_sha256=?",
+                        (cursor.lastrowid, json.dumps(snapshot, ensure_ascii=False), now, job_id, photo_id, current["sha256"]),
+                    )
                 if semantic_available or (
                     prefilter_evaluation
                     and prefilter_evaluation.get("decision") == "auto_excluded"

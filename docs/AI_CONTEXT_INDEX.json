@@ -143,14 +143,18 @@
       "id": "analysis_runtime",
       "entrypoints": [
         "inktime/app/services/analysis.py",
+        "inktime/app/services/seasonal_analysis.py",
+        "inktime/app/repositories/seasonal_analysis.py",
         "inktime/app/domain/analysis/plan.py"
       ],
       "contracts": [
-        "docs/reference/TOKEN_COST_GUIDE_ZH_TW.md"
+        "docs/reference/TOKEN_COST_GUIDE_ZH_TW.md",
+        "docs/analysis/SEASONAL_ANALYSIS_ZH_TW.md"
       ],
       "tests": [
         "tests/**/test_analysis*.py",
-        "tests/**/test_ai_cache_singleflight.py"
+        "tests/**/test_ai_cache_singleflight.py",
+        "tests/integration/test_seasonal_analysis.py"
       ],
       "purpose": "Vision lifecycle, cache, retry and persistence"
     },

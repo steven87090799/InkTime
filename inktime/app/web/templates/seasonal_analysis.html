@@ -1,0 +1,42 @@
+{% extends "base.html" %}
+{% block title %}歷年同期分析｜InkTime{% endblock %}
+{% block content %}
+{% set labels = {'unprocessed':'尚未處理','queued':'等待分析','running':'處理中','completed':'已有模型資料','failed':'失敗，待手動重試','unknown':'結果不明，待手動確認','reserved':'其他分析工作處理中'} %}
+<div class="page-head"><div><p class="eyebrow">逐張分析 · 持久化去重</p><h1>歷年同期分析</h1><p>{{ state.target_date }} 前後 {{ state.window_days }} 天，歷年同期共 {{ state.candidate_count }} 張不同內容的照片。</p></div><a href="/jobs">分析工作</a></div>
+<section class="panel">
+<p>{% if enabled %}已啟用：新照片進入顯示日期範圍時才補齊模型資料。{% else %}尚未啟用。請到<a href="/settings?search=分析執行模式">分析執行模式</a>選擇「歷年同期按需 AI 分析」。{% endif %}日期範圍可在<a href="/settings?search=seasonal_window_days">同期日期範圍設定</a>調整，預設前後 5 天。</p>
+<p>每張照片獨立分析，再以既有評分排序；選片不呼叫模型。相同內容的副本共用分析。模型升級沿用既有資料。排除、禁止上傳或尚未完成掃描的照片不會送出。</p>
+<div class="table-wrap"><table><thead><tr><th>當期狀態</th><th>照片數</th></tr></thead><tbody>{% for key,count in state.counts.items() %}<tr><td>{{ labels[key] }}</td><td>{{ count }}</td></tr>{% endfor %}</tbody></table></div>
+{% if state.missing_capture_dates %}<p class="notice">有 {{ state.missing_capture_dates }} 張可分析照片缺少有效拍攝日期，無法自動進入同期範圍。請至照片庫補齊日期後重新掃描。</p>{% endif %}
+<p>失敗或回應遺失不會自動重送。若工作因預算暫停，請到工作頁面確認後繼續。首次發布會等待當期分析結束，再從通過審查的照片選片。</p>
+<button id="seasonal-run" class="primary" {% if not enabled %}disabled{% endif %}>檢查並補齊當期照片</button> <button id="seasonal-rerun">全部重跑…</button>
+<p id="seasonal-message" role="status" aria-live="polite"></p>
+</section>
+<section class="panel"><h2>逐張處理紀錄</h2><p>所有日期與歷次重跑紀錄均保留。相同內容共用一個處理狀態；進入工作頁面可查看用量、費用與模型請求紀錄。</p>
+<div class="table-wrap"><table><thead><tr><th>照片／內容識別</th><th>狀態</th><th>模型</th><th>工作與證據</th><th>操作</th></tr></thead><tbody>
+{% for task in state.tasks %}<tr><td>{% if task.photo_id %}<a href="/photos/{{ task.photo_id|urlencode }}">{{ task.relative_path or task.photo_id }}</a>{% else %}原照片已移除{% endif %}<small><code>{{ task.content_sha256[:16] }}</code> · 紀錄 {{ task.id }}</small></td>
+<td>{{ labels.get(task.status,task.status) }}{% if task.error_code %}<small>{{ task.error_code }}</small>{% endif %}<small>{{ task.updated_at }}</small></td>
+<td>{{ task.provider or '—' }}<small>{{ task.model or '—' }}</small></td>
+<td>{% if task.job_id %}<a href="/jobs/{{ task.job_id|urlencode }}">工作進度與費用</a><br><a href="/ai/traces?job_id={{ task.job_id|urlencode }}">模型紀錄</a>{% else %}沿用既有分析{% endif %}</td>
+<td>{% if task.is_latest and task.status in ['failed','unknown'] %}<button data-seasonal-retry="{{ task.id }}">手動重試</button>{% endif %}</td></tr>
+{% else %}<tr><td colspan="5" class="empty">尚無同期處理紀錄。啟用後會自動核對，或按「檢查並補齊當期照片」。</td></tr>{% endfor %}
+</tbody></table></div>
+<p>{% if state.offset > 0 %}<a href="?page={{ state.offset // 100 }}">上一頁</a>{% endif %} 第 {{ state.offset // 100 + 1 }} 頁 · 共 {{ state.total_attempts }} 筆 {% if state.offset + 100 < state.total_attempts %}<a href="?page={{ state.offset // 100 + 2 }}">下一頁</a>{% endif %}</p>
+</section>
+<dialog id="seasonal-rerun-dialog"><form id="seasonal-rerun-form"><h2>全部重新分析：三階段確認</h2>
+<p id="rerun-summary"></p><p>這會忽略既有快取，將所有可處理照片逐張重新送入模型，包含非當期照片。原有結果與歷次紀錄會保留。尚有分析工作或待對帳請求時，會阻擋建立。</p>
+<p id="rerun-cost"></p>
+<div id="rerun-step-two"><label><input id="rerun-accept" type="checkbox">我了解全部重跑會再次計費，且不會因模型升級自動執行。</label><button id="rerun-acknowledge" type="button">確認範圍與費用，前往最後確認</button></div>
+<div id="rerun-step-three" hidden><label>請輸入 <strong id="rerun-phrase-label"></strong><input id="rerun-phrase" autocomplete="off"></label><button class="primary" type="submit">最後確認：建立全部重跑工作</button></div>
+<p id="rerun-error" role="status"></p><button type="button" data-dialog-close>取消</button></form></dialog>
+{% endblock %}
+{% block scripts %}<script nonce="{{ csp_nonce }}">
+const seasonalMessage=document.getElementById('seasonal-message'),rerunDialog=document.getElementById('seasonal-rerun-dialog'),rerunError=document.getElementById('rerun-error');
+let rerunPreview=null;
+async function seasonalPost(path,body={}){const response=await window.inktimeFetch('/api/v1/analysis/seasonal/'+path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});const data=await window.inktimeDecodeJson(response);if(!response.ok)throw new Error(data.message||'操作失敗');return data;}
+document.getElementById('seasonal-run').onclick=async function(){await window.inktimeRunAction(this,async()=>{try{const result=await seasonalPost('run');seasonalMessage.textContent=result.waiting?'當期分析已排入工作，完成後即可依資料排名。':'當期照片已核對，沒有需要自動補齊的項目。';location.reload();}catch(error){seasonalMessage.textContent=error.message;}});};
+document.querySelectorAll('[data-seasonal-retry]').forEach(button=>button.onclick=async()=>{if(!await window.inktimeConfirm('原請求可能已計費。這次手動重試可能再次產生費用；歷次紀錄會保留。確認重新處理這張照片？',{title:'手動重試照片'}))return;await window.inktimeRunAction(button,async()=>{try{const result=await seasonalPost('tasks/'+button.dataset.seasonalRetry+'/retry',{accept_possible_charge:true});location.href=result.detail_url;}catch(error){seasonalMessage.textContent=error.message;}});});
+document.getElementById('seasonal-rerun').onclick=async function(){await window.inktimeRunAction(this,async()=>{try{rerunPreview=await seasonalPost('rerun/preview');document.getElementById('rerun-summary').textContent='第一階段：核對範圍，共 '+rerunPreview.photo_count+' 張不同內容的照片。確認有效時間為 10 分鐘。';const estimate=rerunPreview.estimate;document.getElementById('rerun-cost').textContent=estimate.average_cost===null?'模型價格未知，無法提供可靠費用估算。':'預估費用 US$ '+estimate.average_cost.toFixed(4)+'（以 Token 假設估算，實際依供應商帳單；不是費用上限）。';document.getElementById('rerun-step-two').hidden=false;document.getElementById('rerun-step-three').hidden=true;document.getElementById('rerun-accept').checked=false;document.getElementById('rerun-phrase').value='';document.getElementById('rerun-phrase-label').textContent=rerunPreview.confirmation_phrase;rerunError.textContent='';rerunDialog.showModal();}catch(error){seasonalMessage.textContent=error.message;}});};
+document.getElementById('rerun-acknowledge').onclick=async function(){if(!document.getElementById('rerun-accept').checked){rerunError.textContent='請先勾選再次計費確認。';return;}await window.inktimeRunAction(this,async()=>{try{await seasonalPost('rerun/acknowledge',{token:rerunPreview.token,accept_additional_cost:true});document.getElementById('rerun-step-two').hidden=true;document.getElementById('rerun-step-three').hidden=false;document.getElementById('rerun-phrase').focus();rerunError.textContent='第三階段：輸入完整確認文字後才會建立工作。';}catch(error){rerunError.textContent=error.message;}});};
+document.getElementById('seasonal-rerun-form').onsubmit=async function(event){event.preventDefault();if(document.getElementById('rerun-step-three').hidden)return;await window.inktimeRunAction(this,async()=>{try{const result=await seasonalPost('rerun/execute',{token:rerunPreview.token,confirmation_phrase:document.getElementById('rerun-phrase').value,accept_additional_cost:true});location.href=result.detail_url;}catch(error){rerunError.textContent=error.message;}});};
+</script>{% endblock %}

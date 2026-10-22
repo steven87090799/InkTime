@@ -95,6 +95,7 @@
 ### 架構與設計
 
 - [現行選片契約](analysis/PHOTO_SELECTION_AI_FIRST_ZH_TW.md)：資格、固定排名、最愛與內容排除。
+- [歷年同期按需分析](analysis/SEASONAL_ANALYSIS_ZH_TW.md)：日期窗口、逐張去重、失敗手動重試與三階段全部重跑。
 
 - [圖片格式與 HEIC/48MP 安全 contract](architecture/IMAGE_FORMAT_CONTRACT_ZH_TW.md)：來源格式、DNG/GIF、JPEG preview、解碼記憶體與 diagnostics。
 

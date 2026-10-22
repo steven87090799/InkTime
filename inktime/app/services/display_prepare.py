@@ -275,6 +275,7 @@ class DisplayPreparationService:
         candidates = self.render_service.select_candidates_details(
             config.output_count,
             candidate_years=list(config.candidate_years),
+            record_history=True,
         )
         if not candidates:
             if config.ai_fallback == "fail":
@@ -305,6 +306,9 @@ class DisplayPreparationService:
                     "selection_method": "scheduled_display_prepare",
                 }
             }
+            publish_kwargs["selection_run_ids"] = list(dict.fromkeys(
+                str(row["selection_run_id"]) for row in candidates if row.get("selection_run_id")
+            ))
             if config.device_ids:
                 publish_kwargs["device_ids"] = list(config.device_ids)
             else:
@@ -419,9 +423,9 @@ class DisplayPreparationService:
         )
         candidates = (
             self.render_service.select_auto_photo_candidates(
-                len(schedule_times), frame_orientation=frame_orientation, target_date=target
+                len(schedule_times), frame_orientation=frame_orientation, target_date=target, record_history=True
             ) if layout == "auto_photo" else self.render_service.select_candidates_details(
-                required_candidates, target_date=target
+                required_candidates, target_date=target, record_history=True
             )
         )
         unique_candidates = list(
@@ -486,6 +490,10 @@ class DisplayPreparationService:
                     device_configs={device_id: frame_device},
                     activate_pointers=False,
                     assign_device_releases=False,
+                    target_date=target,
+                    selection_run_ids=list(dict.fromkeys(
+                        str(row["selection_run_id"]) for row in frame_candidates if row.get("selection_run_id")
+                    )),
                 )
                 release_ids.append(self._offline_release_id(result, device_id))
 

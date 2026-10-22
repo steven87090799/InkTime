@@ -44,6 +44,7 @@ class SchedulerRunner:
         self.last_notification_scan_at = 0.0
         self.last_notification_enqueue_at = 0.0
         self.last_batch_poll_at = 0.0
+        self.last_seasonal_scan_at = 0.0
         self.last_backup_date: str | None = None
         self.last_observability_heartbeat_at: float = -OBSERVABILITY_HEARTBEAT_INTERVAL_SECONDS
         self.last_observability_tick_at: float = -OBSERVABILITY_TICK_INTERVAL_SECONDS
@@ -174,6 +175,10 @@ class SchedulerRunner:
             self.last_notification_enqueue_at = time.monotonic()
         zone = ZoneInfo(str(settings.get("general.timezone", "Asia/Taipei")))
         now = datetime.now(zone)
+        seasonal = self.app.extensions.get("inktime_seasonal_analysis_service")
+        if seasonal is not None and seasonal.enabled() and time.monotonic() - self.last_seasonal_scan_at >= 300:
+            self._safe_step("seasonal_analysis", lambda: seasonal.ensure(now.date()))
+            self.last_seasonal_scan_at = time.monotonic()
         schedule_repository = self.app.extensions["inktime_schedule_repository"]
         job_repository = self.app.extensions["inktime_job_repository"]
         for task in schedule_repository.due(now):
@@ -729,6 +734,11 @@ class SchedulerRunner:
                 return
             strategy = normalize_analysis_strategy(str(config.get("strategy", "single")))
             settings = self.app.extensions["inktime_settings_repository"]
+            if execution_mode(settings) == "seasonal_ai" and strategy != "local":
+                self.app.extensions["inktime_seasonal_analysis_service"].ensure(now.date())
+                if is_scheduled:
+                    self.app.extensions["inktime_schedule_repository"].mark_enqueued(task, now)
+                return
             if execution_mode(settings) == "disabled" or (
                 strategy != "local" and not permits_automatic_ai(execution_mode(settings))
             ):

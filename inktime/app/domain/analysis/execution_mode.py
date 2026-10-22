@@ -6,7 +6,7 @@ API key must never make an installation start paid analysis by itself.
 
 from __future__ import annotations
 
-EXECUTION_MODES = frozenset({"disabled", "local_only", "local_with_manual_ai", "automatic_ai"})
+EXECUTION_MODES = frozenset({"disabled", "local_only", "local_with_manual_ai", "automatic_ai", "seasonal_ai"})
 
 
 def legacy_execution_mode(ai_mode: object, *, local_processing_enabled: bool) -> str:
@@ -31,8 +31,8 @@ def execution_mode(settings) -> str:
 
 
 def permits_automatic_ai(mode: str) -> bool:
-    return mode == "automatic_ai"
+    return mode in {"automatic_ai", "seasonal_ai"}
 
 
 def permits_manual_ai(mode: str) -> bool:
-    return mode in {"local_with_manual_ai", "automatic_ai"}
+    return mode in {"local_with_manual_ai", "automatic_ai", "seasonal_ai"}

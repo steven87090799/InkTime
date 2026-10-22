@@ -48,10 +48,10 @@ def test_removed_snapshot_metadata_is_safe_and_non_actionable():
 
 
 @pytest.mark.parametrize("key", ["model.analysis_model", "budget.daily_stop", "analysis.concurrency"])
-def test_paid_analysis_controls_remain_available_in_manual_mode(key):
+def test_paid_analysis_controls_remain_available_in_manual_and_seasonal_modes(key):
     rule = SettingsRepository.public_metadata(key)["dependencies"][0]
     assert rule["key"] == "analysis.execution_mode"
-    assert rule["one_of"] == ["local_with_manual_ai", "automatic_ai"]
+    assert rule["one_of"] == ["local_with_manual_ai", "automatic_ai", "seasonal_ai"]
 
 
 @pytest.mark.parametrize("action", ["refresh", "invalidate"])

@@ -179,6 +179,7 @@ class JobRepository:
         force_recompute: bool = False,
         analysis_spec: dict | None = None,
         request_fingerprint: str | None = None,
+        commit_hook=None,
     ) -> str:
         # Selection can be backed by a generator whose database session is
         # already closed.  Materialize it before acquiring the writer lock so
@@ -272,6 +273,8 @@ class JobRepository:
                     ]
                 )
                 connection.execute("UPDATE jobs SET total_items=? WHERE id=?", (total, job_id))
+                if commit_hook is not None:
+                    commit_hook(connection, job_id)
                 connection.execute("COMMIT")
             except Exception:
                 connection.execute("ROLLBACK")
@@ -1437,9 +1440,12 @@ class JobRepository:
             try:
                 rows = connection.execute(
                     """
-                    SELECT id,job_id,photo_id,attempts FROM job_items
-                    WHERE status='running' AND (lease_until IS NULL OR lease_until<?)
-                    ORDER BY job_id,id
+                    SELECT i.id,i.job_id,i.photo_id,i.attempts,
+                           CASE WHEN json_valid(j.settings_json) THEN
+                               json_extract(j.settings_json,'$.seasonal_analysis') END AS seasonal_analysis
+                    FROM job_items i JOIN jobs j ON j.id=i.job_id
+                    WHERE i.status='running' AND (i.lease_until IS NULL OR i.lease_until<?)
+                    ORDER BY i.job_id,i.id
                     """,
                     (now,),
                 ).fetchall()
@@ -1448,7 +1454,7 @@ class JobRepository:
                     item_id = str(row["id"])
                     job_id = str(row["job_id"])
                     attempts = int(row["attempts"] or 0)
-                    if attempts >= MAX_STALE_RECOVERY_ATTEMPTS:
+                    if row["seasonal_analysis"] or attempts >= MAX_STALE_RECOVERY_ATTEMPTS:
                         cursor = connection.execute(
                             """
                             UPDATE job_items

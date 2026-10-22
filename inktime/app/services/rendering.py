@@ -21,6 +21,7 @@ from inktime.app.domain.photos.formats import assert_source_content, load_rgb
 from inktime.app.db import Database
 from inktime.app.domain.photos import LocationResolver, parse_photo_date
 from inktime.app.domain.photos.places import place_date_label
+from inktime.app.domain.photos.rotation import exposure_count, last_exposure_at
 from inktime.app.repositories.photo_locations import PhotoLocationRepository
 from inktime.app.domain.rendering import (
     AtomicReleasePublisher,
@@ -37,6 +38,7 @@ from inktime.app.domain.rendering import (
     resolve_layout_geometry,
 )
 from inktime.app.domain.analysis.execution_mode import execution_mode
+from inktime.app.domain.analysis.seasonal import seasonal_month_days
 from inktime.app.domain.analysis.scoring import (
     LOCAL_QUALITY_SCORE_KIND,
     SEMANTIC_SCORE_KIND,
@@ -60,6 +62,7 @@ from inktime.app.domain.rendering.adaptive_layout import (
 )
 from inktime.app.domain.rendering.layout_geometry import LayoutGeometry, with_photo_date_footers
 from inktime.app.repositories.photos import PhotoRepository
+from inktime.app.repositories.display_history import DisplayHistoryRepository
 from inktime.app.repositories.render_candidates import RenderCandidateRepository
 from inktime.app.repositories.settings import SettingsRepository
 from inktime.app.services.weather import WeatherService
@@ -246,6 +249,7 @@ class RenderService:
         primary_caption: dict[str, Any] | None = None,
         secondary_caption: dict[str, Any] | None = None,
         device_config: dict[str, Any] | None = None,
+        selection_target_date: date | None = None,
     ) -> dict[str, Any]:
         """Resolve every data-dependent render choice before fingerprinting."""
         primary = self.photos.get_with_path(photo_id)
@@ -293,7 +297,7 @@ class RenderService:
                 secondary_id = None
             elif secondary_id is None:
                 candidate = self._select_auto_photo_pair_candidate(
-                    dict(primary), frame_orientation=effective_orientation
+                    dict(primary), frame_orientation=effective_orientation, target_date=selection_target_date,
                 )
                 if candidate is None:
                     raise InsufficientPhotoContentError("RENDER-005 自動照片需要另一張方向相符的照片")
@@ -308,7 +312,7 @@ class RenderService:
                 secondary_id = None
             elif secondary_id is None:
                 candidate = self._select_adaptive_pair_candidate(
-                    dict(primary), frame_orientation=effective_orientation
+                    dict(primary), frame_orientation=effective_orientation, target_date=selection_target_date,
                 )
                 if candidate is None:
                     layout_key = "photo_info"
@@ -1136,7 +1140,7 @@ class RenderService:
         return SEMANTIC_SCORE_KIND
 
     def _photo_score_kind(self, photo: dict[str, Any]) -> str:
-        if execution_mode(self.settings) == "automatic_ai":
+        if execution_mode(self.settings) in {"automatic_ai", "seasonal_ai"}:
             return SEMANTIC_SCORE_KIND
         value = str(photo.get("score_kind") or photo.get("latest_score_kind") or "").strip()
         if value in {SEMANTIC_SCORE_KIND, LOCAL_QUALITY_SCORE_KIND}:
@@ -1160,9 +1164,9 @@ class RenderService:
         return candidates
 
     def _select_auto_photo_pair_candidate(
-        self, primary: dict[str, Any], *, frame_orientation: str
+        self, primary: dict[str, Any], *, frame_orientation: str, target_date: date | None = None,
     ) -> dict[str, Any] | None:
-        rows = self._auto_photo_candidate_pool()
+        rows = self._auto_photo_candidate_pool(target_date=target_date)
         for allowed in self._auto_candidate_stages(rows):
             candidate = select_pair_candidate(primary, allowed, frame_orientation=frame_orientation)
             if candidate is not None:
@@ -1170,9 +1174,18 @@ class RenderService:
         return None
 
     def _select_adaptive_pair_candidate(
-        self, primary: dict[str, Any], *, frame_orientation: str
+        self, primary: dict[str, Any], *, frame_orientation: str, target_date: date | None = None,
     ) -> dict[str, Any] | None:
         """Select fresh first through bounded date and nearest-any-date SQL phases."""
+        if execution_mode(self.settings) == "seasonal_ai":
+            # The secondary source is subject to the same target-day window,
+            # including a future offline slot, as the initial selection.
+            rows = self._auto_photo_candidate_pool(target_date=target_date)
+            for allowed in self._auto_candidate_stages(rows):
+                candidate = select_pair_candidate(primary, allowed, frame_orientation=frame_orientation)
+                if candidate is not None:
+                    return candidate
+            return None
         score_kind = self._photo_score_kind(primary)
         self._adaptive_pair_metadata(primary)
         primary_date_text = str(primary.get("captured_date") or primary.get("captured_at") or "")[:10]
@@ -2063,8 +2076,11 @@ class RenderService:
         device_configs: dict[str, dict[str, Any]] | None = None,
         activate_pointers: bool = True,
         assign_device_releases: bool = True,
+        selection_run_ids: list[str] | None = None,
+        target_date: date | None = None,
     ) -> dict:
         publish_started = time.monotonic()
+        selection_run_ids = list(selection_run_ids or [])
         log_event(
             LOGGER,
             logging.INFO,
@@ -2109,15 +2125,22 @@ class RenderService:
         if not effective_devices and layout_key == "auto_photo":
             auto_orientations.add(str(self.settings.get("render.frame_orientation", "landscape")))
         selected = list(dict.fromkeys(photo_ids)) if auto_orientations else photo_ids[:source_limit]
+        selection_target = target_date or (
+            date.fromisoformat(str(history["history_date"])) if history and history.get("history_date") else self._today()
+        )
         if not selected:
             if auto_orientations:
-                selected = list(dict.fromkeys(
-                    str(row["id"])
+                proposed = [
+                    row
                     for orientation in sorted(auto_orientations)
-                    for row in self.select_auto_photo_candidates(quantity, frame_orientation=orientation)
-                ))
+                    for row in self.select_auto_photo_candidates(
+                        quantity, frame_orientation=orientation, target_date=selection_target, record_history=True,
+                    )
+                ]
             else:
-                selected = self.select_candidates(source_limit)
+                proposed = self.select_candidates_details(source_limit, target_date=selection_target, record_history=True)
+            selected = list(dict.fromkeys(str(row["id"]) for row in proposed))
+            selection_run_ids.extend(str(row["selection_run_id"]) for row in proposed if row.get("selection_run_id"))
         # 明確指定與自動選片都必須在發布前重新驗證；不得使用過期候選或遺失來源契約。
         required = self.candidates.require_for_execution_mode(
             selected,
@@ -2125,6 +2148,11 @@ class RenderService:
         )
         selected = [str(row["id"]) for row in required]
         eligibility_sources = {str(row["id"]): str(row["eligibility_source"]) for row in required}
+        if not selection_run_ids:
+            selection_run_ids = [DisplayHistoryRepository(self.database).record_selection(
+                target=selection_target, candidates=required, selected=required, method="manual",
+                context={"layout": layout_key},
+            )]
         if unique_device_ids:
             manifests = []
             assignments: dict[str, str] = {}
@@ -2153,7 +2181,8 @@ class RenderService:
                     ]
                 else:
                     composition_plans = [
-                        self.resolve_render_plan(photo_id, layout=effective_layout, device_config=device, profile=profile_key)
+                        self.resolve_render_plan(photo_id, layout=effective_layout, device_config=device,
+                                                 profile=profile_key, selection_target_date=selection_target)
                         for photo_id in selected[:quantity]
                     ]
                 for plan in composition_plans:
@@ -2228,6 +2257,7 @@ class RenderService:
                 history=history,
                 device_assignments=assignments if assign_device_releases else None,
                 activate_pointers=activate_pointers,
+                selection_run_ids=selection_run_ids,
             )
             self._record_production_trace(list(dict.fromkeys(release_photo_ids)), published, layout_key)
             log_event(
@@ -2256,7 +2286,7 @@ class RenderService:
                     )
                 )
         else:
-            plans = [self.resolve_render_plan(photo_id) for photo_id in selected]
+            plans = [self.resolve_render_plan(photo_id, selection_target_date=selection_target) for photo_id in selected]
         for plan in plans:
             plan["primary_eligibility_source"] = eligibility_sources.get(str(plan["primary_photo_id"]))
             plan["secondary_eligibility_source"] = (
@@ -2321,6 +2351,7 @@ class RenderService:
             created_by=created_by,
             photo_ids=release_photo_ids,
             history=history,
+            selection_run_ids=selection_run_ids,
         )
         self._record_production_trace(release_photo_ids, published, layout_key)
         log_event(
@@ -2425,12 +2456,18 @@ class RenderService:
         while remaining and len(picked) < limit:
             def sort_key(item: tuple[int, dict[str, Any]]) -> tuple[Any, ...]:
                 index, row = item
-                distance = distances.get(str(row.get("captured_month_day")), 999) if distances else 0
+                distance = distances.get(str(row.get("captured_month_day")), 999) if distances else int(row.get("day_distance") or 0)
                 diversity = LocalSelectionPolicy._diversity_penalty(row, context)
                 semantic = row.get("score_kind") == SEMANTIC_SCORE_KIND
                 adjusted = float(row.get("combined_score") or 0.0) - (0.0 if semantic else diversity)
-                # AI rank wins; diversity only breaks ties between equal AI scores.
-                return distance, -adjusted, diversity if semantic else 0.0, index, str(row.get("id") or "")
+                stage = {"exact_day": 0, "nearby_day": 1, "ranked_fallback": 2}.get(str(row.get("match_type") or ""), 0)
+                # A high AI score cannot repeatedly displace an unseen safe
+                # candidate. Once all have appeared, rotate least-shown first.
+                return (
+                    exposure_count(row), stage, distance,
+                    last_exposure_at(row), -adjusted,
+                    diversity if semantic else 0.0, index, str(row.get("id") or ""),
+                )
 
             _, chosen = min(enumerate(remaining), key=sort_key)
             picked.append(chosen)
@@ -2464,6 +2501,7 @@ class RenderService:
         combined_expression = score_expression
         result: list[dict[str, Any]] = []
         last_score: float | None = None
+        last_count = 0
         last_id = ""
         # 檔案存在性無法安全地交給 SQLite；用固定批次掃描 SQL 已排序結果，
         # 每次只保留真正可用的候選，避免把大型照片庫 materialize 成 Dict。
@@ -2488,8 +2526,8 @@ class RenderService:
                            {score_expression} selection_score,
                            a.memory_score,
                            a.score_kind,a.local_score,p.local_candidate_score,
-                           (SELECT count(*) FROM display_history dh WHERE dh.photo_id=p.id) display_count,
-                           (SELECT max(displayed_at) FROM display_history dh WHERE dh.photo_id=p.id) last_displayed_at,
+                           p.display_count,p.last_displayed_at,p.selection_count,p.last_selected_at,
+                           MAX(p.display_count,p.selection_count) exposure_count,
                            {combined_expression} combined_score
                     FROM photos p
                     JOIN libraries l ON l.id=p.library_id
@@ -2507,8 +2545,9 @@ class RenderService:
                           IN (SELECT value FROM json_each(?)))
                     )
                     SELECT * FROM ranked_candidates
-                    WHERE (? IS NULL OR combined_score<? OR (combined_score=? AND id>?))
-                    ORDER BY combined_score DESC,id LIMIT 250
+                    WHERE (? IS NULL OR exposure_count>? OR (exposure_count=? AND
+                        (combined_score<? OR (combined_score=? AND id>?))))
+                    ORDER BY exposure_count ASC,combined_score DESC,id LIMIT 250
                     """,  # noqa: S608 -- eligibility predicate is a fixed class constant
                     (
                         int(month_days is not None),
@@ -2518,6 +2557,8 @@ class RenderService:
                         int(bool(candidate_years)),
                         json.dumps(candidate_years or []),
                         last_score,
+                        last_count,
+                        last_count,
                         last_score,
                         last_score,
                         last_id,
@@ -2534,6 +2575,7 @@ class RenderService:
                     if len(result) >= max(limit, 1):
                         break
             last_score = float(rows[-1]["combined_score"])
+            last_count = int(rows[-1]["exposure_count"])
             last_id = str(rows[-1]["id"])
             if len(rows) < 250:
                 break
@@ -2608,116 +2650,102 @@ class RenderService:
         candidate_years: list[int] | None,
         score_kind: str,
         already_selected: list[dict[str, Any]] | None = None,
+        candidate_pool: list[dict[str, Any]] | None = None,
+        composition_pool: bool = False,
     ) -> list[dict[str, Any]]:
-        """Select one scoring domain using the existing staged fallback contract.
-
-        ``already_selected`` is only diversity context.  Semantic and local
-        scores are never compared or combined; callers decide the tier order.
-        """
+        """Expand configured date fallbacks before reusing a displayed photo."""
         mode = str(self.settings.get("render.selection_mode", "history_today"))
         context = list(already_selected or [])
-        selected: list[dict[str, Any]] = []
         selected_ids = {str(row["id"]) for row in context}
-
-        if mode == "top_ranked":
-            rows = self._candidate_query(
-                target=target,
-                month_days=None,
-                older_only=False,
-                limit=500,
-                candidate_years=candidate_years,
-                score_kind=score_kind,
-            )
-            selected = self._pick_diverse_candidates(
-                [row for row in rows if str(row["id"]) not in selected_ids],
-                limit=limit,
-                already_selected=context,
-            )
-            for row in selected:
-                row["match_type"] = "top_ranked"
-                row["day_distance"] = None
-            return selected
+        pool: dict[str, dict[str, Any]] = {}
 
         def append(rows: list[dict[str, Any]], match_type: str, distances=None) -> None:
-            available = [row for row in rows if str(row["id"]) not in selected_ids]
-            for row in self._pick_diverse_candidates(
-                available,
-                limit=limit - len(selected),
-                distances=distances,
-                already_selected=[*context, *selected],
-            ):
-                photo_id = str(row["id"])
-                if photo_id in selected_ids or len(selected) >= limit:
+            for row in rows:
+                identifier = str(row["id"])
+                if identifier in selected_ids or identifier in pool:
                     continue
                 row["match_type"] = match_type
                 row["day_distance"] = distances.get(str(row["captured_month_day"])) if distances else 0
-                selected.append(row)
-                selected_ids.add(photo_id)
+                pool[identifier] = row
 
-        month_day = target.strftime("%m-%d")
-        exact = self._candidate_query(
-            target=target,
-            month_days=[month_day],
-            older_only=True,
-            limit=max(100, limit * 10),
-            candidate_years=candidate_years,
-            score_kind=score_kind,
-        )
-        append(exact, "exact_day")
-        fallback = str(self.settings.get("render.history_today_fallback", "nearby_then_ranked"))
-        window = int(self.settings.get("render.history_today_window_days", 7))
-        if len(selected) < limit and window > 0 and fallback in {"nearby_then_ranked", "nearby_only"}:
-            anchor = date(2000, target.month, target.day)
-            distances: dict[str, int] = {}
-            for offset in range(1, window + 1):
-                distances[(anchor - timedelta(days=offset)).strftime("%m-%d")] = offset
-                distances[(anchor + timedelta(days=offset)).strftime("%m-%d")] = offset
-            nearby = self._candidate_query(
+        if execution_mode(self.settings) == "seasonal_ai":
+            append(self._candidate_query(
                 target=target,
-                month_days=list(distances),
-                older_only=True,
-                limit=max(300, limit * 30),
-                candidate_years=candidate_years,
-                score_kind=score_kind,
-            )
-            nearby.sort(
-                key=lambda row: (
-                    distances.get(str(row["captured_month_day"]), 999),
-                    -float(row["combined_score"]),
-                )
-            )
-            append(nearby, "nearby_day", distances)
-        if len(selected) < limit and fallback in {"nearby_then_ranked", "ranked"}:
-            ranked = self._candidate_query(
+                month_days=seasonal_month_days(target, int(self.settings.get("analysis.seasonal_window_days", 5))),
+                older_only=False,
+                limit=max(20, min(int(self.settings.get("render.local_candidate_limit", 200)), 1000)),
+                candidate_years=candidate_years, score_kind=score_kind,
+            ), "seasonal_window")
+        elif mode == "top_ranked":
+            append(self._candidate_query(
                 target=target,
                 month_days=None,
                 older_only=False,
-                limit=500,
+                limit=max(500, limit),
                 candidate_years=candidate_years,
                 score_kind=score_kind,
-            )
-            append(ranked, "ranked_fallback")
-        return selected
+            ), "top_ranked")
+        else:
+            append(self._candidate_query(
+                target=target,
+                month_days=[target.strftime("%m-%d")],
+                older_only=True,
+                limit=min(1000, max(100, limit * 10)),
+                candidate_years=candidate_years,
+                score_kind=score_kind,
+            ), "exact_day")
+            fallback = str(self.settings.get("render.history_today_fallback", "nearby_then_ranked"))
+            window = int(self.settings.get("render.history_today_window_days", 7))
+            def needs_fallback() -> bool:
+                return composition_pool or sum(exposure_count(row) == 0 for row in pool.values()) < limit
+            if needs_fallback() and window > 0 and fallback in {"nearby_then_ranked", "nearby_only"}:
+                anchor = date(2000, target.month, target.day)
+                distances: dict[str, int] = {}
+                for offset in range(1, window + 1):
+                    distances[(anchor - timedelta(days=offset)).strftime("%m-%d")] = offset
+                    distances[(anchor + timedelta(days=offset)).strftime("%m-%d")] = offset
+                append(self._candidate_query(
+                    target=target, month_days=list(distances), older_only=True,
+                    limit=min(1000, max(300, limit * 30)), candidate_years=candidate_years, score_kind=score_kind,
+                ), "nearby_day", distances)
+            if needs_fallback() and fallback in {"nearby_then_ranked", "ranked"}:
+                append(self._candidate_query(
+                    target=target, month_days=None, older_only=False,
+                    limit=max(500, limit), candidate_years=candidate_years, score_kind=score_kind,
+                ), "ranked_fallback")
+        ordered = sorted(pool.values(), key=lambda row: (
+            exposure_count(row),
+            {"exact_day": 0, "nearby_day": 1, "ranked_fallback": 2}.get(str(row.get("match_type") or ""), 0),
+            int(row.get("day_distance") or 0), last_exposure_at(row),
+            -float(row.get("combined_score") or 0), str(row["id"]),
+        ))
+        if candidate_pool is not None:
+            candidate_pool.extend(ordered)
+        if limit >= len(ordered):
+            return ordered
+        return self._pick_diverse_candidates(ordered, limit=limit, already_selected=context)
 
     @staticmethod
     def _auto_candidate_stages(rows: list[dict[str, Any]]):
-        """Expand only through the configured fallback stages, in order."""
+        """Try every unseen composition before admitting displayed sources."""
         allowed: list[dict[str, Any]] = []
-        for stage in ({"exact_day"}, {"nearby_day"}, {"ranked_fallback", "top_ranked"}):
-            added = [row for row in rows if row.get("match_type", "top_ranked") in stage]
-            if added:
-                allowed.extend(added)
-                yield list(allowed)
+        for count in sorted({exposure_count(row) for row in rows}):
+            for stage in ({"exact_day"}, {"nearby_day"}, {"ranked_fallback", "top_ranked", "seasonal_window"}):
+                added = [row for row in rows if exposure_count(row) == count
+                         and row.get("match_type", "top_ranked") in stage]
+                if added:
+                    allowed.extend(added)
+                    yield list(allowed)
 
-    def _auto_photo_candidate_pool(self, *, target_date: date | None = None) -> list[dict[str, Any]]:
-        rows = self.select_candidates_details(1000, target_date=target_date, composition_pool=True)
+    def _auto_photo_candidate_pool(self, *, target_date: date | None = None, record_history: bool = False) -> list[dict[str, Any]]:
+        rows = self.select_candidates_details(1000, target_date=target_date, composition_pool=True, record_history=record_history)
         result = []
         recent_cutoff = datetime.now(timezone.utc) - timedelta(days=14)
         for row in rows:
             photo = {**dict(self.photos.get_with_path(str(row["id"])) or {}), **row}
-            photo["ever_displayed"] = bool(photo.get("display_count"))
+            photo["ever_displayed"] = bool(exposure_count(photo))
             try:
-                displayed = datetime.fromisoformat(str(photo.get("last_displayed_at") or ""))
+                displayed = datetime.fromisoformat(last_exposure_at(photo))
                 displayed = displayed.replace(tzinfo=timezone.utc) if displayed.tzinfo is None else displayed
                 photo["recently_displayed"] = displayed >= recent_cutoff
             except ValueError:
@@ -2726,16 +2754,20 @@ class RenderService:
         return result
 
     def select_auto_photo_candidates(
-        self, quantity: int, *, frame_orientation: str, target_date: date | None = None,
+        self, quantity: int, *, frame_orientation: str, target_date: date | None = None, record_history: bool = False,
     ) -> list[dict[str, Any]]:
         # The configured pool bounds memory/work. Output quantity bounds frames,
         # not sources: an unpairable burst must not hide lower-ranked sources.
-        rows = self._auto_photo_candidate_pool(target_date=target_date)
+        rows = self._auto_photo_candidate_pool(target_date=target_date, record_history=record_history)
         allowed: list[dict[str, Any]] = []
         for allowed in self._auto_candidate_stages(rows):
             if len(select_auto_photo_frames(allowed, frame_orientation=frame_orientation, count=quantity)) >= quantity:
                 break
-        return allowed
+        # Only publish the sources of actual frames. A 1,000-photo candidate
+        # pool must not trip the 200-source release validation limit.
+        return [row for frame in select_auto_photo_frames(
+            allowed, frame_orientation=frame_orientation, count=quantity,
+        ) for row in frame]
 
     def select_candidates_details(
         self,
@@ -2744,28 +2776,36 @@ class RenderService:
         target_date: date | None = None,
         candidate_years: list[int] | None = None,
         composition_pool: bool = False,
+        record_history: bool = False,
     ) -> list[dict[str, Any]]:
         limit = quantity if quantity is not None else int(self.settings.get("render.quantity", 5))
         pool_bound = max(20, min(int(self.settings.get("render.local_candidate_limit", 200)), 1000))
         limit = max(1, min(int(limit), pool_bound if composition_pool else 50))
         target = target_date or self._today()
         mode = execution_mode(self.settings)
-        if mode in {"local_only", "local_with_manual_ai", "disabled", "automatic_ai"}:
-            # Content safety requires a current semantic judgement even when
-            # scheduling/scoring is configured for local-only operation.
-            return self._select_candidates_for_score_kind(
-                target=target,
-                limit=limit,
-                candidate_years=candidate_years,
-                score_kind=SEMANTIC_SCORE_KIND,
-            )
-
-        return self._select_candidates_for_score_kind(
+        # Every formal candidate needs the current semantic safety contract.
+        pool: list[dict[str, Any]] = []
+        selected = self._select_candidates_for_score_kind(
             target=target,
             limit=limit,
             candidate_years=candidate_years,
-            score_kind=self._selection_score_kind(),
+            score_kind=SEMANTIC_SCORE_KIND if mode in {"local_only", "local_with_manual_ai", "disabled", "automatic_ai"}
+            else self._selection_score_kind(),
+            candidate_pool=pool,
+            composition_pool=composition_pool,
         )
+        if record_history:
+            run_id = DisplayHistoryRepository(self.database).record_selection(
+                target=target, candidates=pool, selected=selected, method="automatic",
+                context={"selection_mode": self.settings.get("render.selection_mode", "history_today"),
+                         "execution_mode": mode, "seasonal_window_days": self.settings.get("analysis.seasonal_window_days", 5),
+                         "fallback": self.settings.get("render.history_today_fallback", "nearby_then_ranked"),
+                         "candidate_years": candidate_years or [], "requested_count": limit,
+                         "composition_pool": composition_pool, "policy": "least_displayed_v1"},
+            )
+            for row in selected:
+                row["selection_run_id"] = run_id
+        return selected
 
     def select_candidates(self, quantity: int | None = None) -> list[str]:
         return [str(row["id"]) for row in self.select_candidates_details(quantity)]

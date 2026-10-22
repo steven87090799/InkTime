@@ -23,6 +23,7 @@ from inktime.app.api import (
     dashboard,
     device_pairing,
     devices,
+    display_history,
     health,
     jobs,
     notifications,
@@ -101,6 +102,7 @@ def configure_web_application(
         dashboard.bp,
         device_pairing.bp,
         devices.bp,
+        display_history.bp,
         health.bp,
         jobs.bp,
         notifications.bp,
@@ -142,6 +144,7 @@ def configure_web_application(
         database = container.extensions["inktime_database"]
         database_ready = False
         migration_version = None
+        analysis_failure_count = 0
         try:
             with database.session() as connection:
                 rows = connection.execute(
@@ -154,10 +157,15 @@ def configure_web_application(
                 ).fetchone()
                 migration_version = int(migration_row[0] or 0) if migration_row else 0
                 database_ready = True
+                if getattr(g, "user", None):
+                    analysis_failure_count = connection.execute(
+                        "SELECT COUNT(*) FROM device_notifications WHERE kind='analysis_failure' AND read_at IS NULL"
+                    ).fetchone()[0]
         except Exception:
             rows = []
         return {
             "critical_alerts": rows,
+            "analysis_failure_count": analysis_failure_count,
             "csp_nonce": getattr(g, "csp_nonce", ""),
             "page_guide": (
                 None if request.endpoint == "auth.login" else page_guide_for_endpoint(request.endpoint)

@@ -86,6 +86,8 @@ def _queue_ai(
 ) -> dict:
     settings = current_app.extensions["inktime_settings_repository"]
     mode = execution_mode(settings)
+    if mode == "seasonal_ai":
+        raise ValueError("歷年同期模式請從「分析工作 → 歷年同期分析進度」補齊資料或逐張確認重試")
     if (force_ai and not permits_manual_ai(mode)) or (not force_ai and not permits_automatic_ai(mode)):
         raise ValueError("AI 模式目前為關閉；不會建立模型工作")
     if not photo_ids:
@@ -419,6 +421,12 @@ def queue_ai_mode_run():
     payload = _payload()
     settings = current_app.extensions["inktime_settings_repository"]
     execution = execution_mode(settings)
+    if execution == "seasonal_ai":
+        try:
+            result = current_app.extensions["inktime_seasonal_analysis_service"].ensure()
+            return {**result, "job_ids": [result["job_id"]] if result["job_id"] else [], "message": "已核對當期照片；已有結果沿用，失敗項目需手動重試。"}
+        except ValueError as exc:
+            return _ai_job_error(exc), 409
     mode = str(settings.get("analysis.ai_mode", "top_candidates"))
     if not permits_automatic_ai(execution):
         return {"error_code": "VLM-008", "message": "AI 模式目前為關閉"}, 409

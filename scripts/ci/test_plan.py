@@ -151,6 +151,9 @@ SUITE_EXECUTION_OWNER_JOB_IDS = {
 # bounded while ensuring production changes still select the relevant
 # integration contract.
 INTEGRATION_TEST_OWNER_SUITES: dict[str, tuple[str, ...]] = {
+    "tests/integration/test_seasonal_analysis.py": (
+        "provider_analysis_owner", "runtime_scheduler_owner", "persistence_owner", "web_api_owner",
+    ),
     "tests/integration/test_auto_photo_review_regressions.py": (
         "render_release_owner",
         "web_api_owner",
@@ -222,6 +225,8 @@ INTEGRATION_TEST_OWNER_SUITES: dict[str, tuple[str, ...]] = {
         "web_api_owner",
     ),
     "tests/integration/test_render_candidate_contract.py": ("render_release_owner",),
+    "tests/integration/test_photo_display_history.py": ("render_release_owner", "web_api_owner", "device_delivery_owner"),
+    "tests/integration/test_analysis_failure_notifications.py": ("notifications_observability_owner", "web_api_owner"),
     "tests/integration/test_device_layout_delivery.py": ("render_release_owner", "device_api_contract_owner"),
     "tests/integration/test_photo_crop_state.py": ("render_release_owner", "web_api_owner"),
     "tests/integration/test_photo_places.py": (
@@ -1026,6 +1031,8 @@ def _classify_path(path: str) -> tuple[set[str], set[str], set[str], bool]:
                 "inktime/app/providers/",
                 "inktime/app/domain/analysis/",
                 "inktime/app/services/analysis",
+                "inktime/app/services/seasonal_analysis",
+                "inktime/app/repositories/seasonal_analysis",
                 "inktime/app/services/provider",
                 "inktime/app/services/scoring",
             )

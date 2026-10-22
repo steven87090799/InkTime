@@ -2511,6 +2511,175 @@ MIGRATIONS = (
             "place_json TEXT NOT NULL,updated_at TEXT NOT NULL,PRIMARY KEY(gps_key,provider,language,version))",
         ),
     ),
+    Migration(
+        72,
+        "保存完整選片候選快照，僅以裝置成功回報累計顯示次數",
+        (
+            "ALTER TABLE photos ADD COLUMN display_count INTEGER NOT NULL DEFAULT 0 CHECK(display_count>=0)",
+            "ALTER TABLE photos ADD COLUMN last_displayed_at TEXT",
+            "ALTER TABLE photos ADD COLUMN selection_count INTEGER NOT NULL DEFAULT 0 CHECK(selection_count>=0)",
+            "ALTER TABLE photos ADD COLUMN last_selected_at TEXT",
+            """INSERT INTO display_history(photo_id,history_date,selection_method,release_id,displayed_at,metadata_json)
+            SELECT DISTINCT source.value,COALESCE(os.target_date,substr(q.displayed_at,1,10)),
+                'device_queue_ack',q.release_id,q.displayed_at,
+                json_object('device_id',q.device_id,'queue_item_id',q.id,'timestamp_source','stored_queue_ack')
+            FROM device_content_queue_items q JOIN releases r ON r.id=q.release_id
+            LEFT JOIN device_offline_schedules os ON os.id=q.offline_schedule_id
+            JOIN json_each(CASE WHEN json_valid(r.manifest_json) THEN r.manifest_json ELSE '{}' END,
+                           '$.render_options.render_plans') plan
+            JOIN json_each(json_array(
+                json_extract(CASE WHEN plan.type='object' THEN plan.value ELSE '{}' END,'$.primary_photo_id'),
+                json_extract(CASE WHEN plan.type='object' THEN plan.value ELSE '{}' END,'$.secondary_photo_id'))) source
+            JOIN photos p ON p.id=source.value
+            WHERE q.displayed_at IS NOT NULL AND NOT EXISTS(
+                SELECT 1 FROM display_history h WHERE h.photo_id=source.value AND h.release_id=q.release_id
+                AND h.selection_method='device_queue_ack' AND json_extract(h.metadata_json,'$.queue_item_id')=q.id)""",
+            """UPDATE photos SET
+            display_count=(SELECT COUNT(*) FROM display_history h WHERE h.photo_id=photos.id AND h.selection_method='device_queue_ack'),
+            last_displayed_at=(SELECT MAX(displayed_at) FROM display_history h WHERE h.photo_id=photos.id AND h.selection_method='device_queue_ack')""",
+            """UPDATE photos SET
+            selection_count=(SELECT COUNT(DISTINCT COALESCE(release_id,displayed_at)) FROM display_history h WHERE h.photo_id=photos.id),
+            last_selected_at=(SELECT MAX(displayed_at) FROM display_history h WHERE h.photo_id=photos.id)""",
+            """CREATE TRIGGER confirmed_photo_display_insert AFTER INSERT ON display_history
+            WHEN NEW.selection_method='device_queue_ack' BEGIN
+                UPDATE photos SET display_count=display_count+1,
+                last_displayed_at=CASE WHEN last_displayed_at IS NULL OR NEW.displayed_at>last_displayed_at
+                                      THEN NEW.displayed_at ELSE last_displayed_at END WHERE id=NEW.photo_id;
+            END""",
+            "CREATE INDEX idx_photos_display_count ON photos(display_count,last_displayed_at,id)",
+            "CREATE INDEX idx_photos_exposure ON photos(MAX(display_count,selection_count),id)",
+            """CREATE TABLE photo_selection_runs(
+                id TEXT PRIMARY KEY,target_date TEXT NOT NULL,method TEXT NOT NULL,
+                candidate_count INTEGER NOT NULL,context_json TEXT NOT NULL DEFAULT '{}',
+                published_photo_ids_json TEXT NOT NULL DEFAULT '[]',created_at TEXT NOT NULL)""",
+            "CREATE INDEX idx_photo_selection_date ON photo_selection_runs(target_date,created_at DESC,id)",
+            """CREATE TABLE photo_selection_candidates(
+                run_id TEXT NOT NULL REFERENCES photo_selection_runs(id) ON DELETE CASCADE,
+                photo_id TEXT REFERENCES photos(id) ON DELETE SET NULL,rank INTEGER NOT NULL,
+                selected INTEGER NOT NULL DEFAULT 0,score REAL,snapshot_json TEXT NOT NULL DEFAULT '{}',
+                PRIMARY KEY(run_id,rank),UNIQUE(run_id,photo_id))""",
+            "CREATE INDEX idx_photo_selection_photo ON photo_selection_candidates(photo_id,run_id)",
+            """CREATE TABLE photo_selection_releases(
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_id TEXT NOT NULL REFERENCES photo_selection_runs(id) ON DELETE CASCADE,
+                release_id TEXT REFERENCES releases(id) ON DELETE SET NULL,
+                device_id TEXT REFERENCES devices(id) ON DELETE SET NULL,
+                photo_ids_json TEXT NOT NULL DEFAULT '[]',UNIQUE(run_id,release_id))""",
+        ),
+    ),
+    Migration(
+        73,
+        "模型與批次分析失敗的持久通知及已讀狀態",
+        (
+            # Rebuild only this leaf table to extend its CHECK constraint. All
+            # existing notification IDs, webhook leases and delivery state survive.
+            """CREATE TABLE device_notifications_v73(
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                device_id TEXT REFERENCES devices(id) ON DELETE CASCADE,
+                kind TEXT NOT NULL CHECK(kind IN ('offline','offline_reminder','recovery','test','analysis_failure')),
+                level TEXT NOT NULL CHECK(level IN ('info','warning','error')),
+                title TEXT NOT NULL,message TEXT NOT NULL,details_json TEXT NOT NULL DEFAULT '{}',
+                webhook_status TEXT NOT NULL DEFAULT 'disabled'
+                    CHECK(webhook_status IN ('disabled','pending','retrying','delivered','failed')),
+                webhook_attempts INTEGER NOT NULL DEFAULT 0,webhook_next_attempt_at TEXT,
+                webhook_delivered_at TEXT,webhook_last_error TEXT,created_at TEXT NOT NULL,
+                webhook_idempotency_key TEXT,webhook_claimed_until TEXT,read_at TEXT)""",
+            """INSERT INTO device_notifications_v73(
+                id,device_id,kind,level,title,message,details_json,webhook_status,webhook_attempts,
+                webhook_next_attempt_at,webhook_delivered_at,webhook_last_error,created_at,
+                webhook_idempotency_key,webhook_claimed_until)
+            SELECT id,device_id,kind,level,title,message,details_json,webhook_status,webhook_attempts,
+                webhook_next_attempt_at,webhook_delivered_at,webhook_last_error,created_at,
+                webhook_idempotency_key,webhook_claimed_until FROM device_notifications""",
+            """INSERT INTO sqlite_sequence(name,seq)
+            SELECT 'device_notifications_v73',seq FROM sqlite_sequence WHERE name='device_notifications'
+            AND NOT EXISTS(SELECT 1 FROM sqlite_sequence WHERE name='device_notifications_v73')""",
+            """UPDATE sqlite_sequence SET seq=MAX(seq,COALESCE(
+            (SELECT seq FROM sqlite_sequence WHERE name='device_notifications'),0))
+            WHERE name='device_notifications_v73'""",
+            "DROP TABLE device_notifications",
+            "ALTER TABLE device_notifications_v73 RENAME TO device_notifications",
+            "CREATE INDEX idx_device_notifications_created ON device_notifications(created_at DESC)",
+            "CREATE INDEX idx_device_notifications_delivery ON device_notifications(webhook_status,webhook_next_attempt_at,id)",
+            "CREATE UNIQUE INDEX idx_device_notifications_idempotency ON device_notifications(webhook_idempotency_key)",
+            "CREATE INDEX idx_device_notifications_claim ON device_notifications(webhook_status,webhook_next_attempt_at,webhook_claimed_until,id)",
+            "CREATE INDEX idx_notifications_unread ON device_notifications(kind,read_at,created_at DESC)",
+            # These outbox inserts share the failure transaction, so a worker
+            # crash after committing the failure cannot silently lose its alert.
+            """CREATE TRIGGER notify_ai_analysis_failure AFTER UPDATE OF status ON ai_trace_runs
+            WHEN NEW.status IN ('FAILED','TIMEOUT','AMBIGUOUS') AND OLD.status<>NEW.status BEGIN
+                INSERT OR IGNORE INTO device_notifications(
+                    kind,level,title,message,details_json,webhook_status,webhook_next_attempt_at,
+                    webhook_idempotency_key,created_at)
+                VALUES('analysis_failure','error','照片模型分析失敗',
+                    CASE WHEN NEW.status='AMBIGUOUS' THEN '模型請求結果未確認，請查看 AI 追蹤後決定如何處理。'
+                         WHEN NEW.status='TIMEOUT' THEN '模型分析逾時，請查看 AI 追蹤。'
+                         ELSE '模型未能完成照片分析，請查看 AI 追蹤。' END,
+                    json_object('trace_id',NEW.trace_id,'job_id',NEW.job_id,'photo_id',NEW.photo_id,
+                                'error_code',NEW.error_code,'status',NEW.status),
+                    CASE WHEN (SELECT value_json FROM settings WHERE key='notification.webhook_enabled')='true'
+                          AND COALESCE((SELECT json_extract(value_json,'$') FROM settings WHERE key='notification.webhook_url'),'')<>''
+                         THEN 'pending' ELSE 'disabled' END,
+                    NEW.completed_at,'analysis:trace:'||NEW.trace_id,COALESCE(NEW.completed_at,NEW.started_at));
+            END""",
+            """CREATE TRIGGER notify_failed_analysis_item AFTER UPDATE OF status ON job_items
+            WHEN NEW.status='failed' AND OLD.status<>'failed'
+              AND EXISTS(SELECT 1 FROM jobs WHERE id=NEW.job_id AND kind IN ('analysis','analysis_batch'))
+              AND NOT EXISTS(SELECT 1 FROM ai_trace_runs t WHERE t.job_id=NEW.job_id AND t.photo_id=NEW.photo_id
+                  AND t.status IN ('FAILED','TIMEOUT','AMBIGUOUS') AND t.completed_at>=COALESCE(NEW.started_at,'')) BEGIN
+                INSERT OR IGNORE INTO device_notifications(
+                    kind,level,title,message,details_json,webhook_status,webhook_next_attempt_at,
+                    webhook_idempotency_key,created_at)
+                VALUES('analysis_failure','error','照片分析工作失敗','照片分析已失敗，請查看分析工作與錯誤原因。',
+                    json_object('job_id',NEW.job_id,'photo_id',NEW.photo_id,'error_code',NEW.error_code),
+                    CASE WHEN (SELECT value_json FROM settings WHERE key='notification.webhook_enabled')='true'
+                          AND COALESCE((SELECT json_extract(value_json,'$') FROM settings WHERE key='notification.webhook_url'),'')<>''
+                         THEN 'pending' ELSE 'disabled' END,
+                    NEW.completed_at,'analysis:item:'||NEW.id||':'||COALESCE(NEW.completed_at,''),
+                    COALESCE(NEW.completed_at,NEW.available_at));
+            END""",
+            """CREATE TRIGGER notify_failed_analysis_job AFTER UPDATE OF status ON jobs
+            WHEN NEW.status='failed' AND OLD.status<>'failed' AND NEW.kind IN ('analysis','analysis_batch')
+              AND NOT EXISTS(SELECT 1 FROM job_items WHERE job_id=NEW.id AND status='failed') BEGIN
+                INSERT OR IGNORE INTO device_notifications(
+                    kind,level,title,message,details_json,webhook_status,webhook_next_attempt_at,
+                    webhook_idempotency_key,created_at)
+                VALUES('analysis_failure','error','照片分析工作失敗','分析工作已失敗，請查看工作紀錄與錯誤原因。',
+                    json_object('job_id',NEW.id),
+                    CASE WHEN (SELECT value_json FROM settings WHERE key='notification.webhook_enabled')='true'
+                          AND COALESCE((SELECT json_extract(value_json,'$') FROM settings WHERE key='notification.webhook_url'),'')<>''
+                         THEN 'pending' ELSE 'disabled' END,
+                    NEW.completed_at,'analysis:job:'||NEW.id||':'||COALESCE(NEW.completed_at,''),
+                    COALESCE(NEW.completed_at,NEW.created_at));
+            END""",
+        ),
+    ),
+    Migration(
+        74,
+        "保存歷年同期逐張分析任務、內容去重與重跑確認",
+        (
+            """CREATE TABLE seasonal_analysis_tasks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                content_sha256 TEXT NOT NULL,
+                photo_id TEXT REFERENCES photos(id) ON DELETE SET NULL,
+                job_id TEXT REFERENCES jobs(id) ON DELETE RESTRICT,
+                analysis_id INTEGER REFERENCES photo_analysis(id) ON DELETE SET NULL,
+                analysis_snapshot_json TEXT,
+                status TEXT NOT NULL CHECK(status IN ('queued','running','completed','failed','unknown')),
+                error_code TEXT, target_date TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+                UNIQUE(job_id,content_sha256)
+            )""",
+            "CREATE INDEX idx_seasonal_content ON seasonal_analysis_tasks(content_sha256,id DESC)",
+            "CREATE INDEX idx_seasonal_status ON seasonal_analysis_tasks(status,job_id)",
+            "CREATE UNIQUE INDEX idx_seasonal_active_content ON seasonal_analysis_tasks(content_sha256) "
+            "WHERE status IN ('queued','running')",
+            """CREATE TABLE seasonal_rerun_confirmations (
+                token TEXT PRIMARY KEY, actor TEXT NOT NULL, stage INTEGER NOT NULL,
+                snapshot TEXT NOT NULL, plan_fingerprint TEXT NOT NULL, photo_count INTEGER NOT NULL,
+                expires_at TEXT NOT NULL, job_id TEXT REFERENCES jobs(id) ON DELETE RESTRICT
+            )""",
+        ),
+    ),
 )
 
 
@@ -3113,6 +3282,40 @@ def _applied_versions(database: Database) -> set[int]:
         return {int(row[0]) for row in connection.execute("SELECT version FROM schema_migrations")}
 
 
+def _draft_seasonal_migration(database: Database) -> bool:
+    """Recognize the exact unreleased seasonal branch's former version 72.
+
+    Main ends at 71. The two drafts independently allocated 72; only the
+    seasonal schema moves to 74. Never treat an unknown same-number schema as
+    an applied migration, or recreate its tables and lose the saved tasks.
+    """
+    expected = {migration.version: migration.name for migration in MIGRATIONS}
+    with database.session() as connection:
+        if not _table_exists(connection, "schema_migrations"):
+            return False
+        stored = dict(connection.execute("SELECT version,name FROM schema_migrations WHERE version>=72"))
+        legacy = stored.get(72) == expected.get(74) and 72 in stored and 74 in expected
+        if legacy:
+            required = {
+                "seasonal_analysis_tasks": {"id", "content_sha256", "photo_id", "job_id", "analysis_id",
+                    "analysis_snapshot_json", "status", "error_code", "target_date", "created_at", "updated_at"},
+                "seasonal_rerun_confirmations": {"token", "actor", "stage", "snapshot", "plan_fingerprint",
+                    "photo_count", "expires_at", "job_id"},
+            }
+            valid = set(stored) == {72} and all(
+                {row[1] for row in connection.execute(f"PRAGMA table_info({table})")} == columns
+                for table, columns in required.items()  # fixed internal table names
+            )
+            valid = valid and "display_count" not in {
+                row[1] for row in connection.execute("PRAGMA table_info(photos)")
+            }
+            if not valid:
+                raise MigrationError("MIGRATION-004 同期分支 Schema 與已知版本不符；停止啟動，保留原資料")
+        elif any(expected.get(version) != name for version, name in stored.items()):
+            raise MigrationError("MIGRATION-004 相同 Migration 編號的內容不同；停止啟動，保留原資料")
+        return legacy
+
+
 def _assert_no_unfinished_migration(database: Database) -> None:
     unfinished = None
     try:
@@ -3285,6 +3488,9 @@ def migrate(database: Database, backup_dir: Path | None = None) -> list[int]:
             raise MigrationError(
                 f"MIGRATION-003 資料庫 Schema Version {newest} 高於本程式可支援版本；停止啟動以避免降級寫入"
             )
+        legacy_seasonal = _draft_seasonal_migration(database)
+        if legacy_seasonal:
+            applied_versions = (applied_versions - {72}) | {74}
         has_pending_migrations = any(migration.version not in applied_versions for migration in MIGRATIONS)
         if not has_pending_migrations:
             log_event(
@@ -3300,6 +3506,16 @@ def migrate(database: Database, backup_dir: Path | None = None) -> list[int]:
         backup_path = None
         if backup_dir is not None and had_database and has_pending_migrations:
             backup_path = backup_database(database, backup_dir)
+
+        if legacy_seasonal:
+            # The pre-migration backup still has the original branch numbering.
+            # Both ledgers move atomically; tables, task IDs and evidence stay put.
+            with database.transaction(operation="schema_migration") as connection:
+                connection.execute("UPDATE schema_migrations SET version=74 WHERE version=72")
+                connection.execute(
+                    "UPDATE migration_history SET schema_version=74 WHERE schema_version=72 AND migration_name=?",
+                    (next(m.name for m in MIGRATIONS if m.version == 74),),
+                )
 
         applied: list[int] = []
         for migration in MIGRATIONS:
