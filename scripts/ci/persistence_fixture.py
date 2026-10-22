@@ -1,8 +1,49 @@
 """Deterministic paid-state fixture for real container persistence acceptance."""
 import json
+from hashlib import sha256
+from pathlib import Path
 import sqlite3
 import sys
 from datetime import datetime, timezone
+
+
+LAN_SOURCE_ID = "ci-lan-safe-source"
+LAN_SOURCE_BYTES = b"P6\n1 1\n255\n\xff\xff\xff"
+
+
+def seed_lan_release_source(connection, directory: Path, *, runtime_root: str) -> str:
+    """Give the isolated LAN fixture current v6 provenance, without a model call."""
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "ci-lan-source.ppm").write_bytes(LAN_SOURCE_BYTES)
+    digest = sha256(LAN_SOURCE_BYTES).hexdigest()
+    now = _now()
+    connection.execute(
+        "INSERT INTO libraries(id,name,root_path,created_at,updated_at) VALUES (?,?,?,?,?)",
+        ("ci-lan-source-library", "CI synthetic source", runtime_root, now, now),
+    )
+    connection.execute(
+        "INSERT INTO photos(id,library_id,relative_path,sha256,width,height,status,eligible,"
+        "local_features_status,visual_orientation_rotation_cw,visual_orientation_confidence,"
+        "visual_orientation_ambiguous,created_at,updated_at) "
+        "VALUES (?,?,?, ?,1,1,'analyzed',1,'complete',0,1,0,?,?)",
+        (LAN_SOURCE_ID, "ci-lan-source-library", "ci-lan-source.ppm", digest, now, now),
+    )
+    result = {
+        "schema_version": 6, "types": ["人物", "日常"], "memory_score": 72,
+        "visual_score": 81, "special_level": 2, "side_caption": "這是隔離測試的合成來源。",
+        "content_filter": {key: {"detected": False, "confidence": 1}
+                           for key in ("sexualized_content", "explicit_nudity", "female_glamour_portrait")},
+        "display_exclusion": {"category": "none", "confidence": 1},
+        "visual_orientation": {"rotation_cw": 0, "confidence": 1, "ambiguous": False,
+                               "evidence": ["faces_upright", "horizon_level"]},
+    }
+    connection.execute(
+        "INSERT INTO photo_analysis(photo_id,schema_version,stage,provider,model_name,"
+        "caption,side_caption,types_json,raw_json,score_kind,ranking_score,final_ranking_score,created_at) "
+        "VALUES (?,6,'single','ci-fixture','synthetic','CI source',?,'[]',?,'semantic',99,99,?)",
+        (LAN_SOURCE_ID, result["side_caption"], json.dumps(result), now),
+    )
+    return digest
 
 
 def _now() -> str:

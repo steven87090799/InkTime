@@ -199,6 +199,43 @@ def test_auto_pair_ignores_subject_and_manual_focus_metadata(app, tmp_path):
     assert ImageChops.difference(outputs[0], outputs[1]).getbbox() is None
 
 
+def test_auto_pair_place_and_date_are_upright_without_moving_photo_slots(app, tmp_path, monkeypatch):
+    _configure(app)
+    root = tmp_path / "photos"
+    root.mkdir()
+    for pid, day in (("first", 1), ("second", 2)):
+        _analyzed_photo(app, root, pid, (600, 900), f"2024-07-{day:02}T10:00:00+00:00")
+    service = app.extensions["inktime_render_service"]
+    monkeypatch.setattr(service, "location_name", lambda photo: "")
+    before = service.resolve_render_plan("first", secondary_photo_id="second", layout="auto_photo", orientation="landscape")
+    first = service._render_plan_image(before)
+    places = {"first": "新店區", "second": "臺北101"}
+    monkeypatch.setattr(service, "location_name", lambda photo: places[str(photo["id"])])
+    after = service.resolve_render_plan("first", secondary_photo_id="second", layout="auto_photo", orientation="landscape")
+    calls = []
+    original = ImageDraw.ImageDraw.text
+    def capture(draw, xy, text, *args, **kwargs):
+        if kwargs.get("font") is not None and kwargs["font"].size == 12:
+            calls.append((xy, str(text)))
+        return original(draw, xy, text, *args, **kwargs)
+    monkeypatch.setattr(ImageDraw.ImageDraw, "text", capture)
+    second = service._render_plan_image(after)
+    assert before["geometry"] == after["geometry"]
+    logical = [image.transpose(Image.Transpose.ROTATE_90) for image in (first, second)]
+    for photo, caption, pid in zip(after["geometry"]["photo_rects"], after["geometry"]["caption_rects"], ("first", "second"), strict=True):
+        box = (photo["x"], photo["y"], photo["x"] + photo["width"], photo["y"] + photo["height"])
+        assert ImageChops.difference(logical[0].crop(box), logical[1].crop(box)).getbbox() is None
+        columns = {}
+        for (x, y), text in calls:
+            if caption["x"] <= x < caption["x"] + caption["width"]:
+                columns.setdefault(x, []).append((y, text))
+        texts = ["".join(text for _, text in sorted(glyphs)) for glyphs in columns.values()]
+        assert places[pid] in texts
+        assert after["photo_footer_parts"][pid]["date"] in texts
+    for image in [first, second, *logical]:
+        image.close()
+
+
 def test_compact_d_browser_preview_matches_release_and_protects_text(app, tmp_path):
     _configure(app, **{"render.dither": "natural_d"})
     root = tmp_path / "photos"

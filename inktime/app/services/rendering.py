@@ -1361,9 +1361,10 @@ class RenderService:
     ) -> None:
         """A single readable column to each photo's left; dates never share IDs."""
         for record, caption_box in zip(records, geometry.caption_rects, strict=True):
-            date_label = parts.get(str(record["photo_id"]), {}).get("date", "")
+            metadata = parts.get(str(record["photo_id"]), {})
             self._draw_adaptive_pair_caption(
-                canvas, {**record, "capture_date_label": date_label}, caption_box,
+                canvas, {**record, "capture_date_label": metadata.get("date", ""),
+                         "capture_place_label": metadata.get("location", "")}, caption_box,
                 left_side=True, date_at_bottom=True,
             )
 
@@ -1385,9 +1386,16 @@ class RenderService:
             available_height = max(0, box.height - vertical_padding * 2)
             y = box.y + vertical_padding
             date_characters = list("".join(date_label.split())) if date_at_bottom else []
+            place_characters = list("".join(str(record.get("capture_place_label") or "").split())) if date_at_bottom else []
+            # Keep the existing date/short-sentence positions when no place is
+            # available. A place uses a second small upright column at the
+            # same bottom baseline; it never changes the photo rectangles.
+            if len(place_characters) > 12:
+                place_characters = place_characters[:11] + ["…"]
             date_line_height = 14
-            if date_characters:
-                available_height = max(0, available_height - len(date_characters) * date_line_height - 12)
+            metadata_height = max(len(date_characters), len(place_characters)) * date_line_height
+            if metadata_height:
+                available_height = max(0, available_height - metadata_height - 12)
             if date_label and not date_at_bottom:
                 # The narrow side strip keeps the date small and gives the
                 # larger memory sentence most of the available height.
@@ -1434,16 +1442,18 @@ class RenderService:
                 x = box.x + horizontal_padding + (available_width - glyph_width) // 2 - bounds[0]
                 draw.text((x, y - bounds[1]), character, font=font, fill="#17221c")
                 y += line_height
-            if date_characters:
-                y = box.bottom - vertical_padding - len(date_characters) * date_line_height
+            if date_characters or place_characters:
                 date_font = ImageFont.truetype(str(font_path), 12)
-                for character in date_characters:
-                    draw.text(
-                        (box.x + box.width // 2, y),
-                        character,
-                        font=date_font, fill="black", anchor="mt",
-                    )
-                    y += date_line_height
+                columns = [(date_characters, box.x + box.width // 2)]
+                if date_characters and place_characters:
+                    columns = [(place_characters, box.x + 13), (date_characters, box.x + box.width - 13)]
+                elif place_characters:
+                    columns = [(place_characters, box.x + box.width // 2)]
+                for characters, center in columns:
+                    y = box.bottom - vertical_padding - len(characters) * date_line_height
+                    for character in characters:
+                        draw.text((center, y), character, font=date_font, fill="black", anchor="mt")
+                        y += date_line_height
             draw.line(
                 (box.right - 2, box.y + 12, box.right - 2, box.bottom - 12),
                 fill="#1d2822",

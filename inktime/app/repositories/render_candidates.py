@@ -34,6 +34,7 @@ class RenderCandidateRepository:
     _BASE_SQL_PREDICATE = """
         p.status='analyzed'
         AND p.eligible=1
+        AND p.never_display=0
         AND p.exclusion_status IN ('eligible','manually_restored')
         AND p.lifecycle_status='active'
         AND l.enabled=1
@@ -205,7 +206,8 @@ class RenderCandidateRepository:
                 raise IneligiblePhotoError(
                     photo_id, "PHOTO-ELIGIBILITY-003 照片已 Missing 或不在 active 狀態"
                 )
-            if str(row.get("exclusion_status") or "") not in {"eligible", "manually_restored"}:
+            if (bool(row.get("never_display"))
+                    or str(row.get("exclusion_status") or "") not in {"eligible", "manually_restored"}):
                 raise IneligiblePhotoError(photo_id, "PHOTO-ELIGIBILITY-004 照片已排除或等待人工判斷")
             if not self.available(row):
                 raise IneligiblePhotoError(photo_id, "PHOTO-ELIGIBILITY-005 原始檔不存在")

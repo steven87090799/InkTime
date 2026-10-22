@@ -90,3 +90,33 @@ def test_text_and_paper_mask_leaves_photos_unprotected_in_physical_orientation()
 def test_compact_geometry_rejects_invalid_source_dimensions(sizes):
     with pytest.raises(ValueError):
         resolve_compact_pair_geometry(sizes)
+
+
+@pytest.mark.parametrize(("orientation", "size", "photos"), [
+    ("landscape", (800, 480), [(0, 0, 800, 452)]),
+    ("landscape", (800, 480), [(54, 0, 342, 480), (454, 0, 342, 480)]),
+    ("portrait", (480, 800), [(0, 0, 480, 772)]),
+    ("portrait", (480, 800), [(0, 0, 480, 368), (0, 404, 480, 368)]),
+])
+def test_all_auto_footers_protect_only_existing_non_photo_pixels(orientation, size, photos):
+    plan = {"orientation": orientation, "photo_footer_parts": {"source": {"place": "新店區"}},
+            "geometry": {"canvas_width": size[0], "canvas_height": size[1],
+                         "photo_rects": [dict(zip(("x", "y", "width", "height"), rect, strict=True))
+                                         for rect in photos]}}
+    with render_plan_text_mask(plan) as physical:
+        assert physical.mode == "1" and physical.size == (480, 800)
+        logical = (physical.transpose(Image.Transpose.ROTATE_90)
+                   if orientation == "landscape" else physical.copy())
+        try:
+            # Every photo edge stays unprotected; the rest of the panel is monochrome paper.
+            expected = Image.new("1", size, 1)
+            try:
+                draw = ImageDraw.Draw(expected)
+                for x, y, width, height in photos:
+                    draw.rectangle((x, y, x + width - 1, y + height - 1), fill=0)
+                del draw
+                assert logical.tobytes() == expected.tobytes()
+            finally:
+                expected.close()
+        finally:
+            logical.close()

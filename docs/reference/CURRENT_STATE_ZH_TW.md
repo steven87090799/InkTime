@@ -40,7 +40,7 @@ Config Store v5 是裝置本機儲存格式，不是所有 HTTP Manifest 的版�
 - 3 種 480×800 Profile：`safe_4c`（2bpp，96,000 bytes）、`gdep073e01_6c`、`gdey073d46_7c`（indexed4，192,000 bytes）。PhotoPainter 在裝置端轉為原生 800×480。
 - 12 個抖動選項（含別名／無抖動）：`natural_d`、`warm_vivid_c`、`none`、`floyd_steinberg`、`gooddisplay`、`photo_smooth`、`atkinson`、`bayer4`、`bayer8`、`nearest`、`bayer_ordered`、`serpentine_floyd_steinberg`。
 - 新安裝渲染預設為 `gdep073e01_6c`、`natural_d`、`auto_photo`、`landscape`、`cover`；新增裝置的預設 Profile 同為 `gdep073e01_6c`，仍必須另外與實板匹配。
-- D 使用 epdoptimize 1.3.0 balanced 衍生配方，HSL 飽和度微降 5%、固定白平衡與亮部保白；保留 C 與原版選項。僅接受不超過 480×800 的已排版影像，每塊最多 2,048 像素；Release 記錄實際色盤及配方。橫向自動雙圖每張左側保留 44px 欄，短句靠上、完整日期小字直排靠下，照片等比例置中填滿或依明確選擇 contain；不採用主體／焦點或額外放大。預覽與 Release 共用凍結版面與文字遮罩。
+- D 使用 epdoptimize 1.3.0 balanced 衍生配方，HSL 飽和度微降 5%、固定白平衡與亮部保白；保留 C 與原版選項。僅接受不超過 480×800 的已排版影像，每塊最多 2,048 像素；Release 記錄實際色盤及配方。橫向自動雙圖每張左側保留 44px 欄，短句靠上、既有行政區／地標與完整日期小字分欄直排靠下，照片等比例置中填滿或依明確選擇 contain；不採用主體／焦點或額外放大。預覽與 Release 共用凍結版面與文字遮罩。行政區／地標沿用既有顯示優先順序；單圖與直向雙圖維持照片下方原有 28px 資訊條，不新增電子紙四周白邊，也不變更照片區、填滿或縮放幾何。
 - Enhanced offline schedule 的 PhotoPainter 2.8.7 以後正式 capability 上限為 16 slots/day；Config Store v5 仍可讀 24-slot payload，能力不明的舊裝置需 repair／重新配對，不直接推定為 16。
 - 2.8.7 以後 PhotoPainter KEY1 雙擊顯示唯讀電源頁，顯示後停留 30 秒，再驗證 Internal Flash 的正式 frame 並恢復原圖；無有效 frame 才回正常網路流程。GPIO0 BOOT、GPIO5 PWR、GPIO21 TG28 IRQ 保持安全邊界。
 - 13.3 吋程式是保留的 beta 舊協定實作；目前 Web 沒有相應正式 Profile。不能直接使用本版 7.3 吋 Release。
