@@ -31,8 +31,9 @@ def test_waveshare_nearest_color_preserves_rgb_distance_and_tie_breaks():
         assert _waveshare_six_color_index(*pixel) == expected
 
 
-def test_warm_default_preserves_the_original_system_preset():
-    assert DEFAULT_RENDER_DITHER == "warm_vivid_c"
+def test_natural_default_preserves_the_warm_and_original_system_presets():
+    assert DEFAULT_RENDER_DITHER == "natural_d"
+    assert SYSTEM_PRESETS["natural_d"]["settings"]["render.dither"] == "natural_d"
     assert SYSTEM_PRESETS["warm_vivid_c"]["settings"]["render.dither"] == "warm_vivid_c"
     assert SYSTEM_PRESETS["gooddisplay_spectra6"]["settings"]["render.dither"] == "gooddisplay"
 

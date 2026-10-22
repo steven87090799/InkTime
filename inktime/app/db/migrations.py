@@ -2680,6 +2680,15 @@ MIGRATIONS = (
             )""",
         ),
     ),
+    Migration(
+        75,
+        "將未經管理員另選的舊預設色彩更新為 D 自然膚色",
+        (
+            "UPDATE settings SET value_json='\"natural_d\"',updated_at=datetime('now') "
+            "WHERE key='render.dither' AND value_json='\"warm_vivid_c\"' "
+            "AND (updated_by IS NULL OR updated_by='')",
+        ),
+    ),
 )
 
 

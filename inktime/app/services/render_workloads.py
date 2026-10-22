@@ -25,6 +25,7 @@ from inktime.app.domain.rendering import (
 )
 from inktime.app.db import Database
 from inktime.app.domain.photos import LocationResolver
+from inktime.app.domain.rendering.text_mask import render_plan_text_mask
 from inktime.app.repositories.photos import PhotoRepository
 from inktime.app.repositories.render_candidates import RenderCandidateRepository
 from inktime.app.repositories.settings import SettingsRepository
@@ -366,13 +367,15 @@ def _prepare_library_preview_child(
         )
     quantized = bool(arguments.get("quantized"))
     if quantized:
-        image = encode_image(
-            image,
-            profile_key=str(arguments["profile"]),
-            dither=str(arguments["effective_dither"]),
-            color_distance=str(arguments["color_distance"]),
-            strength=float(arguments["dither_strength"]),
-        ).preview
+        with render_plan_text_mask(arguments.get("render_plan")) as text_mask:
+            image = encode_image(
+                image,
+                profile_key=str(arguments["profile"]),
+                dither=str(arguments["effective_dither"]),
+                color_distance=str(arguments["color_distance"]),
+                strength=float(arguments["dither_strength"]),
+                protected_mask=text_mask,
+            ).preview
     layout_key = str(arguments.get("layout") or settings_repository.get("render.layout", "auto_photo"))
     orientation_key = str(
         arguments.get("orientation") or settings_repository.get("render.frame_orientation", "landscape")
@@ -420,13 +423,15 @@ def _prepare_dual_pair_compare_child(
     previews: list[dict[str, Any]] = []
     for index, plan in enumerate(settings["plans"]):
         image = service._render_plan_image(dict(plan))
-        image = encode_image(
-            image,
-            profile_key=str(plan["profile"]),
-            dither=str(plan["effective_dither"]),
-            color_distance=str(settings["color_distance"]),
-            strength=float(settings["dither_strength"]),
-        ).preview
+        with render_plan_text_mask(plan) as text_mask:
+            image = encode_image(
+                image,
+                profile_key=str(plan["profile"]),
+                dither=str(plan["effective_dither"]),
+                color_distance=str(settings["color_distance"]),
+                strength=float(settings["dither_strength"]),
+                protected_mask=text_mask,
+            ).preview
         if str(plan["orientation"]) == "landscape":
             image = image.transpose(Image.Transpose.ROTATE_90)
         name = f"preview_{index}.png"

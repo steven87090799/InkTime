@@ -97,6 +97,7 @@ DITHER_ALGORITHMS = (
     "floyd_steinberg",
     "gooddisplay",
     "warm_vivid_c",
+    "natural_d",
     "photo_smooth",
     "atkinson",
     "bayer4",
@@ -319,6 +320,33 @@ def _quantize_gooddisplay(
     )
     indexes = bytearray(index_mapping[index] for index in quantized.tobytes())
     return indexes, quantized.convert("RGB"), _gooddisplay_colors(profile)
+
+
+def _quantize_natural_d(
+    image: Image.Image, profile: DisplayProfile, protected_mask: Image.Image | None,
+) -> tuple[bytearray, Image.Image, tuple[PaletteColor, ...]]:
+    from .natural_d import SPECTRA6, quantize
+
+    palette = profile.colors
+    if profile.key == "gdep073e01_6c":
+        calibrated = dict(SPECTRA6)
+        palette = tuple(replace(color, rgb=calibrated[color.name], lab=None) for color in profile.colors)
+        by_name = {color.name: i for i, color in enumerate(palette)}
+        mapping = tuple(by_name[name] for name, _ in SPECTRA6)
+    else:
+        mapping = tuple(range(len(palette)))
+    protected = None
+    if protected_mask is not None:
+        if protected_mask.size != image.size:
+            raise ValueError("RENDER-004 文字保護遮罩尺寸不符")
+        protected = protected_mask.convert("1", dither=Image.Dither.NONE).convert("L").tobytes()
+    raw = quantize(image.tobytes(), image.width, image.height,
+                   tuple(palette[i].rgb for i in mapping), protected)
+    indexes = bytearray(mapping[index] for index in raw)
+    preview = Image.frombytes("P", image.size, bytes(indexes))
+    flattened = [channel for color in palette for channel in color.rgb]
+    preview.putpalette(flattened + [0] * (768 - len(flattened)))
+    return indexes, preview.convert("RGB"), palette
 
 
 def _warm_vivid_c(image: Image.Image) -> Image.Image:
@@ -574,9 +602,13 @@ def encode_image(
         raise ValueError(f"RENDER-004 不支援的抖動算法：{dither}")
     if not 0.0 <= float(strength) <= 2.0:
         raise ValueError("RENDER-004 抖動強度必須介於 0 到 2")
+    if dither == "natural_d" and image.width * image.height > 480 * 800:
+        raise ValueError("RENDER-004 D 色彩模式僅接受不超過 480×800 像素的已排版圖片")
     rgb = image.convert("RGB")
     preview_palette = profile.colors
-    if dither == "warm_vivid_c":
+    if dither == "natural_d":
+        indexes, preview, preview_palette = _quantize_natural_d(rgb, profile, protected_mask)
+    elif dither == "warm_vivid_c":
         with _warm_vivid_c(rgb) as adjusted:
             if profile.key == "gdep073e01_6c":
                 indexes, preview, preview_palette = _quantize_waveshare_six_color(adjusted, profile)

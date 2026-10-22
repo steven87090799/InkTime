@@ -127,6 +127,9 @@ RUNNER_SUITE_TEST_PATHS: dict[str, tuple[str, ...]] = {
     "render_release_owner": (
         "tests/integration/test_photo_display_history.py",
         "tests/integration/test_photo_places.py",
+        "tests/unit/test_compact_pair_geometry.py",
+        "tests/unit/test_natural_d.py",
+        "tests/unit/test_palette.py",
         "tests/unit/test_photo_pair_matching.py",
         "tests/integration/test_auto_publish_pool_regression.py",
         "tests/integration/test_auto_photo_review_boundaries.py",
