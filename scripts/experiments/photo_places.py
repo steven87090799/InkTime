@@ -6,7 +6,6 @@ disposable copy of the database with Migration 71 for enrich/import-landmark.
 from __future__ import annotations
 
 import argparse
-from dataclasses import replace
 import json
 import os
 from pathlib import Path
@@ -72,16 +71,12 @@ def enrich(args):
         place = GeoapifyGeocoder(os.environ.get("GEOCODING_API_KEY", "")).reverse(photo["gps_lat"], photo["gps_lon"])
         repository.cache(photo["gps_lat"], photo["gps_lon"], place, provider="geoapify", language="zh")
         requests_count = 1
-    existing = repository.get(photo)
-    if existing:
-        place = replace(place, landmark=existing.landmark, landmark_confidence=existing.landmark_confidence,
-                        landmark_source=existing.landmark_source)
-    repository.save(photo["id"], photo["sha256"], photo["gps_lat"], photo["gps_lon"], place)
+    place = repository.save_address(photo["id"], photo["sha256"], photo["gps_lat"], photo["gps_lon"], place)
     return {"photo_id": photo["id"], "network_requests": requests_count, "place": place.as_dict()}
 
 
 def import_landmark(args):
-    from inktime.app.domain.photos.places import PhotoPlace, coordinate_key
+    from inktime.app.domain.photos.places import coordinate_key
 
     photo = photo_row(args.database, args.photo_id)
     if photo["sha256"] != args.expected_sha256 or coordinate_key(photo["gps_lat"], photo["gps_lon"]) != coordinate_key(args.latitude, args.longitude):
@@ -90,9 +85,8 @@ def import_landmark(args):
     if not args.write:
         return {"dry_run": True, "landmark": landmark}
     repository = PhotoLocationRepository(Database(args.database))
-    place = replace(repository.get(photo) or PhotoPlace(), landmark=landmark["name"],
-                    landmark_confidence=landmark["confidence"], landmark_source="vision")
-    repository.save(photo["id"], args.expected_sha256, args.latitude, args.longitude, place)
+    place = repository.save_landmark(photo["id"], args.expected_sha256, args.latitude, args.longitude,
+                                     name=landmark["name"], confidence=landmark["confidence"])
     return {"photo_id": photo["id"], "place": place.as_dict()}
 
 

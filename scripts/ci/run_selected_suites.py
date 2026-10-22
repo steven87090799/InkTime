@@ -140,7 +140,7 @@ RUNNER_SUITE_TEST_PATHS: dict[str, tuple[str, ...]] = {
         "tests/integration/test_photo_crop_state.py",
     ),
     "scanner_photos_owner": (
-        "tests/unit/test_photo_places.py",
+        "tests/unit/test_photo_place_domain.py",
         "tests/unit/test_local_selection.py",
         "tests/unit/test_photo_dates.py",
         "tests/unit/test_preprocessing.py",
@@ -173,7 +173,7 @@ RUNNER_SUITE_TEST_PATHS: dict[str, tuple[str, ...]] = {
         "tests/unit/test_photo_analysis_retention.py",
         "tests/unit/test_provider_batch.py",
         "tests/unit/test_provider_config.py",
-        "tests/unit/test_photo_places.py",
+        "tests/unit/test_photo_place_domain.py",
         "tests/unit/test_provider_contracts.py",
         "tests/unit/test_provider_router.py",
         "tests/unit/test_scoring.py",

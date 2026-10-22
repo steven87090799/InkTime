@@ -115,6 +115,14 @@ python scripts/experiments/photo_places.py import-landmark --database /tmp/test-
 
 本次一次性早上交接完成後刪除提醒排程，不建立後續監控。
 
+### 程式碼審查修正
+
+`e8f334c` 的 [Hosted CI #1246](https://github.com/steven87090799/InkTime/actions/runs/39703391568) 因 unit／integration 測試檔同名，在 pytest 收集時失敗。unit 檔改為 `test_photo_place_domain.py`，同步更新兩個 CI owner 的 runner 路徑。
+
+地址與地標改由 `save_address`／`save_landmark` 各自更新，在同一個 `BEGIN IMMEDIATE` 交易中核對目前 SHA／GPS、讀取最新地點資料、合併所屬欄位再寫入。CLI 不再於交易外讀取整份資料後覆寫；網路查詢仍在交易外。若照片身分已改變，舊回應會被拒絕，新身分也不會繼承舊地標或地址。
+
+新增回歸案例涵蓋兩種寫入順序、清除地標保留地址、兩個 CLI 同時更新，以及內容／GPS 變更的拒絕與重建。並行案例使用合成照片、快取地址及本地模型回應，沒有模型／地圖網路請求。這些測試交由 Hosted CI 執行；本地只做語法、Lint、型別、CI 路徑與檔名靜態檢查、文件契約及 `git diff --check`。修正提交的 Hosted CI 結果須另行確認，不以靜態檢查宣稱測試通過。
+
 ## 一手來源
 
 - [OpenRouter GPT-6 Luna](https://openrouter.ai/openai/gpt-6-luna)、[模型目錄 API](https://openrouter.ai/api/v1/models)、[Luna endpoints](https://openrouter.ai/api/v1/models/openai/gpt-6-luna-20260922/endpoints)

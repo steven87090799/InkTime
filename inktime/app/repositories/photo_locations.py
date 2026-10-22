@@ -10,6 +10,8 @@ from inktime.app.domain.photos.places import PLACE_VERSION, PhotoPlace, coordina
 
 
 class PhotoLocationRepository:
+    _LANDMARK_FIELDS = frozenset({"landmark", "landmark_confidence", "landmark_source"})
+
     def __init__(self, database: Database):
         self.database = database
 
@@ -30,22 +32,42 @@ class PhotoLocationRepository:
         except (ValueError, TypeError):
             return None
 
-    def save(self, photo_id: str, content_sha256: str, latitude, longitude, place: PhotoPlace) -> None:
-        if not re.fullmatch(r"[a-f0-9]{64}", content_sha256):
+    def save_address(self, photo_id: str, content_sha256: str, latitude, longitude, place: PhotoPlace) -> PhotoPlace:
+        # Address providers/cache entries cannot replace photo-specific vision evidence.
+        fields = {key: value for key, value in place.as_dict().items() if key not in self._LANDMARK_FIELDS}
+        return self._merge(photo_id, content_sha256, latitude, longitude, fields)
+
+    def save_landmark(self, photo_id: str, content_sha256: str, latitude, longitude,
+                      *, name: str, confidence: float) -> PhotoPlace:
+        return self._merge(photo_id, content_sha256, latitude, longitude,
+                           {"landmark": name, "landmark_confidence": confidence, "landmark_source": "vision"})
+
+    def _merge(self, photo_id: str, content_sha256: str, latitude, longitude, fields: dict) -> PhotoPlace:
+        if not isinstance(content_sha256, str) or not re.fullmatch(r"[a-f0-9]{64}", content_sha256):
             raise ValueError("地點必須綁定照片 SHA-256")
         gps_key = coordinate_key(latitude, longitude)
-        normalized = PhotoPlace.from_dict(place.as_dict())
-        now = datetime.now(timezone.utc).isoformat()
+        normalized = PhotoPlace.from_dict(fields).as_dict()
+        updates = {key: normalized[key] for key in fields}
+        # BEGIN IMMEDIATE serializes the read and merge, not just the final write.
+        # Geocoding/model calls stay outside this short database transaction.
         with self.database.transaction() as connection:
             photo = connection.execute("SELECT sha256,gps_lat,gps_lon FROM photos WHERE id=?", (photo_id,)).fetchone()
             if photo is None or photo["sha256"] != content_sha256 or coordinate_key(photo["gps_lat"], photo["gps_lon"]) != gps_key:
                 raise ValueError("照片內容或 GPS 已改變，拒絕套用舊地點")
+            row = connection.execute(
+                "SELECT place_json FROM photo_locations WHERE photo_id=? AND content_sha256=? AND gps_key=?",
+                (photo_id, content_sha256, gps_key),
+            ).fetchone()
+            existing = PhotoPlace.from_dict(json.loads(row["place_json"])) if row else PhotoPlace()
+            merged = replace(existing, **updates)
+            now = datetime.now(timezone.utc).isoformat()
             connection.execute(
                 "INSERT INTO photo_locations(photo_id,content_sha256,gps_key,place_json,updated_at) VALUES(?,?,?,?,?) "
                 "ON CONFLICT(photo_id) DO UPDATE SET content_sha256=excluded.content_sha256,"
                 "gps_key=excluded.gps_key,place_json=excluded.place_json,updated_at=excluded.updated_at",
-                (photo_id, content_sha256, gps_key, json.dumps(normalized.as_dict(), ensure_ascii=False), now),
+                (photo_id, content_sha256, gps_key, json.dumps(merged.as_dict(), ensure_ascii=False), now),
             )
+        return merged
 
     def cached(self, latitude, longitude, *, provider: str, language: str) -> PhotoPlace | None:
         with self.database.session() as connection:
