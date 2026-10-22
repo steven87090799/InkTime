@@ -12,7 +12,7 @@ import pytest
 
 from inktime.app.domain.analysis.scoring import SEMANTIC_SCORE_KIND
 from inktime.app.domain.rendering.fonts import FontCoverageError
-from inktime.app.domain.rendering.palette import encode_image
+from inktime.app.domain.rendering.palette import EncodedImage, encode_image
 from inktime.app.domain.rendering.release import (
     AtomicReleasePublisher,
     DEVICE_TEST_INDEX_DIRECTORY,
@@ -132,6 +132,43 @@ def test_failed_release_does_not_replace_latest(tmp_path):
     with pytest.raises(ValueError):
         publisher.publish([("broken", Image.new("RGB", (100, 100), "white"))])
     assert (tmp_path / "releases" / "latest").read_text() == first["release_id"]
+
+
+@pytest.mark.parametrize("failure", [None, "encoding", "preview_write"])
+def test_release_closes_owned_pixel_buffers_even_when_failure_retains_traceback(tmp_path, monkeypatch, failure):
+    from inktime.app.domain.rendering import release
+
+    source = Image.new("RGB", (480, 800), "white")
+    owned = []
+
+    def encode(image, **kwargs):
+        owned.append(image)
+        if failure == "encoding":
+            raise OSError("synthetic encoding failure")
+        preview = Image.new("RGB", image.size, "white")
+        owned.append(preview)
+        if failure == "preview_write":
+            def fail_save(*args, **kwargs):
+                raise OSError("synthetic preview failure")
+            monkeypatch.setattr(preview, "save", fail_save)
+        return EncodedImage(b"\x55" * 96000, preview, kwargs["profile"].colors)
+
+    monkeypatch.setattr(release, "encode_image", encode)
+    root = tmp_path / "releases"
+    publisher = AtomicReleasePublisher(root)
+    if failure:
+        with pytest.raises(OSError, match="synthetic") as retained_error:
+            publisher.publish([("source", source)])
+        assert retained_error.value.__traceback__ is not None
+        assert not list(root.glob("*.tmp"))
+        assert not (root / "latest").exists()
+    else:
+        publisher.publish([("source", source)])
+    for image in owned:
+        with pytest.raises(ValueError, match="closed image"):
+            image.getpixel((0, 0))
+    assert source.getpixel((0, 0)) == (255, 255, 255)
+    source.close()
 
 
 def test_invalid_release_contract_does_not_leak_temporary_directory(tmp_path):

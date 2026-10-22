@@ -2171,10 +2171,14 @@ class RenderService:
     def _auto_photo_plans(
         self, photo_ids: list[str], quantity: int, *,
         device_config: dict[str, Any] | None = None, profile: str | None = None,
+        selection_run_ids: list[str] | None = None,
     ) -> list[dict[str, Any]]:
         device = device_config or {}
         orientation = str(device.get("frame_orientation") or self.settings.get("render.frame_orientation", "landscape"))
         rows = [dict(self.ensure_photo_features(photo_id)) for photo_id in dict.fromkeys(photo_ids)]
+        priorities = DisplayHistoryRepository(self.database).selection_priorities(selection_run_ids or [], photo_ids)
+        for row in rows:
+            row.update(priorities.get(str(row["id"]), {}))
         groups = select_auto_photo_frames(rows, frame_orientation=orientation, count=quantity)
         if not groups:
             raise InsufficientPhotoContentError("RENDER-005 沒有可組成完整畫面的照片；請補充方向相符且不重複的照片")
@@ -2288,7 +2292,8 @@ class RenderService:
                 device_orientation_metadata: list[dict[str, Any]] = []
                 if effective_layout == "auto_photo":
                     composition_plans = self._auto_photo_plans(
-                        selected, quantity, device_config=device, profile=profile_key
+                        selected, quantity, device_config=device, profile=profile_key,
+                        selection_run_ids=selection_run_ids,
                     )
                 elif effective_layout in {"photo_pair", "photo_pair_caption"}:
                     composition_plans = [
@@ -2394,7 +2399,7 @@ class RenderService:
             return {"releases": published, "device_releases": assignments}
         release_orientation_metadata: list[dict[str, Any]] = []
         if layout_key == "auto_photo":
-            plans = self._auto_photo_plans(selected, quantity)
+            plans = self._auto_photo_plans(selected, quantity, selection_run_ids=selection_run_ids)
         elif layout_key in {"photo_pair", "photo_pair_caption"}:
             plans = []
             for index in range(0, len(selected), 2):
@@ -2639,7 +2644,7 @@ class RenderService:
                 rows = connection.execute(
                     f"""
                     WITH content_exposure AS (
-                        SELECT sha256,MAX(MAX(display_count,selection_count)) AS used_count,
+                        SELECT sha256,MAX(SUM(display_count),SUM(selection_count)) AS used_count,
                                MAX(MAX(COALESCE(last_displayed_at,''),COALESCE(last_selected_at,''))) AS used_at
                         FROM photos WHERE length(sha256)=64 AND (display_count>0 OR selection_count>0)
                         GROUP BY sha256

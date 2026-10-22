@@ -195,38 +195,44 @@ class AtomicReleasePublisher:
         try:
             for index, (photo_id, source) in enumerate(images, 1):
                 rendered = source.convert("RGB")
-                if rendered.size != (width, height):
-                    raise ValueError(f"RENDER-002 圖片尺寸必須是 {width}×{height}")
-                plan = render_plans[index - 1] if index <= len(render_plans) else None
-                with render_plan_text_mask(plan, override=protected_mask) as text_mask:
-                    encoded = encode_image(
-                        rendered,
-                        profile_key=profile_key,
-                        dither=dither,
-                        color_distance=effective_color_distance,
-                        strength=effective_strength,
-                        linear_light=linear_light,
-                        protected_mask=text_mask,
-                        profile=profile,
+                try:
+                    if rendered.size != (width, height):
+                        raise ValueError(f"RENDER-002 圖片尺寸必須是 {width}×{height}")
+                    plan = render_plans[index - 1] if index <= len(render_plans) else None
+                    with render_plan_text_mask(plan, override=protected_mask) as text_mask:
+                        encoded = encode_image(
+                            rendered,
+                            profile_key=profile_key,
+                            dither=dither,
+                            color_distance=effective_color_distance,
+                            strength=effective_strength,
+                            linear_light=linear_light,
+                            protected_mask=text_mask,
+                            profile=profile,
+                        )
+                finally:
+                    rendered.close()
+                try:
+                    payload = encoded.payload
+                    output_palette = encoded.palette
+                    expected = width * height // (4 if profile.pixel_format == "2bpp" else 2)
+                    if len(payload) != expected:
+                        raise ValueError("RENDER-002 索引影像檔案大小驗證失敗")
+                    filename = f"photo_{index}.bin"
+                    preview = f"preview_{index}.png"
+                    (temporary / filename).write_bytes(payload)
+                    encoded.preview.save(temporary / preview, "PNG")
+                    files.append(
+                        {
+                            "name": filename,
+                            "size": len(payload),
+                            "sha256": sha256(payload).hexdigest(),
+                            "source_photo_id": photo_id,
+                            "preview": preview,
+                        }
                     )
-                payload = encoded.payload
-                output_palette = encoded.palette
-                expected = width * height // (4 if profile.pixel_format == "2bpp" else 2)
-                if len(payload) != expected:
-                    raise ValueError("RENDER-002 索引影像檔案大小驗證失敗")
-                filename = f"photo_{index}.bin"
-                preview = f"preview_{index}.png"
-                (temporary / filename).write_bytes(payload)
-                encoded.preview.save(temporary / preview, "PNG")
-                files.append(
-                    {
-                        "name": filename,
-                        "size": len(payload),
-                        "sha256": sha256(payload).hexdigest(),
-                        "source_photo_id": photo_id,
-                        "preview": preview,
-                    }
-                )
+                finally:
+                    encoded.preview.close()
             manifest: dict[str, Any] = {
                 "schema_version": 1 if profile.pixel_format == "2bpp" else 2,
                 "release_id": release_id,

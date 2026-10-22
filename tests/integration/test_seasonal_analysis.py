@@ -370,6 +370,7 @@ def test_daily_window_only_adds_new_boundary_day_and_keeps_unselected_candidates
         service.photos.save_analysis(item["photo_id"], first, "single", "mock", "old-model", result, json.dumps(result))
         service.jobs.complete_item(first, item["id"], {"stage": "single"}, worker_id="daily-test")
     service.jobs.finalize_if_done(first)
+    assert service.jobs.get(first)["completed_items"] == 11
     second = service.ensure(date(2026, 10, 23))["job_id"]
     assert service.jobs.get(second)["total_items"] == 1
     tasks = _tasks(service)

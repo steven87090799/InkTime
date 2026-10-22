@@ -46,6 +46,29 @@ class DisplayHistoryRepository:
                 )
         return run_id
 
+    def selection_priorities(self, run_ids: list[str], photo_ids: list[str]) -> dict[str, dict[str, Any]]:
+        """Recover only selected sources' frozen ordering for final pairing."""
+        if not run_ids or not photo_ids:
+            return {}
+        with self.database.session() as connection:
+            rows = connection.execute(
+                """SELECT requested.value AS photo_id,
+                    (SELECT c.snapshot_json FROM photo_selection_candidates c
+                     JOIN photo_selection_runs r ON r.id=c.run_id
+                     WHERE c.photo_id=requested.value AND c.run_id IN (SELECT value FROM json_each(?))
+                     ORDER BY r.created_at DESC,r.id DESC LIMIT 1) AS snapshot
+                   FROM json_each(?) requested""",
+                (json.dumps(list(dict.fromkeys(run_ids))), json.dumps(list(dict.fromkeys(photo_ids)))),
+            ).fetchall()
+        priorities = {}
+        for row in rows:
+            snapshot = json.loads(row["snapshot"] or "{}")
+            if snapshot.get("seasonal_priority") is not None:
+                priorities[row["photo_id"]] = {key: snapshot[key] for key in (
+                    "seasonal_priority", "exposure_count", "content_last_exposure_at",
+                ) if snapshot.get(key) is not None}
+        return priorities
+
     def attach_releases(
         self, run_ids: list[str], releases: list[dict[str, Any]], photo_ids: list[str], *, connection=None,
     ) -> None:

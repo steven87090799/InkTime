@@ -297,3 +297,37 @@ def test_copied_content_cannot_reset_the_rotation_counter(app, tmp_path):
     assert rows[0]["id"] == "fresh"
     assert len(rows) == 2
     assert rows[1]["exposure_count"] == 1
+    _seen(app, "copy")
+    rows = app.extensions["inktime_render_service"].select_candidates_details(3, target_date=date(2027, 10, 22))
+    assert rows[1]["exposure_count"] == 2
+
+
+@pytest.mark.parametrize("device_specific", [False, True])
+def test_final_publication_keeps_cross_year_pair_priorities(app, tmp_path, monkeypatch, device_specific):
+    actor = create_admin(app)
+    root = tmp_path / "published-priorities"
+    for identifier, captured in (("same-2012", "2012-10-22"), ("same-2019", "2019-10-22"),
+                                ("near-2012", "2012-10-21"), ("other-2012", "2012-10-20")):
+        _photo(app, root, identifier, 80, captured[5:])
+        Image.new("RGB", (600, 900), "white").save(root / f"{identifier}.jpg")
+        with app.extensions["inktime_database"].transaction() as connection:
+            connection.execute("UPDATE photos SET width=600,height=900,captured_date=?,captured_at=? WHERE id=?",
+                               (captured, captured, identifier))
+    for key, value in {"analysis.execution_mode": "seasonal_ai", "render.layout": "auto_photo",
+                       "render.frame_orientation": "landscape", "render.dither": "none"}.items():
+        _setting(app, key, value)
+    service = app.extensions["inktime_render_service"]
+    observed = []
+    def capture(plan, **kwargs):
+        observed.append([plan["primary_photo_id"], plan["secondary_photo_id"]])
+        return Image.new("RGB", (480, 800), "white")
+    monkeypatch.setattr(service, "_render_plan_image", capture)
+    devices = None
+    if device_specific:
+        identifier, _ = app.extensions["inktime_device_repository"].create(
+            "Seasonal pairs", panel_profile="safe_4c", layout_mode="auto_photo", frame_orientation="landscape",
+        )
+        devices = [identifier]
+    service.publish([], actor, profile_keys=["safe_4c"], device_ids=devices, quantity_override=2,
+                    target_date=date(2026, 10, 22))
+    assert observed == [["same-2012", "same-2019"], ["near-2012", "other-2012"]]
