@@ -723,6 +723,12 @@ def _classify_path(path: str) -> tuple[set[str], set[str], set[str], bool]:
         gates.add("nas_update_e2e")
         return domains, suites, gates, False
 
+    if path in {"gunicorn.conf.py", "inktime/app/core/server_tls.py"}:
+        domains.update({"python", "docker", "tls_security"})
+        suites.update({"python_application_owner", "docker_runtime_owner", "container_configuration_owner", "tls_configuration_owner"})
+        gates.update({"container_security", "tls_smoke"})
+        return domains, suites, gates, False
+
     # This path is both CI-owned and a real production TLS/container surface.
     if path.startswith(".github/tls-smoke/"):
         domains.update({"ci_config", "docker", "tls_security"})
