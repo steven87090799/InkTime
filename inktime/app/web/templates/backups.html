@@ -1,1 +1,47 @@
-{% extends "base.html" %}{% block title %}備份與還原｜InkTime{% endblock %}{% block content %}<div class="page-head"><div><p class="eyebrow">維護</p><h1>備份與還原</h1><p>備份包含 SQLite、一般設定、分析結果、照片／排程狀態與顯示歷史紀錄；預設不包含 API Key、Webhook Token、原始照片、縮圖或已渲染 Release 檔案。</p></div>{% if g.user.role=='administrator' %}<button class="primary" id="backup-now">立即備份</button><span id="backup-status" role="status"></span>{% endif %}</div><section class="panel"><div class="table-wrap"><table><thead><tr><th>備份檔</th><th>大小</th><th>修改時間</th><th>操作</th></tr></thead><tbody>{% for backup in backups %}<tr><td>{{ backup.name }}</td><td>{{ backup.size }} bytes</td><td><time datetime="{{ backup.modified_at }}">{{ backup.modified_at|human_datetime }}</time></td><td>{% if g.user.role=='administrator' %}<a href="/api/v1/backups/{{ backup.name }}">下載</a>{% endif %}</td></tr>{% else %}<tr><td colspan="4" class="empty">尚未建立備份。</td></tr>{% endfor %}</tbody></table></div></section><section class="notice">還原必須先停止 Web、Worker、Scheduler，再執行 <code>scripts/restore_backup.py --yes</code>。工具會先建立目前資料庫安全副本，驗證格式、Schema、雜湊與重要資料表；失敗時自動回復。</section>{% endblock %}{% block scripts %}{% if g.user.role=='administrator' %}<script nonce="{{ csp_nonce }}">document.getElementById('backup-now').onclick=async()=>window.inktimeRunAction(document.getElementById('backup-now'),async()=>{const r=await window.inktimeFetch('/api/v1/backups',{method:'POST'}),d=await window.inktimeDecodeJson(r);if(r.ok)location.reload();else window.inktimeSetStatus('#backup-status',d.message||'備份失敗','error');});</script>{% endif %}{% endblock %}
+{% extends "base.html" %}
+{% block title %}備份與還原｜InkTime{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div>
+    <p class="eyebrow">維護</p><h1>備份與還原</h1>
+    <p>備份包含 SQLite、一般設定、分析結果、照片／排程狀態與顯示歷史紀錄；預設不包含 API Key、Webhook Token、原始照片、縮圖或已渲染 Release 檔案。</p>
+  </div>
+  {% if g.user.role=='administrator' %}<button class="primary" id="backup-now">立即備份</button><span id="backup-status" role="status"></span>{% endif %}
+</div>
+<section class="panel" aria-labelledby="backup-schedule-title">
+  <div class="panel-head">
+    <h2 id="backup-schedule-title">自動備份排程</h2>
+    {% if g.user.role=='administrator' %}<a class="secondary" href="{{ url_for('settings.settings_page', search='backup.') }}#setting-backup-schedule_enabled">調整時間／停用排程</a>{% endif %}
+  </div>
+  {% if backup_schedule_enabled %}
+  <p id="backup-schedule-summary">已啟用：每天 {{ '%02d'|format(backup_hour) }}:00 排程備份一次（{{ display_timezone }}）。</p>
+  {% else %}
+  <p id="backup-schedule-summary">已停用：不會建立新的自動備份工作。手動備份仍可使用。</p>
+  {% endif %}
+  <p>備份保留數量：{{ backup_retention }} 份。備份容量以 GB 顯示。</p>
+  {% if g.user.role=='administrator' %}
+  <p class="muted">點選上方按鈕，可設定每日備份的小時、保留份數，或將「每日自動建立資料庫備份」設為停用，再儲存設定。停用排程會保留既有備份，也不會取消已建立的備份工作。</p>
+  {% endif %}
+</section>
+<section class="panel">
+  <div class="table-wrap"><table>
+    <thead><tr><th>備份檔</th><th>大小（GB）</th><th>修改時間</th><th>操作</th></tr></thead>
+    <tbody>
+    {% for backup in backups %}
+    <tr>
+      <td>{{ backup.name }}</td>
+      <td>{% if 0 < backup.size < 1000000 %}小於 0.001{% else %}{{ '%.3f'|format(backup.size / 1000000000) }}{% endif %} GB</td>
+      <td><time datetime="{{ backup.modified_at }}">{{ backup.modified_at|human_datetime }}</time></td>
+      <td>{% if g.user.role=='administrator' %}<a href="/api/v1/backups/{{ backup.name }}">下載</a>{% endif %}</td>
+    </tr>
+    {% else %}<tr><td colspan="4" class="empty">尚未建立備份。</td></tr>{% endfor %}
+    </tbody>
+  </table></div>
+</section>
+<section class="notice">還原必須先停止 Web、Worker、Scheduler，再執行 <code>scripts/restore_backup.py --yes</code>。工具會先建立目前資料庫安全副本，驗證格式、Schema、雜湊與重要資料表；失敗時自動回復。</section>
+{% endblock %}
+{% block scripts %}
+{% if g.user.role=='administrator' %}
+<script nonce="{{ csp_nonce }}">document.getElementById('backup-now').onclick=async()=>window.inktimeRunAction(document.getElementById('backup-now'),async()=>{const r=await window.inktimeFetch('/api/v1/backups',{method:'POST'}),d=await window.inktimeDecodeJson(r);if(r.ok)location.reload();else window.inktimeSetStatus('#backup-status',d.message||'備份失敗','error');});</script>
+{% endif %}
+{% endblock %}
