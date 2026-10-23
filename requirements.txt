@@ -5,13 +5,12 @@ requests==2.34.2
 # Security baseline for the TLS CA bundle; keep both runtime locks aligned.
 certifi==2026.10.19
 Pillow==13.0.0
-pillow-heif==1.8.0
+pillow-heif==1.8.1
 cryptography==50.0.2
 gunicorn==26.2.0
 psutil==7.0.0
 fonttools==4.66.1
 opencv-python-headless==4.14.0.94
-# 2.2.6 is the newest shared line verified with Python 3.10/3.12 and OpenCV 4.13.
-# Newer NumPy lines no longer share the project's complete supported interpreter matrix.
-numpy==2.2.6
+# Runtime and CI target Python 3.12; keep both architecture locks aligned.
+numpy==2.5.4
 opencc==1.4.2

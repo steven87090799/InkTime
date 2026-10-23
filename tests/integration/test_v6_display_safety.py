@@ -147,3 +147,16 @@ def test_old_eligible_projection_cannot_bypass_current_safety_evidence(app, risk
     assert app.extensions["inktime_render_service"]._candidate_query(
         target=date(2026, 10, 21), month_days=None, older_only=False, limit=10,
     ) == []
+
+
+def test_local_screenshot_evidence_still_blocks_safe_model_result_and_formal_download(app):
+    from inktime.app.services.device_releases import DeviceReleaseService
+    metadata = certified_release_metadata(app)
+    photo_id = metadata["render_plans"][0]["primary_photo_id"]
+    candidates = app.extensions["inktime_render_candidate_repository"]
+    assert candidates.get(photo_id) is not None
+    with app.extensions["inktime_database"].transaction() as connection:
+        connection.execute("UPDATE photos SET screenshot_likelihood=1,exclusion_status='manually_restored',manual_override=1 WHERE id=?", (photo_id,))
+    assert candidates.get(photo_id) is None
+    service = DeviceReleaseService(app.extensions["inktime_database"], app.extensions["inktime_runtime_config"].release_dir)
+    assert not service._formal_content_is_current({"render_options": metadata})

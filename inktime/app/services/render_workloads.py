@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections import Counter
+from collections.abc import Iterable
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 import json
@@ -9,7 +9,7 @@ from pathlib import Path
 import shutil
 import sqlite3
 import tempfile
-from typing import BinaryIO, Any
+from typing import BinaryIO, Any, cast
 from uuid import uuid4
 
 from PIL import Image, ImageDraw, ImageOps
@@ -25,6 +25,7 @@ from inktime.app.domain.rendering import (
 )
 from inktime.app.db import Database
 from inktime.app.domain.photos import LocationResolver
+from inktime.app.domain.rendering.text_mask import render_plan_text_mask
 from inktime.app.repositories.photos import PhotoRepository
 from inktime.app.repositories.render_candidates import RenderCandidateRepository
 from inktime.app.repositories.settings import SettingsRepository
@@ -366,13 +367,15 @@ def _prepare_library_preview_child(
         )
     quantized = bool(arguments.get("quantized"))
     if quantized:
-        image = encode_image(
-            image,
-            profile_key=str(arguments["profile"]),
-            dither=str(arguments["effective_dither"]),
-            color_distance=str(arguments["color_distance"]),
-            strength=float(arguments["dither_strength"]),
-        ).preview
+        with render_plan_text_mask(arguments.get("render_plan")) as text_mask:
+            image = encode_image(
+                image,
+                profile_key=str(arguments["profile"]),
+                dither=str(arguments["effective_dither"]),
+                color_distance=str(arguments["color_distance"]),
+                strength=float(arguments["dither_strength"]),
+                protected_mask=text_mask,
+            ).preview
     layout_key = str(arguments.get("layout") or settings_repository.get("render.layout", "auto_photo"))
     orientation_key = str(
         arguments.get("orientation") or settings_repository.get("render.frame_orientation", "landscape")
@@ -420,13 +423,15 @@ def _prepare_dual_pair_compare_child(
     previews: list[dict[str, Any]] = []
     for index, plan in enumerate(settings["plans"]):
         image = service._render_plan_image(dict(plan))
-        image = encode_image(
-            image,
-            profile_key=str(plan["profile"]),
-            dither=str(plan["effective_dither"]),
-            color_distance=str(settings["color_distance"]),
-            strength=float(settings["dither_strength"]),
-        ).preview
+        with render_plan_text_mask(plan) as text_mask:
+            image = encode_image(
+                image,
+                profile_key=str(plan["profile"]),
+                dither=str(plan["effective_dither"]),
+                color_distance=str(settings["color_distance"]),
+                strength=float(settings["dither_strength"]),
+                protected_mask=text_mask,
+            ).preview
         if str(plan["orientation"]) == "landscape":
             image = image.transpose(Image.Transpose.ROTATE_90)
         name = f"preview_{index}.png"
@@ -794,13 +799,30 @@ class RenderWorkloadService:
 
     @staticmethod
     def _palette_statistics(image: Image.Image, colors) -> list[dict]:
-        rgb = image.convert("RGB")
-        pixels = (
-            list(rgb.get_flattened_data())
-            if hasattr(rgb, "get_flattened_data")
-            else list(rgb.getdata())
-        )
-        counts: Counter[Any] = Counter(pixels)
+        colors = tuple(colors)
+        if not colors:
+            return []
+        counts = dict.fromkeys((color.rgb for color in colors), 0)
+        with image.convert("RGB") as rgb:
+            histogram = rgb.getcolors(maxcolors=len(counts))
+            if histogram is not None:
+                counts.update({color: count for count, color in histogram if color in counts})
+            else:
+                # The normal preview has only palette colors. Preserve the old
+                # behavior for arbitrary RGB inputs too, but retain neither an
+                # image-sized pixel tuple sequence nor every distinct RGB key.
+                for top in range(0, rgb.height, 64):
+                    with rgb.crop((0, top, rgb.width, min(top + 64, rgb.height))) as strip:
+                        # Both Pillow APIs iterate RGB tuples here; the legacy
+                        # ImagingCore return annotation omits its iterator.
+                        pixels = cast(
+                            Iterable[tuple[int, int, int]],
+                            strip.get_flattened_data() if hasattr(strip, "get_flattened_data") else strip.getdata(),
+                        )
+                        for pixel in pixels:
+                            if pixel in counts:
+                                counts[pixel] += 1
+                        del pixels
         total = image.width * image.height
         return [
             {

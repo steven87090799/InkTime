@@ -161,6 +161,22 @@ def settings_page():
     )
 
 
+@bp.get("/settings/overview")
+@login_required
+def settings_overview():
+    from inktime.app.web.settings_report import settings_report_snapshot
+
+    extensions = current_app.extensions
+    report = settings_report_snapshot(
+        extensions["inktime_settings_repository"], extensions["inktime_provider_repository"],
+        extensions["inktime_provider_service"], extensions["inktime_schedule_repository"],
+        extensions["inktime_device_repository"],
+    )
+    response = make_response(render_template("settings_overview.html", report=report))
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
 @bp.get("/help/controls")
 @login_required
 def control_glossary_page():

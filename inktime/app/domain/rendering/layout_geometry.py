@@ -145,6 +145,31 @@ def with_photo_date_footers(geometry: LayoutGeometry) -> LayoutGeometry:
     )
 
 
+def resolve_compact_pair_geometry(
+    source_sizes: tuple[tuple[int, int], tuple[int, int]],
+) -> LayoutGeometry:
+    """Use full-height photo slots; each left column holds its caption and date."""
+    if len(source_sizes) != 2 or any(min(size) <= 0 for size in source_sizes):
+        raise ValueError("compact pair requires two positive source sizes")
+    caption_width, inner_gap, gutter, outer_margin = 44, 6, 8, 4
+    available_width = 800 - 2 * (caption_width + inner_gap + outer_margin) - gutter
+    ratios = [max(width / height, 0.35) for width, height in source_sizes]
+    first_width = max(1, min(available_width - 1, int(available_width * ratios[0] / sum(ratios))))
+    widths = (first_width, available_width - first_width)
+    x = outer_margin
+    photos, captions = [], []
+    for width in widths:
+        captions.append(Rect(x, 0, caption_width, 480))
+        photos.append(Rect(x + caption_width + inner_gap, 0, width, 480))
+        x += caption_width + inner_gap + width + gutter
+    return LayoutGeometry(
+        "photo_pair", "landscape", 800, 480,
+        primary_photo=photos[0], secondary_photo=photos[1],
+        primary_caption=captions[0], secondary_caption=captions[1],
+        gutter=gutter,
+    )
+
+
 def _normalized_canvas(orientation: str, width: int, height: int) -> tuple[int, int]:
     if orientation not in {"portrait", "landscape"}:
         raise ValueError("orientation must be portrait or landscape")

@@ -34,6 +34,7 @@ class RenderCandidateRepository:
     _BASE_SQL_PREDICATE = """
         p.status='analyzed'
         AND p.eligible=1
+        AND p.never_display=0
         AND p.exclusion_status IN ('eligible','manually_restored')
         AND p.lifecycle_status='active'
         AND l.enabled=1
@@ -70,8 +71,11 @@ class RenderCandidateRepository:
     def safety_passed(row: Any) -> bool:
         """Recheck stored model evidence even after an operator status change."""
         from inktime.app.repositories.photos import PhotoRepository
+        from inktime.app.domain.photos.quality_policy import is_confirmed_screenshot
 
         try:
+            if is_confirmed_screenshot(dict(row)):
+                return False
             analysis = validate_analysis_result(json.loads(row["raw_json"]))
             if analysis["schema_version"] != 6:
                 return False
@@ -205,7 +209,8 @@ class RenderCandidateRepository:
                 raise IneligiblePhotoError(
                     photo_id, "PHOTO-ELIGIBILITY-003 照片已 Missing 或不在 active 狀態"
                 )
-            if str(row.get("exclusion_status") or "") not in {"eligible", "manually_restored"}:
+            if (bool(row.get("never_display"))
+                    or str(row.get("exclusion_status") or "") not in {"eligible", "manually_restored"}):
                 raise IneligiblePhotoError(photo_id, "PHOTO-ELIGIBILITY-004 照片已排除或等待人工判斷")
             if not self.available(row):
                 raise IneligiblePhotoError(photo_id, "PHOTO-ELIGIBILITY-005 原始檔不存在")

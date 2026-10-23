@@ -404,52 +404,58 @@ class ObservabilityService:
     def _check_devices(self, now: datetime) -> None:
         with self.database.session() as c:
             rows = c.execute(
-                "SELECT d.id,d.enabled,d.schedule,d.timezone,d.last_download_at,d.last_seen_at,d.last_release_id,d.download_failure_count,d.config_version,d.acked_config_version,r.release_id,r.assigned_at FROM device_render_releases r JOIN devices d ON d.id=r.device_id WHERE d.enabled=1 LIMIT 200"
+                "SELECT d.id,d.enabled,d.schedule,d.timezone,d.last_download_at,d.last_seen_at,d.last_release_id,d.download_failure_count,d.config_version,d.acked_config_version,d.delivery_mode,r.release_id,r.assigned_at FROM device_render_releases r JOIN devices d ON d.id=r.device_id WHERE d.enabled=1 LIMIT 200"
             ).fetchall()
             due_rows = [
                 row
                 for row in rows
                 if self._device_due(str(row["assigned_at"]), str(row["schedule"]), str(row["timezone"]), now)
             ]
-            reports_by_device: dict[str, list] = {}
-            if due_rows:
-                device_ids = tuple(dict.fromkeys(str(row["id"]) for row in due_rows))
-                placeholders = ",".join("?" for _ in device_ids)
-                earliest_assignment = min(str(row["assigned_at"]) for row in due_rows)
-                reports = c.execute(
-                    f"""
-                    WITH ranked AS (
-                        SELECT device_id,event,error_code,details_json,created_at,
-                               ROW_NUMBER() OVER (PARTITION BY device_id ORDER BY id DESC) AS row_number
-                        FROM device_events
-                        WHERE device_id IN ({placeholders}) AND created_at>=?
-                    )
-                    SELECT device_id,event,error_code,details_json,created_at
-                    FROM ranked WHERE row_number<=20
-                    ORDER BY device_id,created_at DESC
-                    """,  # noqa: S608 -- placeholders are generated from device ids
-                    (*device_ids, earliest_assignment),
+            evidence_by_device = {}
+            legacy_ids = tuple(str(row["id"]) for row in due_rows
+                               if str(row["delivery_mode"] or "legacy_online") == "legacy_online")
+            if legacy_ids:
+                placeholders = ",".join("?" for _ in legacy_ids)
+                # Aggregate durable evidence in SQLite rather than forgetting a
+                # successful verification once more than 20 reports arrive.
+                evidence = c.execute(
+                    f"""SELECT e.device_id,
+                        MAX(json_extract(e.details_json,'$.payload_sha256_verified')=1) AS verified,
+                        MAX(json_extract(e.details_json,'$.display_updated')=1) AS displayed
+                        FROM device_events e JOIN device_render_releases r ON r.device_id=e.device_id
+                        WHERE e.device_id IN ({placeholders}) AND e.created_at>=r.assigned_at
+                        AND CASE WHEN json_valid(e.details_json)
+                            THEN json_extract(e.details_json,'$.release_id') END=r.release_id
+                        GROUP BY e.device_id""",  # noqa: S608 -- generated placeholders only.
+                    legacy_ids,
                 ).fetchall()
-                for report in reports:
-                    reports_by_device.setdefault(str(report["device_id"]), []).append(report)
+                evidence_by_device = {str(row["device_id"]): row for row in evidence}
         for row in due_rows:
             device, release = str(row["id"]), str(row["release_id"])
+            if int(row["acked_config_version"] or 0) < int(row["config_version"] or 0):
+                self.alert(
+                    "device", "DEVICE-CONFIG-ACK-OVERDUE", f"裝置 {device} 尚未確認目前設定",
+                    severity="WARNING", subject=device,
+                    details={"device_id": device, "retryable": True, "recommended_page": "/devices"},
+                )
+            else:
+                self.recover("device", "DEVICE-CONFIG-ACK-OVERDUE", "裝置設定 ACK 已完成", subject=device)
+            if str(row["delivery_mode"] or "legacy_online") != "legacy_online":
+                # Queue/offline devices no longer download the legacy pointer.
+                # Retire only its obsolete alarms, without claiming a SHA or
+                # display ACK and without touching the current queue evidence.
+                note = "配送模式已改為佇列／離線排程，舊版 Release 警告已不適用；保留原始紀錄"
+                for code in ("DEVICE-DOWNLOAD-OVERDUE", "DEVICE-VERIFY-OVERDUE", "DEVICE-ACK-OVERDUE"):
+                    self.recover("device", code, note, subject=f"{device}:{release}", resolution_note=note)
+                self.recover("device", "DEVICE-DISPLAY-FAILED", note, subject=device, resolution_note=note)
+                continue
             assigned = self._parse(row["assigned_at"])
-            downloaded = self._parse(row["last_download_at"])
-            reports = [
-                report
-                for report in reports_by_device.get(device, [])
-                if str(report["created_at"]) >= str(row["assigned_at"])
-            ][:20]
-            verified = displayed = False
-            for report in reports:
-                try:
-                    details = json.loads(str(report["details_json"] or "{}"))
-                except json.JSONDecodeError:
-                    details = {}
-                same_release = str(details.get("release_id", "")) == release
-                verified = verified or (same_release and bool(details.get("payload_sha256_verified")))
-                displayed = displayed or (same_release and bool(details.get("display_updated")))
+            downloaded = self._parse(row["last_download_at"]) if row["last_release_id"] == release else None
+            if assigned and downloaded and downloaded < assigned:
+                downloaded = None
+            evidence = evidence_by_device.get(device)
+            verified = bool(evidence and evidence["verified"])
+            displayed = bool(evidence and evidence["displayed"])
             if not downloaded or (assigned and downloaded < assigned):
                 self.alert(
                     "device",
@@ -524,19 +530,6 @@ class ObservabilityService:
                 )
             elif downloaded:
                 self.recover("device", "DEVICE-DISPLAY-FAILED", "裝置下載已恢復", subject=device)
-            if int(row["acked_config_version"] or 0) < int(row["config_version"] or 0) and self._device_due(
-                str(row["assigned_at"]), str(row["schedule"]), str(row["timezone"]), now
-            ):
-                self.alert(
-                    "device",
-                    "DEVICE-CONFIG-ACK-OVERDUE",
-                    f"裝置 {device} 尚未確認目前設定",
-                    severity="WARNING",
-                    subject=device,
-                    details={"device_id": device, "retryable": True, "recommended_page": "/devices"},
-                )
-            else:
-                self.recover("device", "DEVICE-CONFIG-ACK-OVERDUE", "裝置設定 ACK 已完成", subject=device)
 
     def alert(self, component, code, message, *, job_id=None, severity="WARNING", subject="", details=None):
         severity = str(severity).upper()
@@ -572,7 +565,7 @@ class ObservabilityService:
                 severity, component, "alert", message, job_id=job_id, error_code=code, **clean_details
             )
 
-    def recover(self, component, code, message, *, subject=""):
+    def recover(self, component, code, message, *, subject="", resolution_note="監控已偵測到恢復"):
         fp = hashlib.sha256(f"{component}:{code}:{subject}".encode()).hexdigest()
         now = self._now().isoformat()
         with self.database.session() as c:
@@ -582,7 +575,7 @@ class ObservabilityService:
             if row:
                 c.execute(
                     "UPDATE job_errors SET resolved_at=?,resolution_note=? WHERE id=?",
-                    (now, "監控已偵測到恢復", row["id"]),
+                    (now, resolution_note, row["id"]),
                 )
         if row:
             self.record("INFO", component, "recovered", message, error_code=code)

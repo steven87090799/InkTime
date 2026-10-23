@@ -1,10 +1,11 @@
 <!doctype html>
-<html lang="zh-Hant-TW">
+<html lang="zh-Hant-TW" data-display-timezone="{{ display_timezone }}">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="dark">
   <title>虛擬墨水屏｜InkTime</title>
+  <script nonce="{{ csp_nonce }}" src="{{ url_for('static', filename='datetime-display.js') }}"></script>
   <link rel="stylesheet" href="{{ url_for('static', filename='virtual-display.css') }}">
 </head>
 <body>

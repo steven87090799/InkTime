@@ -3,6 +3,7 @@
 import os
 
 from inktime.app.core.runtime_config import resolve_runtime_config
+from inktime.app.core.server_tls import bounded_ssl_context
 
 
 runtime_config = resolve_runtime_config()
@@ -21,3 +22,9 @@ worker_tmp_dir = "/tmp"  # noqa: S108 - container provides a dedicated bounded t
 
 # Container lifecycle uses signals; the optional gunicornc socket is unused.
 control_socket_disable = True
+
+
+def ssl_context(conf, default_factory):
+    # A client that starts TLS but never finishes must not occupy one of the
+    # bounded gthread workers indefinitely. Keep certificate/cipher policy.
+    return bounded_ssl_context(default_factory)

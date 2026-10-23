@@ -113,6 +113,35 @@ def _claimed_test_release(client, app, *, save_preset: bool = False):
     return device_id, settings, context
 
 
+@pytest.mark.parametrize("orientation,expected_size", [("landscape", (800, 480)), ("portrait", (480, 800))])
+def test_release_web_preview_uses_frozen_orientation_without_changing_panel_files(client, app, orientation, expected_size):
+    create_admin(app)
+    login(client)
+    release_id = "preview-orientation"
+    directory = Path(app.config["INKTIME_RELEASE_DIR"]) / release_id
+    directory.mkdir()
+    manifest = {"release_id": release_id, "orientation": orientation, "created_at": "2026-10-22T12:00:57.765011+00:00", "files": [{"preview": "preview_1.png"}]}
+    (directory / "manifest.json").write_text(json.dumps(manifest))
+    path = directory / "preview_1.png"
+    with Image.new("RGB", (480, 800), "white") as image:
+        image.putpixel((0, 0), (255, 0, 0))
+        image.save(path)
+    before = path.read_bytes()
+    settings = app.extensions["inktime_settings_repository"]
+    settings.update("render.frame_orientation", "portrait" if orientation == "landscape" else "landscape", changed_by="test", source_ip="local")
+    url = f"/rendering/releases/{release_id}/preview_1.png"
+    response = client.get(url + "?view=display")
+    assert response.status_code == 200
+    with Image.open(BytesIO(response.data)) as display:
+        assert display.size == expected_size
+        assert display.getpixel((0, 479) if orientation == "landscape" else (0, 0)) == (255, 0, 0)
+    assert path.read_bytes() == before
+    assert client.get(url).data == before
+    page = client.get("/rendering").get_data(as_text=True)
+    assert "2026/10/22 20:00:57" in page
+    assert url + "?view=display" in page
+
+
 def test_browser_canvas_cannot_be_published_as_test_release(client, app):
     create_admin(app)
     login(client)

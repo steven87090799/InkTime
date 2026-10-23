@@ -134,6 +134,145 @@ def test_auto_preview_handles_mixed_orientation_default_secondary(app, tmp_path)
     assert response.status_code == 400, {"http_status": response.status_code}
 
 
+def test_auto_pair_captions_and_dates_remain_visible_and_follow_swapped_photos(app, tmp_path):
+    _configure(app)
+    root = tmp_path / "photos"
+    root.mkdir()
+    for pid, day in (("first", 1), ("second", 2)):
+        _analyzed_photo(app, root, pid, (900, 1600), f"2024-07-{day:02}T10:00:00+00:00")
+    service = app.extensions["inktime_render_service"]
+    outputs = []
+    for first, second in (("first", "second"), ("second", "first")):
+        plan = service.resolve_render_plan(
+            first, secondary_photo_id=second, layout="auto_photo", orientation="landscape", fit_mode="cover",
+        )
+        assert plan["primary_caption"]["photo_id"] == first
+        assert plan["secondary_caption"]["photo_id"] == second
+        assert plan["primary_caption_region"] == "primary_card_left"
+        assert plan["secondary_caption_region"] == "secondary_card_left"
+        logical = service._render_plan_image(plan).transpose(Image.Transpose.ROTATE_90)
+        pieces = []
+        for rect in plan["geometry"]["caption_rects"]:
+            # Exclude the divider so a blank caption cannot pass on its line.
+            region = logical.crop((rect["x"]+4, rect["y"]+4, rect["x"]+rect["width"]-5, rect["y"]+rect["height"]-4))
+            assert ImageChops.invert(region.convert("L")).getbbox() is not None
+        assert plan["geometry"]["info_rects"] == []
+        assert plan["auto_pair_crop_policy"] == "center"
+        assert plan["subject_box"] == plan["secondary_subject_box"] == []
+        for rect in plan["geometry"]["caption_rects"]:
+            region = logical.crop((rect["x"], rect["y"]+rect["height"]//2, rect["x"]+rect["width"], rect["y"]+rect["height"]))
+            assert ImageChops.invert(region.convert("L")).getbbox() is not None
+            pieces.append(region.tobytes())
+        outputs.append(pieces)
+    assert outputs[0][0] != outputs[0][1]  # different dates actually reach pixels
+    assert outputs[0] == outputs[1][::-1]  # dates follow photo IDs when order changes
+
+
+def test_auto_pair_ignores_subject_and_manual_focus_metadata(app, tmp_path):
+    _configure(app)
+    root = tmp_path / "photos"
+    root.mkdir()
+    for pid in ("first", "second"):
+        _analyzed_photo(app, root, pid, (600, 900), "2024-07-01T10:00:00+00:00")
+        with Image.open(root / f"{pid}.jpg") as opened:
+            image = opened.convert("RGB")
+        draw = ImageDraw.Draw(image)
+        draw.rectangle((0, 0, 599, 49), fill="red")
+        draw.rectangle((0, 850, 599, 899), fill="green")
+        image.save(root / f"{pid}.jpg")
+    service = app.extensions["inktime_render_service"]
+    outputs = []
+    for focus in (0., 1.):
+        with app.extensions["inktime_database"].session() as connection:
+            connection.execute(
+                "UPDATE photos SET crop_focus_x=?,crop_focus_y=?,crop_manual_x=?,crop_manual_y=?,"
+                "crop_subject_left=0,crop_subject_top=0,crop_subject_right=1,crop_subject_bottom=1",
+                (focus, focus, focus, focus),
+            )
+        plan = service.resolve_render_plan(
+            "first", secondary_photo_id="second", layout="auto_photo", orientation="landscape", fit_mode="cover",
+        )
+        assert plan["auto_pair_crop_policy"] == "center"
+        assert plan["manual_crop"] == plan["secondary_manual_crop"] == [None, None]
+        assert plan["subject_box"] == plan["secondary_subject_box"] == []
+        outputs.append(service._render_plan_image(plan))
+    assert ImageChops.difference(outputs[0], outputs[1]).getbbox() is None
+
+
+def test_auto_pair_place_and_date_are_upright_without_moving_photo_slots(app, tmp_path, monkeypatch):
+    _configure(app)
+    root = tmp_path / "photos"
+    root.mkdir()
+    for pid, day in (("first", 1), ("second", 2)):
+        _analyzed_photo(app, root, pid, (600, 900), f"2024-07-{day:02}T10:00:00+00:00")
+    service = app.extensions["inktime_render_service"]
+    monkeypatch.setattr(service, "location_name", lambda photo: "")
+    before = service.resolve_render_plan("first", secondary_photo_id="second", layout="auto_photo", orientation="landscape")
+    first = service._render_plan_image(before)
+    places = {"first": "新店區", "second": "臺北101"}
+    monkeypatch.setattr(service, "location_name", lambda photo: places[str(photo["id"])])
+    after = service.resolve_render_plan("first", secondary_photo_id="second", layout="auto_photo", orientation="landscape")
+    calls = []
+    original = ImageDraw.ImageDraw.text
+    def capture(draw, xy, text, *args, **kwargs):
+        if kwargs.get("font") is not None and kwargs["font"].size == 12:
+            calls.append((xy, str(text)))
+        return original(draw, xy, text, *args, **kwargs)
+    monkeypatch.setattr(ImageDraw.ImageDraw, "text", capture)
+    second = service._render_plan_image(after)
+    assert before["geometry"] == after["geometry"]
+    logical = [image.transpose(Image.Transpose.ROTATE_90) for image in (first, second)]
+    for photo, caption, pid in zip(after["geometry"]["photo_rects"], after["geometry"]["caption_rects"], ("first", "second"), strict=True):
+        box = (photo["x"], photo["y"], photo["x"] + photo["width"], photo["y"] + photo["height"])
+        assert ImageChops.difference(logical[0].crop(box), logical[1].crop(box)).getbbox() is None
+        columns = {}
+        for (x, y), text in calls:
+            if caption["x"] <= x < caption["x"] + caption["width"]:
+                columns.setdefault(x, []).append((y, text))
+        texts = ["".join(text for _, text in sorted(glyphs)) for glyphs in columns.values()]
+        assert places[pid] in texts
+        assert after["photo_footer_parts"][pid]["date"] in texts
+    for image in [first, second, *logical]:
+        image.close()
+
+
+def test_compact_d_browser_preview_matches_release_and_protects_text(app, tmp_path):
+    _configure(app, **{"render.dither": "natural_d"})
+    root = tmp_path / "photos"
+    root.mkdir()
+    for pid, day in (("first", 1), ("second", 2)):
+        _analyzed_photo(app, root, pid, (600, 900), f"2024-07-{day:02}T10:00:00+00:00")
+    service = app.extensions["inktime_render_service"]
+    plan = service.resolve_render_plan(
+        "first", secondary_photo_id="second", layout="auto_photo", orientation="landscape",
+        fit_mode="cover", profile="gdep073e01_6c", dither="natural_d",
+    )
+    manifest = service.publisher.publish(
+        [("first+second", service._render_plan_image(plan))], profile_key="gdep073e01_6c",
+        dither="natural_d", orientation="landscape", activate=False, metadata={"render_plans": [plan]},
+    )
+    prepared = tmp_path / "quantized-preview"
+    _prepare_library_preview_child(
+        settings={"arguments": {
+            "photo_id": "first", "layout": plan["layout"], "orientation": plan["orientation"],
+            "render_plan": plan, "quantized": True, "profile": plan["profile"],
+            "effective_dither": "natural_d", "color_distance": "rgb", "dither_strength": 1.,
+        }},
+        database_path=str(service.database.path), prepared_path=str(prepared),
+        font_root=str(service.fonts.root), font_builtin_root=str(service.fonts.builtin_root),
+        location_csv=str(service.locations.csv_path),
+    )
+    with Image.open(service.publisher.root / manifest["release_id"] / "preview_1.png") as published:
+        formal = published.transpose(Image.Transpose.ROTATE_90).convert("RGB")
+    with Image.open(prepared / "preview.png") as browser:
+        assert ImageChops.difference(formal, browser.convert("RGB")).getbbox() is None
+    for rect in [*plan["geometry"]["caption_rects"], *plan["geometry"]["info_rects"]]:
+        region = formal.crop((rect["x"], rect["y"], rect["x"]+rect["width"], rect["y"]+rect["height"]))
+        colors = region.getcolors()
+        assert colors is not None and len(colors) == 2
+        assert {color for _, color in colors} == {(2, 2, 2), (190, 200, 200)}
+
+
 @pytest.mark.parametrize("frame", ["portrait", "landscape"])
 @pytest.mark.parametrize("size", [(1600, 900), (900, 1600), (1000, 1000)])
 @pytest.mark.parametrize("fit", ["contain", "cover"])

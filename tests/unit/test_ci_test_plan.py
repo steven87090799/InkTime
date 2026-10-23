@@ -1,5 +1,7 @@
 import json
 
+import pytest
+
 from scripts.ci.test_plan import (
     DOMAIN_OWNER_SUITES,
     FULL_EXPENSIVE_GATES,
@@ -676,3 +678,15 @@ def test_explicit_full_only_integration_regression_is_documented_and_full():
         "tests/integration/test_scheduled_release_pipeline.py"
     ]
     assert "full_only_integration_regression" in plan["why_full_suite"]
+
+
+@pytest.mark.parametrize("path", ["gunicorn.conf.py", "inktime/app/core/server_tls.py"])
+def test_gunicorn_tls_deadline_routes_container_and_tls_validation(path):
+    plan = build_test_plan([path], draft_context())
+    assert not plan["unknown_paths"]
+    assert "tls_smoke" in plan["selected_gates"]
+    assert "container_security" in plan["selected_gates"]
+    # The TLS owner suite is dispatched to its dedicated smoke job, rather
+    # than the generic selected-owner-suites runner.
+    assert "tls_configuration_owner" in plan["selected_test_suites"]
+    assert plan["suite_execution_gaps"] == []

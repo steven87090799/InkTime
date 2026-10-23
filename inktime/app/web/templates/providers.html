@@ -7,7 +7,65 @@
 <section class="panel"><div class="table-wrap"><table><thead><tr><th>名稱</th><th>端點／目前模型</th><th>狀態／能力</th><th>限制</th><th>逾時／冷卻</th><th>操作</th></tr></thead><tbody>
 {% for provider in providers %}<tr><td><strong>{{ provider.name }}</strong><small>{{ provider.kind }}{% if provider.openrouter_compatible %}｜偵測到 OpenRouter 相容 Base URL，建議改用正式 OpenRouter kind{% endif %}｜優先 {{ provider.priority }}｜<code>{{ provider.api_key_masked }}</code></small></td><td>{{ provider.base_url }}<div class="provider-model-current"><span>目前設定</span><strong><code>{{ provider.model or provider.effective_model }}</code></strong>{% if not provider.model %}<small>沿用系統設定</small>{% elif (provider.model or provider.effective_model) == 'openrouter/free' %}<small>免費自動路由：每次請求的實際模型可能不同，AI Trace 會記錄最終模型。</small>{% else %}<small>固定模型</small>{% endif %}</div>{% if provider.model_validation_error %}<div class="notice">{{ error_notice("CONFIG_INVALID", provider.model_validation_error) }}</div>{% endif %}</td><td>{{ '啟用' if provider.enabled else '停用' }}<small>{{ 'Batch 已啟用' if provider.supports_batch else '即時' }}／{{ '嚴格 Schema' if provider.supports_json_schema else '一般 JSON' }}</small></td><td>{{ provider.rate_limit_rpm or '—' }} RPM<br>{{ provider.token_limit_tpm or '—' }} TPM<br>{{ provider.max_concurrency }} 並行</td><td>{{ provider.timeout_seconds }} 秒<small>冷卻 {{ provider.cooldown_seconds }} 秒</small></td><td>{% if g.user.role == 'administrator' %}<button class="primary model-provider" data-id="{{ provider.id }}">選擇模型</button> <button class="secondary edit-provider" data-id="{{ provider.id }}">連線設定</button> <button class="secondary provider-contract-test" data-id="{{ provider.id }}" data-level="1" data-help="只檢查端點與認證是否可連線，不送圖片；適合儲存後先做。">Level 1／連線</button> <button class="secondary provider-contract-test" data-id="{{ provider.id }}" data-level="2" data-help="送出合成測試圖片，驗證模型可接收 Vision 輸入；會呼叫 Provider 並可能產生少量費用。">Vision Level 2</button> <button class="secondary provider-contract-test" data-id="{{ provider.id }}" data-level="3" data-help="驗證 Vision、結構化輸出與 InkTime 完整分析契約；會呼叫 Provider 並可能產生費用。">Full Contract Level 3</button> <button class="secondary pricing-provider" data-id="{{ provider.id }}" data-help="設定模型每百萬 Token 價格，供 Provider 未回傳真實成本時估算預算；不會改變模型本身的帳單。">模型價格</button>{% endif %}</td></tr>{% else %}<tr><td colspan="6" class="empty">尚未設定 Provider。</td></tr>{% endfor %}
 </tbody></table></div></section>
-<dialog id="provider-dialog"><form id="provider-form" class="form-stack"><h2 id="provider-title">新增 Provider</h2><input name="id" type="hidden"><label>名稱<input name="name" required maxlength="100"></label><label>類型<select name="kind"><option value="openai">OpenAI</option><option value="openrouter">OpenRouter（正式 API）</option><option value="openai_compatible">OpenAI 相容 API</option><option value="ollama">本地 Ollama 相容端點</option></select></label><label>Base URL<input name="base_url" placeholder="https://api.openai.com/v1" required><small>公開 HTTP 一律拒絕；私有 HTTP 只接受 Ollama，或在 options 明確設定 allow_private_http。</small></label><fieldset class="provider-model-picker"><legend>要使用哪一個模型</legend><label>選擇方式<select name="model_mode"><option value="router_free">OpenRouter 免費自動選擇</option><option value="explicit">指定固定模型</option><option value="inherit">沿用系統預設</option></select></label><label id="provider-model-id-field">固定模型 ID<input name="model" maxlength="200" list="provider-model-suggestions" placeholder="供應商/模型名稱"><datalist id="provider-model-suggestions"><option value="openrouter/free"></option><option value="openai/gpt-4o"></option></datalist><small>OpenRouter 必須填完整 ID（例如 <code>供應商/模型名稱</code>）；短名稱會在送出請求前被拒絕。</small></label><p class="muted" id="provider-model-mode-help">免費自動選擇會使用 <code>openrouter/free</code>；實際服務模型會記錄在 AI Trace。</p></fieldset><label data-help="只有 Provider 文件明確要求時才填。這是 JSON 物件，用來限制路由、資料收集、零資料保留、價格或 sticky session；格式錯誤會拒絕儲存。">Provider options（JSON）<textarea name="options_json" rows="7" placeholder='{"require_parameters":true,"allow_fallbacks":false,"data_collection":"deny","session_sticky":true}'></textarea><small>OpenRouter 支援 order、only/ignore、require_parameters、data_collection、zdr、sort、max_price、HTTP-Referer/X-Title 與可選 sticky session。</small></label><label>API Key<input name="api_key" type="password" autocomplete="new-password"><small>編輯時留空會保留既有 Key。</small></label><label>狀態<select name="enabled"><option value="true">啟用</option><option value="false">停用</option></select></label><label>優先順序（小者優先）<input name="priority" type="number" min="1" max="10000" value="100"></label><label>最大並行數<input name="max_concurrency" type="number" min="1" max="32" value="2"></label><label>每分鐘 Request 上限（空白為未設定）<input name="rate_limit_rpm" type="number" min="1"></label><label>每分鐘 Token 上限（空白為未設定）<input name="token_limit_tpm" type="number" min="1"></label><label>HTTP 逾時秒數<input name="timeout_seconds" type="number" min="5" max="600" value="120"></label><label>故障冷卻秒數<input name="cooldown_seconds" type="number" min="1" max="86400" value="300"></label><label data-help="只在 Provider 原生支援非即時 Batch API 時啟用。OpenRouter 不支援 InkTime Batch，誤勾會拒絕儲存。"><input name="supports_batch" type="checkbox"> 支援 Batch API（OpenRouter 不可勾選）</label><label><input name="supports_json_schema" type="checkbox" checked> 支援嚴格 JSON Schema</label><button class="primary">儲存 Provider</button><button type="button" data-dialog-close>取消</button></form></dialog>
+<dialog id="provider-dialog" class="provider-dialog">
+  <form id="provider-form" class="form-stack provider-form">
+    <header class="provider-form-head">
+      <div><p class="eyebrow">Provider connection</p><h2 id="provider-title">新增 Provider</h2></div>
+      <p>依序設定連線、模型與用量邊界。儲存只會建立設定，不會立即呼叫模型或產生費用。</p>
+    </header>
+    <input name="id" type="hidden">
+
+    <section class="provider-form-section">
+      <div class="provider-section-head"><span>1</span><div><h3>基本連線</h3><p>選擇服務類型，填入端點與認證資料。</p></div></div>
+      <div class="provider-field-grid">
+        <label>名稱<input name="name" required maxlength="100" placeholder="例如：OpenRouter 主要帳號"><small>只用來辨識這組設定，不會傳給模型。</small></label>
+        <label>類型<select name="kind"><option value="openai">OpenAI（官方 API；使用 OpenAI 模型與 API Key）</option><option value="openrouter">OpenRouter（多模型路由；支援免費路由與路由規則）</option><option value="openai_compatible">OpenAI 相容 API（第三方 Chat Completions 相容端點）</option><option value="ollama">本地 Ollama（本機或區網自架模型；通常不需要 API Key）</option></select><small>類型會決定驗證規則、預設端點行為與可用能力。</small></label>
+        <div class="provider-choice-guide provider-field-wide" aria-label="Provider 類型說明">
+          <article><strong>OpenAI</strong><span>官方雲端 API</span><p>適合直接使用 OpenAI Vision 模型；需要有效 API Key。</p></article>
+          <article><strong>OpenRouter</strong><span>多模型路由</span><p>可指定模型、免費路由或路由規則；不支援 InkTime Batch。</p></article>
+          <article><strong>相容 API</strong><span>第三方服務</span><p>服務必須相容 OpenAI Chat Completions 與 Vision 輸入格式。</p></article>
+          <article><strong>Ollama</strong><span>本機／區網</span><p>適合自架模型；只有此類型可直接使用私有 HTTP 端點。</p></article>
+        </div>
+        <label class="provider-field-wide">Base URL<input name="base_url" placeholder="https://api.openai.com/v1" required><small>填 API 根網址，不要填單一模型或聊天頁網址。公開 HTTP 一律拒絕；私有 HTTP 只接受 Ollama，或在 options 明確允許。</small></label>
+        <label class="provider-field-wide">API Key<input name="api_key" type="password" autocomplete="new-password" placeholder="本地 Ollama 通常可留空"><small>只會加密儲存，畫面不會完整回顯；編輯既有 Provider 時留空代表保留原 Key。</small></label>
+      </div>
+    </section>
+
+    <fieldset class="provider-form-section provider-model-picker">
+      <legend><span>2</span> 模型選擇</legend>
+      <p class="provider-section-intro">決定每次請求由路由器選模型、固定使用一個模型，或沿用 InkTime 系統預設。</p>
+      <div class="provider-field-grid">
+        <label>選擇方式<select name="model_mode"><option value="router_free">免費自動選擇（僅 OpenRouter；實際模型每次可能不同）</option><option value="explicit">指定固定模型（每次使用同一模型 ID，結果較可預期）</option><option value="inherit">沿用系統預設（此 Provider 不另外指定模型）</option></select></label>
+        <label id="provider-model-id-field">固定模型 ID<input name="model" maxlength="200" list="provider-model-suggestions" placeholder="供應商/模型名稱"><datalist id="provider-model-suggestions"><option value="openrouter/free"></option><option value="openai/gpt-4o"></option></datalist><small>OpenRouter 必須填完整 ID（例如 <code>供應商/模型名稱</code>）；短名稱會在送出請求前被拒絕。</small></label>
+      </div>
+      <p class="provider-mode-help" id="provider-model-mode-help">免費自動選擇會使用 <code>openrouter/free</code>；實際服務模型會記錄在 AI Trace。</p>
+    </fieldset>
+
+    <section class="provider-form-section">
+      <div class="provider-section-head"><span>3</span><div><h3>進階路由選項</h3><p>一般情況可留空；只有 Provider 文件明確要求時才設定。</p></div></div>
+      <label class="provider-field-wide" data-help="這是 JSON 物件，用來限制路由、資料收集、零資料保留、價格或 sticky session；格式錯誤會拒絕儲存。">Provider options（JSON）<textarea name="options_json" rows="6" placeholder='{"require_parameters":true,"allow_fallbacks":false,"data_collection":"deny","session_sticky":true}'></textarea><small>OpenRouter 可設定 order、only/ignore、require_parameters、data_collection、zdr、sort、max_price、HTTP-Referer/X-Title 與 sticky session。錯誤 JSON 會被拒絕，不會偷偷忽略。</small></label>
+    </section>
+
+    <section class="provider-form-section">
+      <div class="provider-section-head"><span>4</span><div><h3>流量限制與可靠性</h3><p>控制路由優先序、並行量、用量上限與失敗後的保護時間。</p></div></div>
+      <div class="provider-runtime-grid">
+        <label>狀態<select name="enabled"><option value="true">啟用（可被新分析工作選用）</option><option value="false">停用（保留設定，但不會被新工作選用）</option></select></label>
+        <label>優先順序<input name="priority" type="number" min="1" max="10000" value="100"><small>數字越小越優先；同時可用時先嘗試較小值。</small></label>
+        <label>最大並行數<input name="max_concurrency" type="number" min="1" max="32" value="2"><small>同時呼叫數；過高可能觸發限流或增加費用。</small></label>
+        <label>每分鐘 Request 上限<input name="rate_limit_rpm" type="number" min="1" placeholder="空白＝不由 InkTime 限制"><small>限制每分鐘請求次數；空白代表未設定。</small></label>
+        <label>每分鐘 Token 上限<input name="token_limit_tpm" type="number" min="1" placeholder="空白＝不由 InkTime 限制"><small>限制每分鐘 Token 總量；空白代表未設定。</small></label>
+        <label>HTTP 逾時秒數<input name="timeout_seconds" type="number" min="5" max="600" value="120"><small>單次呼叫等待上限；逾時會記錄失敗。</small></label>
+        <label>故障冷卻秒數<input name="cooldown_seconds" type="number" min="1" max="86400" value="300"><small>連線失敗後暫停選用的時間，避免連續重試。</small></label>
+      </div>
+      <div class="provider-capability-grid">
+        <label class="provider-capability" data-help="只在 Provider 原生支援非即時 Batch API 時啟用。OpenRouter 不支援 InkTime Batch，誤勾會拒絕儲存。"><input name="supports_batch" type="checkbox"><span><strong>支援 Batch API</strong><small>只在服務原生支援非即時 Batch 時勾選；OpenRouter 不可勾選。</small></span></label>
+        <label class="provider-capability"><input name="supports_json_schema" type="checkbox" checked><span><strong>支援嚴格 JSON Schema</strong><small>Provider 能依指定 Schema 回傳結構化資料；不確定時先關閉並用 Level 3 測試確認。</small></span></label>
+      </div>
+    </section>
+
+    <footer class="provider-form-actions"><button type="button" class="secondary" data-dialog-close>取消</button><button class="primary">儲存 Provider</button></footer>
+  </form>
+</dialog>
 <dialog id="pricing-dialog"><form id="pricing-form" class="form-stack"><h2>模型價格</h2><input name="provider_id" type="hidden"><label>模型<input name="model" value="gpt-5.6-luna" required></label><label>標準 Input USD／1M<input name="input_per_million" type="number" min="0" step="0.000001" value="0.20"></label><label>標準 Cached Input USD／1M<input name="cached_input_per_million" type="number" min="0" step="0.000001" value="0.02"></label><label>標準 Output USD／1M<input name="output_per_million" type="number" min="0" step="0.000001" value="1.20"></label><label>Batch 價格倍率<input name="batch_multiplier" type="number" min="0" step="0.01" value="0.5"></label><p class="muted">若 Provider 沒有真實成本回報且沒有模型價格，成本會標記為 unknown，不會當成零。</p><button class="primary">儲存價格</button><button type="button" data-dialog-close>取消</button></form></dialog>
 {% endblock %}
 {% block scripts %}{% if g.user.role == 'administrator' %}<script nonce="{{ csp_nonce }}">

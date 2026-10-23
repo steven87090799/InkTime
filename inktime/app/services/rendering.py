@@ -60,7 +60,11 @@ from inktime.app.domain.rendering.adaptive_layout import (
     select_auto_photo_frames,
     select_pair_candidate,
 )
-from inktime.app.domain.rendering.layout_geometry import LayoutGeometry, with_photo_date_footers
+from inktime.app.domain.rendering.layout_geometry import (
+    LayoutGeometry,
+    resolve_compact_pair_geometry,
+    with_photo_date_footers,
+)
 from inktime.app.repositories.photos import PhotoRepository
 from inktime.app.repositories.display_history import DisplayHistoryRepository
 from inktime.app.repositories.render_candidates import RenderCandidateRepository
@@ -72,7 +76,7 @@ from inktime.app.services.render_cache import RENDERER_VERSION
 
 LAYOUTS = {
     "full": "單張照片",
-    "auto_photo": "自動滿版＋左短句右日期（橫單直雙）",
+    "auto_photo": "自動照片（橫單直雙；雙圖左側短句）",
     "postcard": "明信片",
     "photo_info": "照片＋日期地點",
     "photo_pair": "雙照片拼版・一句話與日期",
@@ -279,6 +283,7 @@ class RenderService:
         elif auto_photo_requested and fit_key == "stretch_fill":
             fit_key = "cover"
         secondary_id = secondary_photo_id
+        primary_source_size: tuple[int, int] | None = None
         if layout_key in {"photo_pair", "photo_pair_caption"} and (not secondary_id or secondary_id == photo_id):
             layout_key = "photo_info"
             secondary_id = None
@@ -289,6 +294,7 @@ class RenderService:
             source_path = safe_join(Path(primary["root_path"]), str(primary["relative_path"]), decode_url=False)
             source, _info = self._load_oriented_photo(primary, source_path, target_size=(512, 512))
             with source:
+                primary_source_size = source.size
                 resolved_layout = auto_photo_layout(source.size, effective_orientation)
             if device.get("_auto_photo") and layout_key != resolved_layout:
                 raise ValueError("RENDER-005 照片方向已改變，必須重新準備自動版型")
@@ -373,8 +379,21 @@ class RenderService:
         capture_date_labels: dict[str, str] | None = None
         photo_footer_lines: dict[str, str] | None = None
         photo_footer_parts: dict[str, dict[str, str]] | None = None
+        auto_pair_source_sizes: list[list[int]] | None = None
         if auto_photo_requested:
             geometry = with_photo_date_footers(geometry)
+            if layout_key == "photo_pair" and effective_orientation == "landscape" and secondary is not None:
+                second_path = safe_join(
+                    Path(secondary["root_path"]), str(secondary["relative_path"]), decode_url=False
+                )
+                second_source, _info = self._load_oriented_photo(
+                    secondary, second_path, target_size=(512, 512)
+                )
+                with second_source:
+                    assert primary_source_size is not None
+                    sizes = (primary_source_size, second_source.size)
+                    geometry = resolve_compact_pair_geometry(sizes)
+                    auto_pair_source_sizes = [list(size) for size in sizes]
             capture_date_labels = {
                 str(photo["id"]): self._date_label(self._captured_date(photo["captured_at"]))
                 if bool(self.settings.get("render.show_capture_date", True)) else ""
@@ -403,9 +422,16 @@ class RenderService:
                 for record in (primary_caption, resolved_secondary_caption) if record is not None
             }
         pair_caption_region = (
-            "card_left" if layout_key == "adaptive_memory" and effective_orientation == "landscape"
+            "card_left" if auto_pair_source_sizes is not None
+            or (layout_key == "adaptive_memory" and effective_orientation == "landscape")
             else "card_footer"
         )
+        caption_ratios = [0.20, 0.20]
+        if auto_pair_source_sizes is not None:
+            caption_ratios = [
+                caption.width / (photo.right - caption.x)
+                for photo, caption in zip(geometry.photo_rects, geometry.caption_rects, strict=True)
+            ]
         return {
             "version": "render-plan-v1",
             "layout": layout_key,
@@ -415,16 +441,18 @@ class RenderService:
             "secondary_photo_id": str(secondary["id"]) if secondary is not None else None,
             "secondary_sha256": str(secondary["sha256"] or "") if secondary is not None else None,
             "fit_mode": fit_key,
-            "manual_crop": [
+            "manual_crop": [None, None] if auto_pair_source_sizes is not None else [
                 crop_x if crop_x is not None else primary["crop_manual_x"],
                 crop_y if crop_y is not None else primary["crop_manual_y"],
             ],
-            "subject_box": list(self._subject_box(primary) or ()),
+            "subject_box": [] if auto_pair_source_sizes is not None else list(self._subject_box(primary) or ()),
             "secondary_manual_crop": (
-                [secondary["crop_manual_x"], secondary["crop_manual_y"]] if secondary is not None else None
+                ([None, None] if auto_pair_source_sizes is not None
+                 else [secondary["crop_manual_x"], secondary["crop_manual_y"]])
+                if secondary is not None else None
             ),
             "secondary_subject_box": list(self._subject_box(secondary) or ())
-            if secondary is not None
+            if secondary is not None and auto_pair_source_sizes is None
             else [],
             "primary_caption": primary_caption,
             "secondary_caption": resolved_secondary_caption,
@@ -432,12 +460,18 @@ class RenderService:
             "capture_date_labels": capture_date_labels,
             "photo_footer_lines": photo_footer_lines,
             "photo_footer_parts": photo_footer_parts,
-            "footer_alignment": {"caption": "left", "date": "right"} if auto_photo_requested else None,
+            "auto_pair_source_sizes": auto_pair_source_sizes,
+            "auto_pair_crop_policy": "center" if auto_pair_source_sizes is not None else None,
+            "footer_alignment": (
+                {"caption": "left_column", "date": "bottom_vertical"}
+                if auto_pair_source_sizes is not None
+                else {"caption": "left", "date": "right"} if auto_photo_requested else None
+            ),
             "primary_caption_text_hash": primary_caption["text_hash"],
             "primary_caption_source": primary_caption["source"],
             "primary_caption_version": primary_caption["version"],
             "primary_caption_region": f"primary_{pair_caption_region}",
-            "primary_caption_ratio": 0.20,
+            "primary_caption_ratio": caption_ratios[0],
             "secondary_caption_text_hash": resolved_secondary_caption["text_hash"]
             if resolved_secondary_caption
             else None,
@@ -450,7 +484,7 @@ class RenderService:
             "secondary_caption_region": (
                 f"secondary_{pair_caption_region}" if resolved_secondary_caption else None
             ),
-            "secondary_caption_ratio": 0.20 if resolved_secondary_caption else None,
+            "secondary_caption_ratio": caption_ratios[1] if resolved_secondary_caption else None,
             "orientation": effective_orientation,
             "profile": profile
             or str(
@@ -502,6 +536,7 @@ class RenderService:
                 capture_date_labels=plan.get("capture_date_labels"),
                 photo_footer_lines=plan.get("photo_footer_lines"),
                 photo_footer_parts=plan.get("photo_footer_parts"),
+                auto_pair_source_sizes=plan.get("auto_pair_source_sizes"),
                 expected_primary_sha256=plan.get("primary_sha256"),
                 expected_secondary_sha256=plan.get("secondary_sha256"),
             )
@@ -1101,7 +1136,7 @@ class RenderService:
         with self.database.session() as connection:
             rows = connection.execute(
                 f"""
-                SELECT p.*,l.root_path,a.types_json,a.semantic_json,
+                SELECT p.*,l.root_path,a.types_json,a.semantic_json,a.raw_json,
                        EXISTS(SELECT 1 FROM display_history dh WHERE dh.photo_id=p.id) ever_displayed,
                        EXISTS(SELECT 1 FROM display_history dh WHERE dh.photo_id=p.id
                               AND dh.displayed_at>=datetime('now','-14 days')) recently_displayed
@@ -1151,7 +1186,7 @@ class RenderService:
         candidates: list[dict[str, Any]] = []
         for stored in rows:
             row = dict(stored)
-            if not self.candidates.available(row):
+            if not self.candidates.available(row) or not self.candidates.safety_passed(row):
                 continue
             try:
                 semantic = json.loads(str(row.get("semantic_json") or "{}"))
@@ -1302,8 +1337,40 @@ class RenderService:
                 return candidate
         return None
 
+    @staticmethod
+    def _fit_compact_pair_photo(
+        source: Image.Image, size: tuple[int, int], *, fit_mode: str,
+    ) -> Image.Image:
+        # Only normal centred fitting; no subject, focus or additional zoom.
+        if fit_mode != "contain":
+            return ImageOps.fit(source, size, Image.Resampling.LANCZOS, centering=(0.5, 0.5))
+        canvas = Image.new("RGB", size, "white")
+        fitted = ImageOps.contain(source, size, Image.Resampling.LANCZOS)
+        try:
+            canvas.paste(fitted, (
+                (size[0] - fitted.width) // 2,
+                (size[1] - fitted.height) // 2,
+            ))
+        finally:
+            fitted.close()
+        return canvas
+
+    def _draw_compact_pair_captions(
+        self, canvas: Image.Image, geometry: LayoutGeometry,
+        records: tuple[dict[str, Any], dict[str, Any]], parts: dict[str, dict[str, str]],
+    ) -> None:
+        """A single readable column to each photo's left; dates never share IDs."""
+        for record, caption_box in zip(records, geometry.caption_rects, strict=True):
+            metadata = parts.get(str(record["photo_id"]), {})
+            self._draw_adaptive_pair_caption(
+                canvas, {**record, "capture_date_label": metadata.get("date", ""),
+                         "capture_place_label": metadata.get("location", "")}, caption_box,
+                left_side=True, date_at_bottom=True,
+            )
+
     def _draw_adaptive_pair_caption(
-        self, canvas: Image.Image, record: dict[str, Any], box: Rect, *, left_side: bool
+        self, canvas: Image.Image, record: dict[str, Any], box: Rect, *, left_side: bool,
+        date_at_bottom: bool = False,
     ) -> None:
         """Draw one frozen caption only inside its photo's authoritative region."""
         text = str(record["text"])
@@ -1318,7 +1385,18 @@ class RenderService:
             available_width = max(1, box.width - horizontal_padding * 2)
             available_height = max(0, box.height - vertical_padding * 2)
             y = box.y + vertical_padding
-            if date_label:
+            date_characters = list("".join(date_label.split())) if date_at_bottom else []
+            place_characters = list("".join(str(record.get("capture_place_label") or "").split())) if date_at_bottom else []
+            # Keep the existing date/short-sentence positions when no place is
+            # available. A place uses a second small upright column at the
+            # same bottom baseline; it never changes the photo rectangles.
+            if len(place_characters) > 12:
+                place_characters = place_characters[:11] + ["…"]
+            date_line_height = 14
+            metadata_height = max(len(date_characters), len(place_characters)) * date_line_height
+            if metadata_height:
+                available_height = max(0, available_height - metadata_height - 12)
+            if date_label and not date_at_bottom:
                 # The narrow side strip keeps the date small and gives the
                 # larger memory sentence most of the available height.
                 date_lines = date_label.replace("年", "年\n", 1).splitlines()
@@ -1364,6 +1442,18 @@ class RenderService:
                 x = box.x + horizontal_padding + (available_width - glyph_width) // 2 - bounds[0]
                 draw.text((x, y - bounds[1]), character, font=font, fill="#17221c")
                 y += line_height
+            if date_characters or place_characters:
+                date_font = ImageFont.truetype(str(font_path), 12)
+                columns = [(date_characters, box.x + box.width // 2)]
+                if date_characters and place_characters:
+                    columns = [(place_characters, box.x + 13), (date_characters, box.x + box.width - 13)]
+                elif place_characters:
+                    columns = [(place_characters, box.x + box.width // 2)]
+                for characters, center in columns:
+                    y = box.bottom - vertical_padding - len(characters) * date_line_height
+                    for character in characters:
+                        draw.text((center, y), character, font=date_font, fill="black", anchor="mt")
+                        y += date_line_height
             draw.line(
                 (box.right - 2, box.y + 12, box.right - 2, box.bottom - 12),
                 fill="#1d2822",
@@ -1572,6 +1662,7 @@ class RenderService:
         capture_date_labels: dict[str, str] | None = None,
         photo_footer_lines: dict[str, str] | None = None,
         photo_footer_parts: dict[str, dict[str, str]] | None = None,
+        auto_pair_source_sizes: list[list[int]] | None = None,
         expected_primary_sha256: str | None = None,
         expected_secondary_sha256: str | None = None,
     ) -> Image.Image:
@@ -1605,6 +1696,7 @@ class RenderService:
                 capture_date_labels=plan.get("capture_date_labels"),
                 photo_footer_lines=plan.get("photo_footer_lines"),
                 photo_footer_parts=plan.get("photo_footer_parts"),
+                auto_pair_source_sizes=plan.get("auto_pair_source_sizes"),
                 expected_primary_sha256=expected_primary_sha256 or plan.get("primary_sha256"),
                 expected_secondary_sha256=expected_secondary_sha256 or plan.get("secondary_sha256"),
             )
@@ -1774,6 +1866,20 @@ class RenderService:
                 }
             if footer_lines:
                 geometry = with_photo_date_footers(geometry)
+            compact_pair = (
+                auto_pair_source_sizes is not None
+                and layout_key == "photo_pair" and effective_orientation == "landscape"
+            )
+            if compact_pair:
+                assert auto_pair_source_sizes is not None
+                if len(auto_pair_source_sizes) != 2 or any(len(size) != 2 for size in auto_pair_source_sizes):
+                    raise ValueError("RENDER-005 自動雙照片尺寸無效")
+                geometry = resolve_compact_pair_geometry(
+                    (
+                        (auto_pair_source_sizes[0][0], auto_pair_source_sizes[0][1]),
+                        (auto_pair_source_sizes[1][0], auto_pair_source_sizes[1][1]),
+                    ),
+                )
             if layout_key == "full":
                 photo_rect = _required_rect(geometry.primary_photo, "primary_photo")
                 fitted = self._fit_photo(
@@ -1870,22 +1976,38 @@ class RenderService:
                     primary_caption_rect,
                     secondary_caption_rect,
                 )
-                canvas.paste(
-                    self._fit_photo(source, photo, image_size, crop_x, crop_y, fit_mode_key), positions[0]
+                first_fitted = (
+                    self._fit_compact_pair_photo(
+                        source, image_size, fit_mode=fit_mode_key,
+                    ) if compact_pair else
+                    self._fit_photo(source, photo, image_size, crop_x, crop_y, fit_mode_key)
                 )
+                try:
+                    canvas.paste(first_fitted, positions[0])
+                finally:
+                    first_fitted.close()
                 with second_source:
-                    canvas.paste(
-                        self._fit_photo(
+                    second_fitted = (
+                        self._fit_compact_pair_photo(
+                            second_source, second_image_size, fit_mode=fit_mode_key,
+                        ) if compact_pair else self._fit_photo(
                             second_source,
                             second_photo,
                             second_image_size,
                             second_photo["crop_manual_x"],
                             second_photo["crop_manual_y"],
                             fit_mode_key,
-                        ),
-                        positions[1],
+                        )
                     )
-                if footer_lines:
+                    try:
+                        canvas.paste(second_fitted, positions[1])
+                    finally:
+                        second_fitted.close()
+                if compact_pair:
+                    self._draw_compact_pair_captions(
+                        canvas, geometry, (first_caption, second_caption), footer_parts or {}
+                    )
+                elif footer_lines:
                     self._draw_photo_footers(
                         canvas, geometry, footer_parts or {}, photo_id, secondary_photo_id
                     )
@@ -2049,10 +2171,14 @@ class RenderService:
     def _auto_photo_plans(
         self, photo_ids: list[str], quantity: int, *,
         device_config: dict[str, Any] | None = None, profile: str | None = None,
+        selection_run_ids: list[str] | None = None,
     ) -> list[dict[str, Any]]:
         device = device_config or {}
         orientation = str(device.get("frame_orientation") or self.settings.get("render.frame_orientation", "landscape"))
         rows = [dict(self.ensure_photo_features(photo_id)) for photo_id in dict.fromkeys(photo_ids)]
+        priorities = DisplayHistoryRepository(self.database).selection_priorities(selection_run_ids or [], photo_ids)
+        for row in rows:
+            row.update(priorities.get(str(row["id"]), {}))
         groups = select_auto_photo_frames(rows, frame_orientation=orientation, count=quantity)
         if not groups:
             raise InsufficientPhotoContentError("RENDER-005 沒有可組成完整畫面的照片；請補充方向相符且不重複的照片")
@@ -2166,7 +2292,8 @@ class RenderService:
                 device_orientation_metadata: list[dict[str, Any]] = []
                 if effective_layout == "auto_photo":
                     composition_plans = self._auto_photo_plans(
-                        selected, quantity, device_config=device, profile=profile_key
+                        selected, quantity, device_config=device, profile=profile_key,
+                        selection_run_ids=selection_run_ids,
                     )
                 elif effective_layout in {"photo_pair", "photo_pair_caption"}:
                     composition_plans = [
@@ -2272,7 +2399,7 @@ class RenderService:
             return {"releases": published, "device_releases": assignments}
         release_orientation_metadata: list[dict[str, Any]] = []
         if layout_key == "auto_photo":
-            plans = self._auto_photo_plans(selected, quantity)
+            plans = self._auto_photo_plans(selected, quantity, selection_run_ids=selection_run_ids)
         elif layout_key in {"photo_pair", "photo_pair_caption"}:
             plans = []
             for index in range(0, len(selected), 2):
@@ -2464,7 +2591,8 @@ class RenderService:
                 # A high AI score cannot repeatedly displace an unseen safe
                 # candidate. Once all have appeared, rotate least-shown first.
                 return (
-                    exposure_count(row), stage, distance,
+                    exposure_count(row), row.get("seasonal_priority", stage),
+                    0 if row.get("seasonal_priority") == 1000 else distance,
                     last_exposure_at(row), -adjusted,
                     diversity if semantic else 0.0, index, str(row.get("id") or ""),
                 )
@@ -2484,6 +2612,8 @@ class RenderService:
         limit: int,
         candidate_years: list[int] | None = None,
         score_kind: str = SEMANTIC_SCORE_KIND,
+        date_priorities: dict[str, int] | None = None,
+        priority_min_score: float = 0,
     ) -> list[dict[str, Any]]:
         if score_kind not in {SEMANTIC_SCORE_KIND, LOCAL_QUALITY_SCORE_KIND}:
             raise ValueError("RENDER-005 不支援的選片評分來源")
@@ -2502,7 +2632,9 @@ class RenderService:
         result: list[dict[str, Any]] = []
         last_score: float | None = None
         last_count = 0
+        last_priority = 0
         last_id = ""
+        seen_contents: set[str] = set()
         # 檔案存在性無法安全地交給 SQLite；用固定批次掃描 SQL 已排序結果，
         # 每次只保留真正可用的候選，避免把大型照片庫 materialize 成 Dict。
         # photos has no durable burst_group_id column; captured_at is the
@@ -2511,12 +2643,17 @@ class RenderService:
             with self.database.session() as connection:
                 rows = connection.execute(
                     f"""
-                    WITH ranked_candidates AS (
+                    WITH content_exposure AS (
+                        SELECT sha256,MAX(SUM(display_count),SUM(selection_count)) AS used_count,
+                               MAX(MAX(COALESCE(last_displayed_at,''),COALESCE(last_selected_at,''))) AS used_at
+                        FROM photos WHERE length(sha256)=64 AND (display_count>0 OR selection_count>0)
+                        GROUP BY sha256
+                    ), ranked_candidates AS (
                     SELECT p.id,p.library_id,p.relative_path,p.captured_at,p.captured_date,p.captured_month_day,
                            p.width,p.height,p.orientation,p.exif_orientation_original,
                            p.manual_orientation_rotation_cw,p.visual_orientation_rotation_cw,
                            p.visual_orientation_confidence,p.visual_orientation_ambiguous,
-                           p.exif_json,p.exclusion_status,p.manual_override,a.raw_json,
+                           p.exif_json,p.screenshot_likelihood,p.exclusion_status,p.manual_override,a.raw_json,
                            p.sha256,p.perceptual_hash,p.difference_hash,p.duplicate_group_id,p.gps_lat,p.gps_lon,
                            p.e6_score,p.e6_contrast_score,
                            p.e6_subject_score,p.e6_skin_score,p.e6_text_score,
@@ -2527,10 +2664,15 @@ class RenderService:
                            a.memory_score,
                            a.score_kind,a.local_score,p.local_candidate_score,
                            p.display_count,p.last_displayed_at,p.selection_count,p.last_selected_at,
-                           MAX(p.display_count,p.selection_count) exposure_count,
+                           MAX(p.display_count,p.selection_count,COALESCE(exposure.used_count,0)) exposure_count,
+                           exposure.used_at AS content_last_exposure_at,
+                           CASE WHEN ?=0 THEN 0 WHEN {score_expression}>=? THEN
+                               COALESCE((SELECT value FROM json_each(?) WHERE key=p.captured_month_day),1000)
+                               ELSE 1000 END date_priority,
                            {combined_expression} combined_score
                     FROM photos p
                     JOIN libraries l ON l.id=p.library_id
+                    LEFT JOIN content_exposure exposure ON exposure.sha256=p.sha256
                     JOIN photo_analysis a ON a.id=(
                         SELECT latest.id FROM photo_analysis latest WHERE latest.photo_id=p.id
                         ORDER BY {preferred_analysis_order_sql('latest')} LIMIT 1
@@ -2546,10 +2688,14 @@ class RenderService:
                     )
                     SELECT * FROM ranked_candidates
                     WHERE (? IS NULL OR exposure_count>? OR (exposure_count=? AND
-                        (combined_score<? OR (combined_score=? AND id>?))))
-                    ORDER BY exposure_count ASC,combined_score DESC,id LIMIT 250
+                        (date_priority>? OR (date_priority=? AND
+                        (combined_score<? OR (combined_score=? AND id>?))))))
+                    ORDER BY exposure_count ASC,date_priority ASC,combined_score DESC,id LIMIT 250
                     """,  # noqa: S608 -- eligibility predicate is a fixed class constant
                     (
+                        int(date_priorities is not None),
+                        priority_min_score,
+                        json.dumps(date_priorities or {}),
                         int(month_days is not None),
                         json.dumps(month_days or []),
                         int(older_only),
@@ -2559,6 +2705,8 @@ class RenderService:
                         last_score,
                         last_count,
                         last_count,
+                        last_priority,
+                        last_priority,
                         last_score,
                         last_score,
                         last_id,
@@ -2568,6 +2716,11 @@ class RenderService:
                 break
             for stored in rows:
                 if self.candidates.available(stored) and self.candidates.safety_passed(stored):
+                    content = str(stored["sha256"] or "")
+                    if date_priorities is not None and len(content) == 64:
+                        if content in seen_contents:
+                            continue
+                        seen_contents.add(content)
                     candidate = dict(stored)
                     candidate.pop("raw_json", None)
                     candidate.pop("exif_json", None)
@@ -2576,6 +2729,7 @@ class RenderService:
                         break
             last_score = float(rows[-1]["combined_score"])
             last_count = int(rows[-1]["exposure_count"])
+            last_priority = int(rows[-1]["date_priority"])
             last_id = str(rows[-1]["id"])
             if len(rows) < 250:
                 break
@@ -2669,13 +2823,28 @@ class RenderService:
                 pool[identifier] = row
 
         if execution_mode(self.settings) == "seasonal_ai":
-            append(self._candidate_query(
+            window = int(self.settings.get("analysis.seasonal_window_days", 5))
+            anchor = date(2000, target.month, target.day)
+            priorities = {target.strftime("%m-%d"): 0}
+            seasonal_distances = {target.strftime("%m-%d"): 0}
+            for offset in range(1, window + 1):
+                for sign, priority in ((-1, offset * 2 - 1), (1, offset * 2)):
+                    day = (anchor + timedelta(days=sign * offset)).strftime("%m-%d")
+                    priorities[day], seasonal_distances[day] = priority, offset
+            rows = self._candidate_query(
                 target=target,
-                month_days=seasonal_month_days(target, int(self.settings.get("analysis.seasonal_window_days", 5))),
+                month_days=seasonal_month_days(target, window),
                 older_only=False,
                 limit=max(20, min(int(self.settings.get("render.local_candidate_limit", 200)), 1000)),
                 candidate_years=candidate_years, score_kind=score_kind,
-            ), "seasonal_window")
+                date_priorities=priorities,
+                priority_min_score=float(self.settings.get("render.seasonal_priority_min_score", 60)),
+            )
+            append(rows, "seasonal_window", seasonal_distances)
+            for row in pool.values():
+                row["seasonal_priority"] = int(row["date_priority"])
+                row["match_type"] = ("seasonal_low_score" if row["seasonal_priority"] == 1000
+                                     else "exact_day" if row["day_distance"] == 0 else "nearby_day")
         elif mode == "top_ranked":
             append(self._candidate_query(
                 target=target,
@@ -2715,8 +2884,9 @@ class RenderService:
                 ), "ranked_fallback")
         ordered = sorted(pool.values(), key=lambda row: (
             exposure_count(row),
-            {"exact_day": 0, "nearby_day": 1, "ranked_fallback": 2}.get(str(row.get("match_type") or ""), 0),
-            int(row.get("day_distance") or 0), last_exposure_at(row),
+            row.get("seasonal_priority",
+                    {"exact_day": 0, "nearby_day": 1, "ranked_fallback": 2}.get(str(row.get("match_type") or ""), 0)),
+            0 if row.get("seasonal_priority") == 1000 else int(row.get("day_distance") or 0), last_exposure_at(row),
             -float(row.get("combined_score") or 0), str(row["id"]),
         ))
         if candidate_pool is not None:
@@ -2729,10 +2899,11 @@ class RenderService:
     def _auto_candidate_stages(rows: list[dict[str, Any]]):
         """Try every unseen composition before admitting displayed sources."""
         allowed: list[dict[str, Any]] = []
+        def priority(row):
+            return row.get("seasonal_priority", {"exact_day": 0, "nearby_day": 1}.get(row.get("match_type"), 2))
         for count in sorted({exposure_count(row) for row in rows}):
-            for stage in ({"exact_day"}, {"nearby_day"}, {"ranked_fallback", "top_ranked", "seasonal_window"}):
-                added = [row for row in rows if exposure_count(row) == count
-                         and row.get("match_type", "top_ranked") in stage]
+            for stage in sorted({priority(row) for row in rows if exposure_count(row) == count}):
+                added = [row for row in rows if exposure_count(row) == count and priority(row) == stage]
                 if added:
                     allowed.extend(added)
                     yield list(allowed)
@@ -2799,9 +2970,10 @@ class RenderService:
                 target=target, candidates=pool, selected=selected, method="automatic",
                 context={"selection_mode": self.settings.get("render.selection_mode", "history_today"),
                          "execution_mode": mode, "seasonal_window_days": self.settings.get("analysis.seasonal_window_days", 5),
+                         "seasonal_priority_min_score": self.settings.get("render.seasonal_priority_min_score", 60),
                          "fallback": self.settings.get("render.history_today_fallback", "nearby_then_ranked"),
                          "candidate_years": candidate_years or [], "requested_count": limit,
-                         "composition_pool": composition_pool, "policy": "least_displayed_v1"},
+                         "composition_pool": composition_pool, "policy": "least_displayed_seasonal_date_v2"},
             )
             for row in selected:
                 row["selection_run_id"] = run_id

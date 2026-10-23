@@ -20,7 +20,10 @@ from urllib.request import HTTPCookieProcessor, Request, build_opener
 ROOT_DIR = Path(__file__).resolve().parents[1]
 # CI-only fixture; the production application never imports this module.
 sys.path.insert(0, str(ROOT_DIR / "scripts" / "ci"))
-from persistence_fixture import seed as seed_paid_state, verify as verify_paid_state
+from persistence_fixture import (
+    LAN_SOURCE_BYTES, LAN_SOURCE_ID, seed_lan_release_source,
+    seed as seed_paid_state, verify as verify_paid_state,
+)
 
 
 BASE_URL = os.environ.get("INKTIME_LAN_GATE_URL", "http://127.0.0.1:8765").rstrip("/")
@@ -316,6 +319,12 @@ def _seed_release(state_path: Path, data_dir: Path) -> None:
         "render_profile": "safe_4c",
         "created_at": now,
         "files": [{"name": "photo_1.bin", "size": len(payload), "sha256": digest}],
+        "render_options": {
+            "render_plans": [{"primary_photo_id": LAN_SOURCE_ID,
+                              "primary_sha256": sha256(LAN_SOURCE_BYTES).hexdigest()}],
+            "photo_orientations": [{"photo_id": LAN_SOURCE_ID,
+                                    "orientation": {"rotation_degrees": 0}}],
+        },
     }
     (release_dir / "photo_1.bin").write_bytes(payload)
     (release_dir / "manifest.json").write_text(json.dumps(manifest, separators=(",", ":")), encoding="utf-8")
@@ -323,6 +332,7 @@ def _seed_release(state_path: Path, data_dir: Path) -> None:
     try:
         connection.execute("PRAGMA foreign_keys=ON")
         connection.execute("BEGIN IMMEDIATE")
+        seed_lan_release_source(connection, data_dir / "ci-lan-sources", runtime_root="/data/ci-lan-sources")
         connection.execute(
             """
             INSERT OR REPLACE INTO releases(

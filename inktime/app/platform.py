@@ -51,6 +51,7 @@ from inktime.app.repositories.settings import SettingsRepository
 from inktime.app.web.access import csrf_token, verify_csrf
 from inktime.app.web.help_content import page_guide_for_endpoint
 from inktime.app.web.error_messages import CATALOG, DEFAULT, error_text, explain_error, plain_message
+from inktime.app.web.datetime_display import display_timezone, format_display_datetime
 
 
 LOGGER = logging.getLogger("platform")
@@ -118,6 +119,13 @@ def configure_web_application(
     app.jinja_env.globals["csrf_token"] = csrf_token
     app.jinja_env.globals["image_source_accept"] = ",".join(sorted(SUPPORTED_IMAGE_EXTENSIONS))
     app.jinja_env.filters["taiwan_traditional"] = to_taiwan_traditional
+    app.jinja_env.filters["human_datetime"] = lambda value: format_display_datetime(
+        value, getattr(g, "display_timezone", None) or str(settings_repository.get("general.timezone", "Asia/Taipei"))
+    )
+    app.jinja_env.filters["human_photo_datetime"] = lambda value: format_display_datetime(
+        value, getattr(g, "display_timezone", None) or str(settings_repository.get("general.timezone", "Asia/Taipei")),
+        naive_is_utc=False,
+    )
     app.jinja_env.globals.update(
         explain_error=explain_error,
         error_text=error_text,
@@ -141,6 +149,7 @@ def configure_web_application(
 
     @app.context_processor
     def shared_template_context():
+        g.display_timezone = display_timezone(settings_repository.get("general.timezone", "Asia/Taipei"))
         database = container.extensions["inktime_database"]
         database_ready = False
         migration_version = None
@@ -164,6 +173,7 @@ def configure_web_application(
         except Exception:
             rows = []
         return {
+            "display_timezone": g.display_timezone,
             "critical_alerts": rows,
             "analysis_failure_count": analysis_failure_count,
             "csp_nonce": getattr(g, "csp_nonce", ""),

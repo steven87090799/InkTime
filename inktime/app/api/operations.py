@@ -442,7 +442,14 @@ def backups_page():
                 "modified_at": datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat(),
             }
         )
-    return render_template("backups.html", backups=backups)
+    settings = current_app.extensions["inktime_settings_repository"]
+    return render_template(
+        "backups.html",
+        backups=backups,
+        backup_schedule_enabled=bool(settings.get("backup.schedule_enabled", True)),
+        backup_hour=int(settings.get("backup.hour", 3)),
+        backup_retention=int(settings.get("backup.retention", 14)),
+    )
 
 
 @bp.post("/api/v1/backups")

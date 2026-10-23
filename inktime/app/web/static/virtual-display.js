@@ -56,13 +56,6 @@
   };
 
   const numberFormatter = new Intl.NumberFormat('zh-TW');
-  const timeFormatter = new Intl.DateTimeFormat('zh-TW', {
-    hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
-  });
-  const dateFormatter = new Intl.DateTimeFormat('zh-TW', {
-    year: 'numeric', month: '2-digit', day: '2-digit',
-    hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
-  });
   const ditherLabels = {
     gooddisplay: 'Good Display 原廠相容',
     photo_smooth: '照片平滑',
@@ -112,7 +105,7 @@
     time.className = 'debug-time';
     levelNode.className = `debug-level ${level}`;
     detail.className = 'debug-message';
-    time.textContent = timeFormatter.format(new Date());
+    time.textContent = window.inktimeFormatDateTime(new Date().toISOString());
     levelNode.textContent = level === 'error' ? '錯誤' : level === 'warn' ? '警告' : '資訊';
     detail.textContent = message;
     item.append(time, levelNode, detail);
@@ -230,8 +223,8 @@
     elements.meta.profile.textContent = manifest.render_profile;
     elements.meta.format.textContent = `${manifest.width}×${manifest.height} ${manifest.pixel_format}`;
     elements.meta.dither.textContent = ditherLabels[manifest.dither] || manifest.dither || '未標示';
-    elements.meta.created.textContent = dateFormatter.format(new Date(manifest.created_at));
-    elements.meta.received.textContent = dateFormatter.format(new Date());
+    elements.meta.created.textContent = window.inktimeFormatDateTime(manifest.created_at);
+    elements.meta.received.textContent = window.inktimeFormatDateTime(new Date().toISOString());
     elements.meta.sha.textContent = verification.actual;
     elements.verification.textContent = `${verification.method} 已通過`;
     elements.verification.classList.add('verified');

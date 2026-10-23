@@ -41,7 +41,7 @@
 </section>
 <section class="panel"><div class="panel-head"><h2>最近錯誤</h2><a href="/errors">查看錯誤中心</a></div>
   {% if recent_errors %}<div class="table-wrap"><table><thead><tr><th>發生什麼事／如何處理</th><th>次數</th><th>最後發生</th></tr></thead><tbody>
-  {% for error in recent_errors %}<tr><td>{{ error_notice(error.error_code,error.message) }}</td><td>{{ error.occurrences }}</td><td>{{ error.last_seen_at }}</td></tr>{% endfor %}
+  {% for error in recent_errors %}<tr><td>{{ error_notice(error.error_code,error.message) }}</td><td>{{ error.occurrences }}</td><td>{{ error.last_seen_at|human_datetime }}</td></tr>{% endfor %}
   </tbody></table></div>{% else %}<p class="empty">目前沒有未解決錯誤。</p>{% endif %}
 </section>
 <section class="panel setup-overview" id="setup-overview">
@@ -71,5 +71,9 @@
     {% endfor %}
   </ol>
   {% endfor %}
+</section>
+<section class="panel" id="common-settings-entry">
+  <div class="panel-head"><h2>常用設定與狀態報表</h2><a class="secondary" href="{{ url_for('settings.settings_overview') }}">查看目前設定</a></div>
+  <p>集中核對模型選擇、照片庫掃描與模型分析範圍、同期天數、顏色配方、版型、用量限制及備份排程。可展開完整設定值，並一鍵跳到對應頁面調整。</p>
 </section>
 {% endblock %}

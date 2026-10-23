@@ -930,6 +930,31 @@ def release_preview(release_id: str, filename: str):
         abort(404)
     if not path.is_file():
         abort(404)
+    if request.args.get("view") == "display":
+        try:
+            manifest_path = safe_join(
+                current_app.config["INKTIME_RELEASE_DIR"], f"{release_id}/manifest.json"
+            )
+            with manifest_path.open("rb") as handle:
+                raw = handle.read(1024 * 1024 + 1)
+            if len(raw) > 1024 * 1024:
+                abort(404)
+            manifest = json.loads(raw)
+            if not isinstance(manifest, dict) or manifest.get("release_id") != release_id:
+                abort(404)
+        except (OSError, ValueError, UnsafePathError):
+            abort(404)
+        # Published PNGs retain panel coordinates. Undo only the lossless
+        # landscape rotation for web viewing, using this release's frozen plan.
+        if manifest.get("orientation") == "landscape":
+            output = BytesIO()
+            with Image.open(path) as image:
+                if image.width < image.height:
+                    with image.transpose(Image.Transpose.ROTATE_90) as display:
+                        display.save(output, "PNG")
+            if output.tell():
+                output.seek(0)
+                return send_file(output, mimetype="image/png", max_age=0, download_name=filename)
     return send_file(path, mimetype="image/png", conditional=True)
 
 

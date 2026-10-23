@@ -1,10 +1,12 @@
 {% from "components/error_notice.html" import error_notice with context %}
 <!doctype html>
-<html lang="zh-Hant-TW">
+<html lang="zh-Hant-TW" data-display-timezone="{{ display_timezone }}">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="csrf-token" content="{{ csrf_token() }}">
+  <meta name="display-timezone" content="{{ display_timezone }}">
+  <script src="{{ url_for('static', filename='datetime-display.js') }}"></script>
   <title>{% block title %}InkTime{% endblock %}</title>
   <script nonce="{{ csp_nonce }}">
     (() => {
@@ -45,7 +47,7 @@
           <details class="nav-menu{% if request.path.startswith(('/simulator','/virtual-display','/rendering','/display-history')) %} active{% endif %}"><summary>墨水屏</summary><div class="nav-popover"><a href="/rendering">相框與發布<small>方向、版面、裁切與字型</small></a><a href="/simulator">快速模擬器<small>不上模型測試色盤</small></a><a href="/display-history">選片與顯示歷史<small>查詢已顯示照片、選片與完整候選</small></a><a href="/virtual-display">虛擬墨水屏<small>接收正式發布畫面</small></a></div></details>
           <details class="nav-menu{% if request.path.startswith(('/devices','/energy')) %} active{% endif %}"><summary>裝置</summary><div class="nav-popover"><a href="/devices">裝置管理<small>ESP32、配對與排程</small></a><a href="/energy">能源儀表板<small>電池、刷新與續航</small></a></div></details>
           <details class="nav-menu{% if request.path.startswith(('/decision-traces','/feedback','/shadow','/device-queues','/retention','/rollouts')) %} active{% endif %}"><summary>決策與韌性</summary><div class="nav-popover"><a href="/decision-traces">決策追蹤</a><a href="/feedback">使用者回饋</a><a href="/shadow">Shadow 比較</a><a href="/device-queues">裝置內容佇列</a><a href="/retention">資料保留</a><a href="/rollouts">Canary 發布</a></div></details>
-          <details class="nav-menu{% if request.path.startswith(('/notifications','/activity','/maintenance','/schedules','/diagnostics','/errors','/backups','/settings','/help','/account')) %} active{% endif %}"><summary>系統</summary><div class="nav-popover nav-popover-right"><a href="/help/controls">功能說明大全<small>查設定、英文選項與按鈕影響</small></a><a href="/notifications">通知紀錄<small>分析失敗、逾時與裝置事件</small></a><a href="/activity">執行監控<small>工作進度、即時事件與卡住原因</small></a><a href="/settings">系統設定<small>依分類調整所有開關</small></a><a href="/maintenance">照片庫與維護<small>掃描、快取與發布測試</small></a><a href="/schedules">低資源排程<small>Scanner、AI、換圖與快取工作</small></a><a href="/diagnostics">系統診斷<small>資源、健康與診斷包</small></a><a href="/errors">錯誤中心<small>集中查看與處理問題</small></a><a href="/backups">備份與還原<small>建立、下載與保留備份</small></a><a href="/account/password">帳號安全<small>變更登入密碼</small></a><form method="post" action="/logout"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button class="link-button">登出 {{ g.user.username }}</button></form></div></details>
+          <details class="nav-menu{% if request.path.startswith(('/notifications','/activity','/maintenance','/schedules','/diagnostics','/errors','/backups','/settings','/help','/account')) %} active{% endif %}"><summary>系統</summary><div class="nav-popover nav-popover-right"><a href="/help/controls">功能說明大全<small>查設定、英文選項與按鈕影響</small></a><a href="/notifications">通知紀錄<small>分析失敗、逾時與裝置事件</small></a><a href="/activity">執行監控<small>工作進度、即時事件與卡住原因</small></a><a href="/settings/overview">常用設定與狀態報表<small>核對模型、分析範圍、顏色與限制值</small></a><a href="/settings">系統設定<small>依分類調整所有開關</small></a><a href="/maintenance">照片庫與維護<small>掃描、快取與發布測試</small></a><a href="/schedules">低資源排程<small>Scanner、AI、換圖與快取工作</small></a><a href="/diagnostics">系統診斷<small>資源、健康與診斷包</small></a><a href="/errors">錯誤中心<small>集中查看與處理問題</small></a><a href="/backups">備份與還原<small>建立、下載與保留備份</small></a><a href="/account/password">帳號安全<small>變更登入密碼</small></a><form method="post" action="/logout"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button class="link-button">登出 {{ g.user.username }}</button></form></div></details>
         </nav>
       {% endif %}
       <button class="theme-toggle" id="theme-toggle" type="button" aria-label="切換為深色模式" aria-pressed="false">
@@ -56,7 +58,7 @@
   </header>
   <main class="shell">
     {% if g.user %}<div id="analysis-failure-alert" class="notice error" role="alert" {% if not analysis_failure_count %}hidden{% endif %}><strong>照片分析需要處理：<span id="analysis-failure-count">{{ analysis_failure_count }}</span> 筆未讀失敗通知。</strong> <a href="/notifications">查看失敗照片與原因</a></div>{% endif %}
-    {% if g.user and g.user.role == 'administrator' and critical_alerts %}<div class="notice error" role="alert"><strong>需要優先處理{% if critical_alerts|length > 1 %}（{{ critical_alerts|length }}）{% endif %}</strong>{{ error_notice(critical_alerts[0].error_code, critical_alerts[0].message) }}<small>{{ critical_alerts[0].last_seen_at }}</small> · <a href="/activity?severity=CRITICAL">查看相關事件</a></div>{% endif %}
+    {% if g.user and g.user.role == 'administrator' and critical_alerts %}<div class="notice error" role="alert"><strong>需要優先處理{% if critical_alerts|length > 1 %}（{{ critical_alerts|length }}）{% endif %}</strong>{{ error_notice(critical_alerts[0].error_code, critical_alerts[0].message) }}<small>{{ critical_alerts[0].last_seen_at|human_datetime }}</small> · <a href="/activity?severity=CRITICAL">查看相關事件</a></div>{% endif %}
     {% for category, message in get_flashed_messages(with_categories=true) %}
       {% set flash_error_code = category[6:] if category.startswith('error:') else '' %}
       <div class="notice {{ 'error' if flash_error_code else category }}" role="alert">{% if category == 'error' or flash_error_code %}{{ error_notice(message.code, message.message) if message is mapping else error_notice(flash_error_code, message) }}{% else %}{{ message }}{% endif %}</div>
@@ -79,6 +81,7 @@
         </div>
       </aside>
     {% endif %}
+    <p class="muted ui-timezone">時間顯示：{{ '台北時間' if display_timezone == 'Asia/Taipei' else display_timezone }}（24 小時制）</p>
   </main>
   <div class="context-help-popover" id="context-help-popover" role="tooltip" hidden></div>
   <dialog id="inktime-confirm-dialog" aria-labelledby="inktime-confirm-title">

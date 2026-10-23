@@ -166,7 +166,7 @@
   <div class="panel-head"><h2>設定 Snapshot 歷史</h2><span>修改前自動建立，最多保留安全固定上限</span></div>
   <div class="table-wrap"><table><thead><tr><th>時間</th><th>操作者</th><th>變更數</th><th>原因</th><th>動作</th></tr></thead><tbody>
     {% for snapshot in snapshots %}
-    <tr><td>{{ snapshot.created_at }}</td><td>{{ snapshot.actor_id or 'system' }}</td><td>{{ snapshot.changed_keys_count }}</td><td>{{ snapshot.reason or '未填寫' }}</td><td><button type="button" class="secondary view-snapshot" data-id="{{ snapshot.id }}">查看 Diff</button></td></tr>
+    <tr><td>{{ snapshot.created_at|human_datetime }}</td><td>{{ snapshot.actor_id or 'system' }}</td><td>{{ snapshot.changed_keys_count }}</td><td>{{ snapshot.reason or '未填寫' }}</td><td><button type="button" class="secondary view-snapshot" data-id="{{ snapshot.id }}">查看 Diff</button></td></tr>
     {% else %}<tr><td colspan="5" class="empty">尚未建立設定 Snapshot。</td></tr>{% endfor %}
   </tbody></table></div>
 </section>
@@ -174,7 +174,7 @@
 <section class="panel">
   <div class="panel-head"><h2>最近設定稽核</h2><span>技術 Key 僅在稽核中顯示</span></div>
   <div class="table-wrap"><table><thead><tr><th>時間</th><th>設定 Key</th><th>操作者</th><th>來源</th><th>生效方式</th></tr></thead><tbody>
-    {% for entry in history %}<tr><td>{{ entry.changed_at }}</td><td><code>{{ entry.key }}</code></td><td>{{ entry.changed_by or 'system' }}</td><td>{{ entry.source_ip }}</td><td>{{ '重新啟動' if entry.requires_restart else '動態／下次工作' }}</td></tr>{% else %}<tr><td colspan="5" class="empty">尚未修改設定。</td></tr>{% endfor %}
+    {% for entry in history %}<tr><td>{{ entry.changed_at|human_datetime }}</td><td><code>{{ entry.key }}</code></td><td>{{ entry.changed_by or 'system' }}</td><td>{{ entry.source_ip }}</td><td>{{ '重新啟動' if entry.requires_restart else '動態／下次工作' }}</td></tr>{% else %}<tr><td colspan="5" class="empty">尚未修改設定。</td></tr>{% endfor %}
   </tbody></table></div>
 </section>
 

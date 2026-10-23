@@ -97,6 +97,7 @@ DITHER_ALGORITHMS = (
     "floyd_steinberg",
     "gooddisplay",
     "warm_vivid_c",
+    "natural_d",
     "photo_smooth",
     "atkinson",
     "bayer4",
@@ -321,22 +322,63 @@ def _quantize_gooddisplay(
     return indexes, quantized.convert("RGB"), _gooddisplay_colors(profile)
 
 
+def _quantize_natural_d(
+    image: Image.Image, profile: DisplayProfile, protected_mask: Image.Image | None,
+) -> tuple[bytearray, Image.Image, tuple[PaletteColor, ...]]:
+    from .natural_d import SPECTRA6, quantize
+
+    palette = profile.colors
+    if profile.key == "gdep073e01_6c":
+        calibrated = dict(SPECTRA6)
+        palette = tuple(replace(color, rgb=calibrated[color.name], lab=None) for color in profile.colors)
+        by_name = {color.name: i for i, color in enumerate(palette)}
+        mapping = tuple(by_name[name] for name, _ in SPECTRA6)
+    else:
+        mapping = tuple(range(len(palette)))
+    protected = None
+    if protected_mask is not None:
+        if protected_mask.size != image.size:
+            raise ValueError("RENDER-004 文字保護遮罩尺寸不符")
+        protected = protected_mask.convert("1", dither=Image.Dither.NONE).convert("L").tobytes()
+    raw = quantize(image.tobytes(), image.width, image.height,
+                   tuple(palette[i].rgb for i in mapping), protected)
+    indexes = bytearray(mapping[index] for index in raw)
+    preview = Image.frombytes("P", image.size, bytes(indexes))
+    flattened = [channel for color in palette for channel in color.rgb]
+    preview.putpalette(flattened + [0] * (768 - len(flattened)))
+    return indexes, preview.convert("RGB"), palette
+
+
 def _warm_vivid_c(image: Image.Image) -> Image.Image:
     """Frozen C preset accepted on the physical PhotoPainter on 2026-10-17."""
     import numpy as np
 
-    original = np.asarray(image.convert("RGB")).astype(float)
-    adjusted = ImageEnhance.Color(image).enhance(1.12)
-    adjusted = ImageEnhance.Contrast(adjusted).enhance(1.06)
-    adjusted = ImageEnhance.Brightness(adjusted).enhance(1.03)
-    working = np.asarray(adjusted).astype(float)
-    luminance = original @ np.array([0.2126, 0.7152, 0.0722])
-    highlight = np.clip((luminance - 230) / 25, 0, 1)[..., None]
-    working = working * (1 - highlight) + original * highlight
-    weight = np.clip(luminance / 35, 0, 1) * np.clip((245 - luminance) / 45, 0, 1)
-    working[:, :, 0] *= 1 + 0.015 * weight
-    working[:, :, 2] *= 1 - 0.035 * weight
-    return Image.fromarray(np.clip(np.rint(working), 0, 255).astype("uint8"))
+    # Contrast uses the whole-image mean. Keep all Pillow adjustments global;
+    # only the pixel-local float64 math can be split without changing colors.
+    with ImageEnhance.Color(image).enhance(1.12) as saturated:
+        with ImageEnhance.Contrast(saturated).enhance(1.06) as contrasted:
+            adjusted = ImageEnhance.Brightness(contrasted).enhance(1.03)
+    result = Image.new("RGB", image.size)
+    try:
+        with adjusted:
+            for top in range(0, image.height, 64):
+                box = (0, top, image.width, min(top + 64, image.height))
+                with image.crop(box) as source, source.convert("RGB") as rgb, adjusted.crop(box) as strip:
+                    original = np.asarray(rgb).astype(float)
+                    working = np.asarray(strip).astype(float)
+                    luminance = original @ np.array([0.2126, 0.7152, 0.0722])
+                    highlight = np.clip((luminance - 230) / 25, 0, 1)[..., None]
+                    working = working * (1 - highlight) + original * highlight
+                    weight = np.clip(luminance / 35, 0, 1) * np.clip((245 - luminance) / 45, 0, 1)
+                    working[:, :, 0] *= 1 + 0.015 * weight
+                    working[:, :, 2] *= 1 - 0.035 * weight
+                    with Image.fromarray(np.clip(np.rint(working), 0, 255).astype("uint8")) as rendered:
+                        result.paste(rendered, (0, top))
+                    del original, working, luminance, highlight, weight
+        return result
+    except BaseException:
+        result.close()
+        raise
 
 
 def _waveshare_six_color_index(red: int, green: int, blue: int) -> int:
@@ -560,14 +602,18 @@ def encode_image(
         raise ValueError(f"RENDER-004 不支援的抖動算法：{dither}")
     if not 0.0 <= float(strength) <= 2.0:
         raise ValueError("RENDER-004 抖動強度必須介於 0 到 2")
+    if dither == "natural_d" and image.width * image.height > 480 * 800:
+        raise ValueError("RENDER-004 D 色彩模式僅接受不超過 480×800 像素的已排版圖片")
     rgb = image.convert("RGB")
     preview_palette = profile.colors
-    if dither == "warm_vivid_c":
-        adjusted = _warm_vivid_c(rgb)
-        if profile.key == "gdep073e01_6c":
-            indexes, preview, preview_palette = _quantize_waveshare_six_color(adjusted, profile)
-        else:
-            indexes, preview, preview_palette = _quantize_gooddisplay(adjusted, profile)
+    if dither == "natural_d":
+        indexes, preview, preview_palette = _quantize_natural_d(rgb, profile, protected_mask)
+    elif dither == "warm_vivid_c":
+        with _warm_vivid_c(rgb) as adjusted:
+            if profile.key == "gdep073e01_6c":
+                indexes, preview, preview_palette = _quantize_waveshare_six_color(adjusted, profile)
+            else:
+                indexes, preview, preview_palette = _quantize_gooddisplay(adjusted, profile)
     elif dither == "gooddisplay":
         indexes, preview, preview_palette = _quantize_gooddisplay(rgb, profile)
     elif dither == "photo_smooth":

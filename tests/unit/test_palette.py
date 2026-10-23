@@ -4,6 +4,7 @@ import itertools
 import json
 from pathlib import Path
 
+import pytest
 from PIL import Image
 
 from inktime.app.domain.rendering import DITHER_ALGORITHMS, encode_image, get_display_profile
@@ -30,10 +31,45 @@ def test_waveshare_nearest_color_preserves_rgb_distance_and_tie_breaks():
         assert _waveshare_six_color_index(*pixel) == expected
 
 
-def test_warm_default_preserves_the_original_system_preset():
-    assert DEFAULT_RENDER_DITHER == "warm_vivid_c"
+def test_natural_default_preserves_the_warm_and_original_system_presets():
+    assert DEFAULT_RENDER_DITHER == "natural_d"
+    assert SYSTEM_PRESETS["natural_d"]["settings"]["render.dither"] == "natural_d"
     assert SYSTEM_PRESETS["warm_vivid_c"]["settings"]["render.dither"] == "warm_vivid_c"
     assert SYSTEM_PRESETS["gooddisplay_spectra6"]["settings"]["render.dither"] == "gooddisplay"
+
+
+def _frozen_full_image_warm_vivid(image):
+    """Accepted pre-optimization float64 pipeline; contrast must remain global."""
+    import numpy as np
+    from PIL import ImageEnhance
+
+    original = np.asarray(image.convert("RGB")).astype(float)
+    adjusted = ImageEnhance.Color(image).enhance(1.12)
+    adjusted = ImageEnhance.Contrast(adjusted).enhance(1.06)
+    adjusted = ImageEnhance.Brightness(adjusted).enhance(1.03)
+    working = np.asarray(adjusted).astype(float)
+    luminance = original @ np.array([0.2126, 0.7152, 0.0722])
+    highlight = np.clip((luminance - 230) / 25, 0, 1)[..., None]
+    working = working * (1 - highlight) + original * highlight
+    weight = np.clip(luminance / 35, 0, 1) * np.clip((245 - luminance) / 45, 0, 1)
+    working[:, :, 0] *= 1 + 0.015 * weight
+    working[:, :, 2] *= 1 - 0.035 * weight
+    return Image.fromarray(np.clip(np.rint(working), 0, 255).astype("uint8"))
+
+
+@pytest.mark.parametrize("size", [(1, 1), (7, 63), (9, 64), (11, 65), (97, 131), (480, 800), (800, 480)])
+def test_warm_vivid_stripes_preserve_every_accepted_float64_output_pixel(size):
+    import numpy as np
+
+    random = np.random.default_rng(20261019)
+    pixels = random.integers(0, 256, (size[1], size[0], 3), dtype=np.uint8)
+    with Image.fromarray(pixels) as image:
+        before = image.tobytes()
+        with _frozen_full_image_warm_vivid(image) as expected, _warm_vivid_c(image) as actual:
+            assert actual.mode == expected.mode
+            assert actual.size == expected.size
+            assert actual.tobytes() == expected.tobytes()
+        assert image.tobytes() == before
 
 
 GOODDISPLAY_PALETTE = (

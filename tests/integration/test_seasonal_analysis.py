@@ -357,3 +357,55 @@ def test_api_requires_admin_csrf_and_confirmation_before_queueing(client, app, m
     response = client.post("/api/v1/analysis/seasonal/rerun/execute", json={"accept_additional_cost": True}, headers={"X-CSRF-Token": csrf(client)})
     assert response.status_code == 409
     assert not _tasks(app.extensions["inktime_seasonal_analysis_service"])
+
+
+def test_daily_window_only_adds_new_boundary_day_and_keeps_unselected_candidates(app, monkeypatch):
+    service = _setup(app, monkeypatch)
+    for day in range(17, 29):
+        _photo(app, f"day-{day}", f"2018-10-{day}")
+    first = service.ensure(date(2026, 10, 22))["job_id"]
+    assert service.jobs.get(first)["total_items"] == 11
+    for item in service.jobs.claim(first, "daily-test", 20):
+        result = valid_result()
+        service.photos.save_analysis(item["photo_id"], first, "single", "mock", "old-model", result, json.dumps(result))
+        service.jobs.complete_item(first, item["id"], {"stage": "single"}, worker_id="daily-test")
+    service.jobs.finalize_if_done(first)
+    assert service.jobs.get(first)["completed_items"] == 11
+    second = service.ensure(date(2026, 10, 23))["job_id"]
+    assert service.jobs.get(second)["total_items"] == 1
+    tasks = _tasks(service)
+    assert [t["photo_id"] for t in tasks if t["job_id"] == second] == ["day-28"]
+    assert len(tasks) == 12
+    candidates = service.repository.candidates(date(2026, 10, 23), 5)
+    assert {row["id"] for row in candidates} == {f"day-{day}" for day in range(18, 29)}
+    assert service.ensure(date(2026, 10, 23))["job_id"] is None
+
+
+def test_daily_and_status_queries_are_paged_and_deduplicate_across_page_edges(app, monkeypatch):
+    service = _setup(app, monkeypatch)
+    repository = service.repository
+    monkeypatch.setattr(repository, "PAGE_SIZE", 2)
+    monkeypatch.setattr(service, "CHUNK_SIZE", 2)
+    for index in range(5):
+        _photo(app, f"copy-{index}", same_as="one-content")
+    for index in range(4):
+        _photo(app, f"distinct-{index}")
+    _photo(app, "Screenshot-test")
+    _photo(app, "do-not-show")
+    with repository.database.transaction() as connection:
+        connection.execute("UPDATE photos SET never_display=1 WHERE id='do-not-show'")
+    observed = []
+    read_page = repository._candidate_page
+    def bounded_page(*args):
+        rows = read_page(*args)
+        observed.append(len(rows))
+        return rows
+    monkeypatch.setattr(repository, "_candidate_page", bounded_page)
+    monkeypatch.setattr(repository, "candidates", lambda *a, **k: pytest.fail("daily paths cannot materialize the window"))
+    jobs = [service.ensure()["job_id"] for _ in range(3)]
+    assert [service.jobs.get(job)["total_items"] for job in jobs] == [2, 2, 1]
+    assert len({row["content_sha256"] for row in _tasks(service)}) == 5
+    status = repository.status(date(2026, 10, 22), 5)
+    assert status["candidate_count"] == 5
+    assert observed and max(observed) <= 2
+    assert not {"Screenshot-test", "do-not-show"} & {row["photo_id"] for row in _tasks(service)}

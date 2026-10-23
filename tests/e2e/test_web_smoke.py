@@ -13,6 +13,55 @@ sync_playwright = playwright_api.sync_playwright
 expect = playwright_api.expect
 
 
+def _settings_report_regression(page, base):
+    page.goto(base + "/dashboard")
+    page.locator('#common-settings-entry').get_by_role('link', name='查看目前設定').click()
+    expect(page.get_by_role('heading', name='常用設定與狀態報表', exact=True)).to_be_visible()
+    full = page.locator('#report-all-settings')
+    expect(full).to_be_hidden()
+    page.locator('#report-show-all').set_checked(True)
+    expect(full).to_be_visible()
+    target = full.locator('[data-setting-key="render.seasonal_priority_min_score"]')
+    page.locator('#report-search').fill('render.seasonal_priority_min_score')
+    expect(target).to_be_visible()
+    expect(full.locator('[data-setting-key="budget.daily_stop"]')).to_be_hidden()
+    page.locator('#report-show-all').set_checked(False)
+    expect(full).to_be_hidden()
+    page.locator('#report-show-all').set_checked(True)
+    target.get_by_role('link', name='前往設定').click()
+    expect(page.locator('#settings-search')).to_have_value('render.seasonal_priority_min_score')
+    expect(page.locator('#setting-render-seasonal_priority_min_score')).to_be_visible()
+
+
+def _readable_timestamps_regression(page, base):
+    page.goto(base + "/dashboard")
+    raw = "2026-10-17T18:26:01.815629+00:00"
+    page.evaluate("""raw => {
+      const section = document.createElement('section'); section.id='timestamp-fixture';
+      section.innerHTML='<span id="date-visible"></span><input id="date-edit"><textarea id="date-draft"></textarea><pre id="date-json"></pre><code id="date-code"></code><span id="date-raw" data-preserve-timestamps></span>';
+      section.querySelector('#date-visible').textContent=raw;
+      section.querySelector('#date-edit').value=raw;
+      section.querySelector('#date-draft').value=raw;
+      for (const id of ['date-json','date-code','date-raw']) section.querySelector('#'+id).textContent=raw;
+      section.dataset.updatedAt=raw;
+      document.body.append(section);
+    }""", raw)
+    expect(page.locator('#date-visible')).to_have_text("2026/10/18 02:26:01")
+    expect(page.locator('#date-edit')).to_have_value(raw)
+    expect(page.locator('#date-draft')).to_have_value(raw)
+    for identifier in ("date-json", "date-code", "date-raw"):
+        expect(page.locator('#' + identifier)).to_have_text(raw)
+    assert page.locator('#timestamp-fixture').get_attribute('data-updated-at') == raw
+    page.evaluate("document.querySelector('#date-visible').firstChild.data='2026-10-22T19:13:41.802144+00:00'")
+    expect(page.locator('#date-visible')).to_have_text("2026/10/23 03:13:41")
+    for value, expected in (("2026-10-22T23:59:00", "2026/10/23 07:59:00"),
+                            ("2026-02-30T12:00:00Z", "2026-02-30T12:00:00Z"),
+                            ("2026-10-22T16:00:00Z", "2026/10/23 00:00:00")):
+        assert page.evaluate("value => window.inktimeFormatDateTime(value)", value) == expected
+    assert page.evaluate("window.inktimeFormatDateTime('2026-10-22T23:59:00',{naiveIsUTC:false})") == '2026/10/22 23:59:00'
+    page.locator('#timestamp-fixture').evaluate("node => node.remove()")
+
+
 def _review_draft_and_failure_regression(page, base):
     photos = [{"id": f"review-fixture-{index}", "analysis_id": index, "review_version": 0,
                "thumbnail_url": "/fixture-review.svg", "review_state": "unreviewed", "caption_override": "",
@@ -341,6 +390,8 @@ def test_first_setup_login_and_primary_console_pages():
         assert saved.value.status == 200
         expect(concurrency).to_have_value("3")
         expect(page.locator('#dirty-count')).to_have_text("0")
+        _settings_report_regression(page, base)
+        _readable_timestamps_regression(page, base)
         _review_draft_and_failure_regression(page, base)
         _crop_state_regression(page, base)
         _action_failure_regression(page, base)

@@ -1,0 +1,21 @@
+InkTime natural-D color pipeline
+
+Derived from epdoptimize 1.3.0 by paperlesspaper contributors.
+Upstream: https://github.com/paperlesspaper/epdoptimize
+Source: https://github.com/paperlesspaper/epdoptimize/tree/cc15cc5fa5541c626b50fd5dd107c692a745fdac
+npm package SHA-1: 5d97d4e73d835ce5ff9ec10e22ccdbc72493fbd6
+License: Apache License, Version 2.0; reproduced in LICENSE alongside this notice.
+
+The tone mapping, LAB display-range compression, white-preservation rules,
+palette matching and Floyd-Steinberg processing in
+inktime/app/domain/rendering/natural_d.py were adapted from upstream
+src/dither/processing.ts and src/dither/dither.ts. The six-color appearance
+palette is upstream's aitjcizeSpectra6Palette, with blue before green for ties.
+
+InkTime modifications: freeze the user-selected D recipe; add mild normalized
+linear-sRGB white balance and -5% saturation; process adjustments in chunks of
+at most 2048 pixels; bound inputs to one 480x800 frame; use integer diffusion
+tables without persistent image caches; preserve caption masks; map output to
+the existing panel codes. This is a native Python/NumPy adaptation, not a
+JavaScript runtime dependency. The supplied synthetic golden fixture was
+generated independently using the unmodified epdoptimize 1.3.0 JS engine.

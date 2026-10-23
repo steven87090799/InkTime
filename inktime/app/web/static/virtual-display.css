@@ -283,7 +283,7 @@ body {
   .stats-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .current-frame dl { grid-template-columns: 82px minmax(0, 1fr); }
   .palette-row { grid-template-columns: 74px minmax(70px, 1fr) 60px; gap: 8px; }
-  .debug-stream li { grid-template-columns: 62px 50px minmax(0, 1fr); gap: 7px; }
+  .debug-stream li { grid-template-columns: 10ch 50px minmax(0, 1fr); gap: 7px; }
   .frame-controls { grid-template-columns: 1fr 1fr; }
   .frame-controls span { grid-column: 1 / -1; grid-row: 1; }
 }
