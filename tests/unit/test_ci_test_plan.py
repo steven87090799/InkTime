@@ -686,4 +686,7 @@ def test_gunicorn_tls_deadline_routes_container_and_tls_validation(path):
     assert not plan["unknown_paths"]
     assert "tls_smoke" in plan["selected_gates"]
     assert "container_security" in plan["selected_gates"]
-    assert "tls_configuration_owner" in plan["selected_owner_suites"]
+    # The TLS owner suite is dispatched to its dedicated smoke job, rather
+    # than the generic selected-owner-suites runner.
+    assert "tls_configuration_owner" in plan["selected_test_suites"]
+    assert plan["suite_execution_gaps"] == []
