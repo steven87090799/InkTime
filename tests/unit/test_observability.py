@@ -69,10 +69,10 @@ def test_legacy_delivery_still_requires_matching_verification_and_keeps_old_evid
             details = {"release_id": "legacy-release" if index == 0 else "other-release",
                        "payload_sha256_verified": True, "display_updated": True}
             c.execute("INSERT INTO device_events(device_id,level,event,message,details_json,created_at) "
-                      "VALUES (?,'INFO','status_report','fixture',?,?)",
+                      "VALUES (?,'info','status_report','fixture',?,?)",
                       (device, json.dumps(details), (now - timedelta(hours=3) + timedelta(minutes=index)).isoformat()))
         c.execute("INSERT INTO device_events(device_id,level,event,message,details_json,created_at) "
-                  "VALUES (?,'INFO','status_report','legacy malformed','{bad}',?)", (device, now.isoformat()))
+                  "VALUES (?,'info','status_report','legacy malformed','{bad}',?)", (device, now.isoformat()))
     service._check_devices(now)
     with database.session() as c:
         assert c.execute("SELECT count(*) FROM job_errors WHERE resolved_at IS NULL").fetchone()[0] == 0
