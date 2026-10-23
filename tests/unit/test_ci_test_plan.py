@@ -1,5 +1,7 @@
 import json
 
+import pytest
+
 from scripts.ci.test_plan import (
     DOMAIN_OWNER_SUITES,
     FULL_EXPENSIVE_GATES,
