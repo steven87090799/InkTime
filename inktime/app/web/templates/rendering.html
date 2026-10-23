@@ -207,7 +207,7 @@
 <section class="panel">
   <h2>發布歷史</h2>
   <div class="table-wrap"><table><thead><tr><th>版本</th><th>建立時間</th><th>Profile／格式</th><th>檔案</th><th>操作</th></tr></thead><tbody>
-    {% for release in releases %}<tr><td><code>{{ release.release_id }}</code></td><td>{{ release.created_at }}</td><td>{{ release.render_profile|default('safe_4c') }}<small>{{ release.width }}×{{ release.height }} {{ release.pixel_format }}／{{ release.dither|default('none') }}</small></td><td>{{ release.files|length }}{% if release.files %}／<a href="/rendering/releases/{{ release.release_id }}/{{ release.files[0].preview }}" target="_blank">實際色盤預覽</a>{% endif %}</td><td>{% if g.user.role=='administrator' %}<button class="secondary rollback" data-id="{{ release.release_id }}" data-help="把這個 Release 設為該 Profile 的目前正式版本；不刪除較新的 Release，但裝置後續會以回滾版本為準。">回滾此 Profile</button>{% endif %}</td></tr>
+    {% for release in releases %}<tr><td><code>{{ release.release_id }}</code></td><td>{{ release.created_at|human_datetime }}</td><td>{{ release.render_profile|default('safe_4c') }}<small>{{ release.width }}×{{ release.height }} {{ release.pixel_format }}／{{ release.dither|default('none') }}</small></td><td>{{ release.files|length }}{% if release.files %}／<a href="/rendering/releases/{{ release.release_id }}/{{ release.files[0].preview }}?view=display" target="_blank" rel="noopener">實際色盤預覽</a>{% endif %}</td><td>{% if g.user.role=='administrator' %}<button class="secondary rollback" data-id="{{ release.release_id }}" data-help="把這個 Release 設為該 Profile 的目前正式版本；不刪除較新的 Release，但裝置後續會以回滾版本為準。">回滾此 Profile</button>{% endif %}</td></tr>
     {% else %}<tr><td colspan="5" class="empty">尚未發布版本。</td></tr>{% endfor %}
   </tbody></table></div>
 </section>

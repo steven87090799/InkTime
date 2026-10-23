@@ -73,7 +73,7 @@
 <section class="panel">
   <div class="panel-head"><h2>最近能源樣本</h2><span>曲線保留 400 天</span></div>
   <div class="table-wrap"><table><thead><tr><th>時間</th><th>電池</th><th>電壓</th><th>電源</th><th>刷新</th><th>喚醒週期</th></tr></thead><tbody>
-    {% for sample in energy.recent_samples %}<tr><td>{{ sample.recorded_at }}</td><td>{% if sample.battery_percent is not none %}{{ '%.1f'|format(sample.battery_percent) }}%{% if sample.battery_percent_estimated %}（估）{% endif %}{% else %}—{% endif %}</td><td>{% if sample.battery_voltage is not none %}{{ '%.3f'|format(sample.battery_voltage) }} V{% else %}—{% endif %}</td><td>{% if sample.usb_power is none %}未知{% elif sample.usb_power %}USB{% else %}電池{% endif %}</td><td>{% if sample.refresh_duration_ms %}{{ '%.1f'|format(sample.refresh_duration_ms / 1000) }} 秒{% else %}—{% endif %}</td><td>{% if sample.wake_duration_ms %}{{ '%.1f'|format(sample.wake_duration_ms / 1000) }} 秒{% else %}—{% endif %}</td></tr>
+    {% for sample in energy.recent_samples %}<tr><td>{{ sample.recorded_at|human_datetime }}</td><td>{% if sample.battery_percent is not none %}{{ '%.1f'|format(sample.battery_percent) }}%{% if sample.battery_percent_estimated %}（估）{% endif %}{% else %}—{% endif %}</td><td>{% if sample.battery_voltage is not none %}{{ '%.3f'|format(sample.battery_voltage) }} V{% else %}—{% endif %}</td><td>{% if sample.usb_power is none %}未知{% elif sample.usb_power %}USB{% else %}電池{% endif %}</td><td>{% if sample.refresh_duration_ms %}{{ '%.1f'|format(sample.refresh_duration_ms / 1000) }} 秒{% else %}—{% endif %}</td><td>{% if sample.wake_duration_ms %}{{ '%.1f'|format(sample.wake_duration_ms / 1000) }} 秒{% else %}—{% endif %}</td></tr>
     {% else %}<tr><td colspan="6" class="empty">尚無能源樣本。</td></tr>{% endfor %}
   </tbody></table></div>
 </section>
@@ -113,10 +113,10 @@ function drawEnergyChart(id,key,{minimum=null,maximum=null,unit='' }={}){
   svg.append(svgNode('polyline',{points,class:'chart-line'}));
   svg.append(svgNode('text',{x:pad.left-8,y:pad.top+5,'text-anchor':'end',class:'chart-axis'},`${maxValue.toFixed(1)}${unit}`));
   svg.append(svgNode('text',{x:pad.left-8,y:height-pad.bottom,'text-anchor':'end',class:'chart-axis'},`${minValue.toFixed(1)}${unit}`));
-  const dateFormat=new Intl.DateTimeFormat('zh-TW',{month:'numeric',day:'numeric'});
+  const dateFormat={format:value=>window.inktimeFormatDateTime(new Date(value).toISOString()).slice(0,10)};
   svg.append(svgNode('text',{x:pad.left,y:height-10,class:'chart-axis'},dateFormat.format(minTime)));
   svg.append(svgNode('text',{x:width-pad.right,y:height-10,'text-anchor':'end',class:'chart-axis'},dateFormat.format(maxTime)));
-  if(values.length<=90)values.forEach(point=>{const dot=svgNode('circle',{cx:x(point.time),cy:y(point.value),r:3,class:'chart-dot'});dot.append(svgNode('title',{},`${new Date(point.time).toLocaleString('zh-TW')}：${point.value.toFixed(2)}${unit}`));svg.append(dot);});
+  if(values.length<=90)values.forEach(point=>{const dot=svgNode('circle',{cx:x(point.time),cy:y(point.value),r:3,class:'chart-dot'});dot.append(svgNode('title',{},`${window.inktimeFormatDateTime(new Date(point.time).toISOString())}：${point.value.toFixed(2)}${unit}`));svg.append(dot);});
 }
 drawEnergyChart('battery-percent-chart','battery_percent',{minimum:0,maximum:100,unit:'%'});
 drawEnergyChart('battery-voltage-chart','battery_voltage',{unit:' V'});

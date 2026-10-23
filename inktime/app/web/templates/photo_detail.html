@@ -7,7 +7,7 @@
     <p class="eyebrow">照片詳細資訊</p>
     <h1>{{ photo.relative_path }}</h1>
     <p>{{ photo.library_id }} · {{ photo.status }} · <a href="/ai/traces?photo_id={{ photo.id|urlencode }}">AI 分析追蹤</a></p>
-    <p>已確認顯示 {{ photo.display_count or 0 }} 次 · 系統選定 {{ photo.selection_count or 0 }} 次{% if photo.last_displayed_at %} · 上次顯示 {{ photo.last_displayed_at }}{% endif %} · <a href="{{ url_for('display_history.history_page', photo_id=photo.id, tab='displays') }}">顯示歷史</a></p>
+    <p>已確認顯示 {{ photo.display_count or 0 }} 次 · 系統選定 {{ photo.selection_count or 0 }} 次{% if photo.last_displayed_at %} · 上次顯示 {{ photo.last_displayed_at|human_datetime }}{% endif %} · <a href="{{ url_for('display_history.history_page', photo_id=photo.id, tab='displays') }}">顯示歷史</a></p>
   </div>
   <a href="/photos">返回照片庫</a>
 </div>
@@ -98,7 +98,7 @@
         <strong>{% if a.is_preferred %}優先顯示 · {% endif %}{{ a.origin_label }} · {{ a.stage_label }}</strong>
         <span class="status">{{ a.origin_label }} · Schema {{ a.schema_version }}</span>
       </div>
-      <p class="analysis-meta">{{ a.provider or '未知 Provider' }} / {{ a.model or '未知模型' }} · {{ a.created_at }}</p>
+      <p class="analysis-meta">{{ a.provider or '未知 Provider' }} / {{ a.model or '未知模型' }} · {{ a.created_at|human_datetime }}</p>
       {% if a.score_kind == 'semantic' %}
       <dl>
         <dt>照片分類</dt><dd>{{ a.types|join('、') if a.types else '未分類' }}</dd>
@@ -175,7 +175,7 @@
   <section class="panel photo-history-panel">
     <div class="panel-head"><h2>處理歷史</h2><span>共 {{ events|length }} 筆，最新在前</span></div>
     <div class="photo-history-list">
-      {% for event in events %}<article><time>{{ event.created_at }}</time><strong>{{ event.event }}</strong><code>{{ event.changes_json }}</code></article>{% else %}<p class="empty">尚無人工修改。</p>{% endfor %}
+      {% for event in events %}<article><time>{{ event.created_at|human_datetime }}</time><strong>{{ event.event }}</strong><code>{{ event.changes_json }}</code></article>{% else %}<p class="empty">尚無人工修改。</p>{% endfor %}
     </div>
   </section>
 </div>

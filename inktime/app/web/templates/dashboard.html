@@ -41,7 +41,7 @@
 </section>
 <section class="panel"><div class="panel-head"><h2>最近錯誤</h2><a href="/errors">查看錯誤中心</a></div>
   {% if recent_errors %}<div class="table-wrap"><table><thead><tr><th>發生什麼事／如何處理</th><th>次數</th><th>最後發生</th></tr></thead><tbody>
-  {% for error in recent_errors %}<tr><td>{{ error_notice(error.error_code,error.message) }}</td><td>{{ error.occurrences }}</td><td>{{ error.last_seen_at }}</td></tr>{% endfor %}
+  {% for error in recent_errors %}<tr><td>{{ error_notice(error.error_code,error.message) }}</td><td>{{ error.occurrences }}</td><td>{{ error.last_seen_at|human_datetime }}</td></tr>{% endfor %}
   </tbody></table></div>{% else %}<p class="empty">目前沒有未解決錯誤。</p>{% endif %}
 </section>
 <section class="panel setup-overview" id="setup-overview">

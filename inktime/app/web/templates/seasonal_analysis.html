@@ -2,7 +2,7 @@
 {% block title %}歷年同期分析｜InkTime{% endblock %}
 {% block content %}
 {% set labels = {'unprocessed':'尚未處理','queued':'等待分析','running':'處理中','completed':'已有模型資料','failed':'失敗，待手動重試','unknown':'結果不明，待手動確認','reserved':'其他分析工作處理中'} %}
-<div class="page-head"><div><p class="eyebrow">逐張分析 · 持久化去重</p><h1>歷年同期分析</h1><p>{{ state.target_date }} 前後 {{ state.window_days }} 天，歷年同期共 {{ state.candidate_count }} 張不同內容的照片。</p></div><a href="/jobs">分析工作</a></div>
+<div class="page-head"><div><p class="eyebrow">逐張分析 · 持久化去重</p><h1>歷年同期分析</h1><p>{{ state.target_date|human_datetime }} 前後 {{ state.window_days }} 天，歷年同期共 {{ state.candidate_count }} 張不同內容的照片。</p></div><a href="/jobs">分析工作</a></div>
 <section class="panel">
 <p>{% if enabled %}已啟用：新照片進入顯示日期範圍時才補齊模型資料。{% else %}尚未啟用。請到<a href="/settings?search=分析執行模式">分析執行模式</a>選擇「歷年同期按需 AI 分析」。{% endif %}日期範圍可在<a href="/settings?search=seasonal_window_days">同期日期範圍設定</a>調整，預設前後 5 天。</p>
 <p>每張照片獨立分析，再以既有評分排序；選片不呼叫模型。相同內容的副本共用分析。模型升級沿用既有資料。排除、禁止上傳或尚未完成掃描的照片不會送出。</p>
@@ -15,7 +15,7 @@
 <section class="panel"><h2>逐張處理紀錄</h2><p>所有日期與歷次重跑紀錄均保留。相同內容共用一個處理狀態；進入工作頁面可查看用量、費用與模型請求紀錄。</p>
 <div class="table-wrap"><table><thead><tr><th>照片／內容識別</th><th>狀態</th><th>模型</th><th>工作與證據</th><th>操作</th></tr></thead><tbody>
 {% for task in state.tasks %}<tr><td>{% if task.photo_id %}<a href="/photos/{{ task.photo_id|urlencode }}">{{ task.relative_path or task.photo_id }}</a>{% else %}原照片已移除{% endif %}<small><code>{{ task.content_sha256[:16] }}</code> · 紀錄 {{ task.id }}</small></td>
-<td>{{ labels.get(task.status,task.status) }}{% if task.error_code %}<small>{{ task.error_code }}</small>{% endif %}<small>{{ task.updated_at }}</small></td>
+<td>{{ labels.get(task.status,task.status) }}{% if task.error_code %}<small>{{ task.error_code }}</small>{% endif %}<small>{{ task.updated_at|human_datetime }}</small></td>
 <td>{{ task.provider or '—' }}<small>{{ task.model or '—' }}</small></td>
 <td>{% if task.job_id %}<a href="/jobs/{{ task.job_id|urlencode }}">工作進度與費用</a><br><a href="/ai/traces?job_id={{ task.job_id|urlencode }}">模型紀錄</a>{% else %}沿用既有分析{% endif %}</td>
 <td>{% if task.is_latest and task.status in ['failed','unknown'] %}<button data-seasonal-retry="{{ task.id }}">手動重試</button>{% endif %}</td></tr>

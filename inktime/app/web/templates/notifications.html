@@ -6,7 +6,7 @@
   <p>啟用 Webhook 並設定接收網址後，新的失敗通知也會送到該網址。通知已讀不會重試模型分析。</p>
   {% for item in result['items'] %}
   <article class="panel">
-    <div class="panel-head"><h2>{{ item.title }}{% if not item.read_at %} · 未讀{% endif %}</h2><small>{{ item.created_at }}</small></div>
+    <div class="panel-head"><h2>{{ item.title }}{% if not item.read_at %} · 未讀{% endif %}</h2><small>{{ item.created_at|human_datetime }}</small></div>
     <p>{{ item.message }}</p>
     {% if item.details.error_code %}<p>錯誤代碼：{{ item.details.error_code }}</p>{% endif %}
     <p>{% if item.details.trace_id %}<a href="/ai/traces/{{ item.details.trace_id|urlencode }}">查看失敗請求與原因</a> · {% endif %}{% if item.details.job_id %}<a href="/jobs/{{ item.details.job_id|urlencode }}">查看分析工作</a> · {% endif %}{% if item.details.photo_id %}<a href="/photos/{{ item.details.photo_id|urlencode }}">查看照片</a>{% endif %}</p>

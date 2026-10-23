@@ -11,7 +11,7 @@
     <p class="eyebrow">現在發生什麼事</p>
     <h2 id="job-status-heading">{{ job_view.status_label }}</h2>
     <p id="job-status-summary">{{ job_view.status_summary }}</p>
-    <p class="job-state-meta"><span id="job-blocker-code">{% if job_view.blocker_code %}{{ explain_error(job_view.blocker_code).title }}{% endif %}</span><span>最後活動：<time id="job-last-activity">{{ job_view.last_activity_at }}</time></span></p>
+    <p class="job-state-meta"><span id="job-blocker-code">{% if job_view.blocker_code %}{{ explain_error(job_view.blocker_code).title }}{% endif %}</span><span>最後活動：<time id="job-last-activity">{{ job_view.last_activity_at|human_datetime }}</time></span></p>
     <a class="secondary" id="job-status-action" href="{{ job_view.action_url or '#' }}"{% if not job_view.action_url %} hidden{% endif %}>{{ job_view.action_label or '' }}</a>
   </div>
   <div class="job-progress-summary">
