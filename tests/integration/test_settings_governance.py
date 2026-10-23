@@ -1553,3 +1553,64 @@ def test_ui_contains_dirty_search_filter_snapshot_and_accessibility_contracts(cl
     assert SETTING_DEFINITIONS["analysis.ai_daily_photo_limit"]["risk"] == "high"
     assert "analysis.advanced_caption_enabled" not in body
     assert "analysis.copy_humor_level" not in body
+
+
+@pytest.mark.parametrize("role", ["administrator", "viewer"])
+def test_settings_report_is_complete_read_only_and_redacted(client, app, monkeypatch, role):
+    from inktime.app.web.settings_report import settings_report_snapshot
+
+    create_admin(app)
+    settings = app.extensions["inktime_settings_repository"]
+    settings.update_many({
+        "analysis.execution_mode": "seasonal_ai", "analysis.seasonal_window_days": 5,
+        "render.seasonal_priority_min_score": 60, "render.dither": "natural_d",
+        "notification.webhook_url": "https://private.example.test/report-secret-token",
+    }, changed_by="test", source_ip="local")
+    if role == "viewer":
+        app.extensions["inktime_auth_repository"].create_user("report-viewer", "very-safe-passphrase", "viewer")
+        login(client, username="report-viewer")
+    else:
+        login(client)
+    providers = app.extensions["inktime_provider_repository"]
+    provider_service = app.extensions["inktime_provider_service"]
+    monkeypatch.setattr(providers, "list", lambda: [{
+        "id": "report-provider", "name": "Report Provider", "kind": "openai_compatible",
+        "enabled": True, "supports_vision": True, "base_url": "https://secret-base.example.test",
+        "api_key_configured": True, "api_key": "must-never-appear", "model": "provider-vision",
+    }])
+    monkeypatch.setattr(provider_service, "usable_route_snapshot", lambda: [{
+        "provider_id": "report-provider", "display_name": "Report Provider", "model": "provider-vision",
+    }])
+    before = _audit_counts(app)
+    with app.extensions["inktime_database"].session() as connection:
+        jobs_before = connection.execute("SELECT COUNT(*) FROM jobs").fetchone()[0]
+    report = settings_report_snapshot(settings, providers, provider_service,
+        app.extensions["inktime_schedule_repository"], app.extensions["inktime_device_repository"])
+    assert {row["key"] for rows in report["categories"].values() for row in rows} == set(SETTING_DEFINITIONS)
+    assert "歷年同日前後 5 天" in report["mode_description"]
+    response = client.get("/settings/overview")
+    assert response.status_code == 200
+    assert response.headers["Cache-Control"] == "no-store"
+    body = response.get_data(as_text=True)
+    for text in ("常用設定與狀態報表", "照片庫掃描", "完整設定報表", "provider-vision", "D 自然膚色", "目前條件未成立"):
+        assert text in body
+    for secret in ("report-secret-token", "must-never-appear", "secret-base.example.test"):
+        assert secret not in body
+    assert 'role="switch"' in body
+    assert 'id="report-all-settings" hidden' in body
+    assert 'search=render.seasonal_priority_min_score#setting-render-seasonal_priority_min_score' in body
+    assert _audit_counts(app) == before
+    with app.extensions["inktime_database"].session() as connection:
+        assert connection.execute("SELECT COUNT(*) FROM jobs").fetchone()[0] == jobs_before
+
+
+def test_settings_report_requires_login_and_local_mode_does_not_claim_model_use(client, app):
+    create_admin(app)
+    assert client.get("/settings/overview").status_code == 302
+    login(client)
+    body = client.get("/settings/overview").get_data(as_text=True)
+    assert "目前模式不呼叫模型" in body
+    assert "只執行本機特徵與品質分析" in body
+    dashboard = client.get("/dashboard").get_data(as_text=True)
+    assert dashboard.index('id="common-settings-entry"') > dashboard.index('id="setup-overview"')
+    assert 'href="/settings/overview"' in dashboard

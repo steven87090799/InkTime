@@ -13,6 +13,26 @@ sync_playwright = playwright_api.sync_playwright
 expect = playwright_api.expect
 
 
+def _settings_report_regression(page, base):
+    page.goto(base + "/dashboard")
+    page.locator('#common-settings-entry').get_by_role('link', name='查看目前設定').click()
+    expect(page.get_by_role('heading', name='常用設定與狀態報表', exact=True)).to_be_visible()
+    full = page.locator('#report-all-settings')
+    expect(full).to_be_hidden()
+    page.locator('#report-show-all').set_checked(True)
+    expect(full).to_be_visible()
+    target = full.locator('[data-setting-key="render.seasonal_priority_min_score"]')
+    page.locator('#report-search').fill('render.seasonal_priority_min_score')
+    expect(target).to_be_visible()
+    expect(full.locator('[data-setting-key="budget.daily_stop"]')).to_be_hidden()
+    page.locator('#report-show-all').set_checked(False)
+    expect(full).to_be_hidden()
+    page.locator('#report-show-all').set_checked(True)
+    target.get_by_role('link', name='前往設定').click()
+    expect(page.locator('#settings-search')).to_have_value('render.seasonal_priority_min_score')
+    expect(page.locator('#setting-render-seasonal_priority_min_score')).to_be_visible()
+
+
 def _readable_timestamps_regression(page, base):
     page.goto(base + "/dashboard")
     raw = "2026-10-17T18:26:01.815629+00:00"
@@ -370,6 +390,7 @@ def test_first_setup_login_and_primary_console_pages():
         assert saved.value.status == 200
         expect(concurrency).to_have_value("3")
         expect(page.locator('#dirty-count')).to_have_text("0")
+        _settings_report_regression(page, base)
         _readable_timestamps_regression(page, base)
         _review_draft_and_failure_regression(page, base)
         _crop_state_regression(page, base)

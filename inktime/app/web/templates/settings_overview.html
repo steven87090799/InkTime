@@ -1,0 +1,67 @@
+{% extends "base.html" %}
+{% block title %}常用設定與狀態報表｜InkTime{% endblock %}
+{% block head %}<link rel="stylesheet" href="{{ url_for('static', filename='settings-report.css') }}">{% endblock %}
+{% macro setting_row(row, detailed=false) %}
+<article class="report-setting" data-setting-key="{{ row.key }}">
+  <div class="panel-head"><h3>{{ row.label }}</h3><a href="{{ row.url }}">前往設定</a></div>
+  <p class="report-value">{{ row.value }}</p>
+  <p class="muted">{{ row.description }}</p>
+  <p class="report-meta">來源：{{ row.source }} · 套用時機：{{ row.scope }}{% if not row.applies %} · 目前條件未成立{% endif %}</p>
+  {% if row.note %}<p class="muted">{{ row.note }}</p>{% endif %}
+  {% if detailed %}
+  <dl class="report-row-details"><dt>預設值</dt><dd>{{ row.default }}</dd><dt>可接受範圍</dt><dd>{% if row.minimum is not none or row.maximum is not none %}{{ row.minimum if row.minimum is not none else '不限' }} ～ {{ row.maximum if row.maximum is not none else '不限' }}{% else %}依設定說明{% endif %}</dd><dt>最後更新</dt><dd>{{ row.updated_at|human_datetime }}</dd><dt>設定代碼</dt><dd><code>{{ row.key }}</code></dd></dl>
+  {% endif %}
+</article>
+{% endmacro %}
+{% block content %}
+<div class="page-head">
+  <div><p class="eyebrow">首次使用與日常核對</p><h1>常用設定與狀態報表</h1><p>報表產生時間：{{ report.generated_at|human_datetime }}（{{ display_timezone }}）</p></div>
+  <div class="actions-row"><a href="/dashboard#setup-overview">返回首次使用</a><a href="/settings">所有設定</a><button type="button" id="report-print" class="secondary">列印／另存 PDF</button></div>
+</div>
+<p class="notice">這是目前儲存設定的唯讀快照。調整設定請使用各項「前往設定」；已建立的工作、已發布的圖片與相框目前畫面，可能仍使用建立當時的設定。此頁不掃描照片、不呼叫模型，也不建立工作。</p>
+<section class="panel" aria-labelledby="report-analysis-title">
+  <div class="panel-head"><h2 id="report-analysis-title">現在如何處理照片？</h2><a href="/settings?search=analysis.execution_mode">選擇分析模式</a></div>
+  <p><strong>目前執行模式：{{ report.mode_label }}</strong></p>
+  <p id="report-mode-description">{{ report.mode_description }}</p>
+  <p>照片庫掃描負責建立與更新檔案索引；送入模型的照片範圍是另一項設定。完整掃描不代表整個照片庫都會送入模型。</p>
+  <p>歷年同期模式只補缺少的分析；未選中的合格照片仍保留在日期範圍的候選池中。照片是否優先選取，另受分數、安全排除與已顯示次數影響。</p>
+  <div class="actions-row"><a href="/maintenance">照片來源與掃描</a><a href="/analysis/seasonal">歷年同期分析</a><a href="/display-history">選片與顯示歷史</a></div>
+</section>
+<section class="panel">
+  <div class="panel-head"><h2>模型與可用路由</h2><a href="/providers">選擇模型與服務</a></div>
+  <p>{% if report.uses_model %}目前模式允許使用模型；仍需符合排程、用量與預算條件。{% else %}目前模式不呼叫模型；以下是已儲存的模型配置。{% endif %}</p>
+  <p>預設／路由模型：{{ report.readiness.model or '未設定' }}。下列狀態僅代表靜態設定檢查，實際回應模型請查看 <a href="/ai/traces">AI 分析追蹤</a>。</p>
+  <div class="table-wrap"><table><thead><tr><th>服務</th><th>配置模型</th><th>設定狀態</th><th>服務限制</th></tr></thead><tbody>
+  {% for provider in report.readiness.provider_details %}<tr><td>{{ provider.name }}<small>{{ provider.kind }}</small></td><td>{{ provider.model }}</td><td>{{ '可供路由使用' if provider.ready else '尚不可用' }}{% for issue in provider.issues %}<small>{{ issue }}</small>{% endfor %}</td><td>並行 {{ provider.max_concurrency if provider.max_concurrency is not none else '未設定' }}<small>每分鐘請求 {{ provider.rate_limit_rpm if provider.rate_limit_rpm is not none else '未設定' }}／Token {{ provider.token_limit_tpm if provider.token_limit_tpm is not none else '未設定' }}</small><small>逾時 {{ provider.timeout_seconds if provider.timeout_seconds is not none else '未設定' }} 秒</small></td></tr>{% else %}<tr><td colspan="4">尚未設定模型服務。</td></tr>{% endfor %}
+  </tbody></table></div>
+</section>
+{% for group in report.common_groups %}
+<section class="panel"><h2>{{ group.title }}</h2><div class="report-setting-grid">{% for row in group.rows %}{{ setting_row(row) }}{% endfor %}</div></section>
+{% endfor %}
+<section class="panel">
+  <div class="panel-head"><h2>掃描、分析與換圖排程</h2><a href="/schedules">調整排程</a></div>
+  <p>以下列出排程開關與執行方式；已停用的項目仍保留供核對。自動備份設定列於「時區與備份」，可從 <a href="/backups">備份與還原</a> 調整。</p>
+  <div class="table-wrap"><table><thead><tr><th>排程／狀態</th><th>處理範圍／方式</th><th>時間與下次執行</th><th>資源限制</th></tr></thead><tbody>
+  {% for task in report.schedules %}<tr><td>{{ task.name }}<small>{{ '啟用' if task.enabled else '停用' }}</small></td><td>{{ {'scan':'照片庫掃描','analysis':'模型／本機分析','render':'換圖準備','cleanup':'快取清理'}.get(task.kind,task.kind) }}{% if task.mode %}<small>{{ {'incremental':'增量掃描','full':'完整一致性掃描','metadata-only':'只更新中繼資料','local-features-only':'只更新本機特徵','disabled':'停用','enabled':'啟用'}.get(task.mode,task.mode) }}</small>{% endif %}{% if task.strategy %}<small>策略 {{ task.strategy }}</small>{% endif %}</td><td>{{ task.start_time or '—' }} · {{ task.timezone or display_timezone }}<small>排程規則 {{ task.cron }}</small><small>下次：{{ task.next_run|human_datetime if task.enabled else '已停用' }}</small>{% if task.window_start %}<small>時段 {{ task.window_start }} ～ {{ task.window_end }}</small>{% endif %}</td><td>逾時 {{ task.timeout_seconds }} 秒 · 重試 {{ task.retry_count }} 次{% if task.concurrency is not none %}<small>並行 {{ task.concurrency }}</small>{% endif %}{% if task.batch_size is not none %}<small>每批 {{ task.batch_size }}</small>{% endif %}</td></tr>{% endfor %}
+  </tbody></table></div>
+</section>
+<section class="panel">
+  <div class="panel-head"><h2>裝置設定與覆寫</h2><a href="/devices">調整裝置</a></div>
+  <p>裝置設定可能覆寫系統版面；下列「沿用系統」表示裝置未另存該項值。設定已儲存不等於相框已接收。</p>
+  <div class="table-wrap"><table><thead><tr><th>相框／狀態</th><th>面板／配送方式</th><th>方向／版型／裁切</th><th>設定確認／最近連線</th></tr></thead><tbody>
+  {% for device in report.devices %}<tr><td>{{ device.name }}<small>{{ '啟用' if device.enabled else '停用' }} · {{ device.timezone }}</small></td><td>{{ device.panel_profile }}<small>{{ device.delivery_mode }}</small></td><td>{{ {'landscape':'橫向','portrait':'直向'}.get(device.frame_orientation,device.frame_orientation or '沿用系統') }}<small>{{ device.layout_mode or '沿用系統' }}／{{ device.fit_mode or '沿用系統' }}</small></td><td>已確認 v{{ device.acked_config_version }}／已儲存 v{{ device.config_version }}<small>{{ device.last_seen_at|human_datetime }}</small></td></tr>{% else %}<tr><td colspan="4">尚未加入相框。</td></tr>{% endfor %}
+  </tbody></table></div>
+</section>
+<section class="panel report-controls">
+  <h2>完整設定報表</h2>
+  <label class="report-toggle"><input type="checkbox" role="switch" id="report-show-all" aria-controls="report-all-settings" aria-expanded="false"> 展開全部 {{ report.setting_count }} 項設定值</label>
+  <p>包含進階設定、預設值、來源、套用時機及可接受範圍。敏感內容只顯示是否已設定。</p>
+</section>
+<div id="report-all-settings" hidden>
+  <section class="panel report-search"><label for="report-search">搜尋名稱、設定值或代碼</label><input type="search" id="report-search" placeholder="例如：模型、顏色、每天、budget" autocomplete="off"><p id="report-match-count" role="status">共 {{ report.setting_count }} 項設定</p></section>
+  {% for category, rows in report.categories.items() %}
+  <section class="panel report-category"><h2>{{ category }}</h2><div class="report-setting-grid">{% for row in rows %}{{ setting_row(row, true) }}{% endfor %}</div></section>
+  {% endfor %}
+</div>
+{% endblock %}
+{% block scripts %}<script nonce="{{ csp_nonce }}" src="{{ url_for('static', filename='settings-report.js') }}"></script>{% endblock %}
