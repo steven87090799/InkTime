@@ -59,17 +59,19 @@ def test_photo_only_can_publish_and_download_while_still_pending_background_anal
         "照片版相框", panel_profile="safe_4c", layout_mode="auto_photo",
         frame_orientation="landscape",
     )
-    release = app.extensions["inktime_render_service"].publish(
+    result = app.extensions["inktime_render_service"].publish(
         [photo_id], "test", device_ids=[device_id], quantity_override=1,
     )
-    manifest = app.extensions["inktime_release_publisher"].validate(release["release_id"])
+    release_id = result["device_releases"][device_id]
+    assert release_id in {release["release_id"] for release in result["releases"]}
+    manifest = app.extensions["inktime_release_publisher"].validate(release_id)
     options = manifest["render_options"]
     assert options["content_mode"] == "photo_only"
     plan = options["render_plans"][0]
     assert plan["primary_caption"]["text"] == ""
     assert plan["primary_eligibility_source"] == "local"
     filename = next(entry["name"] for entry in manifest["files"] if entry["name"].endswith(".bin"))
-    url = f"/api/device/v1/releases/{release['release_id']}/files/{filename}"
+    url = f"/api/device/v1/releases/{release_id}/files/{filename}"
     headers = {"Authorization": f"Bearer {token}"}
     assert client.get(url, headers=headers).status_code == 200
     with app.extensions["inktime_database"].session() as connection:
