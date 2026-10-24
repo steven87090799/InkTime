@@ -6,6 +6,7 @@
 #include <string>
 #include <vector>
 #include "photopainter_core.h"
+#include "content_notice_core.h"
 #include "queue_client_core.h"
 
 using inktime::kBoardConfig;
@@ -20,6 +21,7 @@ class String {
     if (size) { std::strncpy(output, c_str(), size - 1); output[size - 1] = '\0'; }
   }
   bool operator!=(const String& other) const { return value_ != other.value_; }
+  bool operator==(const String& other) const { return value_ == other.value_; }
  private:
   std::string value_;
 };
@@ -62,6 +64,10 @@ struct Preferences {
   uint8_t getUChar(const char* key, uint8_t fallback) const {
     const auto found = numbers.find(key); return found == numbers.end() ? fallback : found->second;
   }
+  size_t putUChar(const char* key, uint8_t value) {
+    if (failClear && value == 0) return 0;
+    numbers[key] = value; return 1;
+  }
   int16_t getShort(const char* key, int16_t fallback) const {
     const auto found = numbers.find(key); return found == numbers.end() ? fallback : found->second;
   }
@@ -69,7 +75,12 @@ struct Preferences {
 
 struct FakePhotoPainter {
   std::string protectedSha, restoredSha;
-  bool refreshFails = false, forceRefresh = false;
+  bool refreshFails = false, forceRefresh = false, cacheMissing = false;
+  unsigned displays = 0;
+  bool hardwareReady() { return true; }
+  bool storageReady() { return true; }
+  uint32_t lastRefreshDurationMs() { return 1; }
+  uint8_t* allocateWireBuffer(size_t size) { return static_cast<uint8_t*>(std::malloc(size)); }
   bool readActiveSchedule(String&) { return false; }
   bool readStagedNextSchedule(String&) { return false; }
   const char* inFlightFormalFrameSha256() { return nullptr; }
@@ -78,9 +89,12 @@ struct FakePhotoPainter {
     protectedSha = lastGood ? lastGood : ""; return true;
   }
   bool loadFormalFrame(const char* sha, inktime::DisplayRotation, uint8_t** frame) {
-    restoredSha = sha; *frame = static_cast<uint8_t*>(std::malloc(1)); return *frame != nullptr;
+    if (cacheMissing) return false;
+    restoredSha = sha; *frame = allocateWireBuffer(inktime::kPhotoPainterFrameBytes);
+    if (*frame) std::memset(*frame, 0x33, inktime::kPhotoPainterFrameBytes);
+    return *frame != nullptr;
   }
-  bool displayFrame(uint8_t*, size_t) { return !refreshFails; }
+  bool displayFrame(uint8_t*, size_t) { ++displays; return !refreshFails; }
   const char* lastError() { return "simulated-refresh-failure"; }
   bool forceNetworkRefresh() { return forceRefresh; }
 } photoPainter;
@@ -88,6 +102,11 @@ struct FakePhotoPainter {
 String currentPayloadSha256, currentReleaseId, currentRenderProfile;
 String lastDeviceErrorCode, lastDeviceErrorMessage, lastDeviceWarningCode, lastDeviceWarningMessage;
 bool offlineScheduleTxnBlocked = false, currentPayloadShaVerified = true, currentPayloadIntegrityTrusted = true;
+bool deviceAuthInvalid = false;
+inktime::ContentNotice pendingContentNotice = inktime::ContentNotice::None;
+struct { uint32_t epd_transfer_ms = 0; } runtimeTelemetry;
+uint32_t lastRefreshDurationMs = 0;
+static void stopNetworkBeforeDisplay() {}
 unsigned nvsWrites = 0;
 void recordNvsWrite() { ++nvsWrites; }
 void heap_caps_free(void* pointer) { std::free(pointer); }
@@ -148,6 +167,38 @@ int main() {
   saveDisplayRecord(cfg, true);
   assert(shouldSkipCurrentDisplay(cfg));
   assert(runFormalFrameGcForWake() && photoPainter.protectedSha == b);
+
+  // A shortage retains the photo anchor and draws only once across wake cycles.
+  const auto lastGoodB = prefs.blobs.at("disp_record");
+  pendingContentNotice = inktime::ContentNotice::AnalysisRequired;
+  deviceAuthInvalid = true;
+  assert(!displayContentNoticeSafely(cfg));
+  deviceAuthInvalid = false;
+  assert(displayContentNoticeSafely(cfg));
+  const auto noticeDisplays = photoPainter.displays;
+  const auto noticeWrites = nvsWrites;
+  assert(prefs.blobs.at("disp_record") == lastGoodB);
+  assert(!shouldSkipCurrentDisplay(cfg));
+  assert(!displayContentNoticeSafely(cfg));
+  assert(photoPainter.displays == noticeDisplays && nvsWrites == noticeWrites);
+  assert(restoreLastSuccessfulPhoto());  // power-screen restoration retains the overlay
+  assert(storedContentNotice() == inktime::ContentNotice::AnalysisRequired);
+  saveDisplayRecord(cfg, true);  // next successful photo removes the notice
+  assert(storedContentNotice() == inktime::ContentNotice::None);
+  assert(shouldSkipCurrentDisplay(cfg));
+
+  // Cache/refresh failure must not erase a known photo or claim notice success.
+  photoPainter.cacheMissing = true;
+  assert(!displayContentNoticeSafely(cfg));
+  photoPainter.cacheMissing = false;
+  photoPainter.refreshFails = true;
+  assert(!displayContentNoticeSafely(cfg));
+  assert(prefs.getBool("disp_pending", false));
+  assert(prefs.blobs.at("disp_record") == lastGoodB);
+  photoPainter.refreshFails = false;
+  assert(displayContentNoticeSafely(cfg));
+  assert(!prefs.getBool("disp_pending", true));
+  saveDisplayRecord(cfg, true);
 
   // Legacy successful multi-key records remain readable for recovery after upgrade.
   prefs = Preferences{};

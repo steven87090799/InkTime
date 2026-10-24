@@ -212,7 +212,7 @@ def test_display_record_is_atomic_and_interrupted_refresh_cannot_skip():
     save = firmware[firmware.index("static void saveDisplayRecord(") : firmware.index("static bool restoreLastSuccessfulPhoto()")]
     assert 'prefs.putBytes("disp_record", &blob, sizeof(blob))' in save
     assert "memcmp(&blob, &readback, sizeof(blob)) == 0" in save
-    assert 'if (verified && prefs.putBool("disp_pending", false)' in save
+    assert 'if (verified && noticeCleared && prefs.putBool("disp_pending", false)' in save
     for key in ("last_sha", "last_rel", "last_prof", "last_board", "last_rot", "last_ok", "disp_ver"):
         assert f'"{key}"' not in save
     load = firmware[firmware.index("static StoredDisplayRecord loadDisplayRecord()") : firmware.index("static bool runFormalFrameGcForWake(")]

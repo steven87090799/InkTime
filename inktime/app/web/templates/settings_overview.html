@@ -23,6 +23,7 @@
   <div class="panel-head"><h2 id="report-analysis-title">現在如何處理照片？</h2><a href="/settings?search=analysis.execution_mode">選擇分析模式</a></div>
   <p><strong>目前執行模式：{{ report.mode_label }}</strong></p>
   <p id="report-mode-description">{{ report.mode_description }}</p>
+  <p>相框的「<a href="/settings?search=render.content_mode">照片版／照片＋一句話</a>」與背景分析分開設定。照片版不顯示一句話，也不等待模型；模型工作仍依上述分析模式、排程與用量限制逐步處理。已被排除的照片不會因切換照片版而恢復顯示。</p>
   <p>照片庫掃描負責建立與更新檔案索引；送入模型的照片範圍是另一項設定。完整掃描不代表整個照片庫都會送入模型。</p>
   <p>歷年同期模式只補缺少的分析；未選中的合格照片仍保留在日期範圍的候選池中。照片是否優先選取，另受分數、安全排除與已顯示次數影響。</p>
   <div class="actions-row"><a href="/maintenance">照片來源與掃描</a><a href="/analysis/seasonal">歷年同期分析</a><a href="/display-history">選片與顯示歷史</a></div>

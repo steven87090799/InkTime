@@ -755,6 +755,19 @@ SETTING_DEFINITIONS: dict[str, dict[str, Any]] = {
         "max": 100,
         "restart": False,
     },
+    "render.content_mode": {
+        "category": "渲染設定",
+        "default": "photo_caption",
+        "type": "string",
+        "description": "相框顯示內容；與背景模型分析模式分開設定",
+        "risk": "照片版先使用通過本機檢查的照片，不等待模型；已判定排除的照片仍不顯示。背景分析依原設定執行，拍攝日期另由日期開關控制。",
+        "choices": ["photo_only", "photo_caption"],
+        "choice_labels": {
+            "photo_only": "照片版（不顯示一句話，不等待模型）",
+            "photo_caption": "照片＋一句話（使用模型分析結果）",
+        },
+        "restart": False,
+    },
     "render.caption_wrap_enabled": {
         "category": "照片描述與相框文案",
         "default": False,
@@ -1280,6 +1293,7 @@ DEVICE_OVERRIDE_KEYS = {
     "device.default_panel_profile",
 }
 _BASIC_KEYS = {
+    "render.content_mode",
     "general.timezone",
     "analysis.strategy",
     "analysis.execution_mode",
@@ -1345,6 +1359,7 @@ _LABEL_OVERRIDES = {
     "analysis.content_filter_min_confidence": "舊版內容信心門檻",
     "analysis.female_glamour_min_confidence": "舊版寫真信心門檻",
     "render.caption_wrap_enabled": "Footer 多行文案",
+    "render.content_mode": "相框顯示內容",
     "render.caption_max_lines": "Footer 最多行數",
     "render.caption_min_font_size": "Footer 最小字體",
     "observability.debug_enabled": "暫時啟用 Debug 記錄",

@@ -15,6 +15,7 @@
 
 #include "hardware_profile.h"
 #include "photopainter_core.h"
+#include "content_notice_core.h"
 #include "photopainter_wake_core.h"
 #include "offline_schedule_core.h"
 #include "device_config_store.h"
@@ -579,6 +580,9 @@ String lastDeviceErrorCode;
 String lastDeviceErrorMessage;
 String lastDeviceWarningCode;
 String lastDeviceWarningMessage;
+#if INKTIME_PHOTOPAINTER_ENABLED
+static inktime::ContentNotice pendingContentNotice = inktime::ContentNotice::None;
+#endif
 bool queueAckPermanentReject = false;
 uint32_t lastRefreshDurationMs = 0;
 
@@ -989,15 +993,82 @@ static void saveDisplayRecord(const Config &cfg, bool succeeded) {
     && memcmp(&blob, &readback, sizeof(blob)) == 0;
   // Keep the in-progress marker until the complete record is durable. A
   // reset during refresh must not let the previous successful image skip.
-  if (verified && prefs.putBool("disp_pending", false) > 0U) recordNvsWrite();
+  bool noticeCleared = prefs.getUChar("content_notice", 0U) == 0U;
+  if (verified && !noticeCleared) {
+    const size_t cleared = prefs.putUChar("content_notice", 0U);
+    if (cleared > 0U) recordNvsWrite();
+    noticeCleared = cleared > 0U && prefs.getUChar("content_notice", 255U) == 0U;
+  }
+  if (verified && noticeCleared && prefs.putBool("disp_pending", false) > 0U) recordNvsWrite();
   prefs.end();
-  if (!verified) {
+  if (!verified || !noticeCleared) {
     lastDeviceWarningCode = "DEVICE-DISPLAY-RECORD";
     lastDeviceWarningMessage = "顯示紀錄寫入或 readback 失敗";
   }
 }
 
 #if INKTIME_PHOTOPAINTER_ENABLED
+static inktime::ContentNotice storedContentNotice() {
+  if (!prefs.begin("dashcfg", true)) return inktime::ContentNotice::None;
+  const uint8_t kind = prefs.getUChar("content_notice", 0U);
+  prefs.end();
+  return kind <= static_cast<uint8_t>(inktime::ContentNotice::NoEligiblePhotos)
+    ? static_cast<inktime::ContentNotice>(kind) : inktime::ContentNotice::None;
+}
+
+static bool displayContentNoticeSafely(const Config &cfg) {
+  const inktime::ContentNotice kind = pendingContentNotice;
+  if (kind == inktime::ContentNotice::None || deviceAuthInvalid
+      || offlineScheduleTxnBlocked || !photoPainter.hardwareReady()
+      || !photoPainter.storageReady()) return false;
+  if (!prefs.begin("dashcfg", true)) return false;
+  const bool alreadyShown = prefs.getUChar("content_notice", 0U) == static_cast<uint8_t>(kind)
+    && !prefs.getBool("disp_pending", false);
+  prefs.end();
+  // E-paper retains this notice during sleep. Repeated shortage polls must not
+  // repeatedly refresh the panel or write NVS.
+  if (alreadyShown) return false;
+
+  const StoredDisplayRecord stored = loadDisplayRecord();
+  const bool hasPhoto = stored.valid && stored.succeeded
+    && stored.boardProfile == String(kBoardConfig.name);
+  const inktime::DisplayRotation rotation = (hasPhoto ? stored.rotation == 180 : cfg.rotate180)
+    ? inktime::DisplayRotation::Rotate180 : inktime::DisplayRotation::Rotate0;
+  uint8_t* noticeFrame = nullptr;
+  if (hasPhoto) {
+    if (!photoPainter.loadFormalFrame(stored.sha256.c_str(), rotation, &noticeFrame)) return false;
+  } else {
+    noticeFrame = photoPainter.allocateWireBuffer(inktime::kPhotoPainterFrameBytes);
+    if (noticeFrame != nullptr) memset(noticeFrame, 0x11, inktime::kPhotoPainterFrameBytes);
+  }
+  if (noticeFrame == nullptr) return false;
+  const bool prepared = inktime::overlayContentNotice(
+    noticeFrame, inktime::kPhotoPainterFrameBytes, kind, rotation) && beginPanelMutation();
+  bool displayed = false;
+  if (prepared) {
+    stopNetworkBeforeDisplay();
+    displayed = photoPainter.displayFrame(noticeFrame, inktime::kPhotoPainterFrameBytes);
+    lastRefreshDurationMs = photoPainter.lastRefreshDurationMs();
+    runtimeTelemetry.epd_transfer_ms = lastRefreshDurationMs;
+  }
+  heap_caps_free(noticeFrame);
+  if (!displayed || !prefs.begin("dashcfg", false)) return false;
+  // Keep the original verified photo/GC anchor. Only the separate overlay
+  // marker changes; an interrupted refresh retains disp_pending for recovery.
+  const size_t written = prefs.putUChar("content_notice", static_cast<uint8_t>(kind));
+  if (written > 0U) recordNvsWrite();
+  bool verified = written > 0U
+    && prefs.getUChar("content_notice", 0U) == static_cast<uint8_t>(kind);
+  if (verified) {
+    const size_t cleared = prefs.putBool("disp_pending", false);
+    if (cleared > 0U) recordNvsWrite();
+    verified = cleared > 0U && !prefs.getBool("disp_pending", true);
+  }
+  prefs.end();
+  // This is a diagnostic refresh, not DISPLAY_COMPLETED for any photo/slot.
+  return verified;
+}
+
 static bool restoreLastSuccessfulPhoto() {
   const StoredDisplayRecord stored = loadDisplayRecord();
   if (!stored.valid || !stored.succeeded
@@ -1014,6 +1085,11 @@ static bool restoreLastSuccessfulPhoto() {
     lastDeviceErrorCode = "DEVICE-POWER-RESTORE";
     lastDeviceErrorMessage = "最後成功照片的本地 Frame 不存在或完整性驗證失敗";
     return false;
+  }
+  const inktime::ContentNotice notice = storedContentNotice();
+  if (notice != inktime::ContentNotice::None) {
+    (void)inktime::overlayContentNotice(
+      restoredFrame, inktime::kPhotoPainterFrameBytes, notice, rotation);
   }
   const bool displayed = beginPanelMutation() && photoPainter.displayFrame(
     restoredFrame,
@@ -1041,7 +1117,8 @@ static bool shouldSkipCurrentDisplay(const Config &cfg) {
   // Legacy multi-key records remain usable for recovery/GC, but cannot
   // prove an atomic successful display. Require one fresh canonical record.
   const bool pending = !prefs.isKey("disp_record")
-    || prefs.getBool("disp_pending", false);
+    || prefs.getBool("disp_pending", false)
+    || prefs.getUChar("content_notice", 0U) != 0U;
   prefs.end();
   if (pending) return false;
   const StoredDisplayRecord stored = loadDisplayRecord();
@@ -4744,6 +4821,17 @@ static bool downloadOfflineScheduleAndFrames(Config &cfg, bool targetNext = fals
           return false;
         }
         if (!applyRemoteDeviceConfiguration(cfg, remoteConfig)) return false;
+        JsonObjectConst notice = notReady["content_notice"].as<JsonObjectConst>();
+        const JsonVariantConst noticeVersion = notice["config_version"];
+        // Only a completed shortage for the current day/config may alter the
+        // screen. Missing/malformed fields and tomorrow prefetch leave it alone.
+        if (!targetNext && (notice["schema_version"] | 0) == 1
+            && noticeVersion.is<uint32_t>() && !noticeVersion.is<bool>()
+            && noticeVersion.as<uint32_t>() == cfg.config_version
+            && String(notice["target_date"] | "").length() == 10U
+            && String(notice["target_date"] | "") == String(notReady["target_date"] | "")) {
+          pendingContentNotice = inktime::parseContentNotice(notice["kind"] | "");
+        }
         lastDeviceWarningCode = "DEVICE-NO-CONTENT";
         lastDeviceWarningMessage = "設定已同步；離線照片排程尚未準備，保留面板畫面";
       }
@@ -7287,6 +7375,9 @@ void setup() {
   } else {
 #if DEBUG_LOG
     DBG_PRINTLN("[BOOT] downloadDailyPhotoBin FAILED");
+#endif
+#if INKTIME_PHOTOPAINTER_ENABLED
+    (void)displayContentNoticeSafely(g_cfg);
 #endif
   }
   if (deviceAuthInvalid) {

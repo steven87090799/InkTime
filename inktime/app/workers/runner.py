@@ -23,6 +23,7 @@ from inktime.app.domain.photos import PhotoPreprocessor
 from inktime.app.domain.photos.formats import MAX_FILE_BYTES, MAX_SOURCE_PIXELS, MAX_SOURCE_EDGE
 from inktime.app.services.analysis import AnalysisDisabledError, ProviderUnavailableError
 from inktime.app.domain.analysis.execution_mode import permits_automatic_ai, permits_manual_ai
+from inktime.app.domain.rendering.content_mode import content_mode
 from inktime.app.domain.analysis.scoring import LOCAL_QUALITY_SCORE_KIND
 from inktime.app.domain.rendering.adaptive_layout import InsufficientPhotoContentError
 
@@ -199,9 +200,11 @@ def _execute_job_item(app, item, *, job, settings, provider, provider_error, ana
         if not photo_ids:
             raise ValueError("IMG-002 模擬照片資料夾內沒有可用圖片")
         candidate_repository = app.extensions["inktime_render_candidate_repository"]
+        candidate_get = (candidate_repository.get_local if content_mode(runtime_settings) == "photo_only"
+                         else candidate_repository.get)
         photo_repository = app.extensions["inktime_photo_repository"]
         for photo_id in photo_ids:
-            if candidate_repository.get(photo_id) is not None:
+            if candidate_get(photo_id) is not None:
                 continue
             photo_repository.save_analysis(
                 photo_id,
@@ -213,7 +216,7 @@ def _execute_job_item(app, item, *, job, settings, provider, provider_error, ana
                 "{}",
                 score_kind=LOCAL_QUALITY_SCORE_KIND,
             )
-        photo_ids = [photo_id for photo_id in photo_ids if candidate_repository.get(photo_id) is not None]
+        photo_ids = [photo_id for photo_id in photo_ids if candidate_get(photo_id) is not None]
         if not photo_ids:
             return {"scan": scan, "status": "completed", "outcome": "no_content",
                     "outcome_code": "NO_ELIGIBLE_CANDIDATES",

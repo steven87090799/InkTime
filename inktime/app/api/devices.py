@@ -906,9 +906,16 @@ def device_offline_schedule():
             )
         except (TypeError, ValueError, KeyError, OverflowError):
             device_config = None
+        # A missing tomorrow playlist or a preparation still in progress must
+        # never replace today's working photo with a shortage notice.
+        content_notice = _offline_schedules().content_notice_for_device(
+            device_id=str(device["id"]), target_date=target_date,
+            config_version=int(device["config_version"]),
+        ) if target == "current" and device_config is not None else None
         response = jsonify(
             {
                 **({"device_config": device_config, "no_content": True} if device_config is not None else {}),
+                **({"content_notice": content_notice} if content_notice is not None else {}),
                 "error": "schedule_not_ready",
                 "error_code": "DEVICE-008",
                 "message": "schedule_not_ready",
