@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import date, datetime, time, timedelta, timezone
 from dataclasses import dataclass
 from contextlib import nullcontext
+from pathlib import Path
 import hashlib
 import json
 import re
@@ -492,6 +493,62 @@ class OfflineScheduleRepository:
                 (device_id, self._date(target_date).isoformat(), int(config_version)),
             ).fetchone()
         return dict(row) if row else None
+
+    def content_notice_for_device(
+        self, *, device_id: str, target_date: str, config_version: int,
+    ) -> dict[str, Any] | None:
+        """Explain a completed shortage, never a pending prepare or transport error.
+
+        Existence probes avoid loading a large NAS library into memory. An empty
+        library needs a successful full census for every enabled root; unscanned,
+        inaccessible or partially scanned libraries only get the generic notice.
+        None of these outcomes means that every photo has already been displayed.
+        """
+        if self.terminal_outcome_for_device(
+            device_id=device_id, target_date=target_date, config_version=config_version,
+        ) is None:
+            return None
+        with self.database.session() as connection:
+            has_photos = connection.execute(
+                "SELECT 1 FROM photos p JOIN libraries l ON l.id=p.library_id "
+                "WHERE l.enabled=1 AND p.lifecycle_status='active' LIMIT 1"
+            ).fetchone() is not None
+            has_analysis = connection.execute(
+                "SELECT 1 FROM photo_analysis a JOIN photos p ON p.id=a.photo_id "
+                "JOIN libraries l ON l.id=p.library_id WHERE l.enabled=1 "
+                "AND p.lifecycle_status='active' AND a.schema_version=6 "
+                "AND a.score_kind='semantic' LIMIT 1"
+            ).fetchone() is not None
+            roots = connection.execute(
+                """
+                SELECT l.root_path,s.root_path AS scanned_root,s.status,s.full_census,s.root_accessible,
+                       s.root_readable,s.cancelled,s.major_io_errors,s.failed_count
+                FROM libraries l LEFT JOIN scan_runs s ON s.id=(
+                    SELECT latest.id FROM scan_runs latest WHERE latest.library_id=l.id
+                    ORDER BY latest.started_at DESC,latest.rowid DESC LIMIT 1
+                ) WHERE l.enabled=1
+                """
+            ).fetchall() if not has_photos else []
+        verified_empty = not has_photos and bool(roots) and all(
+            row["status"] == "completed" and row["scanned_root"] == row["root_path"]
+            and row["full_census"] == 1
+            and row["root_accessible"] == 1 and row["root_readable"] == 1
+            and row["cancelled"] == 0 and row["major_io_errors"] == 0
+            and row["failed_count"] == 0 and Path(row["root_path"]).is_dir()
+            for row in roots
+        )
+        kind = ("empty_library" if verified_empty else
+                "analysis_required" if has_photos and not has_analysis else
+                "no_eligible_photos")
+        return {
+            "schema_version": 1, "kind": kind, "target_date": target_date,
+            "config_version": int(config_version),
+            "message": {
+                "empty_library": "照片庫沒有照片，請加入照片",
+                "analysis_required": "照片尚未完成必要分析，暫停換圖",
+                "no_eligible_photos": "暫無符合條件的照片，保留目前畫面",
+            }[kind],
+        }
 
     def transient_recovery_for_device(
         self,

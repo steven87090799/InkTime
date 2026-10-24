@@ -26,7 +26,9 @@ def test_actual_sketch_preserves_last_success_after_refresh_and_storage_failures
         ("static StoredDisplayRecord loadDisplayRecord", "#if INKTIME_PHOTOPAINTER_ENABLED\nstatic bool runFormalFrameGcForWake"),
         ("static bool beginPanelMutation", "#if INKTIME_PHOTOPAINTER_ENABLED\nstatic bool displayPowerStatusScreenSafely"),
         ("static bool runFormalFrameGcForWake", "#endif\n\nstatic bool beginPanelMutation"),
-        ("static void saveDisplayRecord", "#if INKTIME_PHOTOPAINTER_ENABLED\nstatic bool restoreLastSuccessfulPhoto"),
+        ("static void saveDisplayRecord", "#if INKTIME_PHOTOPAINTER_ENABLED\nstatic inktime::ContentNotice storedContentNotice"),
+        ("static inktime::ContentNotice storedContentNotice", "static bool displayContentNoticeSafely"),
+        ("static bool displayContentNoticeSafely", "static bool restoreLastSuccessfulPhoto"),
         ("static bool restoreLastSuccessfulPhoto", "#endif\n\nstatic bool shouldSkipCurrentDisplay"),
         ("static bool shouldSkipCurrentDisplay", "static bool validPendingQueueAck"),
     ]

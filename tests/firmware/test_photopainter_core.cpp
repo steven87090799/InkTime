@@ -3,6 +3,7 @@
 #include <vector>
 
 #include "photopainter_core.h"
+#include "content_notice_core.h"
 #include "photopainter_wake_core.h"
 #include "max_awake_recovery_core.h"
 #include "offline_schedule_core.h"
@@ -61,7 +62,37 @@ static void testUnusedSensorSleep() {
   assert(uncertain.asleep && uncertain.commands.size() == 2U);
 }
 
+static void testContentNoticeOverlay() {
+  assert(parseContentNotice("empty_library") == ContentNotice::EmptyLibrary);
+  assert(parseContentNotice("analysis_required") == ContentNotice::AnalysisRequired);
+  assert(parseContentNotice("no_eligible_photos") == ContentNotice::NoEligiblePhotos);
+  assert(parseContentNotice("network_error") == ContentNotice::None);
+  assert(parseContentNotice(nullptr) == ContentNotice::None);
+  for (ContentNotice kind : {ContentNotice::EmptyLibrary, ContentNotice::AnalysisRequired,
+                            ContentNotice::NoEligiblePhotos}) {
+    std::vector<uint8_t> normal(kPhotoPainterFrameBytes, 0x33);
+    std::vector<uint8_t> rotated(kPhotoPainterFrameBytes, 0x33);
+    assert(overlayContentNotice(normal.data(), normal.size(), kind, DisplayRotation::Rotate0));
+    assert(overlayContentNotice(rotated.data(), rotated.size(), kind, DisplayRotation::Rotate180));
+    size_t textPixels = 0;
+    for (uint16_t y = 0; y < kPhotoPainterHeight; ++y) {
+      for (uint16_t x = 0; x < kPhotoPainterWidth; ++x) {
+        const uint8_t pixel = nativePixel(normal, x, y);
+        assert(pixel == nativePixel(rotated, kPhotoPainterWidth - 1 - x, kPhotoPainterHeight - 1 - y));
+        if (y < kPhotoPainterHeight - 44) assert(pixel == 3);  // original photo retained
+        else if (y >= kPhotoPainterHeight - 42 && pixel == 0) ++textPixels;
+      }
+    }
+    assert(textPixels > 100);
+    const auto unchanged = normal;
+    assert(!overlayContentNotice(normal.data(), normal.size() - 1, kind, DisplayRotation::Rotate0));
+    assert(!overlayContentNotice(normal.data(), normal.size(), ContentNotice::None, DisplayRotation::Rotate0));
+    assert(normal == unchanged);
+  }
+}
+
 int main() {
+  testContentNoticeOverlay();
   testUnusedSensorSleep();
   uint8_t powerAttempt = 0U;
   const uint64_t recoveryIntervals[] = {900U, 1800U, 3600U, 3600U};
