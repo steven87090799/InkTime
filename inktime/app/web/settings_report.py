@@ -16,7 +16,7 @@ COMMON_GROUPS = (
     ("模型與處理方式", ("model.analysis_model", "model.low_model", "model.repair_model", "batch.model", "analysis.image_max_side", "analysis.concurrency")),
     ("用量與費用限制", ("analysis.ai_daily_photo_limit", "analysis.ai_monthly_photo_limit", "budget.daily_stop", "budget.monthly_stop", "budget.photo_max", "budget.max_tokens")),
     ("照片篩選與選片", ("analysis.prefilter_enabled", "analysis.prefilter_screenshots", "analysis.prefilter_low_quality", "analysis.e6_min_score", "render.selection_mode", "render.seasonal_priority_min_score")),
-    ("顏色與相框版面", ("render.profile", "render.dither", "render.dither_strength", "render.color_distance", "render.layout", "render.frame_orientation", "render.fit_mode")),
+    ("顏色與相框版面", ("render.content_mode", "render.profile", "render.dither", "render.dither_strength", "render.color_distance", "render.layout", "render.frame_orientation", "render.fit_mode")),
     ("時區與備份", ("general.timezone", "backup.schedule_enabled", "backup.hour", "backup.retention")),
 )
 SCOPE_LABELS = {

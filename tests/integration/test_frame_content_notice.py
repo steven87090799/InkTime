@@ -41,6 +41,7 @@ def test_unprepared_or_future_playlist_does_not_show_no_photos(client, app):
     ("failed_scan", "no_eligible_photos"),
     ("unmounted", "no_eligible_photos"),
     ("analysis_missing", "analysis_required"),
+    ("photo_only", "no_eligible_photos"),
 ])
 def test_confirmed_shortage_distinguishes_empty_from_unanalysed_library(client, app, tmp_path, state, expected):
     device_id, token, version, today = _device(app)
@@ -56,12 +57,16 @@ def test_confirmed_shortage_distinguishes_empty_from_unanalysed_library(client, 
                 "UPDATE scan_runs SET status=?,full_census=1,completed_at=? WHERE id=?",
                 ("failed" if state == "failed_scan" else "completed", now, scan_id),
             )
-    if state == "analysis_missing":
+    if state in {"analysis_missing", "photo_only"}:
         with app.extensions["inktime_database"].session() as connection:
             connection.execute(
                 "INSERT INTO photos(id,library_id,relative_path,status,created_at,updated_at) "
                 "VALUES ('present-photo',?,'present.jpg','preprocessed',?,?)", (library_id, now, now),
             )
+    if state == "photo_only":
+        app.extensions["inktime_settings_repository"].update(
+            "render.content_mode", "photo_only", changed_by="test", source_ip="test",
+        )
     if state == "unmounted":
         root.rmdir()
     _shortage(app, device_id, version, today)

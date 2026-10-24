@@ -280,9 +280,20 @@ class DeviceReleaseService:
         if versions is None:
             return False
         options = manifest.get("render_options")
-        orientations = options.get("photo_orientations") if isinstance(options, dict) else None
+        if not isinstance(options, dict):
+            return False
+        orientations = options.get("photo_orientations")
         if not isinstance(orientations, list):
             return False
+        presentation = str(options.get("content_mode", "photo_caption"))
+        if presentation == "photo_only":
+            for plan in options.get("render_plans", []):
+                for role in ("primary", "secondary"):
+                    if not plan.get(f"{role}_photo_id"):
+                        continue
+                    caption = plan.get(f"{role}_caption")
+                    if not isinstance(caption, dict) or caption.get("text") != "":
+                        return False
         rotations: dict[str, int] = {}
         for item in orientations:
             if not isinstance(item, dict) or not isinstance(item.get("photo_id"), str):
@@ -299,7 +310,7 @@ class DeviceReleaseService:
             return False
         try:
             rows = RenderCandidateRepository(self.database).require_for_execution_mode(
-                versions, "automatic_ai"
+                versions, "automatic_ai", content_mode=presentation,
             )
             for row in rows:
                 effective = resolve_effective_orientation(

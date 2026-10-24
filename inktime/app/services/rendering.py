@@ -38,6 +38,7 @@ from inktime.app.domain.rendering import (
     resolve_layout_geometry,
 )
 from inktime.app.domain.analysis.execution_mode import execution_mode
+from inktime.app.domain.rendering.content_mode import content_mode
 from inktime.app.domain.analysis.seasonal import seasonal_month_days
 from inktime.app.domain.analysis.scoring import (
     LOCAL_QUALITY_SCORE_KIND,
@@ -330,10 +331,12 @@ class RenderService:
         if (layout_key == "adaptive_memory" or auto_photo_requested) and secondary is not None:
             production_secondary = (
                 self.candidates.require_for_execution_mode(
-                    [str(secondary["id"])], execution_mode(self.settings)
+                    [str(secondary["id"])], execution_mode(self.settings),
+                    content_mode=content_mode(self.settings),
                 )[0]
                 if auto_photo_requested
-                else self.candidates.get(str(secondary["id"]))
+                else (self.candidates.get_local(str(secondary["id"]))
+                      if content_mode(self.settings) == "photo_only" else self.candidates.get(str(secondary["id"])))
             )
             desired = pair_orientation(effective_orientation)
             if production_secondary is None or pair_score(
@@ -755,6 +758,7 @@ class RenderService:
                 "caption_min_font_size": int(self.settings.get("render.caption_min_font_size", 17)),
             },
             "render_settings": {
+                "content_mode": content_mode(self.settings),
                 "fit_mode": fit_mode or str(self.settings.get("render.fit_mode", "cover")),
                 "layout": layout_key,
                 "frame_orientation": effective_frame,
@@ -912,12 +916,16 @@ class RenderService:
 
     def _caption_text(self, photo_id: str, analysis: dict[str, Any] | None) -> str:
         """Return the canonical model side-caption for rendering."""
+        if content_mode(self.settings) == "photo_only":
+            return ""
         row = analysis
         if row is None:
             return ""
         return str(row.get("side_caption") or "").strip()
 
     def _caption(self, photo_id: str) -> str:
+        if content_mode(self.settings) == "photo_only":
+            return ""
         override = self._photo_level_caption_override(photo_id)
         if override is not None:
             return override["text"]
@@ -1013,14 +1021,22 @@ class RenderService:
                     "source_updated_at": override["updated_at"] or None,
                 }
             )
-        return record
+        return self._presentation_caption(record)
 
-    @staticmethod
-    def _bound_caption_record(record: Any, photo_id: str) -> dict[str, Any]:
+    def _presentation_caption(self, record: dict[str, Any]) -> dict[str, Any]:
+        if content_mode(self.settings) != "photo_only":
+            return record
+        return {
+            **record, "text": "", "source": "photo_only", "is_ai_generated": False,
+            "text_hash": hashlib.sha256(b"").hexdigest(),
+            "source_detail": {}, "source_updated_at": None,
+        }
+
+    def _bound_caption_record(self, record: Any, photo_id: str) -> dict[str, Any]:
         bound = dict(record)
         if str(bound.get("photo_id") or "") != str(photo_id):
             raise ValueError("RENDER-005 Caption 與照片識別不一致")
-        return bound
+        return self._presentation_caption(bound)
 
     @staticmethod
     def _compact_photo_caption(record: dict[str, Any]) -> dict[str, Any]:
@@ -1136,12 +1152,12 @@ class RenderService:
         with self.database.session() as connection:
             rows = connection.execute(
                 f"""
-                SELECT p.*,l.root_path,a.types_json,a.semantic_json,a.raw_json,
+                SELECT p.*,l.root_path,a.types_json,a.semantic_json,a.raw_json,a.schema_version,a.score_kind,
                        EXISTS(SELECT 1 FROM display_history dh WHERE dh.photo_id=p.id) ever_displayed,
                        EXISTS(SELECT 1 FROM display_history dh WHERE dh.photo_id=p.id
                               AND dh.displayed_at>=datetime('now','-14 days')) recently_displayed
                 FROM photos p JOIN libraries l ON l.id=p.library_id
-                JOIN photo_analysis a ON a.id=(
+                LEFT JOIN photo_analysis a ON a.id=(
                     SELECT latest.id FROM photo_analysis latest WHERE latest.photo_id=p.id
                     ORDER BY {preferred_analysis_order_sql('latest')} LIMIT 1
                 )
@@ -1170,23 +1186,22 @@ class RenderService:
 
     def _selection_score_kind(self) -> str:
         """Choose the domain for a single-domain history or pair query."""
-        if execution_mode(self.settings) in {"local_only", "local_with_manual_ai", "disabled"}:
+        if content_mode(self.settings) == "photo_only":
             return LOCAL_QUALITY_SCORE_KIND
         return SEMANTIC_SCORE_KIND
 
     def _photo_score_kind(self, photo: dict[str, Any]) -> str:
-        if execution_mode(self.settings) in {"automatic_ai", "seasonal_ai"}:
-            return SEMANTIC_SCORE_KIND
-        value = str(photo.get("score_kind") or photo.get("latest_score_kind") or "").strip()
-        if value in {SEMANTIC_SCORE_KIND, LOCAL_QUALITY_SCORE_KIND}:
-            return value
-        return self._selection_score_kind()
+        if content_mode(self.settings) == "photo_only":
+            return LOCAL_QUALITY_SCORE_KIND
+        return SEMANTIC_SCORE_KIND
 
     def _available_adaptive_candidates(self, rows: list[Any]) -> list[dict[str, Any]]:
         candidates: list[dict[str, Any]] = []
         for stored in rows:
             row = dict(stored)
-            if not self.candidates.available(row) or not self.candidates.safety_passed(row):
+            safe = (self.candidates.local_safety_passed(row) if content_mode(self.settings) == "photo_only"
+                    else self.candidates.safety_passed(row))
+            if not self.candidates.available(row) or not safe:
                 continue
             try:
                 semantic = json.loads(str(row.get("semantic_json") or "{}"))
@@ -1212,7 +1227,7 @@ class RenderService:
         self, primary: dict[str, Any], *, frame_orientation: str, target_date: date | None = None,
     ) -> dict[str, Any] | None:
         """Select fresh first through bounded date and nearest-any-date SQL phases."""
-        if execution_mode(self.settings) == "seasonal_ai":
+        if content_mode(self.settings) != "photo_only" and execution_mode(self.settings) == "seasonal_ai":
             # The secondary source is subject to the same target-day window,
             # including a future offline slot, as the initial selection.
             rows = self._auto_photo_candidate_pool(target_date=target_date)
@@ -1751,7 +1766,9 @@ class RenderService:
                     primary["id"] = photo_id
                     second_row = None
                     if secondary_photo_id:
-                        requested = self.candidates.get(secondary_photo_id)
+                        requested = (self.candidates.get_local(secondary_photo_id)
+                                     if content_mode(self.settings) == "photo_only"
+                                     else self.candidates.get(secondary_photo_id))
                         if requested is not None and pair_score(
                             primary,
                             requested,
@@ -2271,6 +2288,7 @@ class RenderService:
         required = self.candidates.require_for_execution_mode(
             selected,
             execution_mode(self.settings),
+            content_mode=content_mode(self.settings),
         )
         selected = [str(row["id"]) for row in required]
         eligibility_sources = {str(row["id"]): str(row["eligibility_source"]) for row in required}
@@ -2364,6 +2382,7 @@ class RenderService:
                         "device_id": device_id,
                         "layout_mode": device.get("layout_mode") or layout_key,
                         "aggregation_scope": "release",
+                        "content_mode": content_mode(self.settings),
                         "render_plans": manifest_plans,
                         "quantization_plan": self._quantization_metadata(
                             profile_key,
@@ -2461,6 +2480,7 @@ class RenderService:
                 activate=False,
                 metadata={
                     "aggregation_scope": "release",
+                    "content_mode": content_mode(self.settings),
                     "render_plans": manifest_plans,
                     "quantization_plan": self._quantization_metadata(
                         profile_key,
@@ -2626,7 +2646,7 @@ class RenderService:
         score_expression = (
             "COALESCE(a.final_ranking_score,a.ranking_score,a.semantic_score,0)"
             if semantic_selection
-            else "COALESCE(a.local_score,p.local_candidate_score,0)"
+            else "COALESCE(p.local_candidate_score,0)"
         )
         combined_expression = score_expression
         result: list[dict[str, Any]] = []
@@ -2662,7 +2682,7 @@ class RenderService:
                            CASE WHEN a.score_kind='{SEMANTIC_SCORE_KIND}' THEN {score_expression} END ranking_score,
                            {score_expression} selection_score,
                            a.memory_score,
-                           a.score_kind,a.local_score,p.local_candidate_score,
+                           a.score_kind,a.schema_version,a.local_score,p.local_candidate_score,
                            p.display_count,p.last_displayed_at,p.selection_count,p.last_selected_at,
                            MAX(p.display_count,p.selection_count,COALESCE(exposure.used_count,0)) exposure_count,
                            exposure.used_at AS content_last_exposure_at,
@@ -2673,7 +2693,7 @@ class RenderService:
                     FROM photos p
                     JOIN libraries l ON l.id=p.library_id
                     LEFT JOIN content_exposure exposure ON exposure.sha256=p.sha256
-                    JOIN photo_analysis a ON a.id=(
+                    LEFT JOIN photo_analysis a ON a.id=(
                         SELECT latest.id FROM photo_analysis latest WHERE latest.photo_id=p.id
                         ORDER BY {preferred_analysis_order_sql('latest')} LIMIT 1
                     )
@@ -2715,7 +2735,9 @@ class RenderService:
             if not rows:
                 break
             for stored in rows:
-                if self.candidates.available(stored) and self.candidates.safety_passed(stored):
+                safe = (self.candidates.safety_passed(stored) if semantic_selection
+                        else self.candidates.local_safety_passed(stored))
+                if self.candidates.available(stored) and safe:
                     content = str(stored["sha256"] or "")
                     if date_priorities is not None and len(content) == 64:
                         if content in seen_contents:
@@ -2822,7 +2844,7 @@ class RenderService:
                 row["day_distance"] = distances.get(str(row["captured_month_day"])) if distances else 0
                 pool[identifier] = row
 
-        if execution_mode(self.settings) == "seasonal_ai":
+        if content_mode(self.settings) != "photo_only" and execution_mode(self.settings) == "seasonal_ai":
             window = int(self.settings.get("analysis.seasonal_window_days", 5))
             anchor = date(2000, target.month, target.day)
             priorities = {target.strftime("%m-%d"): 0}
@@ -2954,14 +2976,13 @@ class RenderService:
         limit = max(1, min(int(limit), pool_bound if composition_pool else 50))
         target = target_date or self._today()
         mode = execution_mode(self.settings)
-        # Every formal candidate needs the current semantic safety contract.
+        # Presentation selects its own contract; background AI may still be busy.
         pool: list[dict[str, Any]] = []
         selected = self._select_candidates_for_score_kind(
             target=target,
             limit=limit,
             candidate_years=candidate_years,
-            score_kind=SEMANTIC_SCORE_KIND if mode in {"local_only", "local_with_manual_ai", "disabled", "automatic_ai"}
-            else self._selection_score_kind(),
+            score_kind=self._selection_score_kind(),
             candidate_pool=pool,
             composition_pool=composition_pool,
         )
@@ -3052,7 +3073,7 @@ class RenderService:
         score_expression = (
             "COALESCE(a.final_ranking_score,a.ranking_score,a.semantic_score,0)"
             if score_kind == SEMANTIC_SCORE_KIND
-            else "COALESCE(a.local_score,p.local_candidate_score,0)"
+            else "COALESCE(p.local_candidate_score,0)"
         )
         where, params = self._history_where(filters, month_day=month_day)
         if history_date:
@@ -3094,7 +3115,7 @@ class RenderService:
                        {score_expression} AS final_score
                 FROM photos p
                 JOIN libraries l ON l.id=p.library_id
-                JOIN photo_analysis a ON a.id=(
+                LEFT JOIN photo_analysis a ON a.id=(
                     SELECT latest.id FROM photo_analysis latest
                     WHERE latest.photo_id=p.id ORDER BY {preferred_analysis_order_sql('latest')} LIMIT 1
                 )
@@ -3187,7 +3208,7 @@ class RenderService:
         where, params = self._history_where(filters)
         analysis_join = (
             "JOIN libraries l ON l.id=p.library_id "
-            "JOIN photo_analysis a ON a.id=(SELECT latest.id FROM photo_analysis latest "
+            "LEFT JOIN photo_analysis a ON a.id=(SELECT latest.id FROM photo_analysis latest "
             f"WHERE latest.photo_id=p.id ORDER BY {preferred_analysis_order_sql('latest')} LIMIT 1)"
         )
         with self.database.session() as connection:

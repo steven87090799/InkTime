@@ -50,10 +50,13 @@ class RenderCandidateRepository:
         AND a.ranking_score IS NOT NULL
         AND p.local_features_status='complete'
     """
-    LOCAL_SQL_PREDICATE = f"""
-        {_BASE_SQL_PREDICATE}
-        AND a.local_score IS NOT NULL
+    LOCAL_SQL_PREDICATE = """
+        p.status IN ('discovered','preprocessed','analyzed')
+        AND p.eligible=1 AND p.never_display=0
+        AND p.exclusion_status IN ('eligible','manually_restored')
+        AND p.lifecycle_status='active' AND l.enabled=1
         AND p.local_features_status='complete'
+        AND p.local_candidate_score IS NOT NULL
     """
     MAX_REQUESTED = 200
 
@@ -151,8 +154,35 @@ class RenderCandidateRepository:
         return rows
 
     def get_local(self, photo_id: str) -> dict[str, Any] | None:
-        """A local ranking still needs v6 semantic safety evidence to publish."""
-        return self.get(photo_id)
+        """Photo-only delivery does not wait for a model, but honors its holds."""
+        with self.database.session() as connection:
+            row = connection.execute(
+                f"""
+                SELECT p.*,l.root_path,l.enabled AS library_enabled,a.id AS latest_analysis_id,
+                       a.score_kind,a.ranking_score,a.local_score,a.schema_version,a.raw_json
+                FROM photos p JOIN libraries l ON l.id=p.library_id
+                LEFT JOIN photo_analysis a ON a.id=(
+                    SELECT latest.id FROM photo_analysis latest WHERE latest.photo_id=p.id
+                    ORDER BY {preferred_analysis_order_sql('latest')} LIMIT 1
+                ) WHERE p.id=? AND {self.LOCAL_SQL_PREDICATE}
+                """,  # noqa: S608 -- fixed repository predicate
+                (photo_id,),
+            ).fetchone()
+        if row is None or not self.available(row) or not self.local_safety_passed(row):
+            return None
+        return dict(row)
+
+    @classmethod
+    def local_safety_passed(cls, row: Any) -> bool:
+        from inktime.app.domain.photos.quality_policy import is_confirmed_screenshot
+
+        values = dict(row)
+        if is_confirmed_screenshot(values):
+            return False
+        # A completed v6 decision cannot be bypassed by switching presentation.
+        if values.get("score_kind") == SEMANTIC_SCORE_KIND and values.get("schema_version") not in {4, 5}:
+            return cls.safety_passed(row)
+        return True
 
     def require_local(self, photo_ids: Iterable[str]) -> list[dict[str, Any]]:
         rows: list[dict[str, Any]] = []
@@ -167,18 +197,21 @@ class RenderCandidateRepository:
         self,
         photo_ids: Iterable[str],
         execution: str,
+        *,
+        content_mode: str = "photo_caption",
     ) -> list[dict[str, Any]]:
         """Resolve one release contract per requested photo, without N+1 queries.
 
-        Every formal release requires a current v6 semantic safety result and
-        local scanner features. Older v4/v5 results remain readable but cannot
-        certify the additional display-exclusion categories.
+        Caption presentation requires v6 analysis; photo-only presentation uses
+        scanner evidence while background analysis proceeds independently.
         """
         ids = list(dict.fromkeys(str(value).strip() for value in photo_ids if str(value).strip()))
         if len(ids) > self.MAX_REQUESTED:
             raise ValueError(f"RENDER-009 一次最多可發布 {self.MAX_REQUESTED} 張照片")
         if not ids:
             return []
+        if content_mode not in {"photo_only", "photo_caption"}:
+            raise ValueError("RENDER-009 不支援的照片顯示模式")
 
         placeholders = ",".join("?" for _ in ids)
         with self.database.session() as connection:
@@ -226,11 +259,20 @@ class RenderCandidateRepository:
             local_eligible = (
                 bool(row.get("eligible")) and str(row.get("local_features_status") or "") == "complete"
             )
-            if not (analysis_eligible and local_eligible and self.safety_passed(row)):
+            safe = self.local_safety_passed(row) if content_mode == "photo_only" else self.safety_passed(row)
+            if not (local_eligible and safe and (content_mode == "photo_only" or analysis_eligible)):
                 raise IneligiblePhotoError(
-                    photo_id, "PHOTO-ELIGIBILITY-007 尚未同時完成本機品質檢查與 v6 AI 安全分析"
+                    photo_id,
+                    "PHOTO-ELIGIBILITY-007 本機檢查未完成，或已有分析結果要求排除"
+                    if content_mode == "photo_only" else
+                    "PHOTO-ELIGIBILITY-007 尚未同時完成本機品質檢查與 v6 AI 安全分析",
                 )
-            source = "analysis"
+            if content_mode == "photo_only" and (
+                str(row.get("status") or "") not in {"discovered", "preprocessed", "analyzed"}
+                or row.get("local_candidate_score") is None
+            ):
+                raise IneligiblePhotoError(photo_id, "PHOTO-ELIGIBILITY-006 照片尚未完成本機處理")
+            source = "local" if content_mode == "photo_only" else "analysis"
 
             resolved.append(
                 {

@@ -509,6 +509,10 @@ class OfflineScheduleRepository:
         ) is None:
             return None
         with self.database.session() as connection:
+            display_setting = connection.execute(
+                "SELECT value_json FROM settings WHERE key='render.content_mode'"
+            ).fetchone()
+            photo_only = display_setting is not None and display_setting[0] == '"photo_only"'
             has_photos = connection.execute(
                 "SELECT 1 FROM photos p JOIN libraries l ON l.id=p.library_id "
                 "WHERE l.enabled=1 AND p.lifecycle_status='active' LIMIT 1"
@@ -538,7 +542,7 @@ class OfflineScheduleRepository:
             for row in roots
         )
         kind = ("empty_library" if verified_empty else
-                "analysis_required" if has_photos and not has_analysis else
+                "analysis_required" if has_photos and not has_analysis and not photo_only else
                 "no_eligible_photos")
         return {
             "schema_version": 1, "kind": kind, "target_date": target_date,

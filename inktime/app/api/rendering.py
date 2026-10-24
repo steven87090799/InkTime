@@ -37,6 +37,7 @@ from inktime.app.services.rendering import (
 )
 from inktime.app.services.render_cache import RENDERER_VERSION
 from inktime.app.domain.analysis.execution_mode import execution_mode
+from inktime.app.domain.rendering.content_mode import content_mode
 
 
 bp = Blueprint("rendering", __name__)
@@ -775,6 +776,7 @@ def publish_release():
             current_app.extensions["inktime_render_candidate_repository"].require_for_execution_mode(
                 requested_photo_ids,
                 execution_mode(current_app.extensions["inktime_settings_repository"]),
+                content_mode=content_mode(current_app.extensions["inktime_settings_repository"]),
             )
         except ValueError as exc:
             abort(409, description=str(exc))
