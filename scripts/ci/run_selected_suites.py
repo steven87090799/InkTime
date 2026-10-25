@@ -55,6 +55,7 @@ RUNNER_SUITE_TEST_PATHS: dict[str, tuple[str, ...]] = {
     "web_ui_owner": (
         "tests/integration/test_offline_download_display.py",
         "tests/integration/test_management_ui.py",
+        "tests/integration/test_photo_scan_ui.py",
     ),
     "web_api_owner": (
         "tests/integration/test_photo_display_history.py",
@@ -68,6 +69,7 @@ RUNNER_SUITE_TEST_PATHS: dict[str, tuple[str, ...]] = {
         "tests/integration/test_deployment_modes.py",
         "tests/integration/test_photopainter_stock_api.py",
         "tests/integration/test_review_workbench.py",
+        "tests/integration/test_photo_scan_ui.py",
     ),
     "auth_security_owner": (
         "tests/security",
