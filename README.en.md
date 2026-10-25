@@ -1,6 +1,6 @@
 # InkTime · Photo analysis and e-ink memory frames
 
-> Branch documentation updated on 2026-10-23 against `origin/main=799e5bb`. SQLite Migration 75, AI Schema v6, firmware 2.8.9 (HTTP JSON reception fix; not flashed), Config Store v5 and NAS deployment contract 3 are separate versions. The [GPS/landmark experiment](docs/experiments/GPS_LOCATION_20261022.md) requires explicit invocation and makes no automatic external calls. Check the deployed Git revision in Diagnostics; see the [source baseline](docs/reference/CURRENT_STATE_ZH_TW.md).
+> Branch documentation updated on 2026-10-26 against `origin/main=714cacf`. SQLite Migration 75, AI Schema v6, firmware 2.8.10 (cross-server pairing repair; verify deployment separately), Config Store v5 and NAS deployment contract 3 are separate versions. The [GPS/landmark experiment](docs/experiments/GPS_LOCATION_20261022.md) requires explicit invocation and makes no automatic external calls. Check the deployed Git revision in Diagnostics; see the [source baseline](docs/reference/CURRENT_STATE_ZH_TW.md).
 
 [繁體中文](README.md) · [Documentation map](docs/README.md) · [HTML manual](USER_MANUAL.html) · [Quick start](docs/getting-started/QUICK_START_ZH_TW.md)
 
@@ -296,7 +296,7 @@ Example PCB:
 
 ## Build and Flash
 
-The shared 7C/PhotoPainter source currently declares firmware **2.8.9**. Use the exact Hosted CI profile, pinned dependencies and repository-owned partition table described in the [ESP32 guide](docs/devices/ESP32_GUIDE_ZH_TW.md).
+The shared 7C/PhotoPainter source currently declares firmware **2.8.10**. Use the exact Hosted CI profile, pinned dependencies and repository-owned partition table described in the [ESP32 guide](docs/devices/ESP32_GUIDE_ZH_TW.md).
 
 PhotoPainter Rev2.0 requires 16 MiB flash, 8 MiB OPI PSRAM, TG28 ALDO4 power handling and its own GPIO map. Read the [compact safety contract](docs/devices/PHOTOPAINTER_SAFETY_CONTRACT.md) and the exact flashing/recovery sections of the [PhotoPainter guide](docs/devices/WAVESHARE_PHOTOPAINTER_ZH_TW.md) before flashing. Keep ALDO3 / Audio_VCC powered; unpowered audio codecs can clamp the shared I2C bus. Preserve a full local flash backup; an app-only binary belongs at `0x10000`, never `0x0`. GPIO0 remains BOOT and GPIO5 remains the factory PWR button.
 
