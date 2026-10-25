@@ -20,6 +20,7 @@ from inktime.app.repositories.photo_analysis_retention import PhotoAnalysisReten
 from inktime.app.core.paths import safe_join
 from inktime.app.web.access import administrator_required, login_required
 from inktime.app.workers.scanner import SCAN_MODES
+from inktime.app.services.photo_scan_overview import photo_scan_overview
 
 
 bp = Blueprint("operations", __name__)
@@ -475,6 +476,13 @@ def maintenance_page():
     return render_template(
         "maintenance.html",
         photo_dir=current_app.config["INKTIME_PHOTO_DIR"],
+        scan=photo_scan_overview(
+            photos=current_app.extensions["inktime_photo_repository"],
+            jobs=current_app.extensions["inktime_job_repository"],
+            schedules=current_app.extensions["inktime_schedule_repository"],
+            photo_dir=current_app.config["INKTIME_PHOTO_DIR"],
+            timezone=str(current_app.extensions["inktime_settings_repository"].get("general.timezone")),
+        ),
     )
 
 

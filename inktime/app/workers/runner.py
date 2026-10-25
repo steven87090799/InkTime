@@ -500,11 +500,10 @@ class WorkerRunner:
                         # JOB-LOCAL-FAILED made it TERMINAL_NO_RETRY, so a routine
                         # `docker stop` or NAS reboot permanently dead-lettered
                         # whatever was running.
-                        exc.code = (
-                            "JOB-SHUTDOWN-CANCELLED"
-                            if getattr(exc, "cancelled", False)
-                            else "JOB-LOCAL-FAILED"
-                        )
+                        if getattr(exc, "cancelled", False):
+                            exc.code = "JOB-SHUTDOWN-CANCELLED"
+                        elif exc.code not in {"SCAN-001", "SCAN-002"}:
+                            exc.code = "JOB-LOCAL-FAILED"
                         raise
                 return _execute_job_item(
                     self.app, item, job=job, settings=settings, provider=provider, provider_error=provider_error, analysis=analysis, analysis_plan=analysis_plan, execution=execution, progress_items=progress_items, progress_seconds=progress_seconds, scanner_disk_batch_size=scanner_disk_batch_size, scanner_write_batch_size=scanner_write_batch_size, scanner_missing_threshold_ratio=scanner_missing_threshold_ratio, scanner_safety=scanner_safety, runtime_settings=runtime_settings, scan_cancel_requested=scan_cancel_requested, log_scan_progress=log_scan_progress
