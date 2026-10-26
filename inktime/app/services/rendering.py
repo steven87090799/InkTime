@@ -2976,7 +2976,11 @@ class RenderService:
             run_id = DisplayHistoryRepository(self.database).record_selection(
                 target=target_date or self._today(), candidates=rows, selected=selected,
                 method="automatic", context={"policy": "confirmed_display_quality_lottery_v3",
-                    "requested_frames": quantity, "composition_pool": True},
+                    "requested_frames": quantity, "composition_pool": True,
+                    "selection_mode": self.settings.get("render.selection_mode", "history_today"),
+                    "execution_mode": execution_mode(self.settings),
+                    "fallback": "seasonal_outside_high_score" if self.settings.get("render.seasonal_outside_fallback", True) else "keep_current",
+                    "seed_date": (target_date or self._today()).isoformat()},
             )
             for row in selected:
                 row["selection_run_id"] = run_id

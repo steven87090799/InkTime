@@ -2,7 +2,7 @@
 {% block title %}選片與顯示歷史｜InkTime{% endblock %}
 {% block head %}<link rel="stylesheet" href="{{ url_for('static', filename='display-history.css') }}">{% endblock %}
 {% block content %}
-<div class="page-head"><div><p class="eyebrow">照片輪替紀錄</p><h1>選片與顯示歷史</h1><p>優先選未顯示照片；需要重用時，優先選次數較少、較久沒出現的照片。</p></div><a href="/rendering">相框與發布</a></div>
+<div class="page-head"><div><p class="eyebrow">照片輪替紀錄</p><h1>選片與顯示歷史</h1><p>同期模式以日期、品質與已確認顯示紀錄加權隨機；偏好未顯示照片，高分照片仍可再次入選。</p></div><a href="/rendering">相框與發布</a></div>
 {% if detail %}
 <section class="panel">
   <div class="panel-head"><h2>{{ detail.target_date|human_datetime }} 的選片</h2><a href="{{ url_for('display_history.history_page', date=detail.target_date) }}">返回當天歷史</a></div>
@@ -29,7 +29,7 @@
 {% else %}
 <section class="panel">
   <form class="inline-form" method="get"><label>日期<input type="date" name="date" value="{{ filters.target_date }}"></label><label>照片 ID<input name="photo_id" value="{{ filters.photo_id }}" placeholder="選填"></label><label>紀錄種類<select name="tab"><option value="selections" {% if filters.tab == 'selections' %}selected{% endif %}>系統選片與所有候選</option><option value="displays" {% if filters.tab == 'displays' %}selected{% endif %}>顯示與舊發布紀錄</option></select></label><button>查詢</button><a href="/display-history">清除篩選</a></form>
-  <p>顯示次數只累計裝置的成功回報。系統選定次數另行保存，讓無法回報的舊裝置也能避免重複。歷史發布紀錄保留為「未確認」。完整候選快照從功能啟用後開始保存。</p>
+  <p>顯示次數只累計裝置的成功回報。系統選定次數另行保存，不會冒充實際顯示，也不會單憑入選就降低未看過照片的輪替順位。歷史發布紀錄保留為「未確認」。完整候選快照從功能啟用後開始保存。</p>
 </section>
 <section class="panel">
   <h2>{{ '顯示與發布紀錄' if filters.tab == 'displays' else '系統選片紀錄' }} <small>共 {{ result.total }} 筆</small></h2>
