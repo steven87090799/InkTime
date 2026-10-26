@@ -1786,7 +1786,7 @@ class PhotoRepository:
                 """,
                 (periods["day_start"], periods["day_end"], periods["month_start"], periods["month_end"]),
             ).fetchone()
-        return int(row["daily"] or 0) >= daily_limit or int(row["monthly"] or 0) >= monthly_limit
+        return (daily_limit > 0 and int(row["daily"] or 0) >= daily_limit) or (monthly_limit > 0 and int(row["monthly"] or 0) >= monthly_limit)
 
     def location_visit_count(self, latitude: float | None, longitude: float | None) -> int:
         """以約 22 km 的本機格網估計地點稀有度，避免把精確座標送出。"""

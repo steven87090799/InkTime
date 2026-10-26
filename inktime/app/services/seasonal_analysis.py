@@ -29,6 +29,28 @@ class SeasonalAnalysisService:
     def enabled(self) -> bool:
         return execution_mode(self.settings) == "seasonal_ai"
 
+    def preparation_target(self, now: datetime, *, device_id: str | None = None) -> date | None:
+        """Start tomorrow only after a real morning display, never on download."""
+        zone = ZoneInfo(str(self.settings.get("general.timezone", "Asia/Taipei")))
+        local = now.astimezone(zone)
+        if local.hour < 8:
+            return None
+        if self.settings.get("analysis.require_display_ack", True):
+            start = local.replace(hour=8, minute=0, second=0, microsecond=0).astimezone(timezone.utc).isoformat()
+            end = local.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
+            clause = " AND json_extract(metadata_json,'$.device_id')=?" if device_id else ""
+            params = [start, end.astimezone(timezone.utc).isoformat()]
+            if device_id:
+                params.append(device_id)
+            with self.repository.database.session() as connection:
+                row = connection.execute(
+                    "SELECT 1 FROM display_history WHERE selection_method='device_queue_ack' "
+                    "AND displayed_at>=? AND displayed_at<?" + clause + " LIMIT 1", params,
+                ).fetchone()
+            if row is None:
+                return None
+        return local.date() + timedelta(days=int(self.settings.get("analysis.prepare_ahead_days", 1)))
+
     def _plan(self) -> dict:
         if not permits_manual_ai(execution_mode(self.settings)):
             raise ValueError("目前分析執行模式不允許使用模型")
@@ -57,7 +79,10 @@ class SeasonalAnalysisService:
     def ensure(self, target: date | None = None) -> dict:
         if not self.enabled():
             return {"waiting": False, "job_id": None}
-        target = target or self.today()
+        if target is None:
+            target = self.preparation_target(datetime.now(timezone.utc))
+            if target is None:
+                return {"waiting": False, "job_id": None, "reason": "waiting_for_morning_display_ack"}
         self.repository.refresh()
         missing: list[dict] = []
         waiting = False
@@ -131,6 +156,13 @@ class SeasonalAnalysisService:
             return False
         target_value = (settings.get("offline_prepare") or {}).get("target_date") or (settings.get("history") or {}).get("history_date")
         target = date.fromisoformat(str(target_value)) if target_value else self.today()
+        local_now = datetime.now(ZoneInfo(str(self.settings.get("general.timezone", "Asia/Taipei"))))
+        if target > local_now.date() and self.preparation_target(local_now) is None:
+            return True
+        # Publish the best completed results by 07:30, while missing analyses
+        # remain in their durable queue; never mark missing AI as successful.
+        if target <= local_now.date() and (local_now.hour, local_now.minute) >= (7, 30):
+            return False
         waiting = bool(self.ensure(target)["waiting"])
         if waiting and job_id is not None:
             self.repository.note_waiting(job_id, target)

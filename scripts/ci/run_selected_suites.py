@@ -126,6 +126,7 @@ RUNNER_SUITE_TEST_PATHS: dict[str, tuple[str, ...]] = {
         "tests/integration/test_device_test_ack.py",
     ),
     "render_release_owner": (
+        "tests/integration/test_seasonal_analysis.py",
         "tests/unit/test_nas_resource_bounds.py",
         "tests/integration/test_photo_display_history.py",
         "tests/integration/test_photo_places.py",

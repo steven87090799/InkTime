@@ -4,11 +4,14 @@
 {% set labels = {'unprocessed':'尚未處理','queued':'等待分析','running':'處理中','completed':'已有模型資料','failed':'失敗，待手動重試','unknown':'結果不明，待手動確認','reserved':'其他分析工作處理中'} %}
 <div class="page-head"><div><p class="eyebrow">逐張分析 · 持久化去重</p><h1>歷年同期分析</h1><p>{{ state.target_date|human_datetime }} 前後 {{ state.window_days }} 天，歷年同期共 {{ state.candidate_count }} 張不同內容的照片。</p></div><a href="/jobs">分析工作</a></div>
 <section class="panel">
-<p>{% if enabled %}已啟用：新照片進入顯示日期範圍時才補齊模型資料。{% else %}尚未啟用。請到<a href="/settings?search=分析執行模式">分析執行模式</a>選擇「歷年同期按需 AI 分析」。{% endif %}日期範圍可在<a href="/settings?search=seasonal_window_days">同期日期範圍設定</a>調整，預設前後 5 天。</p>
+<p>{% if enabled %}已啟用：新照片進入顯示日期範圍時才補齊模型資料。{% else %}尚未啟用。請到<a href="/settings?search=分析執行模式">分析執行模式</a>選擇「歷年同期按日期分批」。{% endif %}日期範圍可在<a href="/settings?search=seasonal_window_days">同期日期範圍設定</a>調整，預設前後 5 天。</p>
 <p>每張照片獨立分析，再以既有評分排序；選片不呼叫模型。相同內容的副本共用分析。模型升級沿用既有資料。排除、禁止上傳或尚未完成掃描的照片不會送出。</p>
 <div class="table-wrap"><table><thead><tr><th>當期狀態</th><th>照片數</th></tr></thead><tbody>{% for key,count in state.counts.items() %}<tr><td>{{ labels[key] }}</td><td>{{ count }}</td></tr>{% endfor %}</tbody></table></div>
 {% if state.missing_capture_dates %}<p class="notice">有 {{ state.missing_capture_dates }} 張可分析照片缺少有效拍攝日期，無法自動進入同期範圍。請至照片庫補齊日期後重新掃描。</p>{% endif %}
-<p>失敗或回應遺失不會自動重送。若工作因預算暫停，請到工作頁面確認後繼續。首次發布會等待當期分析結束，再從通過審查的照片選片。</p>
+<p>失敗或回應遺失不會自動重送。若工作因預算暫停，請到工作頁面確認後繼續。在準備期限前等待同期分析，再從通過審查的照片選片。</p>
+<p>目標是隔天顯示日期，前後各五天從照片索引分頁處理，不重新掃描原始照片庫。每天八點後收到相框實際顯示確認，才啟動隔日準備；沿用既有模型結果。平日 08／18／20／22 點，週末 08 點起每兩小時至 22 點。<a href="/display-history">查看入選、未入選與實際顯示紀錄</a> · <a href="/devices">相框倒數與同步狀態</a></p>
+{% if state.waiting_for_display_ack %}<p class="notice">等待今天八點後的相框顯示確認；下載完成不代表已顯示。尚未啟動隔日分析。</p>{% endif %}
+<p>若首次分析超過每日供應商額度，未送出照片保留排隊；到目標日 07:30 先用已完成的合格結果準備圖片，缺少的分析不會標成成功。沒有可用結果時保留原畫面。</p>
 <button id="seasonal-run" class="primary" {% if not enabled %}disabled{% endif %}>檢查並補齊當期照片</button> <button id="seasonal-rerun">全部重跑…</button>
 <p id="seasonal-message" role="status" aria-live="polite"></p>
 </section>

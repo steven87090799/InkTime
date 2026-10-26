@@ -389,7 +389,7 @@ class DisplayPreparationService:
             raise JobConfigurationError("DEVICE-008 裝置離線 Slot 能力尚未確認，拒絕建立 Playlist")
         try:
             schedule_times = validate_offline_schedule(
-                json.loads(str(device["schedule_times_json"] or "[]")),
+                self.offline_schedules.times_for_date(target, json.loads(str(device["schedule_times_json"] or "[]"))),
                 maximum=resolve_offline_schedule_max_slots(
                     {"offline_schedule_max_slots": device["offline_schedule_max_slots"]}
                 ),

@@ -2659,14 +2659,14 @@ class RenderService:
         # 每次只保留真正可用的候選，避免把大型照片庫 materialize 成 Dict。
         # photos has no durable burst_group_id column; captured_at is the
         # existing burst-proximity signal consumed by LocalSelectionPolicy.
-        while len(result) < max(limit, 1):
+        while date_priorities is not None or len(result) < max(limit, 1):
             with self.database.session() as connection:
                 rows = connection.execute(
                     f"""
                     WITH content_exposure AS (
-                        SELECT sha256,MAX(SUM(display_count),SUM(selection_count)) AS used_count,
-                               MAX(MAX(COALESCE(last_displayed_at,''),COALESCE(last_selected_at,''))) AS used_at
-                        FROM photos WHERE length(sha256)=64 AND (display_count>0 OR selection_count>0)
+                        SELECT sha256,SUM(display_count) AS used_count,
+                               MAX(COALESCE(last_displayed_at,'')) AS used_at
+                        FROM photos WHERE length(sha256)=64 AND display_count>0
                         GROUP BY sha256
                     ), ranked_candidates AS (
                     SELECT p.id,p.library_id,p.relative_path,p.captured_at,p.captured_date,p.captured_month_day,
@@ -2684,7 +2684,7 @@ class RenderService:
                            a.memory_score,
                            a.score_kind,a.schema_version,a.local_score,p.local_candidate_score,
                            p.display_count,p.last_displayed_at,p.selection_count,p.last_selected_at,
-                           MAX(p.display_count,p.selection_count,COALESCE(exposure.used_count,0)) exposure_count,
+                           MAX(p.display_count,COALESCE(exposure.used_count,0)) exposure_count,
                            exposure.used_at AS content_last_exposure_at,
                            CASE WHEN ?=0 THEN 0 WHEN {score_expression}>=? THEN
                                COALESCE((SELECT value FROM json_each(?) WHERE key=p.captured_month_day),1000)
@@ -2747,8 +2747,11 @@ class RenderService:
                     candidate.pop("raw_json", None)
                     candidate.pop("exif_json", None)
                     result.append(candidate)
-                    if len(result) >= max(limit, 1):
+                    if date_priorities is None and len(result) >= max(limit, 1):
                         break
+            if date_priorities is not None:
+                from inktime.app.domain.photos.seasonal_rotation import seasonal_order
+                result = seasonal_order(result, target, priority_min_score)[:max(limit, 1)]
             last_score = float(rows[-1]["combined_score"])
             last_count = int(rows[-1]["exposure_count"])
             last_priority = int(rows[-1]["date_priority"])
@@ -2911,6 +2914,12 @@ class RenderService:
             0 if row.get("seasonal_priority") == 1000 else int(row.get("day_distance") or 0), last_exposure_at(row),
             -float(row.get("combined_score") or 0), str(row["id"]),
         ))
+        if execution_mode(self.settings) == "seasonal_ai":
+            from inktime.app.domain.photos.seasonal_rotation import seasonal_order
+            ordered = seasonal_order(ordered, target, float(self.settings.get("render.seasonal_priority_min_score", 60)))
+            if candidate_pool is not None:
+                candidate_pool.extend(ordered)
+            return ordered[:limit]
         if candidate_pool is not None:
             candidate_pool.extend(ordered)
         if limit >= len(ordered):
@@ -2919,19 +2928,12 @@ class RenderService:
 
     @staticmethod
     def _auto_candidate_stages(rows: list[dict[str, Any]]):
-        """Try every unseen composition before admitting displayed sources."""
-        allowed: list[dict[str, Any]] = []
-        def priority(row):
-            return row.get("seasonal_priority", {"exact_day": 0, "nearby_day": 1}.get(row.get("match_type"), 2))
-        for count in sorted({exposure_count(row) for row in rows}):
-            for stage in sorted({priority(row) for row in rows if exposure_count(row) == count}):
-                added = [row for row in rows if exposure_count(row) == count and priority(row) == stage]
-                if added:
-                    allowed.extend(added)
-                    yield list(allowed)
+        # Ordering already applies the quality and history policy. Do not undo
+        # the lottery by forcing every low-score unseen source ahead of repeats.
+        yield list(rows)
 
     def _auto_photo_candidate_pool(self, *, target_date: date | None = None, record_history: bool = False) -> list[dict[str, Any]]:
-        rows = self.select_candidates_details(1000, target_date=target_date, composition_pool=True, record_history=record_history)
+        rows = self.select_candidates_details(1000, target_date=target_date, composition_pool=True, record_history=False)
         result = []
         recent_cutoff = datetime.now(timezone.utc) - timedelta(days=14)
         for row in rows:
@@ -2958,9 +2960,18 @@ class RenderService:
                 break
         # Only publish the sources of actual frames. A 1,000-photo candidate
         # pool must not trip the 200-source release validation limit.
-        return [row for frame in select_auto_photo_frames(
+        selected = [row for frame in select_auto_photo_frames(
             allowed, frame_orientation=frame_orientation, count=quantity,
         ) for row in frame]
+        if record_history:
+            run_id = DisplayHistoryRepository(self.database).record_selection(
+                target=target_date or self._today(), candidates=rows, selected=selected,
+                method="automatic", context={"policy": "confirmed_display_quality_lottery_v3",
+                    "requested_frames": quantity, "composition_pool": True},
+            )
+            for row in selected:
+                row["selection_run_id"] = run_id
+        return selected
 
     def select_candidates_details(
         self,
@@ -2994,7 +3005,7 @@ class RenderService:
                          "seasonal_priority_min_score": self.settings.get("render.seasonal_priority_min_score", 60),
                          "fallback": self.settings.get("render.history_today_fallback", "nearby_then_ranked"),
                          "candidate_years": candidate_years or [], "requested_count": limit,
-                         "composition_pool": composition_pool, "policy": "least_displayed_seasonal_date_v2"},
+                         "composition_pool": composition_pool, "policy": "confirmed_display_quality_lottery_v3" if mode == "seasonal_ai" else "least_displayed_seasonal_date_v2"},
             )
             for row in selected:
                 row["selection_run_id"] = run_id

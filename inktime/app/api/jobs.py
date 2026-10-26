@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import math
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from flask import Blueprint, Response, abort, current_app, g, render_template, request, stream_with_context
@@ -39,7 +39,10 @@ def _seasonal_status():
     if page is None or not 1 <= page <= 100000:
         abort(400, description="分頁不合法")
     service = _seasonal()
-    return service.repository.status(service.today(), service.window(), offset=(page - 1) * 100)
+    target = service.today() + timedelta(days=int(service.settings.get("analysis.prepare_ahead_days", 1)))
+    state = service.repository.status(target, service.window(), offset=(page - 1) * 100)
+    state["waiting_for_display_ack"] = service.preparation_target(datetime.now(timezone.utc)) is None
+    return state
 
 
 @bp.get("/analysis/seasonal")
