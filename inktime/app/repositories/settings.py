@@ -212,7 +212,7 @@ SETTING_DEFINITIONS: dict[str, dict[str, Any]] = {
     "display.weekday_times": {"category": "隔日圖片準備", "default": '08:00,18:00,20:00,22:00', "type": "string", "description": "週一至週五顯示時刻，使用逗號分隔 HH:MM", "restart": False},
     "display.weekend_times": {"category": "隔日圖片準備", "default": '08:00,10:00,12:00,14:00,16:00,18:00,20:00,22:00', "type": "string", "description": "週六日顯示時刻；國定假日未另套行事曆", "restart": False},
     "analysis.prepare_ahead_days": {"category": "隔日圖片準備", "default": 1, "type": "integer", "description": "按日期分批分析的目標提前天數", "restart": False, "min": 1, "max": 1},
-    "analysis.require_display_ack": {"category": "隔日圖片準備", "default": True, "type": "boolean", "description": "開始隔日分析前，等待當日八點後相框的實際顯示回報", "restart": False},
+    "analysis.require_delivery_ack": {"category": "隔日圖片準備", "default": True, "type": "boolean", "description": "八點後確認當日首張已下載校驗或已顯示，再開始隔日分析", "restart": False},
     "analysis.seasonal_window_days": {
         "category": "分析執行模式",
         "default": 5,

@@ -9,8 +9,8 @@
 <div class="table-wrap"><table><thead><tr><th>當期狀態</th><th>照片數</th></tr></thead><tbody>{% for key,count in state.counts.items() %}<tr><td>{{ labels[key] }}</td><td>{{ count }}</td></tr>{% endfor %}</tbody></table></div>
 {% if state.missing_capture_dates %}<p class="notice">有 {{ state.missing_capture_dates }} 張可分析照片缺少有效拍攝日期，無法自動進入同期範圍。請至照片庫補齊日期後重新掃描。</p>{% endif %}
 <p>失敗或回應遺失不會自動重送。若工作因預算暫停，請到工作頁面確認後繼續。在準備期限前等待同期分析，再從通過審查的照片選片。</p>
-<p>目標是隔天顯示日期，前後各五天從照片索引分頁處理，不重新掃描原始照片庫。每天八點後收到相框實際顯示確認，才啟動隔日準備；沿用既有模型結果。平日 08／18／20／22 點，週末 08 點起每兩小時至 22 點。<a href="/display-history">查看入選、未入選與實際顯示紀錄</a> · <a href="/devices">相框倒數與同步狀態</a></p>
-{% if state.waiting_for_display_ack %}<p class="notice">等待今天八點後的相框顯示確認；下載完成不代表已顯示。尚未啟動隔日分析。</p>{% endif %}
+<p>目標是隔天顯示日期，前後各五天從照片索引分頁處理，不重新掃描原始照片庫。每天八點後確認首張已下載且校驗完成，才啟動隔日準備；沿用既有模型結果。平日 08／18／20／22 點，週末 08 點起每兩小時至 22 點。<a href="/display-history">查看入選、未入選與實際顯示紀錄</a> · <a href="/devices">相框倒數與同步狀態</a></p>
+{% if state.waiting_for_display_ack %}<p class="notice">等待今天首張圖片下載與校驗確認，八點後開始準備；下載完成不代表已顯示。尚未啟動隔日分析。</p>{% endif %}
 <p>若首次分析超過每日供應商額度，未送出照片保留排隊；到目標日 07:30 先用已完成的合格結果準備圖片，缺少的分析不會標成成功。沒有可用結果時保留原畫面。</p>
 <button id="seasonal-run" class="primary" {% if not enabled %}disabled{% endif %}>檢查並補齊當期照片</button> <button id="seasonal-rerun">全部重跑…</button>
 <p id="seasonal-message" role="status" aria-live="polite"></p>

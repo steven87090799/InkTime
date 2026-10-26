@@ -30,12 +30,12 @@ class SeasonalAnalysisService:
         return execution_mode(self.settings) == "seasonal_ai"
 
     def preparation_target(self, now: datetime, *, device_id: str | None = None) -> date | None:
-        """Start tomorrow only after a real morning display, never on download."""
+        """Start tomorrow after verified morning delivery or confirmed display."""
         zone = ZoneInfo(str(self.settings.get("general.timezone", "Asia/Taipei")))
         local = now.astimezone(zone)
         if local.hour < 8:
             return None
-        if self.settings.get("analysis.require_display_ack", True):
+        if self.settings.get("analysis.require_delivery_ack", True):
             start = local.replace(hour=8, minute=0, second=0, microsecond=0).astimezone(timezone.utc).isoformat()
             end = local.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
             clause = " AND json_extract(metadata_json,'$.device_id')=?" if device_id else ""
@@ -45,10 +45,29 @@ class SeasonalAnalysisService:
             with self.repository.database.session() as connection:
                 row = connection.execute(
                     "SELECT 1 FROM display_history WHERE selection_method='device_queue_ack' "
-                    "AND displayed_at>=? AND displayed_at<?" + clause + " LIMIT 1", params,
+                    "AND displayed_at>=? AND displayed_at<?" + clause + " LIMIT 1", params,  # noqa: S608 - fixed optional device predicate
                 ).fetchone()
             if row is None:
-                return None
+                # Offline panel-complete ACKs can arrive at the next network
+                # wake. Hash verification of today's first slot is sufficient
+                # to start tomorrow, but never counts as an actual display.
+                device_clause = " AND d.id=?" if device_id else ""
+                delivery_params = [local.date().isoformat()]
+                if device_id:
+                    delivery_params.append(device_id)
+                with self.repository.database.session() as connection:
+                    row = connection.execute(
+                        "SELECT 1 FROM device_offline_schedule_slots sl "
+                        "JOIN device_offline_schedules ds ON ds.id=sl.schedule_id "
+                        "JOIN devices d ON d.id=ds.device_id "
+                        "JOIN device_content_queue_events e ON e.queue_item_id=sl.queue_item_id "
+                        "AND e.device_id=d.id WHERE ds.target_date=? AND sl.slot_index=0 "
+                        "AND ds.config_version=d.config_version AND ds.status='ready' "
+                        "AND e.event_type='HASH_VERIFIED'" + device_clause + " LIMIT 1",  # noqa: S608 - fixed optional device predicate
+                        delivery_params,
+                    ).fetchone()
+                if row is None:
+                    return None
         return local.date() + timedelta(days=int(self.settings.get("analysis.prepare_ahead_days", 1)))
 
     def _plan(self) -> dict:
@@ -82,7 +101,7 @@ class SeasonalAnalysisService:
         if target is None:
             target = self.preparation_target(datetime.now(timezone.utc))
             if target is None:
-                return {"waiting": False, "job_id": None, "reason": "waiting_for_morning_display_ack"}
+                return {"waiting": False, "job_id": None, "reason": "waiting_for_morning_delivery_ack"}
         self.repository.refresh()
         missing: list[dict] = []
         waiting = False
