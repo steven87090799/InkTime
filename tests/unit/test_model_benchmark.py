@@ -229,7 +229,7 @@ class _LiveMetricProvider:
     def analyze(self, **_kwargs):
         self.analyze_count += 1
         if self.invalid_first and self.analyze_count == 1:
-            content = json.dumps(valid_result(types=["人物", "人物"]), ensure_ascii=False)
+            content = json.dumps(valid_result(types=["未知分類"]), ensure_ascii=False)
         else:
             content = json.dumps(valid_result(), ensure_ascii=False)
         return ProviderResponse(content, Usage(input_tokens=10, output_tokens=5, provider_reported_cost=0.1))

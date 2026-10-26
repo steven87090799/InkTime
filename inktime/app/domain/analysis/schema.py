@@ -389,7 +389,7 @@ def validate_model_response(raw: str | dict, *, caption_controls: dict[str, Any]
             value["types"] = list(dict.fromkeys(categories))
         orientation = value.get("visual_orientation")
         evidence = orientation.get("evidence") if isinstance(orientation, dict) else None
-        if isinstance(evidence, list) and 1 <= len(evidence) <= 6 and all(
+        if isinstance(orientation, dict) and isinstance(evidence, list) and 1 <= len(evidence) <= 6 and all(
             isinstance(code, str) for code in evidence
         ):
             orientation["evidence"] = list(dict.fromkeys(evidence))
