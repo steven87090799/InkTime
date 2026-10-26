@@ -111,8 +111,7 @@ class ProviderService:
             matching_free = any(
                 free.daily_free_first and FailoverVisionProvider._free_model(free)
                 and free.priority < paid.priority
-                and free.provider.base_url == paid.provider.base_url
-                and free.provider.api_key == paid.provider.api_key
+                and FailoverVisionProvider._same_account(free, paid)
                 for free in channels
             )
             if not matching_free or float(self.settings.get("budget.daily_stop", 10)) <= 0:

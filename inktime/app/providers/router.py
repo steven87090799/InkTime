@@ -144,18 +144,27 @@ class FailoverVisionProvider(VisionProvider):
     def _free_model(channel: ProviderChannel) -> bool:
         return channel.model == "openrouter/free" or str(channel.model or "").endswith(":free")
 
+    @staticmethod
+    def _same_account(first: ProviderChannel, second: ProviderChannel) -> bool:
+        base_url = getattr(first.provider, "base_url", "")
+        api_key = getattr(first.provider, "api_key", "")
+        return bool(base_url and api_key and base_url == getattr(second.provider, "base_url", "")
+                    and api_key == getattr(second.provider, "api_key", ""))
+
     def _daily_free_gate(self, channel: ProviderChannel) -> None:
         if not channel.daily_free_first:
             return
         free = channel if self._free_model(channel) else next(
             (candidate for candidate in self.channels
              if candidate.daily_free_first and self._free_model(candidate)
-             and candidate.provider.base_url == channel.provider.base_url
-             and candidate.provider.api_key == channel.provider.api_key), None,
+             and self._same_account(candidate, channel)), None,
         )
         if free is None:
             raise ProviderHTTPError("CONFIG_INVALID 付費接續缺少相同帳號的免費 Provider", "CONFIG_INVALID")
-        quota = free.provider.free_daily_quota()
+        quota_reader = getattr(free.provider, "free_daily_quota", None)
+        if not callable(quota_reader):
+            raise ProviderHTTPError("CONFIG_INVALID Provider 不支援每日免費額度查詢", "CONFIG_INVALID")
+        quota = quota_reader()
         if self._free_model(channel) and quota["remaining"] == 0:
             raise ProviderHTTPError(
                 "OpenRouter 當日免費額度已用完，等待下一個 UTC 日或已設定的付費接續",
