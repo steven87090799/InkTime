@@ -113,6 +113,7 @@ class BoundedJobWorker:
         self.processed_items = 0
         self.failure_count = 0
         self._schema_failure_streak = 0
+        self._provider_rejection_streak = 0
         self.child_active = 0
         self.child_timeouts = 0
         self.child_terminated = 0
@@ -159,6 +160,9 @@ class BoundedJobWorker:
             return
         self.failure_count += 1
         self._schema_failure_streak = self._schema_failure_streak + 1 if code == "VLM-004" else 0
+        http_status = getattr(exc, "http_status", None) or getattr(getattr(exc, "call_trace", None), "http_status", None)
+        rejected_input = code == "CONFIG_INVALID" and http_status == 400
+        self._provider_rejection_streak = self._provider_rejection_streak + 1 if rejected_input else 0
         if code.startswith("BUDGET-"):
             if not self.repository.defer_item(item_id, self.worker_id):
                 return
@@ -187,7 +191,15 @@ class BoundedJobWorker:
         )
         if not recorded:
             return
-        if code in {"CONFIG_INVALID", "AUTH_REQUIRED", "VLM-008"} or self._schema_failure_streak >= 3:
+        job = self.repository.get(job_id)
+        # A single HTTP 400 after validated results may be specific to that
+        # image. Keep it failed for explicit retry while draining other photos;
+        # first-request failures and repeated rejections still stop the job.
+        isolated_input_rejection = (
+            rejected_input and job is not None and int(job["completed_items"] or 0) > 0
+            and self._provider_rejection_streak < 3
+        )
+        if (code in {"CONFIG_INVALID", "AUTH_REQUIRED", "VLM-008"} and not isolated_input_rejection) or self._schema_failure_streak >= 3:
             self.repository.request_pause(job_id)
             self.repository.add_event(
                 job_id, "provider_safety_pause",
@@ -291,6 +303,7 @@ class BoundedJobWorker:
                         tasks.pop(item_id, None)
                         if message[0] == "ok":
                             self._schema_failure_streak = 0
+                            self._provider_rejection_streak = 0
                             _state, completed_id, result, cost = message
                             if self.result_callback:
                                 self.result_callback(result)
@@ -343,6 +356,7 @@ class BoundedJobWorker:
 
     def run_job(self, job_id: str) -> None:
         self._schema_failure_streak = 0
+        self._provider_rejection_streak = 0
         if self.hard_timeout:
             self._run_process_job(job_id)
             return
@@ -363,6 +377,7 @@ class BoundedJobWorker:
                 self._record_failure(job_id, item_id, exc)
             else:
                 self._schema_failure_streak = 0
+                self._provider_rejection_streak = 0
                 if future in timed_out:
                     self.repository.record_late_completion(
                         job_id, completed_id, result, cost, self.worker_id

@@ -702,6 +702,48 @@ def test_success_breaks_consecutive_schema_failure_safety_pause(app):
     assert repository.get(job_id)["status"] == "completed_with_errors"
 
 
+@pytest.mark.parametrize("wrapped", [False, True])
+def test_isolated_input_rejection_keeps_other_photos_running_after_proven_success(app, wrapped):
+    from inktime.app.providers.base import ProviderCallTrace
+    from inktime.app.providers.openai_compatible import ProviderHTTPError
+
+    service, repository, job_id = create_job(app, 8)
+    service.start(job_id)
+    calls = []
+
+    def process(item):
+        calls.append(item["id"])
+        if len(calls) == 2:
+            raise ProviderHTTPError("rejected image", "CONFIG_INVALID", request_started=True,
+                                    http_status=None if wrapped else 400,
+                                    call_trace=ProviderCallTrace(http_status=400) if wrapped else None)
+        return {"photo_id": item["photo_id"]}
+
+    BoundedJobWorker(repository, process, concurrency=1).run_job(job_id)
+    job = repository.get(job_id)
+    assert len(calls) == 8
+    assert job["status"] == "completed_with_errors"
+    assert job["completed_items"] == 7 and job["failed_items"] == 1
+
+
+def test_repeated_input_rejections_pause_even_after_success(app):
+    from inktime.app.providers.openai_compatible import ProviderHTTPError
+
+    service, repository, job_id = create_job(app, 10)
+    service.start(job_id)
+    calls = []
+
+    def process(item):
+        calls.append(item["id"])
+        if len(calls) > 1:
+            raise ProviderHTTPError("rejected image", "CONFIG_INVALID", http_status=400, request_started=True)
+        return {"photo_id": item["photo_id"]}
+
+    BoundedJobWorker(repository, process, concurrency=1).run_job(job_id)
+    assert len(calls) == 4
+    assert repository.get(job_id)["status"] == "paused"
+
+
 def test_keyset_queue_reaches_old_job_after_more_than_one_hundred(app):
     repository = app.extensions["inktime_job_repository"]
     service = app.extensions["inktime_job_service"]
