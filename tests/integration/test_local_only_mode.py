@@ -4,10 +4,10 @@ from inktime.app.domain.analysis.execution_mode import execution_mode
 from tests.conftest import create_admin, csrf, login
 
 
-def test_new_install_defaults_to_local_only_without_provider_route(app, monkeypatch):
+def test_new_install_defaults_to_seasonal_without_provider_calls(app, monkeypatch):
     settings = app.extensions["inktime_settings_repository"]
     providers = app.extensions["inktime_provider_service"]
-    assert execution_mode(settings) == "local_only"
+    assert execution_mode(settings) == "seasonal_ai"
     called = 0
 
     def route_snapshot():
@@ -21,7 +21,7 @@ def test_new_install_defaults_to_local_only_without_provider_route(app, monkeypa
         provider_route=[],
         scoring_profile_id=str(app.extensions["inktime_scoring_repository"].current()["id"]),
     )
-    assert plan["ai_execution_policy"]["execution_mode"] == "local_only"
+    assert plan["ai_execution_policy"]["execution_mode"] == "seasonal_ai"
     assert plan["provider_route"] == []
     assert called == 0
 
