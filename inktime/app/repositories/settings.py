@@ -975,12 +975,13 @@ SETTING_DEFINITIONS: dict[str, dict[str, Any]] = {
         "risk": "正式渲染會逐段檢查字元，缺字時禁止發布且不使用預設字型替代",
         "restart": False,
     },
+    "location.auto_enrich": {"category": "地區資料", "default": True, "type": "boolean", "description": "掃描與分析時自動補齊地區並快取；臺灣使用離線行政區界線，其他地區保留粗略城市", "restart": False},
     "render.show_location": {
         "category": "渲染設定",
         "default": True,
         "type": "boolean",
-        "description": "照片含 GPS 時，在電子紙短文案下方顯示最近城市",
-        "risk": "只顯示離線城市索引的粗略地名，不顯示精確座標；停用可從電子紙畫面隱藏",
+        "description": "照片含 GPS 時，在電子紙短文案下方顯示已保存的行政區或地區",
+        "risk": "優先使用行政區；無區界資料時顯示粗略城市，無 GPS 時留白",
         "restart": False,
     },
     "render.location_max_distance_km": {

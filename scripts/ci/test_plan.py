@@ -151,6 +151,7 @@ SUITE_EXECUTION_OWNER_JOB_IDS = {
 # bounded while ensuring production changes still select the relevant
 # integration contract.
 INTEGRATION_TEST_OWNER_SUITES: dict[str, tuple[str, ...]] = {
+    "tests/integration/test_automatic_photo_locations.py": ("scanner_photos_owner", "provider_analysis_owner", "persistence_owner"),
     "tests/integration/test_seasonal_analysis.py": (
         "provider_analysis_owner", "runtime_scheduler_owner", "persistence_owner", "web_api_owner", "render_release_owner",
     ),
@@ -1037,6 +1038,7 @@ def _classify_path(path: str) -> tuple[set[str], set[str], set[str], bool]:
                 "inktime/app/providers/",
                 "inktime/app/domain/analysis/",
                 "inktime/app/services/analysis",
+                "inktime/app/services/photo_location_enrichment",
                 "inktime/app/services/seasonal_analysis",
                 "inktime/app/repositories/seasonal_analysis",
                 "inktime/app/services/provider",

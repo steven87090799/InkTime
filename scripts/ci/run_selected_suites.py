@@ -98,6 +98,8 @@ RUNNER_SUITE_TEST_PATHS: dict[str, tuple[str, ...]] = {
         "tests/integration/test_v6_display_safety.py",
     ),
     "persistence_owner": (
+        "tests/integration/test_automatic_photo_locations.py",
+        "tests/unit/test_offline_districts.py",
         "tests/integration/test_seasonal_analysis.py",
         "tests/integration/test_photo_places.py",
         "tests/integration/test_auto_photo_selection_regressions.py",
@@ -154,6 +156,8 @@ RUNNER_SUITE_TEST_PATHS: dict[str, tuple[str, ...]] = {
         "tests/integration/test_photo_crop_state.py",
     ),
     "scanner_photos_owner": (
+        "tests/integration/test_automatic_photo_locations.py",
+        "tests/unit/test_offline_districts.py",
         "tests/unit/test_photo_place_domain.py",
         "tests/unit/test_local_selection.py",
         "tests/unit/test_photo_dates.py",
@@ -180,6 +184,8 @@ RUNNER_SUITE_TEST_PATHS: dict[str, tuple[str, ...]] = {
         "tests/integration/test_budget_calendar.py",
     ),
     "provider_analysis_owner": (
+        "tests/integration/test_automatic_photo_locations.py",
+        "tests/unit/test_offline_districts.py",
         "tests/unit/test_batch_multipart.py",
         "tests/integration/test_seasonal_analysis.py",
         "tests/integration/test_budget_offset_regressions.py",

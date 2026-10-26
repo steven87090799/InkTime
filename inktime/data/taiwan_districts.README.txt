@@ -1,0 +1,9 @@
+臺灣鄉鎮市區界線離線索引
+來源：內政部國土測繪中心 https://maps.nlsc.gov.tw/pro/download.jsp
+原始檔：鄉鎮市區界線(TWD97經緯度).zip，2026-10-26 下載。
+原始 ZIP SHA-256：e028e5a750eee48cf7913330655e5e5c5bb1f176868fbd0afdfc661fca60557c
+內容版本：TOWN_MOI_1120317，含官方 Town_Majia_Sanhe 疊加圖層。不是宣稱 2026 年測繪資料。
+座標：官方 TWD97[2020] 經緯度；照片 GPS 比對僅作地區標籤，不作測量用途。
+衍生方式：scripts/build_taiwan_districts.py；保留多環孔洞，座標四捨五入至小數六位。
+授權：政府資料開放授權條款第1版 https://data.gov.tw/license
+本索引僅含公開行政區界線，不含使用者照片、GPS 或私人資料。

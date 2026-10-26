@@ -95,6 +95,7 @@ class PhotoAnalysisService:
         observability=None,
         process_boundary=None,
         ai_traces=None,
+        location_enrichment=None,
     ) -> None:
         self.photos = photos
         self.usage = usage
@@ -104,6 +105,7 @@ class PhotoAnalysisService:
         self.observability = observability
         self.process_boundary = process_boundary
         self.ai_traces = ai_traces
+        self.location_enrichment = location_enrichment
 
     def _trace_write(self, method: str, *args, **kwargs):
         """Trace persistence is never allowed to alter production control flow."""
@@ -1442,6 +1444,8 @@ class PhotoAnalysisService:
         if not source.is_file():
             raise FileNotFoundError("SCAN-001 找不到照片檔案")
         assert_source_content(source, photo["sha256"])
+        if self.location_enrichment is not None:
+            self.location_enrichment.enrich(photo)
         photo = self._ensure_e6_suitability(photo_id, photo, source)
         analysis_spec = dict(analysis_plan or {})
         if not analysis_spec:

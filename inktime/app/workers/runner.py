@@ -104,6 +104,7 @@ def _execute_job_item(app, item, *, job, settings, provider, provider_error, ana
             app.extensions["inktime_photo_repository"],
             PhotoPreprocessor(),
             app.extensions["inktime_thumbnail_cache"],
+            location_enrichment=app.extensions["inktime_location_enrichment_service"],
         )
         return scanner.scan(
             settings.get("library_name", "主要照片庫"),
@@ -170,6 +171,7 @@ def _execute_job_item(app, item, *, job, settings, provider, provider_error, ana
             app.extensions["inktime_photo_repository"],
             PhotoPreprocessor(),
             app.extensions["inktime_thumbnail_cache"],
+            location_enrichment=app.extensions["inktime_location_enrichment_service"],
         )
         scan = scanner.scan(
             settings.get("library_name", "電子紙模擬照片"),

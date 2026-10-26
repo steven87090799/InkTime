@@ -147,11 +147,13 @@ def _scan_error(
 
 class PhotoScanner:
     def __init__(
-        self, repository: PhotoRepository, preprocessor: PhotoPreprocessor, thumbnails: ThumbnailCache
+        self, repository: PhotoRepository, preprocessor: PhotoPreprocessor, thumbnails: ThumbnailCache,
+        *, location_enrichment=None,
     ) -> None:
         self.repository = repository
         self.preprocessor = preprocessor
         self.thumbnails = thumbnails
+        self.location_enrichment = location_enrichment
 
     @staticmethod
     def _sections(
@@ -461,6 +463,8 @@ class PhotoScanner:
 
             for seen_chunk in _slices(seen_without_write, write_batch_size):
                 self.repository.mark_seen_batch(scan_id, seen_chunk)
+                if self.location_enrichment is not None:
+                    self.location_enrichment.enrich_ids(seen_chunk)
             for failed_chunk in _slices(processing_failures, write_batch_size):
                 self.repository.mark_processing_failed_batch(scan_id, failed_chunk)
 
@@ -512,6 +516,8 @@ class PhotoScanner:
                         for item in prepared_chunk
                     )
                     continue
+                if self.location_enrichment is not None:
+                    self.location_enrichment.enrich_ids([result.photo_id for result in batch_results])
                 by_path: dict[str, BatchPhotoResult] = {
                     batch_result.relative_path: batch_result for batch_result in batch_results
                 }

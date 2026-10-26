@@ -298,6 +298,9 @@ def bootstrap_services(
     budget_service = BudgetService(database, settings_repository)
     provider_service = ProviderService(provider_repository, settings_repository)
     process_boundary = KillableProcessBoundary(max_processes=config.worker_concurrency)
+    from inktime.app.services.photo_location_enrichment import PhotoLocationEnrichmentService
+    location_resolver = LocationResolver(Path(__file__).resolve().parents[2] / "data" / "world_cities_zh.csv")
+    location_enrichment = PhotoLocationEnrichmentService(database, settings_repository, location_resolver)
     analysis_service = PhotoAnalysisService(
         photo_repository,
         usage_repository,
@@ -307,6 +310,7 @@ def bootstrap_services(
         observability_service,
         process_boundary,
         ai_trace_repository,
+        location_enrichment=location_enrichment,
     )
     analysis_batch_repository = AnalysisBatchRepository(database)
     batch_analysis_service = BatchAnalysisService(
@@ -326,7 +330,6 @@ def bootstrap_services(
         scoring_repository=scoring_repository,
     )
     font_manager = FontManager(config.data_dir / "fonts")
-    location_resolver = LocationResolver(Path(__file__).resolve().parents[2] / "data" / "world_cities_zh.csv")
     release_publisher = AtomicReleasePublisher(config.release_dir)
     observability_service.publisher = release_publisher
     render_candidate_repository = RenderCandidateRepository(database)
@@ -397,6 +400,7 @@ def bootstrap_services(
             ),
             "inktime_font_manager": font_manager,
             "inktime_location_resolver": location_resolver,
+            "inktime_location_enrichment_service": location_enrichment,
             "inktime_release_publisher": release_publisher,
             "inktime_render_candidate_repository": render_candidate_repository,
             "inktime_photo_analysis_retention_repository": photo_analysis_retention_repository,
