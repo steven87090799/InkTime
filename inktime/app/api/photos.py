@@ -230,14 +230,20 @@ def photos_page():
         if hard_excluded:
             reason = str(photo.get("reject_reason") or quality["primary_reason"])
             photo.pop("score_band", None)
+            pending_review = stored_exclusion == "pending_review"
+            photo["selection_status_label"] = "待確認" if pending_review else "已排除"
+            status_reason = (
+                f"待人工確認：{exclusion_labels.get(reason, reason)}（判斷尚未確定）"
+                if pending_review else f"已排除：{exclusion_labels.get(reason, reason)}"
+            )
             photo["total_score"] = 0.0
             photo["selection_score"] = 0.0
             if score_kind != SEMANTIC_SCORE_KIND and str(photo.get("local_features_status") or "") == "complete":
                 photo["score_kind"] = LOCAL_QUALITY_SCORE_KIND
                 photo["local_quality_score"] = local_candidate_score(photo, evaluation=quality)
-                photo["total_score_source"] = f"本機候選品質（已排除：{exclusion_labels.get(reason, reason)}）"
+                photo["total_score_source"] = f"本機候選品質（{status_reason}）"
             else:
-                photo["total_score_source"] = f"已排除：{exclusion_labels.get(reason, reason)}"
+                photo["total_score_source"] = status_reason
         elif ranking_score is not None and photo.get("local_features_status") != "complete":
             photo["total_score"] = None
             photo["total_score_source"] = "等待本機品質檢查完成"
