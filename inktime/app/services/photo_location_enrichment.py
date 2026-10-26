@@ -46,14 +46,15 @@ class PhotoLocationEnrichmentService:
             LOGGER.warning('地區補齊未完成 photo_id=%s reason=%s', photo['id'], type(error).__name__)
             return None
 
-    def save_visual_landmark(self, photo, raw):
+    def save_visual_landmark(self, photo, raw, *, connection=None):
         try:
             response = extract_json_value(raw) if isinstance(raw, str) else raw
             landmark = visual_landmark(response.get('landmark')) if isinstance(response, dict) else None
             if landmark is None:
                 return None
             return self.repository.save_landmark(photo['id'], photo['sha256'], photo['gps_lat'], photo['gps_lon'],
-                                                 name=landmark['name'], confidence=landmark['confidence'])
+                                                 name=landmark['name'], confidence=landmark['confidence'],
+                                                 connection=connection)
         except (ValueError, TypeError, OSError, sqlite3.Error, KeyError) as error:
             LOGGER.warning('地標保存未完成 photo_id=%s reason=%s', photo['id'], type(error).__name__)
             return None

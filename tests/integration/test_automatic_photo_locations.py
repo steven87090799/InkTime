@@ -1,5 +1,7 @@
 import hashlib
 
+import pytest
+
 
 def photo(app, identifier, lat=24.9676, lon=121.5376):
     db = app.extensions['inktime_database']
@@ -61,3 +63,20 @@ def test_visual_landmark_without_gps_is_independent_and_uncertainty_falls_back(a
     place = service.save_visual_landmark(district_row, {'landmark': {'name': '不確定建築', 'confidence': 0.6}})
     assert place.display_label == '新店區'
     assert place.landmark == '不確定建築'
+
+
+def test_visual_landmark_uses_the_analysis_transaction_and_rolls_back(app):
+    service = app.extensions['inktime_location_enrichment_service']
+    row = photo(app, 'transaction-landmark')
+    service.enrich(row)
+    with pytest.raises(RuntimeError, match='import failed'):
+        with app.extensions['inktime_database'].transaction() as connection:
+            place = service.save_visual_landmark(
+                row, {'landmark': {'name': '測試地標', 'confidence': 0.98}}, connection=connection,
+            )
+            assert place.landmark == '測試地標'
+            assert place.district == '新店區'
+            raise RuntimeError('import failed')
+    place = service.repository.get(row)
+    assert place.district == '新店區'
+    assert place.landmark == ''

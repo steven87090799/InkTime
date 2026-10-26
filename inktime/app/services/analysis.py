@@ -517,8 +517,8 @@ class PhotoAnalysisService:
             expected_content_sha256=str(photo["sha256"] or ""),
             connection=connection,
         )
-        if self.location_enrichment is not None and connection is None and provider != "local":
-            self.location_enrichment.save_visual_landmark(photo, raw)
+        if self.location_enrichment is not None and provider != "local":
+            self.location_enrichment.save_visual_landmark(photo, raw, connection=connection)
         self._activity(
             "DEBUG",
             "photo_analysis_completed",
