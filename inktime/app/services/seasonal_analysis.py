@@ -38,7 +38,7 @@ class SeasonalAnalysisService:
         if self.settings.get("analysis.require_delivery_ack", True):
             start = local.replace(hour=8, minute=0, second=0, microsecond=0).astimezone(timezone.utc).isoformat()
             end = local.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
-            params = [start, end.astimezone(timezone.utc).isoformat()]
+            params: list[str | None] = [start, end.astimezone(timezone.utc).isoformat()]
             params.extend([device_id, device_id])
             with self.repository.database.session() as connection:
                 row = connection.execute(

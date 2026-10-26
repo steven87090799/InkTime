@@ -375,6 +375,9 @@ def test_first_setup_login_and_primary_console_pages():
         # All settings remain visible/searchable even while their dependency is
         # disabled. Enable AI before editing its concurrency; no model is called.
         expect(concurrency_card).to_be_visible()
+        expect(page.locator('[name="analysis.execution_mode"]')).to_have_value("seasonal_ai")
+        expect(concurrency).to_be_enabled()
+        page.locator('[name="analysis.execution_mode"]').select_option("disabled")
         expect(concurrency).to_be_disabled()
         page.locator('[name="analysis.execution_mode"]').select_option("automatic_ai")
         expect(concurrency).to_be_enabled()

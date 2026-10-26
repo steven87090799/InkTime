@@ -1612,7 +1612,7 @@ class RenderService:
             date_lines = self._pair_date_lines(part.get("date", ""))
             date_font = ImageFont.truetype(font.path, 10)
             date_width = max((draw.textlength(line, font=date_font) for line in date_lines), default=0)
-            right = rect.right - 8
+            right = float(rect.right - 8)
             if date_lines:
                 for index, line in enumerate(date_lines):
                     draw.text((right, rect.y + 2 + index * 12), line, font=date_font, fill="black", anchor="rt")
