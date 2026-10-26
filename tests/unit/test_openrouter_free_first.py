@@ -173,3 +173,19 @@ def test_quota_read_is_authenticated_and_does_not_send_an_image():
         api_key="mock-key", session=Session(),
     )
     assert provider.free_daily_quota() == {"used": 7, "limit": 1000, "remaining": 993}
+
+
+def test_enabling_free_first_preserves_existing_analysis_cache_identity(app):
+    repo = app.extensions["inktime_provider_repository"]
+    service = app.extensions["inktime_provider_service"]
+    payload = {
+        "name": "free", "kind": "openrouter", "base_url": "https://openrouter.ai/api/v1",
+        "api_key": "mock-key", "model": "openrouter/free", "enabled": True,
+    }
+    identifier = repo.save(payload, user_id="test")
+    original_route = service.route_snapshot()
+    original_operations = service.operational_revision(repo.get(identifier))
+    repo.save({**payload, "id": identifier, "max_concurrency": 1, "rate_limit_rpm": 20,
+               "options": {"daily_free_first": True}}, user_id="test")
+    assert service.route_snapshot() == original_route
+    assert service.operational_revision(repo.get(identifier)) != original_operations
