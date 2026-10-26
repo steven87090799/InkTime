@@ -51,6 +51,7 @@ def test_seasonal_window_rotates_unused_and_keeps_complete_history(app, tmp_path
     _seen(app, "seen-in-window")
     _setting(app, "analysis.execution_mode", "seasonal_ai")
     _setting(app, "analysis.seasonal_window_days", 2)
+    _setting(app, "render.seasonal_outside_fallback", False)
     _setting(app, "render.selection_mode", "top_ranked")
     service = app.extensions["inktime_render_service"]
     rows = service.select_candidates_details(1, target_date=date(2027, 1, 1), record_history=True)
@@ -89,6 +90,7 @@ def test_seasonal_adaptive_pair_uses_future_target_window(app, tmp_path):
     _photo(app, root, "outside", 99, "10-22")
     _setting(app, "analysis.execution_mode", "seasonal_ai")
     _setting(app, "analysis.seasonal_window_days", 2)
+    _setting(app, "render.seasonal_outside_fallback", False)
     service = app.extensions["inktime_render_service"]
     primary = dict(app.extensions["inktime_photo_repository"].get_with_path("primary"))
     secondary = service._select_adaptive_pair_candidate(

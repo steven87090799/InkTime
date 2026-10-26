@@ -2870,6 +2870,15 @@ class RenderService:
                 row["seasonal_priority"] = int(row["date_priority"])
                 row["match_type"] = ("seasonal_low_score" if row["seasonal_priority"] == 1000
                                      else "exact_day" if row["day_distance"] == 0 else "nearby_day")
+            minimum = float(self.settings.get("render.seasonal_priority_min_score", 60))
+            if (not any(float(row.get("selection_score") or 0) >= minimum for row in pool.values())
+                    and self.settings.get("render.seasonal_outside_fallback", True)):
+                outside = self._candidate_query(
+                    target=target, month_days=None, older_only=False,
+                    limit=max(500, limit), candidate_years=candidate_years, score_kind=score_kind,
+                )
+                append([row for row in outside if float(row.get("selection_score") or 0) >= minimum],
+                       "ranked_fallback")
         elif mode == "top_ranked":
             append(self._candidate_query(
                 target=target,

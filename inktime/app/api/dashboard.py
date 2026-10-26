@@ -145,7 +145,7 @@ def _setup_overview(connection) -> dict:
             "用量限制與預算保護",
             complete=all(value > 0 for value in (daily_limit, monthly_limit, daily_stop, monthly_stop)),
             current=(
-                f"每日 {daily_limit} 張／每月 {monthly_limit} 張 · "
+                f"每日 {str(daily_limit) + ' 張' if daily_limit else '不限制張數'}／每月 {str(monthly_limit) + ' 張' if monthly_limit else '不限制張數'} · "
                 f"每日停用 US$ {daily_stop:g}／每月停用 US$ {monthly_stop:g}"
             ),
             detail="達到照片數或成本上限時會停止新增模型請求，避免失控使用。",

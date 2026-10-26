@@ -227,7 +227,7 @@ SETTING_DEFINITIONS: dict[str, dict[str, Any]] = {
         "category": "AI 模式",
         "default": 50,
         "type": "integer",
-        "description": "前 N 張候選模式每次允許進入 AI 的最高本機候選數",
+        "description": "僅前 N 張候選模式的上限；歷年同期按日期分批不受此值限制",
         "risk": "提高數值會增加 Token 與成本；不會影響已快取結果",
         "min": 1,
         "max": 10000,
@@ -820,6 +820,7 @@ SETTING_DEFINITIONS: dict[str, dict[str, Any]] = {
         "choices": ["history_today", "top_ranked"],
         "restart": False,
     },
+    "render.seasonal_outside_fallback": {"category": "渲染設定", "default": True, "type": "boolean", "description": "同期範圍沒有合格照片時，使用範圍外已分析的高分照片並記錄補圖標示", "restart": False},
     "render.history_today_window_days": {
         "category": "渲染設定",
         "default": 5,

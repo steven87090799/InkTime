@@ -102,7 +102,7 @@ def _queue_ai(
     selected = (
         list(dict.fromkeys(photo_ids))[:500]
         if force_ai or frozen_photo_ids
-        else _repository().active_eligible_requested_ids(photo_ids, limit=daily_limit)
+        else _repository().active_eligible_requested_ids(photo_ids, limit=daily_limit or len(photo_ids))
     )
     if not selected:
         raise ValueError("沒有符合資格且可送入 AI 的照片")
@@ -442,7 +442,7 @@ def queue_ai_mode_run():
         return _ai_job_error(exc), 409
     if mode == "full_library" and not confirmed:
         total_eligible = _repository().count_active_eligible()
-        queued_now = min(total_eligible, daily_limit)
+        queued_now = min(total_eligible, daily_limit) if daily_limit > 0 else total_eligible
         estimate = current_app.extensions["inktime_job_service"].estimate(
             queued_now, str(settings.get("analysis.strategy", "single"))
         )
@@ -454,7 +454,7 @@ def queue_ai_mode_run():
             "estimate": estimate,
             "confirmation_required": True,
         }, 409
-    limit = int(settings.get("analysis.ai_top_n", 50)) if mode == "top_candidates" else daily_limit
+    limit = int(settings.get("analysis.ai_top_n", 50)) if mode == "top_candidates" else (daily_limit or _repository().count_active_eligible())
     if mode == "full_library":
         group_by = str(payload.get("batch_by", "year"))
         if group_by not in {"year", "folder"}:
