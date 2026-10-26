@@ -1043,3 +1043,25 @@ def test_adaptive_secondary_risk_controls_the_preview_dither_plan(app, tmp_path,
 
     monkeypatch.setattr(service, "_select_adaptive_pair_candidate", selection_must_stay_frozen)
     assert service._render_plan_image(plan).size == (480, 800)
+
+
+def test_compact_pair_dates_leave_both_sentences_and_districts_visible(app, monkeypatch):
+    from inktime.app.domain.rendering.layout_geometry import resolve_compact_pair_geometry
+    service = app.extensions['inktime_render_service']
+    geometry = resolve_compact_pair_geometry(((900, 1600), (900, 1600)))
+    calls = []
+    original = ImageDraw.ImageDraw.text
+    def capture(draw, xy, text, *args, **kwargs):
+        calls.append((str(text), kwargs['font'].size))
+        return original(draw, xy, text, *args, **kwargs)
+    monkeypatch.setattr(ImageDraw.ImageDraw, 'text', capture)
+    records = ({'photo_id': 'a', 'text': '那天微風也記得我們一起走過的路'},
+               {'photo_id': 'b', 'text': '那些溫柔日常值得好好收藏'})
+    parts = {key: {'date': '2022年8月5日', 'location': '新店區'} for key in ('a', 'b')}
+    with Image.new('RGB', (800, 480), 'white') as canvas:
+        service._draw_compact_pair_captions(canvas, geometry, records, parts)
+    assert sum(text == '2022' for text, _ in calls) == 2
+    assert sum(text == '8/5' for text, _ in calls) == 2
+    assert sum(text == '新店區' for text, _ in calls) == 2
+    painted = ''.join(text for text, size in calls if size >= 18)
+    assert records[0]['text'] in painted and records[1]['text'] in painted

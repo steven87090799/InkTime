@@ -50,7 +50,7 @@ class PhotoLocationEnrichmentService:
         import json
         with self.database.session() as connection:
             rows = connection.execute(
-                "SELECT p.id,p.sha256,p.gps_lat,p.gps_lon,l.gps_key AS cached_gps,l.content_sha256 AS cached_sha FROM photos p "
+                "SELECT p.id,p.sha256,p.gps_lat,p.gps_lon,l.gps_key AS cached_gps,l.content_sha256 AS cached_sha,l.place_json AS cached_place FROM photos p "
                 "LEFT JOIN photo_locations l ON l.photo_id=p.id "
                 "WHERE p.id IN (SELECT value FROM json_each(?)) "
                 "AND p.gps_lat IS NOT NULL AND p.gps_lon IS NOT NULL",
@@ -60,8 +60,10 @@ class PhotoLocationEnrichmentService:
         for row in rows:
             try:
                 if row['cached_sha'] == row['sha256'] and row['cached_gps'] == coordinate_key(row['gps_lat'], row['gps_lon']):
-                    continue
-            except ValueError:
+                    cached = json.loads(row['cached_place'] or '{}')
+                    if cached.get('district') or cached.get('city') or cached.get('full_address') or cached.get('source') == 'offline-city-index':
+                        continue
+            except (ValueError, TypeError):
                 pass
             completed += self.enrich(row) is not None
         return completed

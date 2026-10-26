@@ -38,7 +38,8 @@ def test_address_enrichment_preserves_landmark_and_rejects_stale_photo(app):
     row = photo(app, 'landmark')
     service.repository.save_landmark(row['id'], row['sha256'], row['gps_lat'], row['gps_lon'],
                                      name='已確認地標', confidence=0.95)
-    place = service.enrich(row)
+    assert service.enrich_ids([row['id']]) == 1
+    place = service.repository.get(row)
     assert place.district == '新店區'
     assert place.landmark == '已確認地標'
     stale = photo(app, 'stale')
