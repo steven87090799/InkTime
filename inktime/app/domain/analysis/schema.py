@@ -387,6 +387,12 @@ def validate_model_response(raw: str | dict, *, caption_controls: dict[str, Any]
             isinstance(category, str) for category in categories
         ):
             value["types"] = list(dict.fromkeys(categories))
+        orientation = value.get("visual_orientation")
+        evidence = orientation.get("evidence") if isinstance(orientation, dict) else None
+        if isinstance(evidence, list) and 1 <= len(evidence) <= 6 and all(
+            isinstance(code, str) for code in evidence
+        ):
+            orientation["evidence"] = list(dict.fromkeys(evidence))
     _validate(value, json_schema_for_stage(
         "single", caption_controls=caption_controls, schema_version=schema_version,
     )["schema"], "analysis")

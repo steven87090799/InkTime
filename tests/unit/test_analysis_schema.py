@@ -184,6 +184,27 @@ def test_category_repair_does_not_accept_malformed_or_oversized_output(categorie
         validate_model_response(valid_result(types=categories))
 
 
+def test_repeated_orientation_evidence_is_normalized_without_changing_direction_or_raw_input():
+    value = valid_result(visual_orientation={
+        "rotation_cw": 0, "confidence": 0.97, "ambiguous": False,
+        "evidence": ["faces_upright", "faces_upright"],
+    })
+    result = validate_model_response(value)
+    assert result["visual_orientation"] == {**value["visual_orientation"], "evidence": ["faces_upright"]}
+    assert value["visual_orientation"]["evidence"] == ["faces_upright", "faces_upright"]
+    with pytest.raises(AnalysisValidationError, match="不可重複"):
+        validate_analysis_result(value)
+
+
+@pytest.mark.parametrize("evidence", [["faces_upright"] * 7, ["unknown", "unknown"], ["faces_upright", 1]])
+def test_evidence_deduplication_keeps_size_enum_and_type_guards(evidence):
+    value = valid_result(visual_orientation={
+        "rotation_cw": 0, "confidence": 0.97, "ambiguous": False, "evidence": evidence,
+    })
+    with pytest.raises(AnalysisValidationError):
+        validate_model_response(value)
+
+
 @pytest.mark.parametrize("field,invalid", [
     ("confidence", "0.9"), ("confidence", float("nan")), ("confidence", 2),
     ("rotation_cw", 45), ("ambiguous", "false"), ("evidence", ["invalid"]),
