@@ -29,17 +29,17 @@ def contains(rings, x, y):
 class DistrictResolver:
     def __init__(self, path=DATA_PATH):
         self.path = Path(path)
+        self.index = lru_cache(maxsize=1)(self._load_index)
+        self.geometry = lru_cache(maxsize=8)(self._load_geometry)
 
-    @lru_cache(maxsize=1)
-    def index(self):
+    def _load_index(self):
         with zipfile.ZipFile(self.path) as archive:
             value = json.loads(archive.read('index.json'))
         if not 1 <= len(value['features']) <= 500:
             raise ValueError('行政區索引超出範圍')
         return value
 
-    @lru_cache(maxsize=8)
-    def geometry(self, name):
+    def _load_geometry(self, name):
         with zipfile.ZipFile(self.path) as archive:
             if archive.getinfo(name).file_size > 16 * 1024 * 1024:
                 raise ValueError('行政區界線資料過大')

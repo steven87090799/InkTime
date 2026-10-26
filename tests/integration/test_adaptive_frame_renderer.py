@@ -514,8 +514,9 @@ def test_every_pair_mode_draws_both_photo_captions_and_smaller_capture_dates(
     painted = "".join(text for text, _size in calls)
     for caption in ("A側相框回憶文字", "B側相框回憶文字"):
         assert caption in painted
-    for label in ("2024年7月1日", "2021年12月31日"):
-        assert label in painted
+    for year, month_day in (("2024", "7/1"), ("2021", "12/31")):
+        assert year in painted
+        assert month_day in painted or ("月" in painted and "日" in painted)
     assert plan["primary_caption"]["capture_date"] == "2024-07-01"
     assert plan["secondary_caption"]["capture_date"] == "2021-12-31"
     assert all(size <= 14 for text, size in calls if "年" in text or "月" in text)

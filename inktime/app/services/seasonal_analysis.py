@@ -38,23 +38,19 @@ class SeasonalAnalysisService:
         if self.settings.get("analysis.require_delivery_ack", True):
             start = local.replace(hour=8, minute=0, second=0, microsecond=0).astimezone(timezone.utc).isoformat()
             end = local.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
-            clause = " AND json_extract(metadata_json,'$.device_id')=?" if device_id else ""
             params = [start, end.astimezone(timezone.utc).isoformat()]
-            if device_id:
-                params.append(device_id)
+            params.extend([device_id, device_id])
             with self.repository.database.session() as connection:
                 row = connection.execute(
                     "SELECT 1 FROM display_history WHERE selection_method='device_queue_ack' "
-                    "AND displayed_at>=? AND displayed_at<?" + clause + " LIMIT 1", params,  # noqa: S608 - fixed optional device predicate
+                    "AND displayed_at>=? AND displayed_at<? "
+                    "AND (? IS NULL OR json_extract(metadata_json,'$.device_id')=?) LIMIT 1", params,
                 ).fetchone()
             if row is None:
                 # Offline panel-complete ACKs can arrive at the next network
                 # wake. Hash verification of today's first slot is sufficient
                 # to start tomorrow, but never counts as an actual display.
-                device_clause = " AND d.id=?" if device_id else ""
-                delivery_params = [local.date().isoformat()]
-                if device_id:
-                    delivery_params.append(device_id)
+                delivery_params = [local.date().isoformat(), device_id, device_id]
                 with self.repository.database.session() as connection:
                     row = connection.execute(
                         "SELECT 1 FROM device_offline_schedule_slots sl "
@@ -63,7 +59,7 @@ class SeasonalAnalysisService:
                         "JOIN device_content_queue_events e ON e.queue_item_id=sl.queue_item_id "
                         "AND e.device_id=d.id WHERE ds.target_date=? AND sl.slot_index=0 "
                         "AND ds.config_version=d.config_version AND ds.status='ready' "
-                        "AND e.event_type='HASH_VERIFIED'" + device_clause + " LIMIT 1",  # noqa: S608 - fixed optional device predicate
+                        "AND e.event_type='HASH_VERIFIED' AND (? IS NULL OR d.id=?) LIMIT 1",
                         delivery_params,
                     ).fetchone()
                 if row is None:

@@ -8,6 +8,7 @@ import json
 import logging
 from pathlib import Path
 import random
+import re
 import time
 from typing import Any
 
@@ -1395,42 +1396,39 @@ class RenderService:
             draw.rectangle((box.x, box.y, box.right, box.bottom), fill="white")
             normalized = " ".join(text.split())
             font_path = self.fonts.resolve(str(self.settings.get("render.font_path", "")))
-            horizontal_padding = 10
+            horizontal_padding = min(10, max(4, (box.width - 32) // 2))
             vertical_padding = 12
             available_width = max(1, box.width - horizontal_padding * 2)
             available_height = max(0, box.height - vertical_padding * 2)
             y = box.y + vertical_padding
-            date_characters = list("".join(date_label.split())) if date_at_bottom else []
-            place_characters = list("".join(str(record.get("capture_place_label") or "").split())) if date_at_bottom else []
-            # Keep the existing date/short-sentence positions when no place is
-            # available. A place uses a second small upright column at the
-            # same bottom baseline; it never changes the photo rectangles.
-            if len(place_characters) > 12:
-                place_characters = place_characters[:11] + ["…"]
-            date_line_height = 14
-            metadata_height = max(len(date_characters), len(place_characters)) * date_line_height
+            date_font = ImageFont.truetype(str(font_path), 10)
+            date_lines = self._pair_date_lines(date_label)
+            place = str(record.get("capture_place_label") or "").strip()
+            metadata_lines = list(date_lines)
+            if place:
+                # Horizontal place lines share the strip width, not the sentence
+                # height of a second long vertical date column.
+                remaining = place
+                while remaining and len(metadata_lines) < len(date_lines) + 3:
+                    line = ""
+                    while remaining and draw.textlength(line + remaining[0], font=date_font) <= available_width:
+                        line += remaining[0]
+                        remaining = remaining[1:]
+                    if not line:
+                        break
+                    metadata_lines.append(line)
+                if remaining and metadata_lines:
+                    metadata_lines[-1] = self._fit_line(draw, metadata_lines[-1] + "…", date_font, available_width)
+            metadata_height = len(metadata_lines) * 14
             if metadata_height:
                 available_height = max(0, available_height - metadata_height - 12)
-            if date_label and not date_at_bottom:
-                # The narrow side strip keeps the date small and gives the
-                # larger memory sentence most of the available height.
-                date_lines = date_label.replace("年", "年\n", 1).splitlines()
-                date_font = ImageFont.truetype(str(font_path), 10)
-                for date_size in range(14, 9, -1):
-                    candidate_font = ImageFont.truetype(str(font_path), date_size)
-                    if all(
-                        draw.textlength(line, font=candidate_font) <= available_width for line in date_lines
-                    ):
-                        date_font = candidate_font
-                        break
-                for line in date_lines:
+                metadata_top = box.bottom - vertical_padding - metadata_height if date_at_bottom else y
+                for index, line in enumerate(metadata_lines):
                     bounds = draw.textbbox((0, 0), line, font=date_font)
-                    glyph_width = bounds[2] - bounds[0]
-                    x = box.x + horizontal_padding + (available_width - glyph_width) // 2 - bounds[0]
-                    draw.text((x, y - bounds[1]), line, font=date_font, fill="#17221c")
-                    y += 18
-                y += 8
-                available_height = max(0, box.bottom - vertical_padding - y)
+                    x = box.x + horizontal_padding + (available_width - draw.textlength(line, font=date_font)) / 2
+                    draw.text((x, metadata_top + index * 14 - bounds[1]), line, font=date_font, fill="#17221c")
+                if not date_at_bottom:
+                    y += metadata_height + 12
             font = ImageFont.truetype(str(font_path), 18)
             for font_size in range(24, 17, -1):
                 candidate_font = ImageFont.truetype(str(font_path), font_size)
@@ -1457,18 +1455,6 @@ class RenderService:
                 x = box.x + horizontal_padding + (available_width - glyph_width) // 2 - bounds[0]
                 draw.text((x, y - bounds[1]), character, font=font, fill="#17221c")
                 y += line_height
-            if date_characters or place_characters:
-                date_font = ImageFont.truetype(str(font_path), 12)
-                columns = [(date_characters, box.x + box.width // 2)]
-                if date_characters and place_characters:
-                    columns = [(place_characters, box.x + 13), (date_characters, box.x + box.width - 13)]
-                elif place_characters:
-                    columns = [(place_characters, box.x + box.width // 2)]
-                for characters, center in columns:
-                    y = box.bottom - vertical_padding - len(characters) * date_line_height
-                    for character in characters:
-                        draw.text((center, y), character, font=date_font, fill="black", anchor="mt")
-                        y += date_line_height
             draw.line(
                 (box.right - 2, box.y + 12, box.right - 2, box.bottom - 12),
                 fill="#1d2822",
@@ -1480,11 +1466,16 @@ class RenderService:
         draw.rectangle((box.x, box.y, box.right, box.bottom), fill="white")
         draw.line((box.x + 8, box.y + 2, box.right - 8, box.y + 2), fill="#1d2822", width=1)
         caption_top = box.y + 8
-        if date_label:
+        place = str(record.get("capture_place_label") or "").strip()
+        if date_label or place:
             font_path = self.fonts.resolve(str(self.settings.get("render.font_path", "")))
-            date_font = ImageFont.truetype(str(font_path), 14)
-            draw.text((box.x + 12, caption_top), date_label, font=date_font, fill="#17221c")
-            caption_top += 22
+            date_font = ImageFont.truetype(str(font_path), 10)
+            for index, line in enumerate(self._pair_date_lines(date_label)):
+                draw.text((box.right - 12, caption_top + index * 12), line, font=date_font, fill="#17221c", anchor="rt")
+            if place:
+                place = self._fit_line(draw, place, date_font, max(1, box.width - 88))
+                draw.text((box.x + 12, caption_top + 6), place, font=date_font, fill="#17221c")
+            caption_top += 28
         self._draw_footer_caption(
             draw,
             text,
@@ -1618,23 +1609,29 @@ class RenderService:
             font = fonts["small"]
             date_font = ImageFont.truetype(font.path, 14)
             part = parts[photo_id]
-            date_label = part.get("date", "")
-            location_label = part.get("location", "")
-            # Keep the full date. Shorten the place first, reserving room for
-            # the caption even in a two-photo portrait footer.
-            date_pixels = draw.textlength(date_label, font=date_font) if date_label else 0
-            separator_pixels = draw.textlength("・", font=date_font) if date_label else 0
-            place_budget = int(max(0, rect.width * 0.62 - date_pixels - separator_pixels))
-            location_label = self._fit_line(draw, location_label, date_font, place_budget) if place_budget >= 14 else ""
-            date_label = place_date_label(location_label, date_label)
-            date_width = draw.textlength(date_label, font=date_font) if date_label else 0
-            available = max(1, rect.width - 16 - date_width - (12 if date_label else 0))
-            text = self._fit_line(draw, part.get("caption", ""), font, int(available))
-            y = rect.y + rect.height / 2
+            date_lines = self._pair_date_lines(part.get("date", ""))
+            date_font = ImageFont.truetype(font.path, 10)
+            date_width = max((draw.textlength(line, font=date_font) for line in date_lines), default=0)
+            right = rect.right - 8
+            if date_lines:
+                for index, line in enumerate(date_lines):
+                    draw.text((right, rect.y + 2 + index * 12), line, font=date_font, fill="black", anchor="rt")
+                right -= date_width + 10
+            location = self._fit_line(draw, part.get("location", ""), date_font, max(0, int(rect.width * 0.25)))
+            if location:
+                draw.text((right, rect.y + rect.height / 2), location, font=date_font, fill="black", anchor="rm")
+                right -= draw.textlength(location, font=date_font) + 10
+            available = max(1, int(right - rect.x - 8))
+            text = self._fit_line(draw, part.get("caption", ""), font, available)
             if text:
-                draw.text((rect.x + 8, y), text, font=font, fill="black", anchor="lm")
-            if date_label:
-                draw.text((rect.right - 8, y), date_label, font=date_font, fill="black", anchor="rm")
+                draw.text((rect.x + 8, rect.y + rect.height / 2), text, font=font, fill="black", anchor="lm")
+
+    @staticmethod
+    def _pair_date_lines(label: str) -> list[str]:
+        match = re.fullmatch(r"(\d{4})年(\d{1,2})月(\d{1,2})日", label.strip())
+        if match:
+            return [match[1], f"{int(match[2])}/{int(match[3])}"]
+        return [label.strip()] if label.strip() else []
 
     def _calendar(self, canvas: Image.Image, fonts, today: date, start_y: int = 75) -> None:
         draw = ImageDraw.Draw(canvas)
