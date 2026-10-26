@@ -1055,7 +1055,7 @@ def test_compact_pair_dates_leave_both_sentences_and_districts_visible(app, monk
         calls.append((str(text), kwargs['font'].size))
         return original(draw, xy, text, *args, **kwargs)
     monkeypatch.setattr(ImageDraw.ImageDraw, 'text', capture)
-    records = ({'photo_id': 'a', 'text': '那天微風也記得我們一起走過的路'},
+    records = ({'photo_id': 'a', 'text': '那天微風也記得我們一起走過的路留在心裡面'},
                {'photo_id': 'b', 'text': '那些溫柔日常值得好好收藏'})
     parts = {key: {'date': '2022年8月5日', 'location': '新店區'} for key in ('a', 'b')}
     with Image.new('RGB', (800, 480), 'white') as canvas:

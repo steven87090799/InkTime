@@ -1397,7 +1397,7 @@ class RenderService:
             normalized = " ".join(text.split())
             font_path = self.fonts.resolve(str(self.settings.get("render.font_path", "")))
             horizontal_padding = min(10, max(4, (box.width - 32) // 2))
-            vertical_padding = 12
+            vertical_padding = 8
             available_width = max(1, box.width - horizontal_padding * 2)
             available_height = max(0, box.height - vertical_padding * 2)
             y = box.y + vertical_padding
@@ -1421,18 +1421,18 @@ class RenderService:
                     metadata_lines[-1] = self._fit_line(draw, metadata_lines[-1] + "…", date_font, available_width)
             metadata_height = len(metadata_lines) * 14
             if metadata_height:
-                available_height = max(0, available_height - metadata_height - 12)
+                available_height = max(0, available_height - metadata_height - 8)
                 metadata_top = box.bottom - vertical_padding - metadata_height if date_at_bottom else y
                 for index, line in enumerate(metadata_lines):
                     bounds = draw.textbbox((0, 0), line, font=date_font)
                     x = box.x + horizontal_padding + (available_width - draw.textlength(line, font=date_font)) / 2
                     draw.text((x, metadata_top + index * 14 - bounds[1]), line, font=date_font, fill="#17221c")
                 if not date_at_bottom:
-                    y += metadata_height + 12
+                    y += metadata_height + 8
             font = ImageFont.truetype(str(font_path), 18)
             for font_size in range(24, 17, -1):
                 candidate_font = ImageFont.truetype(str(font_path), font_size)
-                if len(normalized) * (font_size + 4) <= available_height and all(
+                if len(normalized) * (font_size + 2) <= available_height and all(
                     draw.textbbox((0, 0), character, font=candidate_font)[2]
                     - draw.textbbox((0, 0), character, font=candidate_font)[0]
                     <= available_width
@@ -1440,7 +1440,7 @@ class RenderService:
                 ):
                     font = candidate_font
                     break
-            line_height: int = max(1, int(font.size) + 4)
+            line_height: int = max(1, int(font.size) + 2)
             maximum_characters: int = max(0, available_height // line_height)
             characters = list(normalized)
             if len(characters) > maximum_characters:
@@ -1622,7 +1622,15 @@ class RenderService:
                 draw.text((right, rect.y + rect.height / 2), location, font=date_font, fill="black", anchor="rm")
                 right -= draw.textlength(location, font=date_font) + 10
             available = max(1, int(right - rect.x - 8))
-            text = self._fit_line(draw, part.get("caption", ""), font, available)
+            caption = part.get("caption", "")
+            # Existing model captions are <=20 characters. Preserve them even
+            # beside a long landmark before resorting to explicit ellipsis.
+            if len(caption) <= 20:
+                for size in (18, 17, 16):
+                    font = ImageFont.truetype(font.path, size)
+                    if draw.textlength(caption, font=font) <= available:
+                        break
+            text = self._fit_line(draw, caption, font, available)
             if text:
                 draw.text((rect.x + 8, rect.y + rect.height / 2), text, font=font, fill="black", anchor="lm")
 
