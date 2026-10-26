@@ -340,7 +340,9 @@ def provider_revision(
     if semantic:
         # Scheduling policy never changes the image request or its response
         # contract, so enabling free-first must reuse already-paid results.
-        fields["options"].pop("daily_free_first", None)
+        semantic_options = fields["options"]
+        if isinstance(semantic_options, dict):
+            semantic_options.pop("daily_free_first", None)
         # The semantic revision feeds provider_prompt_contract_sha256 and hence
         # the ai_analysis_cache key, so it must contain only inputs that can
         # change the provider's Vision request or JSON contract.  `priority` is
