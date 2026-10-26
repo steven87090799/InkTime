@@ -364,10 +364,10 @@ def _validate(value: Any, schema: dict[str, Any], path: str) -> None:
 
 def validate_model_response(raw: str | dict, *, caption_controls: dict[str, Any] | None = None,
                             schema_version: int = SCHEMA_VERSION) -> dict:
-    """Normalize only conservative orientation contradictions at model ingress.
+    """Normalize conservative category duplicates and orientation contradictions.
 
-    Validate the complete shape first: missing fields, invalid enums/types,
-    nonfinite scores and safety fields must still fail strict validation.
+    Only bounded category lists are deduplicated. Missing fields, invalid
+    enums/types, nonfinite scores and safety fields still fail strict validation.
     Never invent a rotation or increase its confidence.
     """
     if isinstance(raw, str):
@@ -379,6 +379,14 @@ def validate_model_response(raw: str | dict, *, caption_controls: dict[str, Any]
     value = to_taiwan_traditional(deepcopy(raw), protected=PROTOCOL_ENUM_VALUES)
     if schema_version == SCHEMA_VERSION and isinstance(value, dict) and isinstance(value.get("side_caption"), str):
         value["side_caption"] = value["side_caption"].strip()
+    # Models sometimes repeat a category once per person. Preserve ordering
+    # and raw trace evidence; never repair malformed, oversized or unknown tags.
+    if schema_version == SCHEMA_VERSION and isinstance(value, dict):
+        categories = value.get("types")
+        if isinstance(categories, list) and 1 <= len(categories) <= 3 and all(
+            isinstance(category, str) for category in categories
+        ):
+            value["types"] = list(dict.fromkeys(categories))
     _validate(value, json_schema_for_stage(
         "single", caption_controls=caption_controls, schema_version=schema_version,
     )["schema"], "analysis")

@@ -4,6 +4,7 @@ from hashlib import sha256
 from typing import Any
 
 from inktime.app.domain.analysis.scoring import normalize_scoring_rules
+from inktime.app.domain.jobs.failure_policy import JobConfigurationError
 from inktime.app.providers.openai_compatible import OpenAICompatibleProvider
 from inktime.app.providers.config import (
     capabilities_for,
@@ -88,14 +89,34 @@ class ProviderService:
                     ),
                     request_token_reserve=max(8000, int(self.settings.get("budget.max_tokens", 8000))) + 512,
                     priority=int(snapshot.get("priority", config["priority"])),
-                    max_concurrency=config["max_concurrency"],
-                    requests_per_minute=config["rate_limit_rpm"],
+                    max_concurrency=(1 if config.get("options", {}).get("daily_free_first")
+                                     else config["max_concurrency"]),
+                    requests_per_minute=(
+                        min(int(config["rate_limit_rpm"] or 20), 20)
+                        if effective_kind == "openrouter" and (
+                            str(config.get("model") or "").strip() == "openrouter/free"
+                            or str(config.get("model") or "").strip().endswith(":free")
+                        ) else config["rate_limit_rpm"]
+                    ),
                     tokens_per_minute=config["token_limit_tpm"],
                     cooldown_seconds=config["cooldown_seconds"],
                     model=str(config.get("model") or "").strip() or None,
                     analysis_revision=self.config_revision(config),
+                    daily_free_first=bool(config.get("options", {}).get("daily_free_first")),
                 )
             )
+        for paid in channels:
+            if not paid.daily_free_first or FailoverVisionProvider._free_model(paid):
+                continue
+            matching_free = any(
+                free.daily_free_first and FailoverVisionProvider._free_model(free)
+                and free.priority < paid.priority
+                and free.provider.base_url == paid.provider.base_url
+                and free.provider.api_key == paid.provider.api_key
+                for free in channels
+            )
+            if not matching_free or float(self.settings.get("budget.daily_stop", 10)) <= 0:
+                raise JobConfigurationError("CONFIG_INVALID 付費接續需要較高優先的同帳號免費 Provider 與每日付費上限")
         return FailoverVisionProvider(channels) if channels else None
 
     @staticmethod

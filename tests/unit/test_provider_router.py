@@ -524,6 +524,7 @@ def test_provider_service_freezes_provider_model_and_invalidates_model_changes(a
     router = service.build_router(snapshot)
     assert router is not None
     assert router.channels[0].model == "openrouter/free"
+    assert router.channels[0].requests_per_minute == 20
 
     repository.save(
         {

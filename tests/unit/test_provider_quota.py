@@ -1,5 +1,6 @@
 from pathlib import Path
 import multiprocessing
+import pytest
 
 from inktime.app.db import Database, migrate
 from inktime.app.providers.base import Usage
@@ -59,3 +60,26 @@ def test_rpm_and_circuit_survive_router_reconstruction(tmp_path):
     other_account.release_channel(other_account.channels[0], error=ProviderHTTPError("failure", "VLM-005"))
     restarted = _router(path, scope="other-account")
     assert not restarted.acquire_channel(restarted.channels[0])
+
+
+def test_shared_circuit_exposes_its_remaining_wait_without_consuming_quota(tmp_path, monkeypatch):
+    from inktime.app.repositories import provider_quota
+    from inktime.app.providers.base import request_definitely_not_sent
+
+    clock = [1000.0]
+    monkeypatch.setattr(provider_quota.time, "time", lambda: clock[0])
+    path = tmp_path / "quota.sqlite3"
+    migrate(Database(path))
+    router = _router(path)
+    channel = router.channels[0]
+    channel.cooldown_seconds = 300
+    assert router.acquire_channel(channel)
+    router.release_channel(channel, error=ProviderHTTPError("temporary", "VLM-005"))
+    clock[0] += 20
+    restarted = _router(path)
+    with pytest.raises(ProviderHTTPError) as raised:
+        restarted.select_channel()
+    assert raised.value.retry_after == 280
+    assert request_definitely_not_sent(raised.value)
+    with Database(path).session() as connection:
+        assert connection.execute("SELECT count(*) FROM provider_quota_events").fetchone()[0] == 1

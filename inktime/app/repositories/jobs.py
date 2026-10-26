@@ -1251,19 +1251,30 @@ class JobRepository:
             )
         return bool(cursor.rowcount)
 
-    def defer_item(self, item_id: str, worker_id: str | None = None) -> bool:
-        """預算阻擋時歸還租約，不把尚未送出的項目記成分析失敗。"""
-        with self.database.session() as connection:
+    def defer_item(
+        self, item_id: str, worker_id: str | None = None, *,
+        retry_after_seconds: float = 0, defer_pending: bool = False, error_code: str | None = None,
+    ) -> bool:
+        """歸還未送出項目；Provider 等待期間不再領取同工作的其他照片。"""
+        available_at = (datetime.now(timezone.utc) + timedelta(seconds=retry_after_seconds)).isoformat()
+        with self.database.transaction(operation="defer_job_item") as connection:
             ownership = " AND worker_id=?" if worker_id is not None else ""
             ownership_params = (worker_id,) if worker_id is not None else ()
             cursor = connection.execute(
                 f"""
                 UPDATE job_items
-                SET status='pending',worker_id=NULL,lease_until=NULL,available_at=?,attempts=MAX(0,attempts-1)
+                SET status='pending',worker_id=NULL,lease_until=NULL,available_at=?,attempts=MAX(0,attempts-1),
+                    error_code=COALESCE(?,error_code)
                 WHERE id=? AND status='running'{ownership}
                 """,  # noqa: S608
-                (utc_now(), item_id, *ownership_params),
+                (available_at, error_code, item_id, *ownership_params),
             )
+            if cursor.rowcount and defer_pending:
+                connection.execute(
+                    "UPDATE job_items SET available_at=MAX(available_at,?),error_code=COALESCE(?,error_code) "
+                    "WHERE job_id=(SELECT job_id FROM job_items WHERE id=?) AND status='pending'",
+                    (available_at, error_code, item_id),
+                )
         return bool(cursor.rowcount)
 
     def fail_item(

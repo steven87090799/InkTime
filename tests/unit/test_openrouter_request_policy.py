@@ -222,7 +222,7 @@ def test_openrouter_400_is_not_retried_and_preserves_bounded_safe_error_details(
     provider.close()
 
 
-def test_openrouter_no_compatible_endpoint_404_is_retryable():
+def test_openrouter_no_compatible_endpoint_404_requires_configuration_review():
     class Response:
         status_code = 404
         headers = {}
@@ -256,7 +256,7 @@ def test_openrouter_no_compatible_endpoint_404_is_retryable():
         provider._post_completion({"model": "openrouter/free", "messages": []})
 
     error = caught.value
-    assert error.code == "VLM-005"
+    assert error.code == "CONFIG_INVALID"
     assert error.http_status == 404
     assert error.response_info["provider_error_code"] == "404"
     assert "No endpoints found" in error.response_info["provider_error_message"]

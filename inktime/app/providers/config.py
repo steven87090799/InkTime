@@ -37,6 +37,7 @@ OPENROUTER_OPTION_KEYS = set(OPENROUTER_ROUTING_KEYS) | {
     "app_title",
     "session_sticky",
     "allow_private_http",
+    "daily_free_first",
 }
 GENERIC_OPTION_KEYS = {"allow_private_http"}
 
@@ -164,6 +165,7 @@ def normalize_options(kind: str, options: Any, *, base_url: str | None = None) -
             "session_sticky",
             "allow_private_http",
             "enforce_distillable_text",
+            "daily_free_first",
         }:
             if type(value) is not bool:
                 raise ValueError(f"PROVIDER-008 {key} 必須是 JSON Boolean")

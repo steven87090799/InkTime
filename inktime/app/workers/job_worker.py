@@ -3,6 +3,7 @@ from __future__ import annotations
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 import logging
+import math
 import multiprocessing
 import threading
 import time
@@ -17,6 +18,7 @@ from inktime.app.domain.jobs.failure_policy import (
     failure_code,
 )
 from inktime.app.repositories.jobs import JobRepository
+from inktime.app.providers.base import request_definitely_not_sent
 
 
 LOGGER = logging.getLogger("job_worker")
@@ -110,6 +112,7 @@ class BoundedJobWorker:
         self.max_observed_futures = 0
         self.processed_items = 0
         self.failure_count = 0
+        self._schema_failure_streak = 0
         self.child_active = 0
         self.child_timeouts = 0
         self.child_terminated = 0
@@ -138,8 +141,24 @@ class BoundedJobWorker:
         return self.repository.finalize_if_done(job_id, finalizer=self.finalize_callback)
 
     def _record_failure(self, job_id: str, item_id: str, exc: Exception) -> None:
-        self.failure_count += 1
         code = failure_code(exc)
+        if code in {"VLM-001", "VLM-002", "VLM-005", "AI-PROVIDER-TIMEOUT", "AI-PROVIDER-UNAVAILABLE"} and request_definitely_not_sent(exc):
+            try:
+                delay = float(getattr(exc, "retry_after", None) or 60)
+            except (TypeError, ValueError):
+                delay = 60.0
+            delay = min(86400.0, max(1.0, delay)) if math.isfinite(delay) else 60.0
+            if self.repository.defer_item(
+                item_id, self.worker_id, retry_after_seconds=delay, defer_pending=True, error_code=code,
+            ):
+                self.repository.transition(job_id, {"running"}, "retrying", "provider_wait")
+                self.repository.add_event(
+                    job_id, "provider_wait", "Provider 暫時不可用，保留照片排隊；未消耗分析重試次數",
+                    {"item_id": item_id, "retry_after_seconds": delay},
+                )
+            return
+        self.failure_count += 1
+        self._schema_failure_streak = self._schema_failure_streak + 1 if code == "VLM-004" else 0
         if code.startswith("BUDGET-"):
             if not self.repository.defer_item(item_id, self.worker_id):
                 return
@@ -157,7 +176,7 @@ class BoundedJobWorker:
         # and use a scheduled interval when one was persisted with the Job;
         # older/manual Jobs keep exponential backoff.
         attempts = 1 if classify_failure(exc) == FailureClass.TERMINAL_NO_RETRY else self.max_attempts
-        self.repository.fail_item(
+        recorded = self.repository.fail_item(
             job_id,
             item_id,
             code,
@@ -166,6 +185,15 @@ class BoundedJobWorker:
             retry_interval_seconds=self.retry_interval_seconds,
             worker_id=self.worker_id,
         )
+        if not recorded:
+            return
+        if code in {"CONFIG_INVALID", "AUTH_REQUIRED", "VLM-008"} or self._schema_failure_streak >= 3:
+            self.repository.request_pause(job_id)
+            self.repository.add_event(
+                job_id, "provider_safety_pause",
+                "模型設定／認證不相容或連續格式錯誤，先暫停工作；其餘照片保留排隊，請檢查 AI Trace 與模型設定",
+                {"item_id": item_id, "error_code": code},
+            )
         if self.error_callback and (
             self.failure_count <= 3 or self.failure_count % self.progress_interval_items == 0
         ):
@@ -262,6 +290,7 @@ class BoundedJobWorker:
                             self.child_active = max(0, self.child_active - 1)
                         tasks.pop(item_id, None)
                         if message[0] == "ok":
+                            self._schema_failure_streak = 0
                             _state, completed_id, result, cost = message
                             if self.result_callback:
                                 self.result_callback(result)
@@ -313,10 +342,14 @@ class BoundedJobWorker:
             self._finalize_if_done(job_id)
 
     def run_job(self, job_id: str) -> None:
+        self._schema_failure_streak = 0
         if self.hard_timeout:
             self._run_process_job(job_id)
             return
         futures: dict[Future, tuple[str, float]] = {}
+        # Do not pre-submit work behind active threads: a provider/budget stop
+        # must reach the queue before another photo starts a model request.
+        dispatch_capacity = min(self.queue_size, self.concurrency)
         timed_out: set[Future] = set()
         timeout_triggered = False
         last_lease_renewal = time.monotonic()
@@ -329,6 +362,7 @@ class BoundedJobWorker:
             except Exception as exc:
                 self._record_failure(job_id, item_id, exc)
             else:
+                self._schema_failure_streak = 0
                 if future in timed_out:
                     self.repository.record_late_completion(
                         job_id, completed_id, result, cost, self.worker_id
@@ -370,9 +404,9 @@ class BoundedJobWorker:
                     not timeout_triggered
                     and not self.stop_event.is_set()
                     and job["status"] in {"running", "retrying"}
-                    and len(futures) < self.queue_size
+                    and len(futures) < dispatch_capacity
                 ):
-                    claimed = self.repository.claim(job_id, self.worker_id, self.queue_size - len(futures))
+                    claimed = self.repository.claim(job_id, self.worker_id, dispatch_capacity - len(futures))
                     for item in claimed:
                         future = executor.submit(self._process, item)
                         futures[future] = (str(item["id"]), time.monotonic())

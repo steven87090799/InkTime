@@ -166,6 +166,24 @@ def test_model_orientation_normalization_is_conservative_and_keeps_input_immutab
     assert validate_analysis_result(result) == result
 
 
+def test_model_category_duplicates_are_repaired_without_mutating_raw_evidence():
+    value = valid_result(types=["人物", "日常", "人物"])
+    result = validate_model_response(value)
+    assert result["types"] == ["人物", "日常"]
+    assert value["types"] == ["人物", "日常", "人物"]
+    assert validate_analysis_result(result) == result
+    with pytest.raises(AnalysisValidationError, match="不可重複"):
+        validate_analysis_result(value)
+
+
+@pytest.mark.parametrize("categories", [
+    [], ["人物"] * 4, ["未知分類", "未知分類"], ["人物", 1],
+])
+def test_category_repair_does_not_accept_malformed_or_oversized_output(categories):
+    with pytest.raises(AnalysisValidationError):
+        validate_model_response(valid_result(types=categories))
+
+
 @pytest.mark.parametrize("field,invalid", [
     ("confidence", "0.9"), ("confidence", float("nan")), ("confidence", 2),
     ("rotation_cw", 45), ("ambiguous", "false"), ("evidence", ["invalid"]),
