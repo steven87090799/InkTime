@@ -14,7 +14,7 @@ def contains(rings, x, y):
     """Even-odd across rings retains holes; exact boundaries are ambiguous."""
     inside = False
     for ring in rings:
-        for a, b in zip(ring, ring[1:]):
+        for a, b in zip(ring, ring[1:], strict=False):
             ax, ay = a
             bx, by = b
             cross = (x - ax) * (by - ay) - (y - ay) * (bx - ax)

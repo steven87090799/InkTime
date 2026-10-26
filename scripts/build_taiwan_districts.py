@@ -61,7 +61,7 @@ def build(source: Path, target: Path):
             shapes = list(polygons(src.read(layer + '.shp')))
             if len(names) != len(shapes):
                 raise ValueError('Attribute/geometry count mismatch')
-            for position, (attributes, (bounds, rings)) in enumerate(zip(names, shapes)):
+            for position, (attributes, (bounds, rings)) in enumerate(zip(names, shapes, strict=True)):
                 code = attributes['TOWNCODE']
                 if not code.isdigit():
                     raise ValueError('Invalid town code')
