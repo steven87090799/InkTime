@@ -358,3 +358,17 @@ def test_unpaired_surrogate_cannot_reach_database_or_utf8_rendering():
 def test_huge_integer_score_is_a_schema_error_without_float_overflow():
     with pytest.raises(AnalysisValidationError):
         validate_model_response(valid_result(memory_score=10**400))
+
+
+def test_optional_visual_landmark_does_not_change_stored_analysis_or_trigger_repair():
+    from inktime.app.domain.analysis.schema import validate_model_response
+    from inktime.app.providers.openai_compatible import _json_schema_for_provider
+    original = valid_result()
+    for evidence in ({'name': '臺北101', 'confidence': 0.98}, {'name': 'invalid', 'confidence': 'unknown'}):
+        assert validate_model_response(original | {'landmark': evidence}) == original
+    current = _json_schema_for_provider('openrouter', 'single', caption_controls=None,
+                                        prompt_version='photo-analysis-v6-literary20-landmarks-20261026')
+    assert 'landmark' in current['schema']['required']
+    frozen = _json_schema_for_provider('openrouter', 'single', caption_controls=None,
+                                       prompt_version='photo-analysis-v6-literary20-20261021')
+    assert 'landmark' not in frozen['schema']['properties']

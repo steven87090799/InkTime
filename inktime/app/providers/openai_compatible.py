@@ -17,6 +17,8 @@ from decimal import Decimal
 
 import requests
 
+from inktime.app.domain.analysis.landmarks import LANDMARK_PROMPT, landmark_contract_enabled, with_landmark_schema
+
 from inktime.app.core.logging import log_event, should_log_rate_limited
 from inktime.app.domain.analysis.plan import normalize_reasoning_effort
 from inktime.app.domain.analysis.schema import (
@@ -71,6 +73,8 @@ def _json_schema_for_provider(
         caption_controls=caption_controls,
         schema_version=_analysis_schema_version(prompt_version),
     )
+    if stage != "provider_contract_level2" and _analysis_schema_version(prompt_version) == 6 and landmark_contract_enabled(prompt_version):
+        schema = with_landmark_schema(schema)
     if kind == "openrouter":
         # OpenRouter's free router rejects ``uniqueItems`` even though it is a
         # standard JSON Schema keyword.  Keep InkTime's local canonicalization
@@ -227,6 +231,8 @@ def analysis_prompt_sections(scoring_rules: str, caption_controls: dict[str, Any
                 "text": caption,
             }
         )
+    if _analysis_schema_version(prompt_version) == 6 and landmark_contract_enabled(prompt_version):
+        sections.append({"key": "landmark", "label": "重大地標辨識", "editable": False, "text": LANDMARK_PROMPT})
     return sections
 
 

@@ -64,7 +64,7 @@ class AnalysisDisabledError(RuntimeError):
     code = "ANALYSIS-DISABLED"
 
 
-PROMPT_VERSION = "photo-analysis-v6-literary20-20261021"
+PROMPT_VERSION = "photo-analysis-v6-literary20-landmarks-20261026"
 # The compact response still needs enough headroom to complete
 # strict JSON without truncation.
 LOGGER = logging.getLogger("analysis")
@@ -517,6 +517,8 @@ class PhotoAnalysisService:
             expected_content_sha256=str(photo["sha256"] or ""),
             connection=connection,
         )
+        if self.location_enrichment is not None and connection is None and provider != "local":
+            self.location_enrichment.save_visual_landmark(photo, raw)
         self._activity(
             "DEBUG",
             "photo_analysis_completed",

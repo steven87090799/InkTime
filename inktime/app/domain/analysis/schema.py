@@ -375,6 +375,9 @@ def validate_model_response(raw: str | dict, *, caption_controls: dict[str, Any]
             raw = analysis_json_decoder().decode(raw)
         except json.JSONDecodeError as exc:
             raise AnalysisValidationError("模型回傳無效 JSON") from exc
+    # Landmark is optional wire evidence, stored independently of v4/v5/v6 scores.
+    if schema_version == SCHEMA_VERSION and isinstance(raw, dict):
+        raw = {key: value for key, value in raw.items() if key != "landmark"}
     _validate_unicode(raw)
     value = to_taiwan_traditional(deepcopy(raw), protected=PROTOCOL_ENUM_VALUES)
     if schema_version == SCHEMA_VERSION and isinstance(value, dict) and isinstance(value.get("side_caption"), str):

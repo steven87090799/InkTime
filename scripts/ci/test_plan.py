@@ -133,6 +133,7 @@ BENCHMARK_CONTRACT_PATHS = frozenset(
         "inktime/app/domain/analysis/__init__.py",
         "inktime/app/domain/analysis/plan.py",
         "inktime/app/domain/analysis/schema.py",
+        "inktime/app/domain/analysis/landmarks.py",
         "inktime/app/domain/analysis/scoring.py",
         "inktime/app/services/analysis.py",
         "inktime/app/services/model_benchmark.py",

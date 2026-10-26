@@ -46,3 +46,18 @@ def test_address_enrichment_preserves_landmark_and_rejects_stale_photo(app):
     with app.extensions['inktime_database'].transaction() as connection:
         connection.execute("UPDATE photos SET gps_lat=25.0 WHERE id='stale'")
     assert service.enrich(stale) is None
+
+
+def test_visual_landmark_without_gps_is_independent_and_uncertainty_falls_back(app):
+    service = app.extensions['inktime_location_enrichment_service']
+    row = photo(app, 'visible-tower', None, None)
+    place = service.save_visual_landmark(row, {'landmark': {'name': '臺北101', 'confidence': 0.98}})
+    assert place.display_label == '臺北101'
+    assert not place.administrative_label
+    assert service.save_visual_landmark(row, {'landmark': {'name': '猜測地標', 'confidence': 'high'}}) is None
+    assert service.repository.get(row).landmark == '臺北101'
+    district_row = photo(app, 'district-and-landmark')
+    service.enrich(district_row)
+    place = service.save_visual_landmark(district_row, {'landmark': {'name': '不確定建築', 'confidence': 0.6}})
+    assert place.display_label == '新店區'
+    assert place.landmark == '不確定建築'

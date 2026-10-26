@@ -3,6 +3,8 @@ import logging
 import sqlite3
 import zipfile
 
+from inktime.app.domain.analysis.json_repair import extract_json_value
+from inktime.app.domain.analysis.landmarks import visual_landmark
 from inktime.app.domain.photos.districts import DistrictResolver
 from inktime.app.domain.photos.places import PhotoPlace, coordinate_key
 from inktime.app.repositories.photo_locations import PhotoLocationRepository
@@ -42,6 +44,18 @@ class PhotoLocationEnrichmentService:
             # A stale photo or damaged optional map must not lose a valid scan
             # or trigger a second paid analysis. No GPS is included in logs.
             LOGGER.warning('地區補齊未完成 photo_id=%s reason=%s', photo['id'], type(error).__name__)
+            return None
+
+    def save_visual_landmark(self, photo, raw):
+        try:
+            response = extract_json_value(raw) if isinstance(raw, str) else raw
+            landmark = visual_landmark(response.get('landmark')) if isinstance(response, dict) else None
+            if landmark is None:
+                return None
+            return self.repository.save_landmark(photo['id'], photo['sha256'], photo['gps_lat'], photo['gps_lon'],
+                                                 name=landmark['name'], confidence=landmark['confidence'])
+        except (ValueError, TypeError, OSError, sqlite3.Error, KeyError) as error:
+            LOGGER.warning('地標保存未完成 photo_id=%s reason=%s', photo['id'], type(error).__name__)
             return None
 
     def enrich_ids(self, ids):
