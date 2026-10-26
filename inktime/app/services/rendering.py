@@ -2751,7 +2751,7 @@ class RenderService:
                         break
             if date_priorities is not None:
                 from inktime.app.domain.photos.seasonal_rotation import seasonal_order
-                result = seasonal_order(result, target, priority_min_score)[:max(limit, 1)]
+                result = seasonal_order(result, target, priority_min_score, float(self.settings.get("render.repeat_high_score", 75)))[:max(limit, 1)]
             last_score = float(rows[-1]["combined_score"])
             last_count = int(rows[-1]["exposure_count"])
             last_priority = int(rows[-1]["date_priority"])
@@ -2925,7 +2925,7 @@ class RenderService:
         ))
         if execution_mode(self.settings) == "seasonal_ai":
             from inktime.app.domain.photos.seasonal_rotation import seasonal_order
-            ordered = seasonal_order(ordered, target, float(self.settings.get("render.seasonal_priority_min_score", 60)))
+            ordered = seasonal_order(ordered, target, float(self.settings.get("render.seasonal_priority_min_score", 60)), float(self.settings.get("render.repeat_high_score", 75)))
             if candidate_pool is not None:
                 candidate_pool.extend(ordered)
             return ordered[:limit]

@@ -335,3 +335,19 @@ def test_final_publication_keeps_cross_year_pair_priorities(app, tmp_path, monke
     service.publish([], actor, profile_keys=["safe_4c"], device_ids=devices, quantity_override=2,
                     target_date=date(2026, 10, 22))
     assert observed == [["same-2012", "same-2019"], ["near-2012", "other-2012"]]
+
+
+def test_empty_season_uses_labeled_high_score_fallback(app, tmp_path):
+    root = tmp_path / "outside-fallback"
+    _photo(app, root, "low-seasonal", 30, "10-22")
+    _photo(app, root, "outside-high", 90, "04-01")
+    _setting(app, "analysis.execution_mode", "seasonal_ai")
+    _setting(app, "analysis.seasonal_window_days", 5)
+    _setting(app, "render.seasonal_outside_fallback", True)
+    rows = app.extensions["inktime_render_service"].select_candidates_details(
+        1, target_date=date(2027, 10, 22), record_history=True)
+    assert rows[0]["id"] == "outside-high"
+    run = DisplayHistoryRepository(app.extensions["inktime_database"]).detail(rows[0]["selection_run_id"])
+    chosen = next(row for row in run["candidates"] if row["selected"])
+    assert chosen["snapshot"]["match_type"] == "ranked_fallback"
+    assert chosen["snapshot"]["captured_month_day"] == "04-01"

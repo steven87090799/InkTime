@@ -820,6 +820,7 @@ SETTING_DEFINITIONS: dict[str, dict[str, Any]] = {
         "choices": ["history_today", "top_ranked"],
         "restart": False,
     },
+    "render.repeat_high_score": {"category": "渲染設定", "default": 75, "type": "number", "min": 0, "max": 100, "description": "高分照片可再次入選的加權門檻；仍保留已顯示與近期顯示懲罰", "restart": False},
     "render.seasonal_outside_fallback": {"category": "渲染設定", "default": True, "type": "boolean", "description": "同期範圍沒有合格照片時，使用範圍外已分析的高分照片並記錄補圖標示", "restart": False},
     "render.history_today_window_days": {
         "category": "渲染設定",
