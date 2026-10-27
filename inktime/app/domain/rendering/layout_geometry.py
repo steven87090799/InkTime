@@ -127,18 +127,29 @@ class LayoutGeometry:
 
 
 def with_photo_date_footers(geometry: LayoutGeometry) -> LayoutGeometry:
-    def split(rect: Rect | None, existing_caption: Rect | None) -> tuple[Rect | None, Rect | None]:
+    def split(
+        rect: Rect | None, existing_caption: Rect | None, bottom_limit: int | None = None,
+    ) -> tuple[Rect | None, Rect | None]:
         if rect is None:
             return None, None
         bottom = existing_caption.bottom if existing_caption is not None else rect.bottom
+        if bottom_limit is not None:
+            bottom = min(bottom, bottom_limit)
         height = bottom - rect.y
         footer = min(28, max(1, height // 4))
         photo = Rect(rect.x, rect.y, rect.width, height - footer)
         date = Rect(rect.x, photo.bottom, rect.width, footer)
         return photo, date
 
-    primary, primary_date = split(geometry.primary_photo, geometry.primary_caption)
+    stacked = geometry.orientation == "portrait" and geometry.secondary_photo is not None
+    primary_limit = geometry.secondary_photo.y - geometry.gutter if stacked and geometry.secondary_photo else None
+    primary, primary_date = split(geometry.primary_photo, geometry.primary_caption, primary_limit)
     secondary, secondary_date = split(geometry.secondary_photo, geometry.secondary_caption)
+    if stacked and secondary is not None and primary_date is not None:
+        # Center the middle text row in the existing white band, including its
+        # gutter. Keep the photo slots and 28px text height exactly unchanged.
+        shift = min(4, max(0, (secondary.y - primary_date.bottom) // 2))
+        primary_date = replace(primary_date, y=primary_date.y + shift)
     return replace(
         geometry, primary_photo=primary, secondary_photo=secondary,
         primary_caption=primary_date, secondary_caption=secondary_date,
