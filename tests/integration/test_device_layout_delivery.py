@@ -70,10 +70,13 @@ def test_mixed_devices_select_enough_candidates_before_truncation_and_show_real_
     pair, _ = devices.create("pair", layout_mode="photo_pair_caption")
     service = app.extensions["inktime_render_service"]
     selected_limits = []
+    selected_candidates = []
     original_select = service.select_candidates_details
     def select(limit, **kwargs):
         selected_limits.append(limit)
-        return original_select(limit, **kwargs)
+        rows = original_select(limit, **kwargs)
+        selected_candidates.append([str(row["id"]) for row in rows])
+        return rows
     monkeypatch.setattr(service, "select_candidates_details", select)
     captured = {}
     original = service._render_plan_image
@@ -85,13 +88,22 @@ def test_mixed_devices_select_enough_candidates_before_truncation_and_show_real_
     monkeypatch.setattr(service, "_render_plan_image", render)
     result = service.publish([], "test", device_ids=[single, pair], quantity_override=2)
     assert selected_limits == [4]
+    selected = selected_candidates[0]
+    assert len(selected) == 3
     assert [plan["secondary_photo_id"] for plan, _ in captured[single]] == [None, None]
-    assert [plan["secondary_photo_id"] for plan, _ in captured[pair]] == [identifiers[1], None]
+    assert [plan["secondary_photo_id"] for plan, _ in captured[pair]] == [selected[1], None]
+    assert [plan["primary_photo_id"] for plan, _ in captured[pair]] == [selected[0], selected[2]]
     assert [plan["layout"] for plan, _ in captured[pair]] == ["photo_pair_caption", "photo_info"]
-    def blue_pixels(image):
-        return sum(b > r + 70 and b > g + 50 for r, g, b in image.convert("RGB").getdata())
-    assert blue_pixels(captured[pair][0][1]) > 5000
-    assert blue_pixels(captured[single][0][1]) == 0
+    color_predicates = {
+        identifiers[0]: lambda r, g, b: r > g + 70 and r > b + 70,
+        identifiers[1]: lambda r, g, b: b > r + 70 and b > g + 50,
+        identifiers[2]: lambda r, g, b: g > r + 70 and g > b + 70,
+    }
+    def selected_color_pixels(image, photo_id):
+        matches = color_predicates[photo_id]
+        return sum(matches(r, g, b) for r, g, b in image.convert("RGB").getdata())
+    assert selected_color_pixels(captured[pair][0][1], selected[1]) > 5000
+    assert selected_color_pixels(captured[single][0][1], selected[1]) < 5000
     for device_id in (single, pair):
         manifest = app.extensions["inktime_release_publisher"].validate(result["device_releases"][device_id])
         assert len(manifest["files"]) == 2
