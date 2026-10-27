@@ -266,6 +266,9 @@ def test_shared_confirmation_dialog_resets_and_normalizes_cancel_state(client, a
     assert "dialog.returnValue === 'confirm'" in body
 
 def test_shared_preview_retry_and_typed_job_contracts_are_rendered(client, app):
+    app.extensions["inktime_settings_repository"].update(
+        "analysis.execution_mode", "local_only", changed_by="test", source_ip="test"
+    )
     create_admin(app)
     login(client)
 

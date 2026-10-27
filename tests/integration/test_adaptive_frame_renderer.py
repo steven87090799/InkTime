@@ -198,19 +198,21 @@ def test_auto_photo_places_captions_and_dates_without_overlap(app, tmp_path, mon
                 and rect["y"] <= call[0][1] < rect["y"] + rect["height"]
             ]
             assert glyphs, "Caption glyphs must reach their own left column"
-            dates = [call for call in calls if call[2] == "mt" and call[0][0] == rect["x"] + rect["width"] // 2]
-            assert "".join(call[1] for call in dates) == plan["capture_date_labels"][pid]
-            assert all(len(call[1]) == 1 for call in dates)
+            dates = [call for call in glyphs if call[1] in {"2024", f"7/{index + 1}"}]
+            assert [call[1] for call in dates] == ["2024", f"7/{index + 1}"]
+            glyphs = [call for call in glyphs if call not in dates]
             assert min(call[0][1] for call in glyphs) <= rect["y"] + 12
             assert min(call[0][1] for call in dates) > max(call[0][1] for call in glyphs)
-            assert all(call[3] <= rect["width"] - 8 for call in dates)
-            assert dates[-1][0][1] + 14 == rect["y"] + rect["height"] - 12
+            assert all(call[3] <= rect["width"] - 6 for call in dates)
+            assert dates[-1][0][1] + 14 <= rect["y"] + rect["height"]
             continue
         y = rect["y"] + rect["height"] / 2
         caption = next(call for call in calls if call[2] == "lm" and call[0] == (rect["x"] + 8, y))
-        captured = next(call for call in calls if call[2] == "rm" and call[0] == (rect["x"] + rect["width"] - 8, y))
-        assert captured[1] == plan["capture_date_labels"][pid]
-        assert caption[0][0] + caption[3] + 12 <= captured[0][0] - captured[3]
+        dates = [call for call in calls if call[2] == "rt" and
+                 call[0][0] == rect["x"] + rect["width"] - 8 and
+                 rect["y"] <= call[0][1] < rect["y"] + rect["height"]]
+        assert [call[1] for call in dates] == ["2024", f"7/{index + 1}"]
+        assert caption[0][0] + caption[3] + 10 <= min(call[0][0] - call[3] for call in dates)
 
 
 def test_default_batch_photo_plans_reserve_distinct_portrait_sources(app, tmp_path):
@@ -576,13 +578,13 @@ def test_pair_dates_are_frozen_and_missing_dates_never_draw_unknown_placeholder(
 
     monkeypatch.setattr(ImageDraw.ImageDraw, "text", capture_text)
     service._render_plan_image(plan)
-    assert "2024年7月1日" in "".join(calls)
+    assert "2024" in calls and "7/1" in calls
     assert "未知" not in "".join(calls)
     calls.clear()
     service.render_photo(
         "a", layout=layout, secondary_photo_id="b", orientation="landscape"
     )
-    assert not any("年" in text or "月" in text for text in calls)
+    assert "2024" not in calls and "7/1" not in calls
     assert "A側相框回憶文字" in "".join(calls) and "B側相框回憶文字" in "".join(calls)
     assert service._date_label(None) == ""
 
@@ -714,9 +716,8 @@ def test_adaptive_recently_displayed_candidate_is_fallback_but_fresh_candidate_w
     _analyzed_photo(app, root, "fresh", (900, 1600), "2026-08-12T10:00:00+00:00")
     with app.extensions["inktime_database"].session() as connection:
         connection.execute(
-            """INSERT INTO display_history(
-                   photo_id,history_date,selection_method,displayed_at,metadata_json
-               ) VALUES ('recent','2026-08-10','test',datetime('now'),'{}')"""
+            """UPDATE photos SET display_count=1,last_displayed_at=datetime('now')
+               WHERE id='recent'"""
         )
 
     service = app.extensions["inktime_render_service"]

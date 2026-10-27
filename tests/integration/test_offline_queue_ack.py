@@ -120,7 +120,7 @@ def test_queue_ack_batch_is_bounded_independent_and_idempotent(client, app):
     assert too_many.status_code == 400
 
 
-def test_delayed_terminal_ack_is_only_allowed_for_prefetched_offline_item(client, app):
+def test_delayed_terminal_ack_is_only_allowed_for_prefetched_offline_item(custom_device_schedule, client, app):
     device_id, token = app.extensions["inktime_device_repository"].create(
         "離線 ACK",
         delivery_mode="inktime_offline_schedule",
@@ -355,7 +355,7 @@ def test_delayed_terminal_ack_is_only_allowed_for_prefetched_offline_item(client
     assert ordinary_delayed.status_code == 409
 
 
-def test_acknowledged_offline_item_survives_expiry_maintenance_until_retention(client, app):
+def test_acknowledged_offline_item_survives_expiry_maintenance_until_retention(custom_device_schedule, client, app):
     target_date = datetime.now(ZoneInfo("Asia/Taipei")).date().isoformat()
     device_id, token = app.extensions["inktime_device_repository"].create(
         "維持延遲終端 ACK 的離線相框",
@@ -428,7 +428,7 @@ def test_acknowledged_offline_item_survives_expiry_maintenance_until_retention(c
     assert delayed.status_code == 200
 
 
-def test_cancelled_offline_item_requires_download_evidence_for_delayed_terminal(client, app):
+def test_cancelled_offline_item_requires_download_evidence_for_delayed_terminal(custom_device_schedule, client, app):
     repository = app.extensions["inktime_offline_schedule_repository"]
     no_evidence_device, no_evidence_token = app.extensions["inktime_device_repository"].create(
         "取消但未下載 ACK",
@@ -536,7 +536,7 @@ def test_cancelled_offline_item_requires_download_evidence_for_delayed_terminal(
     assert state["status"] == "CANCELLED"
 
 
-def test_queue_enqueue_requires_explicit_offline_schedule_ownership(app):
+def test_queue_enqueue_requires_explicit_offline_schedule_ownership(custom_device_schedule, app):
     queue = app.extensions["inktime_resilience_repository"]
     online_device, _online_token = app.extensions["inktime_device_repository"].create("online scope")
     release = _release(app, "queue-scope")
@@ -712,7 +712,7 @@ def test_display_completed_pointer_uses_event_time_and_replay_keeps_one_history(
     assert history_count == 1
 
 
-def test_mode_transition_cancels_incompatible_active_delivery_with_audit(app):
+def test_mode_transition_cancels_incompatible_active_delivery_with_audit(custom_device_schedule, app):
     devices = app.extensions["inktime_device_repository"]
     queue = app.extensions["inktime_resilience_repository"]
     online_id, _online_token = devices.create("online to offline")

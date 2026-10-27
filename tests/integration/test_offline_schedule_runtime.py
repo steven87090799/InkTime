@@ -29,7 +29,7 @@ def _device_dates() -> tuple[str, str]:
     return today.isoformat(), (today + timedelta(days=1)).isoformat()
 
 
-def test_dst_collision_preparation_keeps_release_order_and_unique_manifest_epochs(app):
+def test_dst_collision_preparation_keeps_release_order_and_unique_manifest_epochs(custom_device_schedule, app):
     device_id, _ = app.extensions["inktime_device_repository"].create(
         "DST", timezone_name="America/New_York", delivery_mode="inktime_offline_schedule",
         offline_prefetch_allowed=True, schedule_times=["02:30", "03:30"], minimum_schedule_gap_minutes=30,
@@ -44,7 +44,7 @@ def test_dst_collision_preparation_keeps_release_order_and_unique_manifest_epoch
     assert all(datetime.fromisoformat(slot["ack_deadline"]).timestamp() > start for slot, start in zip(prepared["slots"], starts, strict=True))
 
 
-def test_offline_day_preparation_is_atomic_and_device_projection_contains_full_sha(client, app):
+def test_offline_day_preparation_is_atomic_and_device_projection_contains_full_sha(custom_device_schedule, client, app):
     today, tomorrow = _device_dates()
     devices = app.extensions["inktime_device_repository"]
     device_id, token = devices.create(
@@ -165,7 +165,7 @@ def test_offline_day_preparation_is_atomic_and_device_projection_contains_full_s
         ).status_code == 400
 
 
-def test_prepare_day_recovers_terminal_shortage_and_clears_outcome(app):
+def test_prepare_day_recovers_terminal_shortage_and_clears_outcome(custom_device_schedule, app):
     device_id, _token = app.extensions["inktime_device_repository"].create(
         "恢復離線終端結果的相框",
         delivery_mode="inktime_offline_schedule",
@@ -288,7 +288,7 @@ def test_fixed_daily_midday_prepare_authorizes_every_payload_until_target_day_en
     ],
 )
 def test_render_input_change_supersedes_future_playlist_and_rejects_stale_prepare(
-    app, field, value
+    app, field, value, custom_device_schedule
 ):
     devices = app.extensions["inktime_device_repository"]
     device_id, _token = devices.create(
@@ -338,7 +338,7 @@ def test_render_input_change_supersedes_future_playlist_and_rejects_stale_prepar
         )
 
 
-def test_actual_playlist_preview_reads_committed_schedule_without_reselection(app, monkeypatch):
+def test_actual_playlist_preview_reads_committed_schedule_without_reselection(custom_device_schedule, app, monkeypatch):
     device_id, _token = app.extensions["inktime_device_repository"].create(
         "離線實際 Playlist 預覽",
         delivery_mode="inktime_offline_schedule",
@@ -382,7 +382,7 @@ def test_actual_playlist_preview_reads_committed_schedule_without_reselection(ap
     assert preview["playlist"][0]["show_at"] == prepared["slots"][0]["show_at"]
 
 
-def test_actual_playlist_preview_defaults_to_device_local_date(app, monkeypatch):
+def test_actual_playlist_preview_defaults_to_device_local_date(custom_device_schedule, app, monkeypatch):
     app.extensions["inktime_settings_repository"].update(
         "general.timezone", "Pacific/Honolulu", changed_by="test", source_ip="127.0.0.1"
     )
@@ -472,7 +472,7 @@ def test_actual_playlist_preview_rejects_device_outside_saved_schedule(app, monk
         )
 
 
-def test_offline_slot_replacement_rejects_historical_release_and_preserves_state(client, app):
+def test_offline_slot_replacement_rejects_historical_release_and_preserves_state(custom_device_schedule, client, app):
     create_admin(app)
     login(client)
     devices = app.extensions["inktime_device_repository"]
@@ -572,7 +572,7 @@ def test_offline_slot_replacement_rejects_historical_release_and_preserves_state
         ) == before_queue_version + 1
 
 
-def test_offline_prepare_rejects_historical_release_and_preserves_state(client, app):
+def test_offline_prepare_rejects_historical_release_and_preserves_state(custom_device_schedule, client, app):
     create_admin(app)
     login(client)
     device_id, _token = app.extensions["inktime_device_repository"].create(
@@ -653,7 +653,7 @@ def test_offline_prepare_rejects_historical_release_and_preserves_state(client, 
         ).fetchone()[0] == 2
 
 
-def test_offline_schedule_snapshot_does_not_follow_live_device_config(client, app):
+def test_offline_schedule_snapshot_does_not_follow_live_device_config(custom_device_schedule, client, app):
     device_id, token = app.extensions["inktime_device_repository"].create(
         "離線快照",
         delivery_mode="inktime_offline_schedule",
@@ -798,7 +798,7 @@ def test_empty_offline_schedule_with_corrupt_live_config_retains_bounded_retry(c
     assert "no_content" not in body
 
 
-def test_offline_schedule_repository_fails_closed_on_corrupt_manifest_and_keeps_snapshot_typed(app):
+def test_offline_schedule_repository_fails_closed_on_corrupt_manifest_and_keeps_snapshot_typed(custom_device_schedule, app):
     device_id, _token = app.extensions["inktime_device_repository"].create(
         "離線完整性邊界",
         delivery_mode="inktime_offline_schedule",

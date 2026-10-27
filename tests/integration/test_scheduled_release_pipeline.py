@@ -10,7 +10,7 @@ from tests.unit.test_analysis_schema import valid_result
 
 @pytest.mark.parametrize("wide,tall,expected", [(12, 0, 12), (0, 24, 12), (6, 12, 12), (0, 23, 0)])
 def test_auto_photo_schedule_reserves_only_orientation_appropriate_sources(
-    app, monkeypatch, wide, tall, expected
+    app, tmp_path, monkeypatch, custom_device_schedule, wide, tall, expected
 ):
     times = [f"{hour:02d}:25" for hour in range(0, 24, 2)]
     did, _ = app.extensions["inktime_device_repository"].create(
@@ -23,6 +23,14 @@ def test_auto_photo_schedule_reserves_only_orientation_appropriate_sources(
     rows = [
         {"id": f"wide-{i}", "width": 1600, "height": 900} for i in range(wide)
     ] + [{"id": f"tall-{i}", "width": 900, "height": 1600} for i in range(tall)]
+    # Selection history has real photo foreign keys, even when publishing is stubbed.
+    library = app.extensions["inktime_photo_repository"].ensure_library("候選照片", tmp_path)
+    with app.extensions["inktime_database"].transaction() as connection:
+        connection.executemany(
+            "INSERT INTO photos(id,library_id,relative_path,width,height,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,datetime('now'),datetime('now'))",
+            [(row["id"], library, f"{row['id']}.jpg", row["width"], row["height"]) for row in rows],
+        )
     published = []
 
     def publish(ids, *args, **kwargs):
@@ -51,7 +59,7 @@ def test_auto_photo_schedule_reserves_only_orientation_appropriate_sources(
 
 
 @pytest.mark.parametrize("available", [24, 23])
-def test_two_hour_offline_pair_schedule_keeps_two_distinct_sources_per_frame(app, monkeypatch, available):
+def test_two_hour_offline_pair_schedule_keeps_two_distinct_sources_per_frame(custom_device_schedule, app, monkeypatch, available):
     times = [f"{hour:02d}:00" for hour in range(0, 24, 2)]
     device_id, _ = app.extensions["inktime_device_repository"].create(
         "Two-hour paired frame", panel_profile="gdep073e01_6c",
@@ -173,7 +181,7 @@ def test_schedule_resolves_devices_limits_years_and_commits_history_after_publis
     assert len(history) == 4
 
 
-def test_enhanced_device_preparation_publishes_one_release_per_slot_and_is_idempotent(app, tmp_path):
+def test_enhanced_device_preparation_publishes_one_release_per_slot_and_is_idempotent(custom_device_schedule, app, tmp_path):
     app.extensions["inktime_settings_repository"].update(
         "analysis.execution_mode", "automatic_ai", changed_by="test", source_ip="127.0.0.1"
     )
@@ -322,7 +330,7 @@ def test_enhanced_prepare_shortage_returns_no_content_without_partial_activation
         ).fetchone()[0] == 0
 
 
-def test_enhanced_prepare_fails_closed_when_device_config_changes_before_commit(app, tmp_path, monkeypatch):
+def test_enhanced_prepare_fails_closed_when_device_config_changes_before_commit(custom_device_schedule, app, tmp_path, monkeypatch):
     app.extensions["inktime_settings_repository"].update(
         "analysis.execution_mode", "automatic_ai", changed_by="test", source_ip="127.0.0.1"
     )

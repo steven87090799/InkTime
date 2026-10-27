@@ -1168,7 +1168,13 @@ def test_offline_shortage_is_terminal_for_one_device_day_config(app):
     assert terminal["terminal_outcome_code"] == "NO_ELIGIBLE_CANDIDATES"
 
 
-def test_offline_shortage_retries_after_bounded_cooldown_and_keeps_active_dedupe(app):
+def test_offline_shortage_retries_after_bounded_cooldown_and_keeps_active_dedupe(app, custom_device_schedule):
+    # This contract exercises custom device times and the legacy 20:00 start.
+    app.extensions["inktime_settings_repository"].update_many(
+        {"analysis.execution_mode": "automatic_ai",
+         "offline.future_schedule_prepare_hour_local": 20},
+        changed_by="test", source_ip="test",
+    )
     device_id, _token = app.extensions["inktime_device_repository"].create(
         "冷卻後恢復的離線相框",
         delivery_mode="inktime_offline_schedule",
@@ -1274,7 +1280,13 @@ def test_offline_shortage_retries_after_bounded_cooldown_and_keeps_active_dedupe
     ) == 2
 
 
-def test_offline_scheduler_prepares_only_tomorrow_after_expired_today(app):
+def test_offline_scheduler_prepares_only_tomorrow_after_expired_today(app, custom_device_schedule):
+    # This contract exercises custom device times and the legacy 20:00 start.
+    app.extensions["inktime_settings_repository"].update_many(
+        {"analysis.execution_mode": "automatic_ai",
+         "offline.future_schedule_prepare_hour_local": 20},
+        changed_by="test", source_ip="test",
+    )
     device_id, _token = app.extensions["inktime_device_repository"].create(
         "預先準備明日的離線相框",
         delivery_mode="inktime_offline_schedule",
@@ -1349,7 +1361,13 @@ def test_offline_prefetch_keeps_today_and_tomorrow_decisions_independent():
     ) == [datetime(2026, 8, 4, tzinfo=zone).date()]
 
 
-def test_offline_scheduler_skips_expired_today_but_keeps_a_future_today_slot(app):
+def test_offline_scheduler_skips_expired_today_but_keeps_a_future_today_slot(app, custom_device_schedule):
+    # This contract exercises custom device times and the legacy 20:00 start.
+    app.extensions["inktime_settings_repository"].update_many(
+        {"analysis.execution_mode": "automatic_ai",
+         "offline.future_schedule_prepare_hour_local": 20},
+        changed_by="test", source_ip="test",
+    )
     def offline_jobs(device_id):
         return {
             job["dedupe_key"]

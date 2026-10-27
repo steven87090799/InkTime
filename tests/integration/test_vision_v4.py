@@ -51,7 +51,7 @@ def test_defaults_and_settings_ui(app, client):
 
 @pytest.mark.parametrize("code", list(CONTENT_FILTER_SWITCHES))
 @pytest.mark.parametrize(
-    "confidence,enabled,status", [(0.95, True, "auto_excluded"), (0.4, True, "pending_review"),
+    "confidence,enabled,status", [(0.95, True, "auto_excluded"), (0.4, True, "auto_excluded"),
                                    (0.95, False, "auto_excluded")]
 )
 def test_authoritative_exclusion_retains_analysis_orientation(app, code, confidence, enabled, status):

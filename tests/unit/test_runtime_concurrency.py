@@ -302,7 +302,10 @@ def test_shutdown_fences_running_future_and_only_retries_queued_work(app):
     assert items[actual_running_item_id]["error_code"] == "JOB-SHUTDOWN-AMBIGUOUS"
     assert items[actual_running_item_id]["attempts"] == 1
     assert items[queued_item_id]["status"] == "pending"
-    assert items[queued_item_id]["error_code"] == "JOB-003"
+    # Thread dispatch stops at concurrency: this item was never submitted,
+    # so shutdown must leave it unclaimed rather than invent a failed attempt.
+    assert items[queued_item_id]["error_code"] is None
+    assert items[queued_item_id]["attempts"] == 0
     assert items[queued_item_id]["worker_id"] is None
     assert calls == {actual_running_item_id: 1}
 

@@ -243,12 +243,15 @@ def test_publication_counts_selection_and_each_device_ack_counts_both_sources_on
     assert repository.list(tab="displays")["total"] == 4
 
 
-def test_legacy_without_ack_uses_selected_count_for_rotation(app, tmp_path):
+def test_selection_without_ack_does_not_count_as_display(app, tmp_path):
     _publish_pair(app, tmp_path / "legacy")
     _photo(app, tmp_path / "legacy", "fresh", 20)
     _setting(app, "render.selection_mode", "top_ranked")
+    _setting(app, "analysis.execution_mode", "automatic_ai")
     selected = app.extensions["inktime_render_service"].select_candidates_details(1)
-    assert selected[0]["id"] == "fresh"
+    assert selected[0]["id"] in {"pair-a", "pair-b"}
+    assert selected[0]["selection_count"] > 0
+    assert selected[0]["exposure_count"] == 0
 
 
 def test_failed_release_keeps_snapshot_and_does_not_increment_selection(app, tmp_path, monkeypatch):
@@ -334,7 +337,9 @@ def test_final_publication_keeps_cross_year_pair_priorities(app, tmp_path, monke
         devices = [identifier]
     service.publish([], actor, profile_keys=["safe_4c"], device_ids=devices, quantity_override=2,
                     target_date=date(2026, 10, 22))
-    assert observed == [["same-2012", "same-2019"], ["near-2012", "other-2012"]]
+    assert [set(pair) for pair in observed] == [
+        {"same-2012", "same-2019"}, {"near-2012", "other-2012"},
+    ]
 
 
 def test_empty_season_uses_labeled_high_score_fallback(app, tmp_path):

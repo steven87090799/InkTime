@@ -21,8 +21,8 @@ def test_seasonal_pair_priority_survives_expansion_for_multiple_frames():
     # acceptable nearby peer; content freshness still comes first.
     candidates[1]["seasonal_priority"] = 1000
     assert select_pair_candidate(candidates[0], candidates[1:], frame_orientation="landscape")["id"] == "near-2012"
-    candidates[2]["selection_count"] = 1
-    candidates[3]["selection_count"] = 1
+    candidates[2]["display_count"] = 1
+    candidates[3]["display_count"] = 1
     assert select_pair_candidate(candidates[0], candidates[1:], frame_orientation="landscape")["id"] == "same-2019"
 
 

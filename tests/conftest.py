@@ -40,6 +40,14 @@ def client(app):
     return app.test_client()
 
 
+@pytest.fixture
+def custom_device_schedule(app):
+    """Exercise explicit per-device times independently of the weekly default."""
+    app.extensions["inktime_settings_repository"].update(
+        "display.weekly_schedule_enabled", False, changed_by="test", source_ip="test"
+    )
+
+
 def csrf(client) -> str:
     with client.session_transaction() as session:
         return str(session.get("csrf_token", ""))

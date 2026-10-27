@@ -5,7 +5,7 @@ from tests.conftest import create_admin, login
 from tests.integration.test_offline_queue_ack import _ack, _release
 
 
-def test_offline_verified_download_is_not_displayed_as_never_downloaded(app):
+def test_offline_verified_download_is_not_displayed_as_never_downloaded(custom_device_schedule, app):
     create_admin(app)
     device_id, token = app.extensions["inktime_device_repository"].create(
         "Offline status audit", delivery_mode="inktime_offline_schedule",

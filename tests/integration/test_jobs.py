@@ -57,6 +57,9 @@ def test_job_api_rejects_invalid_worker_settings_without_writes(client, app, set
 def test_forced_paid_recompute_requires_explicit_additional_cost_acceptance(client, app):
     from tests.conftest import create_admin, csrf, login
 
+    app.extensions["inktime_settings_repository"].update(
+        "analysis.execution_mode", "local_with_manual_ai", changed_by="test", source_ip="test"
+    )
     create_admin(app)
     login(client)
     photo_ids = add_photos(app, 1)

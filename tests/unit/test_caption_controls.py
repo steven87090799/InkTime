@@ -52,7 +52,9 @@ def test_empty_custom_rule_adds_no_prompt_section_and_nonempty_adds_one_line():
         "評分參考", _controls(side_caption_custom_rules="避開雙關語\n保持口語")
     )
     assert "side_caption 自訂規則" not in base
-    assert custom == base + "\n\nside_caption 自訂規則：避開雙關語 保持口語"
+    custom_section = "side_caption 自訂規則：避開雙關語 保持口語\n\n"
+    assert custom.count(custom_section) == 1
+    assert custom.replace(custom_section, "") == base
 
 
 def test_complete_prompt_and_schema_have_no_advanced_caption_contract(tmp_path):

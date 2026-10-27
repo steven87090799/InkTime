@@ -465,7 +465,7 @@ def test_gc_preserves_every_active_release_reference(app, reference_kind):
     assert state["reconciliation_status"] == "ok"
 
 
-def test_gc_preserves_committed_offline_schedule_payload(app):
+def test_gc_preserves_committed_offline_schedule_payload(custom_device_schedule, app):
     publisher = app.extensions["inktime_release_publisher"]
     coordinator = app.extensions["inktime_release_coordinator"]
     release_id = _gc_candidate(app, status="published")

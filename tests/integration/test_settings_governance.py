@@ -351,7 +351,7 @@ def test_settings_side_effect_failure_rolls_back_setting_and_audit(app, monkeypa
         app.extensions["inktime_settings_repository"].get(
             "offline.future_schedule_prepare_hour_local"
         )
-        == 20
+        == 8
     )
     with app.extensions["inktime_database"].session() as connection:
         assert connection.execute("SELECT COUNT(*) FROM setting_history").fetchone()[0] == 0
@@ -462,7 +462,7 @@ def test_import_applies_offline_and_timezone_effects(client, app):
     )
     assert response.status_code == 200
     assert response.json["runtime_effects"]["offline_prepare_deadlines_invalidated"] == 1
-    assert response.json["runtime_effects"]["scheduled_tasks_rebased"] == 5
+    assert response.json["runtime_effects"]["scheduled_tasks_rebased"] == 3
     assert app.extensions["inktime_device_repository"].get(device_id)[
         "next_offline_prepare_at"
     ] == OFFLINE_PREPARE_BOOTSTRAP_AT
@@ -654,7 +654,7 @@ def test_preset_settings_failure_rolls_back_device_changes(app, monkeypatch):
 
 
 def test_preset_effect_failure_rolls_back_devices_settings_history_snapshot_and_deadline(
-    app, monkeypatch
+    app, monkeypatch, custom_device_schedule
 ):
     devices = app.extensions["inktime_device_repository"]
     service = app.extensions["inktime_settings_mutation_service"]
@@ -715,7 +715,7 @@ def test_preset_effect_failure_rolls_back_devices_settings_history_snapshot_and_
     assert _audit_counts(app) == before_audit
 
 
-def test_preset_success_is_atomic_bounded_and_idempotent(client, app, monkeypatch):
+def test_preset_success_is_atomic_bounded_and_idempotent(custom_device_schedule, client, app, monkeypatch):
     create_admin(app)
     login(client)
     key = _install_atomic_test_preset(monkeypatch)
@@ -867,11 +867,11 @@ def test_runtime_timezone_change_rebases_enabled_cron_without_enqueuing(app):
             "WHERE key='full_reconcile'"
         )
         connection.execute(
-            "UPDATE scheduled_tasks SET cron='0 1 1 1 *',weekdays_json='[]' "
+            "UPDATE scheduled_tasks SET enabled=1,cron='0 1 1 1 *',weekdays_json='[]' "
             "WHERE key='ai_schedule'"
         )
         connection.execute(
-            "UPDATE scheduled_tasks SET cron='0 9 * * *',weekdays_json='[0,2]' "
+            "UPDATE scheduled_tasks SET enabled=1,cron='0 9 * * *',weekdays_json='[0,2]' "
             "WHERE key='display_prepare'"
         )
         connection.execute(
@@ -1030,7 +1030,7 @@ def test_high_risk_change_requires_preview_confirmation(client, app):
         {"analysis.ai_mode": "full_library"},
     )
     assert blocked.status_code == 409
-    assert app.extensions["inktime_settings_repository"].get("analysis.ai_mode") == "top_candidates"
+    assert app.extensions["inktime_settings_repository"].get("analysis.ai_mode") == "on_demand"
     confirmed = client.post(
         "/api/v1/settings",
         json={"analysis.ai_mode": "full_library"},
@@ -1605,6 +1605,9 @@ def test_settings_report_is_complete_read_only_and_redacted(client, app, monkeyp
 
 
 def test_settings_report_requires_login_and_local_mode_does_not_claim_model_use(client, app):
+    app.extensions["inktime_settings_repository"].update(
+        "analysis.execution_mode", "local_only", changed_by="test", source_ip="test"
+    )
     create_admin(app)
     assert client.get("/settings/overview").status_code == 302
     login(client)
