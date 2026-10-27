@@ -191,7 +191,7 @@ def test_auto_photo_places_captions_and_dates_without_overlap(app, tmp_path, mon
                  rect["y"] <= bounds[1] < rect["y"] + rect["height"]]
         photo = plan["geometry"]["photo_rects"][index]
         date_text = [text for text, _bounds in owned if all(c in "0123456789/" for c in text)]
-        assert date_text == (["2024", f"7/{index + 1}"] if photo["height"] > photo["width"]
+        assert date_text == (["2024", f"7/{index + 1}"] if photo["height"] > photo["width"] or len(plan["geometry"]["photo_rects"]) == 2
                              else [f"2024/7/{index + 1}"])
         assert all(bounds[2] <= rect["x"] + rect["width"] and
                    bounds[3] <= rect["y"] + rect["height"] for _text, bounds in owned)
@@ -1050,8 +1050,8 @@ def test_compact_pair_dates_leave_both_sentences_and_districts_visible(app, monk
     assert sum(text == '2022' for text, _ in calls) == 2
     assert sum(text == '8/5' for text, _ in calls) == 2
     assert sum(text == '新店區' for text, _ in calls) == 2
-    assert all(14 <= size <= 15 for text, size in calls if text in {'2022', '8/5'})
-    painted = ''.join(text for text, size in calls if size >= 16)
+    assert all(14 <= size <= 18 for text, size in calls if text in {'2022', '8/5'})
+    painted = ''.join(text for text, size in calls if size >= 16 and text not in {'2022', '8/5'})
     assert records[0]['text'] in painted and records[1]['text'] in painted
 
 
@@ -1079,7 +1079,7 @@ def test_compact_pair_long_places_keep_twenty_characters_and_original_metadata(a
     parts = {key: {'date': '2026年12月31日', 'location': place} for key in ('a', 'b')}
     with Image.new('RGB', (800, 480), 'white') as canvas:
         service._draw_compact_pair_captions(canvas, geometry, records, parts)
-    assert ''.join(value for value, size in calls if size >= 16) == text * 2
+    assert ''.join(value for value, size in calls if size >= 16 and value not in {'2026', '12/31'}) == text * 2
     place_text = ''.join(value for value, size in calls if size < 16 and value not in {'2026', '12/31'})
     if visible_place is None:
         assert '…' in place_text
@@ -1100,7 +1100,7 @@ def test_compact_pair_keeps_date_legible_and_unknown_place_name_complete(app):
             place=place, sentence=text, width=38, height=464,
         )
     assert ''.join(value for value, _font, _step in lines[2:]) == place
-    assert 14 <= lines[0][1].size <= 15
+    assert 14 <= lines[0][1].size <= 18
 
 
 def test_compact_pair_sixteen_character_caption_leaves_room_for_forty_character_landmark(app):
@@ -1120,7 +1120,8 @@ def test_vertical_caption_centers_short_glyphs_and_compacts_punctuation(app):
     from PIL import ImageFont
 
     service = app.extensions['inktime_render_service']
-    font = ImageFont.truetype(str(service.fonts.resolve('')), 17)
+    font_path = service.fonts.resolve(str(service.settings.get('render.font_path', '')))
+    font = ImageFont.truetype(str(font_path), 17)
     with Image.new('RGB', (44, 480), 'white') as canvas:
         runs = service._vertical_caption_run(ImageDraw.Draw(canvas), '一 杯，飲料。', font)
     assert ''.join(character for character, _box, _advance in runs) == '一杯，飲料。'
@@ -1129,12 +1130,54 @@ def test_vertical_caption_centers_short_glyphs_and_compacts_punctuation(app):
     assert runs[2][2] < runs[1][2]  # The comma does not consume a full CJK cell.
 
 
+@pytest.mark.parametrize('layout,orientation,date_lines,minimum_date_size', [
+    ('full', 'landscape', ['2026/12/31'], 20),
+    ('full', 'portrait', ['2026', '12/31'], 16),
+    ('photo_pair', 'portrait', ['2026', '12/31'], 16),
+])
+@pytest.mark.parametrize('place', ['國立故宮博物院南部院區', '山水風光' * 10])
+def test_footers_keep_large_dates_full_sentence_and_landmark_without_overlap(
+    app, monkeypatch, layout, orientation, date_lines, minimum_date_size, place
+):
+    from inktime.app.domain.rendering.layout_geometry import resolve_layout_geometry, with_photo_date_footers
+
+    width, height = (800, 480) if orientation == 'landscape' else (480, 800)
+    geometry = with_photo_date_footers(resolve_layout_geometry(layout, orientation, width, height))
+    sentence = '樹影與遠山，留住我們相聚的時光。'
+    parts = {key: {'caption': sentence, 'date': '2026年12月31日', 'location': place}
+             for key in ('a', 'b')[:len(geometry.photo_rects)]}
+    calls = []
+    original = ImageDraw.ImageDraw.text
+
+    def capture(draw, xy, text, *args, **kwargs):
+        box = draw.textbbox(xy, str(text), font=kwargs['font'], anchor=kwargs.get('anchor'))
+        calls.append((str(text), int(kwargs['font'].size), box))
+        return original(draw, xy, text, *args, **kwargs)
+
+    monkeypatch.setattr(ImageDraw.ImageDraw, 'text', capture)
+    with Image.new('RGB', (width, height), 'white') as canvas:
+        app.extensions['inktime_render_service']._draw_photo_footers(
+            canvas, geometry, parts, 'a', 'b' if len(geometry.photo_rects) == 2 else None,
+        )
+    dates = [(text, size) for text, size, _box in calls if text.replace('/', '').isdigit()]
+    assert [text for text, _size in dates] == date_lines * len(geometry.photo_rects)
+    assert all(size >= minimum_date_size for _text, size in dates)
+    assert sum(text == sentence for text, _size, _box in calls) == len(geometry.photo_rects)
+    assert sum(text == place for text, _size, _box in calls) == len(geometry.photo_rects)
+    for _text, _size, box in calls:
+        assert any(box[0] >= rect.x and box[1] >= rect.y and box[2] <= rect.right and box[3] <= rect.bottom
+                   for rect in geometry.caption_rects)
+    for index, (_text, _size, first) in enumerate(calls):
+        for _other, _other_size, second in calls[index + 1:]:
+            assert min(first[2], second[2]) <= max(first[0], second[0]) or min(first[3], second[3]) <= max(first[1], second[1])
+
+
 def test_new_auto_pairs_fill_slots_and_legacy_frozen_plans_keep_contain(app, tmp_path):
     from inktime.app.domain.rendering.layout_geometry import resolve_compact_pair_geometry
 
     root = tmp_path / 'filled-pair'
     root.mkdir()
-    for pid, size in (('narrow', (300, 1600)), ('wide', (900, 1000))):
+    for pid, size in (('narrow', (300, 1600)), ('wide', (900, 1400))):
         _analyzed_photo(app, root, pid, size, '2024-07-01T10:00:00+00:00')
         Image.new('RGB', size, '#204060').save(root / f'{pid}.jpg')
     service = app.extensions['inktime_render_service']
