@@ -1,5 +1,5 @@
 from concurrent.futures import ThreadPoolExecutor
-from datetime import date
+from datetime import date, datetime
 import hashlib
 import json
 
@@ -11,11 +11,38 @@ from tests.conftest import create_admin, csrf, login
 from tests.unit.test_analysis_schema import valid_result
 
 
+def test_default_profile_uses_next_day_weekly_slots_and_unlimited_analysis(app):
+    settings = app.extensions["inktime_settings_repository"]
+    expected = {
+        "analysis.execution_mode": "seasonal_ai",
+        "analysis.ai_mode": "on_demand",
+        "analysis.prepare_ahead_days": 1,
+        "analysis.require_delivery_ack": True,
+        "analysis.seasonal_window_days": 5,
+        "analysis.ai_daily_photo_limit": 0,
+        "analysis.ai_monthly_photo_limit": 0,
+        "analysis.side_caption_max_chars": 16,
+        "display.weekly_schedule_enabled": True,
+    }
+    assert {key: settings.get(key) for key in expected} == expected
+    schedules = app.extensions["inktime_offline_schedule_repository"]
+    assert schedules.times_for_date(date(2026, 10, 26), ["01:00"]) == [
+        "08:00", "18:00", "20:00", "22:00",
+    ]
+    assert schedules.times_for_date(date(2026, 10, 31), ["01:00"]) == [
+        "08:00", "10:00", "12:00", "14:00", "16:00", "18:00", "20:00", "22:00",
+    ]
+    # Starting after 08:00 still requires today's delivery evidence.
+    service = app.extensions["inktime_seasonal_analysis_service"]
+    assert service.preparation_target(datetime.fromisoformat("2026-10-27T08:01:00+08:00")) is None
+
+
 def _setup(app, monkeypatch):
     service = app.extensions["inktime_seasonal_analysis_service"]
     settings = app.extensions["inktime_settings_repository"]
     settings.update("analysis.execution_mode", "seasonal_ai", changed_by="test", source_ip="127.0.0.1")
     monkeypatch.setattr(service, "today", lambda: date(2026, 10, 22))
+    monkeypatch.setattr(service, "preparation_target", lambda now, **kwargs: date(2026, 10, 22))
     plan = app.extensions["inktime_analysis_service"].build_plan(
         strategy="single", provider_route=[],
         scoring_profile_id=str(app.extensions["inktime_scoring_repository"].current()["id"]),
@@ -207,9 +234,10 @@ def test_seasonal_ranking_uses_the_complete_window_without_another_model_call(ap
     calls = []
     monkeypatch.setattr(renderer, "_candidate_query", lambda **kwargs: calls.append(kwargs) or [])
     assert renderer.select_candidates_details(target_date=date(2026, 1, 1)) == []
-    assert len(calls) == 1
+    assert len(calls) == 2
     assert {"12-27", "01-01", "01-06"} <= set(calls[0]["month_days"])
     assert calls[0]["older_only"] is False
+    assert calls[1]["month_days"] is None  # Empty window uses the saved high-score fallback.
 
 
 def test_cancelled_seasonal_task_without_trace_notifies_once(app, monkeypatch):
@@ -409,3 +437,49 @@ def test_daily_and_status_queries_are_paged_and_deduplicate_across_page_edges(ap
     assert status["candidate_count"] == 5
     assert observed and max(observed) <= 2
     assert not {"Screenshot-test", "do-not-show"} & {row["photo_id"] for row in _tasks(service)}
+
+
+def test_next_day_waits_for_real_display_not_preparation(app):
+    from datetime import datetime, timezone
+    service = app.extensions["inktime_seasonal_analysis_service"]
+    _photo(app, "morning")
+    moment = datetime(2026, 10, 26, 0, 1, tzinfo=timezone.utc)
+    assert service.preparation_target(moment) is None
+    db = app.extensions["inktime_database"]
+    with db.transaction() as connection:
+        connection.execute("INSERT INTO display_history(photo_id,history_date,selection_method,displayed_at) "
+                           "VALUES ('morning','2026-10-26','scheduled_display_prepare',?)", (moment.isoformat(),))
+    assert service.preparation_target(moment) is None
+    with db.transaction() as connection:
+        connection.execute("INSERT INTO display_history(photo_id,history_date,selection_method,displayed_at,metadata_json) "
+                           "VALUES ('morning','2026-10-26','device_queue_ack',?,?)",
+                           (moment.isoformat(), json.dumps({"device_id": "frame-a"})))
+    assert service.preparation_target(moment, device_id="frame-a") == date(2026, 10, 27)
+    assert service.preparation_target(moment, device_id="frame-b") is None
+    assert service.preparation_target(moment.replace(hour=23)) is None  # next local morning, no ACK
+
+
+def test_weekday_and_weekend_day_playlists_use_target_date(app):
+    schedules = app.extensions["inktime_offline_schedule_repository"]
+    assert schedules.times_for_date(date(2026, 10, 30), ["08:00"]) == ["08:00", "18:00", "20:00", "22:00"]
+    assert schedules.times_for_date(date(2026, 10, 31), ["08:00"]) == ["08:00", "10:00", "12:00", "14:00", "16:00", "18:00", "20:00", "22:00"]
+
+
+def test_zero_photo_limits_mean_unlimited(app):
+    photos = app.extensions["inktime_photo_repository"]
+    assert photos.ai_limit_reached(daily_limit=0, monthly_limit=0) is False
+
+
+def test_quality_lottery_does_not_count_prepared_photos_as_displayed():
+    from inktime.app.domain.photos.rotation import exposure_count
+    from inktime.app.domain.photos.seasonal_rotation import seasonal_order
+    assert exposure_count({"selection_count": 50, "display_count": 0}) == 0
+    rows = [{"id": "unseen-low", "selection_score": 35},
+            {"id": "seen-high", "selection_score": 90, "display_count": 3},
+            {"id": "unseen-high", "selection_score": 90}]
+    for day in range(1, 29):
+        ordered = seasonal_order(rows, date(2026, 10, day))
+        assert ordered[-1]["id"] == "unseen-low"
+        assert ordered == seasonal_order(rows, date(2026, 10, day))
+    winners = {seasonal_order(rows, date(2026, 10, day))[0]["id"] for day in range(1, 29)}
+    assert winners == {"seen-high", "unseen-high"}

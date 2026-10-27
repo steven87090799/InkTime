@@ -102,7 +102,7 @@ def _queue_ai(
     selected = (
         list(dict.fromkeys(photo_ids))[:500]
         if force_ai or frozen_photo_ids
-        else _repository().active_eligible_requested_ids(photo_ids, limit=daily_limit)
+        else _repository().active_eligible_requested_ids(photo_ids, limit=daily_limit or len(photo_ids))
     )
     if not selected:
         raise ValueError("沒有符合資格且可送入 AI 的照片")
@@ -230,14 +230,20 @@ def photos_page():
         if hard_excluded:
             reason = str(photo.get("reject_reason") or quality["primary_reason"])
             photo.pop("score_band", None)
+            pending_review = stored_exclusion == "pending_review"
+            photo["selection_status_label"] = "待確認" if pending_review else "已排除"
+            status_reason = (
+                f"待人工確認：{exclusion_labels.get(reason, reason)}（判斷尚未確定）"
+                if pending_review else f"已排除：{exclusion_labels.get(reason, reason)}"
+            )
             photo["total_score"] = 0.0
             photo["selection_score"] = 0.0
             if score_kind != SEMANTIC_SCORE_KIND and str(photo.get("local_features_status") or "") == "complete":
                 photo["score_kind"] = LOCAL_QUALITY_SCORE_KIND
                 photo["local_quality_score"] = local_candidate_score(photo, evaluation=quality)
-                photo["total_score_source"] = f"本機候選品質（已排除：{exclusion_labels.get(reason, reason)}）"
+                photo["total_score_source"] = f"本機候選品質（{status_reason}）"
             else:
-                photo["total_score_source"] = f"已排除：{exclusion_labels.get(reason, reason)}"
+                photo["total_score_source"] = status_reason
         elif ranking_score is not None and photo.get("local_features_status") != "complete":
             photo["total_score"] = None
             photo["total_score_source"] = "等待本機品質檢查完成"
@@ -442,7 +448,7 @@ def queue_ai_mode_run():
         return _ai_job_error(exc), 409
     if mode == "full_library" and not confirmed:
         total_eligible = _repository().count_active_eligible()
-        queued_now = min(total_eligible, daily_limit)
+        queued_now = min(total_eligible, daily_limit) if daily_limit > 0 else total_eligible
         estimate = current_app.extensions["inktime_job_service"].estimate(
             queued_now, str(settings.get("analysis.strategy", "single"))
         )
@@ -454,7 +460,7 @@ def queue_ai_mode_run():
             "estimate": estimate,
             "confirmation_required": True,
         }, 409
-    limit = int(settings.get("analysis.ai_top_n", 50)) if mode == "top_candidates" else daily_limit
+    limit = int(settings.get("analysis.ai_top_n", 50)) if mode == "top_candidates" else (daily_limit or _repository().count_active_eligible())
     if mode == "full_library":
         group_by = str(payload.get("batch_by", "year"))
         if group_by not in {"year", "folder"}:

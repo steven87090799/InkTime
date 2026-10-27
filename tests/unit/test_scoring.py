@@ -157,7 +157,7 @@ class RepairLabProvider(LabProvider):
         import json
 
         return ProviderResponse(
-            json.dumps(valid_result(types=["人物", "人物"]), ensure_ascii=False),
+            json.dumps(valid_result(types=["未知分類"]), ensure_ascii=False),
             Usage(120, 30, 10),
         )
 
@@ -220,7 +220,7 @@ class FailingScoringProvider(LabProvider):
         import json
 
         return ProviderResponse(
-            json.dumps(valid_result(types=["人物", "人物"]), ensure_ascii=False),
+            json.dumps(valid_result(types=["未知分類"]), ensure_ascii=False),
             Usage(120, 30, 10),
         )
 

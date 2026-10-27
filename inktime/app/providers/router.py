@@ -45,6 +45,7 @@ class ProviderChannel:
     shared_quota: Any = None
     request_token_reserve: int = 8512
     analysis_revision: str = ""
+    daily_free_first: bool = False
     semaphore: threading.BoundedSemaphore = field(init=False)
     request_times: deque = field(default_factory=deque)
     token_events: deque = field(default_factory=deque)
@@ -112,6 +113,83 @@ class FailoverVisionProvider(VisionProvider):
         with self._lock:
             return self._can_use_channel_locked(channel, time.monotonic())
 
+    def _unavailable(self, channels=None) -> ProviderHTTPError:
+        """Only a failed local reservation can authorize queue deferral."""
+        delays = []
+        now = time.monotonic()
+        for channel in self.channels if channels is None else channels:
+            deferred = getattr(self._local, "quota_gate_errors", {}).get(id(channel))
+            if deferred is not None:
+                delays.append(float(deferred.retry_after or 60))
+                continue
+            if channel.shared_quota is not None:
+                delays.append(channel.shared_quota.retry_after(channel))
+            elif channel.circuit_until > now:
+                delays.append(channel.circuit_until - now)
+            elif channel.requests_per_minute and len(channel.request_times) >= channel.requests_per_minute:
+                delays.append(max(1.0, channel.request_times[0] + 60 - now))
+            else:
+                delays.append(5.0)
+        for channel in self.channels if channels is None else channels:
+            deferred = getattr(self._local, "quota_gate_errors", {}).get(id(channel))
+            if deferred is not None and float(deferred.retry_after or 60) == min(delays):
+                return deferred
+        return ProviderHTTPError(
+            "Provider 暫時不可用；照片保留排隊，等待冷卻或額度恢復",
+            "VLM-005", retry_after=max(1.0, min(delays, default=60.0)),
+            ambiguous=False, vision_started=False, request_started=False,
+        )
+
+    @staticmethod
+    def _free_model(channel: ProviderChannel) -> bool:
+        return channel.model == "openrouter/free" or str(channel.model or "").endswith(":free")
+
+    @staticmethod
+    def _same_account(first: ProviderChannel, second: ProviderChannel) -> bool:
+        base_url = getattr(first.provider, "base_url", "")
+        api_key = getattr(first.provider, "api_key", "")
+        return bool(base_url and api_key and base_url == getattr(second.provider, "base_url", "")
+                    and api_key == getattr(second.provider, "api_key", ""))
+
+    def _daily_free_gate(self, channel: ProviderChannel) -> None:
+        if not channel.daily_free_first:
+            return
+        free = channel if self._free_model(channel) else next(
+            (candidate for candidate in self.channels
+             if candidate.daily_free_first and self._free_model(candidate)
+             and self._same_account(candidate, channel)), None,
+        )
+        if free is None:
+            raise ProviderHTTPError("CONFIG_INVALID 付費接續缺少相同帳號的免費 Provider", "CONFIG_INVALID")
+        quota_reader = getattr(free.provider, "free_daily_quota", None)
+        if not callable(quota_reader):
+            raise ProviderHTTPError("CONFIG_INVALID Provider 不支援每日免費額度查詢", "CONFIG_INVALID")
+        quota = quota_reader()
+        if self._free_model(channel) and quota["remaining"] == 0:
+            raise ProviderHTTPError(
+                "OpenRouter 當日免費額度已用完，等待下一個 UTC 日或已設定的付費接續",
+                "VLM-005", retry_after=max(1.0, 86400 - time.time() % 86400),
+                ambiguous=False, vision_started=False, request_started=False,
+            )
+        if not self._free_model(channel) and quota["remaining"] > 0:
+            getattr(self._local, "quota_gate_errors", {}).pop(id(free), None)
+            waiting = self._unavailable([free])
+            waiting.args = ("免費額度尚未用完，付費接續保持關閉；等待免費 Provider 恢復",)
+            raise waiting
+
+    def _cancel_local_reservation(self, channel: ProviderChannel) -> None:
+        """Quota lookup rejected dispatch: no model request or circuit outcome."""
+        with self._lock:
+            if channel.shared_quota is not None:
+                identifier = getattr(self._local, "quota_reservations", {}).pop(id(channel), None)
+                if identifier is not None:
+                    channel.shared_quota.cancel(identifier)
+            else:
+                slot = getattr(self._local, "request_slots", {}).pop(id(channel), None)
+                if slot is not None:
+                    channel.request_times.remove(slot)
+        channel.semaphore.release()
+
     def _reserve_request_slot(self, channel: ProviderChannel) -> bool:
         """Consume RPM only after a semaphore permit is available."""
 
@@ -128,6 +206,9 @@ class FailoverVisionProvider(VisionProvider):
             if not self._can_use_channel_locked(channel, now):
                 return False
             channel.request_times.append(now)
+            slots = getattr(self._local, "request_slots", {})
+            slots[id(channel)] = now
+            self._local.request_slots = slots
             return True
 
     def candidate_channels(self, *, excluded: set[str] | None = None) -> list[ProviderChannel]:
@@ -177,10 +258,24 @@ class FailoverVisionProvider(VisionProvider):
 
     def acquire_channel(self, channel: ProviderChannel) -> bool:
         """Reserve RPM and network concurrency only for the cache owner."""
+        errors = getattr(self._local, "quota_gate_errors", {})
+        errors.pop(id(channel), None)
+        self._local.quota_gate_errors = errors
         if not channel.semaphore.acquire(blocking=False):
             return False
         if self._reserve_request_slot(channel):
             self._local.channel = channel
+            try:
+                self._daily_free_gate(channel)
+            except ProviderHTTPError as exc:
+                self._cancel_local_reservation(channel)
+                if exc.code == "VLM-005":
+                    errors[id(channel)] = exc
+                    return False
+                raise
+            except Exception:
+                self._cancel_local_reservation(channel)
+                raise
             return True
         channel.semaphore.release()
         return False
@@ -199,7 +294,7 @@ class FailoverVisionProvider(VisionProvider):
                 continue
             if self.acquire_channel(channel):
                 return channel
-        raise ProviderHTTPError("所有 Provider 暫時不可用或已達 Rate Limit", "VLM-005")
+        raise self._unavailable()
 
     def release_channel(
         self,
@@ -231,6 +326,7 @@ class FailoverVisionProvider(VisionProvider):
                         identifier, channel, usage=usage, error=error, failure_threshold=self.failure_threshold,
                     )
         finally:
+            getattr(self._local, "request_slots", {}).pop(id(channel), None)
             channel.semaphore.release()
 
     def _execute(self, method: str, **kwargs) -> ProviderResponse:
@@ -312,7 +408,7 @@ class FailoverVisionProvider(VisionProvider):
                 operation=method,
                 retryable=True,
             )
-        raise ProviderHTTPError("所有 Provider 暫時不可用或已達 Rate Limit", "VLM-005")
+        raise self._unavailable()
 
     def _execute_sticky(
         self,
@@ -325,7 +421,9 @@ class FailoverVisionProvider(VisionProvider):
         """Run one request on a selected channel without failover."""
 
         if not self.acquire_channel(channel):
-            raise ProviderHTTPError("指定 Provider 暫時不可用或已達 Rate Limit", "VLM-005")
+            error = self._unavailable([channel])
+            error.args = ("指定 Provider 暫時不可用；照片保留排隊，等待冷卻或額度恢復",)
+            raise error
         self._local.channel = channel
         try:
             call_kwargs = self._call_kwargs(channel, method, kwargs)
@@ -385,7 +483,7 @@ class FailoverVisionProvider(VisionProvider):
             return response
         if last_error:
             raise last_error
-        raise ProviderHTTPError("所有 Provider 暫時不可用或已達 Rate Limit", "VLM-005")
+        raise self._unavailable()
 
     def repair_json(self, **kwargs) -> ProviderResponse:
         channel = getattr(self._local, "channel", None)

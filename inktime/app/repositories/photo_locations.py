@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import nullcontext
 from datetime import datetime, timezone
 from dataclasses import replace
 import json
@@ -38,11 +39,12 @@ class PhotoLocationRepository:
         return self._merge(photo_id, content_sha256, latitude, longitude, fields)
 
     def save_landmark(self, photo_id: str, content_sha256: str, latitude, longitude,
-                      *, name: str, confidence: float) -> PhotoPlace:
+                      *, name: str, confidence: float, connection=None) -> PhotoPlace:
         return self._merge(photo_id, content_sha256, latitude, longitude,
-                           {"landmark": name, "landmark_confidence": confidence, "landmark_source": "vision"})
+                           {"landmark": name, "landmark_confidence": confidence, "landmark_source": "vision"},
+                           connection=connection)
 
-    def _merge(self, photo_id: str, content_sha256: str, latitude, longitude, fields: dict) -> PhotoPlace:
+    def _merge(self, photo_id: str, content_sha256: str, latitude, longitude, fields: dict, *, connection=None) -> PhotoPlace:
         if not isinstance(content_sha256, str) or not re.fullmatch(r"[a-f0-9]{64}", content_sha256):
             raise ValueError("地點必須綁定照片 SHA-256")
         gps_key = coordinate_key(latitude, longitude)
@@ -50,7 +52,9 @@ class PhotoLocationRepository:
         updates = {key: normalized[key] for key in fields}
         # BEGIN IMMEDIATE serializes the read and merge, not just the final write.
         # Geocoding/model calls stay outside this short database transaction.
-        with self.database.transaction() as connection:
+        context = self.database.transaction() if connection is None else nullcontext(connection)
+        with context as active_connection:
+            connection = active_connection
             photo = connection.execute("SELECT sha256,gps_lat,gps_lon FROM photos WHERE id=?", (photo_id,)).fetchone()
             if photo is None or photo["sha256"] != content_sha256 or coordinate_key(photo["gps_lat"], photo["gps_lon"]) != gps_key:
                 raise ValueError("照片內容或 GPS 已改變，拒絕套用舊地點")

@@ -266,6 +266,9 @@ def test_shared_confirmation_dialog_resets_and_normalizes_cancel_state(client, a
     assert "dialog.returnValue === 'confirm'" in body
 
 def test_shared_preview_retry_and_typed_job_contracts_are_rendered(client, app):
+    app.extensions["inktime_settings_repository"].update(
+        "analysis.execution_mode", "local_only", changed_by="test", source_ip="test"
+    )
     create_admin(app)
     login(client)
 
@@ -1322,7 +1325,12 @@ def test_photo_cards_never_present_excluded_screenshot_or_severe_blur_as_high_sc
     assert "疑似缺陷保留供參考，不降低 AI 選片分" in detail
 
 
-def test_photo_cards_force_ineligible_selection_score_to_zero_but_keep_diagnostics(client, app):
+@pytest.mark.parametrize("status,badge,source", [
+    ("eligible", "已排除", "已排除："),
+    ("auto_excluded", "已排除", "已排除："),
+    ("pending_review", "待確認", "待人工確認："),
+])
+def test_photo_cards_force_ineligible_selection_score_to_zero_but_keep_diagnostics(client, app, status, badge, source):
     create_admin(app)
     login(client)
     photo_id = add_photos(app, 1)[0]
@@ -1342,6 +1350,10 @@ def test_photo_cards_force_ineligible_selection_score_to_zero_but_keep_diagnosti
         ranking_score=98,
     )
     with app.extensions["inktime_database"].session() as connection:
+        connection.execute(
+            "UPDATE photos SET eligible=0,exclusion_status=?,reject_reason='sexualized_content' WHERE id=?",
+            (status, photo_id),
+        )
         raw_score = float(
             connection.execute(
                 "SELECT final_ranking_score FROM photo_analysis WHERE photo_id=?",
@@ -1351,7 +1363,11 @@ def test_photo_cards_force_ineligible_selection_score_to_zero_but_keep_diagnosti
 
     body = client.get("/photos").get_data(as_text=True)
 
-    assert "AI 選片分 0.0（已排除：" in body
+    assert f'AI 選片分 0.0（{source}' in body
+    assert f'class="score-badge">{badge} 0.0</span>' in body
+    if status == "pending_review":
+        assert "判斷尚未確定" in body
+        assert 'AI 選片分 0.0（已排除：' not in body
     assert f"模型原評分 {round(raw_score, 1)}" in body
     assert "E6 顯示適合度 99.0" in body
 

@@ -25,6 +25,7 @@ from inktime.app.domain.analysis.scoring import (
     DEFAULT_SCORING_RULES,
 )
 from inktime.app.domain.analysis.schema import (
+    DEFAULT_SIDE_CAPTION_MAX_CHARS,
     SIDE_CAPTION_MAX_CHARS,
     SIDE_CAPTION_MIN_CHARS,
     normalize_caption_controls,
@@ -157,7 +158,7 @@ SETTING_DEFINITIONS: dict[str, dict[str, Any]] = {
     },
     "analysis.side_caption_max_chars": {
         "category": "照片描述與相框文案",
-        "default": SIDE_CAPTION_MAX_CHARS,
+        "default": DEFAULT_SIDE_CAPTION_MAX_CHARS,
         "type": "integer",
         "description": "相框一句話最多字元數",
         "risk": "必須與最少字數保持 min ≤ max",
@@ -178,7 +179,7 @@ SETTING_DEFINITIONS: dict[str, dict[str, Any]] = {
     },
     "analysis.execution_mode": {
         "category": "分析執行模式",
-        "default": "local_only",
+        "default": "seasonal_ai",
         "type": "string",
         "description": "分析執行模式；本機選片不會讀取 Provider 或產生模型費用",
         "risk": "自動 AI 或歷年同期按需模式會依 Provider 設定執行付費模型工作",
@@ -188,13 +189,13 @@ SETTING_DEFINITIONS: dict[str, dict[str, Any]] = {
             "local_only": "僅使用本機選片（只做本機特徵與品質判斷；不使用 Provider、不產生模型費用）",
             "local_with_manual_ai": "本機選片＋手動 AI（平時只做本機分析；只有手動送入 AI 時才呼叫模型）",
             "automatic_ai": "自動 AI 分析（排程與新工作可自動使用已啟用的 Provider；可能產生 Token 與費用）",
-            "seasonal_ai": "歷年同期按需 AI 分析",
+            "seasonal_ai": "歷年同期按日期分批",
         },
         "restart": False,
     },
     "analysis.ai_mode": {
         "category": "AI 模式",
-        "default": "top_candidates",
+        "default": "on_demand",
         "type": "string",
         "description": "預設僅分析本機候選分最高的前 N 張；關閉時絕不呼叫模型",
         "risk": "完整照片庫必須在工作建立時確認，並依年份或資料夾分批處理",
@@ -208,6 +209,11 @@ SETTING_DEFINITIONS: dict[str, dict[str, Any]] = {
         },
         "restart": False,
     },
+    "display.weekly_schedule_enabled": {"category": "隔日圖片準備", "default": True, "type": "boolean", "description": "依目標日期區分平日與週末離線顯示時段", "restart": False},
+    "display.weekday_times": {"category": "隔日圖片準備", "default": '08:00,18:00,20:00,22:00', "type": "string", "description": "週一至週五顯示時刻，使用逗號分隔 HH:MM", "restart": False},
+    "display.weekend_times": {"category": "隔日圖片準備", "default": '08:00,10:00,12:00,14:00,16:00,18:00,20:00,22:00', "type": "string", "description": "週六日顯示時刻；國定假日未另套行事曆", "restart": False},
+    "analysis.prepare_ahead_days": {"category": "隔日圖片準備", "default": 1, "type": "integer", "description": "按日期分批分析的目標提前天數", "restart": False, "min": 1, "max": 1},
+    "analysis.require_delivery_ack": {"category": "隔日圖片準備", "default": True, "type": "boolean", "description": "八點後確認當日首張已下載校驗或已顯示，再開始隔日分析", "restart": False},
     "analysis.seasonal_window_days": {
         "category": "分析執行模式",
         "default": 5,
@@ -222,7 +228,7 @@ SETTING_DEFINITIONS: dict[str, dict[str, Any]] = {
         "category": "AI 模式",
         "default": 50,
         "type": "integer",
-        "description": "前 N 張候選模式每次允許進入 AI 的最高本機候選數",
+        "description": "僅前 N 張候選模式的上限；歷年同期按日期分批不受此值限制",
         "risk": "提高數值會增加 Token 與成本；不會影響已快取結果",
         "min": 1,
         "max": 10000,
@@ -230,21 +236,21 @@ SETTING_DEFINITIONS: dict[str, dict[str, Any]] = {
     },
     "analysis.ai_daily_photo_limit": {
         "category": "AI 模式",
-        "default": 50,
+        "default": 0,
         "type": "integer",
-        "description": "每日可實際送往 AI 的不同照片上限，快取命中不計入",
+        "description": "0 表示不限制張數；每日可實際送往 AI 的不同照片上限，快取命中不計入",
         "risk": "達到上限時會退回本機選片，隔日可續跑",
-        "min": 1,
+        "min": 0,
         "max": 100000,
         "restart": False,
     },
     "analysis.ai_monthly_photo_limit": {
         "category": "AI 模式",
-        "default": 500,
+        "default": 0,
         "type": "integer",
-        "description": "每月可實際送往 AI 的不同照片上限",
+        "description": "0 表示不限制張數；每月可實際送往 AI 的不同照片上限",
         "risk": "達到上限時會退回本機選片，需調整後才會再送出",
-        "min": 1,
+        "min": 0,
         "max": 1000000,
         "restart": False,
     },
@@ -279,8 +285,8 @@ SETTING_DEFINITIONS: dict[str, dict[str, Any]] = {
     'analysis.exclude_sexualized_content': {'category': '舊版 AI 內容排除', 'default': True, 'type': 'boolean', 'description': 'v4/v5 排除偏色情／性感照片；v6 固定排除', 'label': '舊版色情化內容排除', 'risk': '只影響舊版分析；v6 安全排除不可關閉，明確命中也不可人工恢復。', 'restart': False},
     'analysis.exclude_explicit_nudity': {'category': '舊版 AI 內容排除', 'default': True, 'type': 'boolean', 'description': 'v4/v5 排除成人裸露照片；v6 固定排除', 'label': '舊版裸露內容排除', 'risk': '只影響舊版分析；v6 安全排除不可關閉，明確命中也不可人工恢復。', 'restart': False},
     'analysis.exclude_female_glamour_portraits': {'category': '舊版 AI 內容排除', 'default': True, 'type': 'boolean', 'description': 'v4/v5 排除女性寫真；v6 固定排除', 'label': '舊版女性寫真排除', 'risk': '只影響舊版分析；v6 同時辨識不限性別的商業模特照。', 'restart': False},
-    'analysis.content_filter_min_confidence': {'category': '舊版 AI 內容排除', 'default': 0.85, 'type': 'number', 'description': 'v4/v5 內容排除信心門檻', 'label': '舊版內容信心門檻', 'risk': '只影響舊版分析；v6 使用固定安全門檻，低信心疑似照片等待人工確認。', 'restart': False, 'min': 0, 'max': 1},
-    'analysis.female_glamour_min_confidence': {'category': '舊版 AI 內容排除', 'default': 0.9, 'type': 'number', 'description': 'v4/v5 女性寫真信心門檻', 'label': '舊版寫真信心門檻', 'risk': '只影響舊版分析；v6 使用固定安全門檻。', 'restart': False, 'min': 0, 'max': 1},
+    'analysis.content_filter_min_confidence': {'category': '舊版 AI 內容排除', 'default': 0.85, 'type': 'number', 'description': 'v4/v5 內容排除信心門檻', 'label': '舊版內容信心門檻', 'risk': '只影響舊版分析；v6 直接採模型是／否判斷，信心值僅供查閱。', 'restart': False, 'min': 0, 'max': 1},
+    'analysis.female_glamour_min_confidence': {'category': '舊版 AI 內容排除', 'default': 0.9, 'type': 'number', 'description': 'v4/v5 女性寫真信心門檻', 'label': '舊版寫真信心門檻', 'risk': '只影響舊版分析；v6 直接採模型是／否判斷，信心值僅供查閱。', 'restart': False, 'min': 0, 'max': 1},
     "analysis.prefilter_enabled": {
         "category": "本機預篩選",
         "default": True,
@@ -508,7 +514,7 @@ SETTING_DEFINITIONS: dict[str, dict[str, Any]] = {
     },
     "offline.future_schedule_prepare_hour_local": {
         "category": "效能與待機",
-        "default": 20,
+        "default": 8,
         "type": "integer",
         "description": "裝置本地時間到達此時後，Scheduler 預先準備下一個本地日排程",
         "risk": "過晚可能縮短渲染緩衝；過早會增加未來 Slot 暫存時間",
@@ -815,9 +821,11 @@ SETTING_DEFINITIONS: dict[str, dict[str, Any]] = {
         "choices": ["history_today", "top_ranked"],
         "restart": False,
     },
+    "render.repeat_high_score": {"category": "渲染設定", "default": 75, "type": "number", "min": 0, "max": 100, "description": "高分照片可再次入選的加權門檻；仍保留已顯示與近期顯示懲罰", "restart": False},
+    "render.seasonal_outside_fallback": {"category": "渲染設定", "default": True, "type": "boolean", "description": "同期範圍沒有合格照片時，使用範圍外已分析的高分照片並記錄補圖標示", "restart": False},
     "render.history_today_window_days": {
         "category": "渲染設定",
-        "default": 7,
+        "default": 5,
         "type": "integer",
         "description": "歷年同日不足時，可向前後尋找的日數",
         "risk": "設為 0 只接受完全相同月日",
@@ -968,12 +976,13 @@ SETTING_DEFINITIONS: dict[str, dict[str, Any]] = {
         "risk": "正式渲染會逐段檢查字元，缺字時禁止發布且不使用預設字型替代",
         "restart": False,
     },
+    "location.auto_enrich": {"category": "地區資料", "default": True, "type": "boolean", "description": "掃描與分析時自動補齊地區並快取；臺灣使用離線行政區界線，其他地區保留粗略城市", "restart": False},
     "render.show_location": {
         "category": "渲染設定",
         "default": True,
         "type": "boolean",
-        "description": "照片含 GPS 時，在電子紙短文案下方顯示最近城市",
-        "risk": "只顯示離線城市索引的粗略地名，不顯示精確座標；停用可從電子紙畫面隱藏",
+        "description": "照片含 GPS 時，在電子紙短文案下方顯示已保存的行政區或地區",
+        "risk": "優先使用行政區；無區界資料時顯示粗略城市，無 GPS 時留白",
         "restart": False,
     },
     "render.location_max_distance_km": {
@@ -1506,7 +1515,7 @@ class SettingsRepository:
         now = datetime.now(timezone.utc).isoformat()
         with self.database.session() as connection:
             # Determine upgrade intent before inserting the new key.  A fresh
-            # database starts local-only; an existing installation keeps the
+            # database starts seasonal; an existing installation keeps the
             # old ai_mode policy through the compatibility adapter.
             existing_rows = connection.execute(
                 "SELECT key,value_json,updated_by FROM settings"
@@ -1534,7 +1543,7 @@ class SettingsRepository:
                 from inktime.app.domain.analysis.execution_mode import legacy_execution_mode
 
                 mode = (
-                    "local_only"
+                    "seasonal_ai"
                     if not existing
                     else legacy_execution_mode(
                         existing.get("analysis.ai_mode", "off"),
@@ -1937,6 +1946,9 @@ class SettingsRepository:
                 or bool(parsed.fragment)
             ):
                 raise ValueError(f"{key} 必須是無帳密與 Fragment 的完整 https:// URL")
+        if key in {"display.weekday_times", "display.weekend_times"}:
+            from inktime.app.domain.photopainter.offline_schedule import validate_offline_schedule
+            validate_offline_schedule(str(value).split(","), maximum=16, minimum_gap_minutes=30)
         if key in {"general.timezone", "device.default_timezone"}:
             try:
                 ZoneInfo(str(value))

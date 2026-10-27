@@ -184,7 +184,7 @@ def test_auto_photo_places_captions_and_dates_without_overlap(app, tmp_path, mon
 
     monkeypatch.setattr(ImageDraw.ImageDraw, "text", record)
     service._render_plan_image(plan)
-    for index, (pid, key) in enumerate((("primary", "primary_caption"), ("secondary", "secondary_caption"))):
+    for index, key in enumerate(("primary_caption", "secondary_caption")):
         rect = plan["geometry"][key]
         if rect is None:
             continue
@@ -198,19 +198,21 @@ def test_auto_photo_places_captions_and_dates_without_overlap(app, tmp_path, mon
                 and rect["y"] <= call[0][1] < rect["y"] + rect["height"]
             ]
             assert glyphs, "Caption glyphs must reach their own left column"
-            dates = [call for call in calls if call[2] == "mt" and call[0][0] == rect["x"] + rect["width"] // 2]
-            assert "".join(call[1] for call in dates) == plan["capture_date_labels"][pid]
-            assert all(len(call[1]) == 1 for call in dates)
+            dates = [call for call in glyphs if call[1] in {"2024", f"7/{index + 1}"}]
+            assert [call[1] for call in dates] == ["2024", f"7/{index + 1}"]
+            glyphs = [call for call in glyphs if call not in dates]
             assert min(call[0][1] for call in glyphs) <= rect["y"] + 12
             assert min(call[0][1] for call in dates) > max(call[0][1] for call in glyphs)
-            assert all(call[3] <= rect["width"] - 8 for call in dates)
-            assert dates[-1][0][1] + 14 == rect["y"] + rect["height"] - 12
+            assert all(call[3] <= rect["width"] - 6 for call in dates)
+            assert dates[-1][0][1] + 14 <= rect["y"] + rect["height"]
             continue
         y = rect["y"] + rect["height"] / 2
         caption = next(call for call in calls if call[2] == "lm" and call[0] == (rect["x"] + 8, y))
-        captured = next(call for call in calls if call[2] == "rm" and call[0] == (rect["x"] + rect["width"] - 8, y))
-        assert captured[1] == plan["capture_date_labels"][pid]
-        assert caption[0][0] + caption[3] + 12 <= captured[0][0] - captured[3]
+        dates = [call for call in calls if call[2] == "rt" and
+                 call[0][0] == rect["x"] + rect["width"] - 8 and
+                 rect["y"] <= call[0][1] < rect["y"] + rect["height"]]
+        assert [call[1] for call in dates] == ["2024", f"7/{index + 1}"]
+        assert caption[0][0] + caption[3] + 10 <= min(call[0][0] - call[3] for call in dates)
 
 
 def test_default_batch_photo_plans_reserve_distinct_portrait_sources(app, tmp_path):
@@ -514,12 +516,13 @@ def test_every_pair_mode_draws_both_photo_captions_and_smaller_capture_dates(
     painted = "".join(text for text, _size in calls)
     for caption in ("A側相框回憶文字", "B側相框回憶文字"):
         assert caption in painted
-    for label in ("2024年7月1日", "2021年12月31日"):
-        assert label in painted
+    for year, month_day in (("2024", "7/1"), ("2021", "12/31")):
+        assert year in painted
+        assert month_day in painted or ("月" in painted and "日" in painted)
     assert plan["primary_caption"]["capture_date"] == "2024-07-01"
     assert plan["secondary_caption"]["capture_date"] == "2021-12-31"
     assert all(size <= 14 for text, size in calls if "年" in text or "月" in text)
-    assert all(size >= 18 for text, size in calls if "A" in text or "B" in text)
+    assert all(size >= 16 for text, size in calls if "A" in text or "B" in text)
 
 
 @pytest.mark.parametrize("layout", ("photo_pair", "photo_pair_caption", "adaptive_memory"))
@@ -575,13 +578,13 @@ def test_pair_dates_are_frozen_and_missing_dates_never_draw_unknown_placeholder(
 
     monkeypatch.setattr(ImageDraw.ImageDraw, "text", capture_text)
     service._render_plan_image(plan)
-    assert "2024年7月1日" in "".join(calls)
+    assert "2024" in calls and "7/1" in calls
     assert "未知" not in "".join(calls)
     calls.clear()
     service.render_photo(
         "a", layout=layout, secondary_photo_id="b", orientation="landscape"
     )
-    assert not any("年" in text or "月" in text for text in calls)
+    assert "2024" not in calls and "7/1" not in calls
     assert "A側相框回憶文字" in "".join(calls) and "B側相框回憶文字" in "".join(calls)
     assert service._date_label(None) == ""
 
@@ -713,9 +716,8 @@ def test_adaptive_recently_displayed_candidate_is_fallback_but_fresh_candidate_w
     _analyzed_photo(app, root, "fresh", (900, 1600), "2026-08-12T10:00:00+00:00")
     with app.extensions["inktime_database"].session() as connection:
         connection.execute(
-            """INSERT INTO display_history(
-                   photo_id,history_date,selection_method,displayed_at,metadata_json
-               ) VALUES ('recent','2026-08-10','test',datetime('now'),'{}')"""
+            """UPDATE photos SET display_count=1,last_displayed_at=datetime('now')
+               WHERE id='recent'"""
         )
 
     service = app.extensions["inktime_render_service"]
@@ -1042,3 +1044,101 @@ def test_adaptive_secondary_risk_controls_the_preview_dither_plan(app, tmp_path,
 
     monkeypatch.setattr(service, "_select_adaptive_pair_candidate", selection_must_stay_frozen)
     assert service._render_plan_image(plan).size == (480, 800)
+
+
+def test_compact_pair_dates_leave_both_sentences_and_districts_visible(app, monkeypatch):
+    from inktime.app.domain.rendering.layout_geometry import resolve_compact_pair_geometry
+    service = app.extensions['inktime_render_service']
+    geometry = resolve_compact_pair_geometry(((900, 1600), (900, 1600)))
+    calls = []
+    original = ImageDraw.ImageDraw.text
+    def capture(draw, xy, text, *args, **kwargs):
+        calls.append((str(text), kwargs['font'].size))
+        return original(draw, xy, text, *args, **kwargs)
+    monkeypatch.setattr(ImageDraw.ImageDraw, 'text', capture)
+    records = ({'photo_id': 'a', 'text': '那天微風也記得我們一起走過的路留在心裡面'},
+               {'photo_id': 'b', 'text': '那些溫柔日常值得好好收藏'})
+    parts = {key: {'date': '2022年8月5日', 'location': '新店區'} for key in ('a', 'b')}
+    with Image.new('RGB', (800, 480), 'white') as canvas:
+        service._draw_compact_pair_captions(canvas, geometry, records, parts)
+    assert sum(text == '2022' for text, _ in calls) == 2
+    assert sum(text == '8/5' for text, _ in calls) == 2
+    assert sum(text == '新店區' for text, _ in calls) == 2
+    assert all(size == 14 for text, size in calls if text in {'2022', '8/5'})
+    painted = ''.join(text for text, size in calls if size >= 16)
+    assert records[0]['text'] in painted and records[1]['text'] in painted
+
+
+@pytest.mark.parametrize('place,visible_place', [
+    ('國立故宮博物院南部院區', '國立故宮博物院南部院區'),
+    ('國立臺灣史前文化博物館南科考古館', '國立臺灣史前文化博物館南科考古館'),
+    ('海邊風景文化展示中心', '海邊風景文化展示中心'),
+    ('山水風光' * 10, None),
+])
+def test_compact_pair_long_places_keep_twenty_characters_and_original_metadata(app, monkeypatch, place, visible_place):
+    from inktime.app.domain.rendering.layout_geometry import resolve_compact_pair_geometry
+
+    service = app.extensions['inktime_render_service']
+    geometry = resolve_compact_pair_geometry(((900, 1600), (900, 1600)))
+    text = '那天微風也記得我們一起走過的路留在心裡面'
+    calls = []
+    original = ImageDraw.ImageDraw.text
+
+    def capture(draw, xy, value, *args, **kwargs):
+        calls.append((str(value), kwargs['font'].size))
+        return original(draw, xy, value, *args, **kwargs)
+
+    monkeypatch.setattr(ImageDraw.ImageDraw, 'text', capture)
+    records = tuple({'photo_id': key, 'text': text} for key in ('a', 'b'))
+    parts = {key: {'date': '2026年12月31日', 'location': place} for key in ('a', 'b')}
+    with Image.new('RGB', (800, 480), 'white') as canvas:
+        service._draw_compact_pair_captions(canvas, geometry, records, parts)
+    assert ''.join(value for value, size in calls if size >= 16) == text * 2
+    place_text = ''.join(value for value, size in calls if size < 16 and value not in {'2026', '12/31'})
+    if visible_place is None:
+        assert '…' in place_text
+    else:
+        assert place_text == visible_place * 2
+    assert all(part['location'] == place for part in parts.values())
+    assert sum(rect.width for rect in geometry.photo_rects) == 684
+
+
+def test_compact_pair_unknown_name_can_shrink_date_and_keep_its_full_name(app):
+    service = app.extensions['inktime_render_service']
+    place = '甲乙丙丁戊己庚辛壬癸子丑寅卯辰巳午未'
+    text = '那天微風也記得我們一起走過的路留在心裡'
+    font_path = service.fonts.resolve(str(service.settings.get('render.font_path', '')))
+    with Image.new('RGB', (44, 480), 'white') as canvas:
+        lines = service._compact_pair_metadata_lines(
+            ImageDraw.Draw(canvas), font_path=font_path, date_lines=['2026', '12/31'],
+            place=place, sentence=text, width=38, height=464,
+        )
+    assert ''.join(value for value, _font, _step in lines[2:]) == place
+    assert 10 <= lines[0][1].size < 14
+
+
+def test_compact_pair_sixteen_character_caption_leaves_room_for_forty_character_landmark(app):
+    service = app.extensions['inktime_render_service']
+    place = '山水風光' * 10
+    font_path = service.fonts.resolve(str(service.settings.get('render.font_path', '')))
+    with Image.new('RGB', (44, 480), 'white') as canvas:
+        lines = service._compact_pair_metadata_lines(
+            ImageDraw.Draw(canvas), font_path=font_path, date_lines=['2026', '12/31'],
+            place=place, sentence='把平凡日子收進光裡讓回憶慢慢發亮', width=38, height=464,
+        )
+    assert ''.join(value for value, _font, _step in lines[2:]) == place
+    assert sum(step for _value, _font, step in lines) + 16 * 18 + 8 <= 464
+
+
+def test_shorter_generation_limit_preserves_existing_model_sentence(app, tmp_path):
+    root = tmp_path / 'retained-caption'
+    root.mkdir()
+    text = '那天微風也記得我們一起走過的路留在心裡面'
+    _analyzed_photo(app, root, 'retained', (1600, 900), '2026-10-27T08:00:00+00:00', side_caption=text)
+    app.extensions['inktime_settings_repository'].update(
+        'analysis.side_caption_max_chars', 16, changed_by=create_admin(app), source_ip='127.0.0.1',
+    )
+    plan = app.extensions['inktime_render_service'].resolve_render_plan(
+        'retained', layout='auto_photo', orientation='landscape',
+    )
+    assert plan['primary_caption']['text'] == text

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 import json
 from unittest.mock import Mock
 from zoneinfo import ZoneInfo
@@ -55,6 +55,16 @@ def test_due_incremental_schedule_enqueues_existing_scanner_entry(app, tmp_path)
     assert job["kind"] == "scan"
     assert job["status"] == "running"
     assert json.loads(job["settings_json"])["max_attempts"] == 2
+
+
+def test_legacy_daily_ai_and_same_day_render_schedules_start_disabled(app):
+    schedules = app.extensions["inktime_schedule_repository"]
+    assert not schedules.get("ai_schedule")["enabled"]
+    assert not schedules.get("display_prepare")["enabled"]
+    # Bootstrapping an existing installation must preserve explicit choices.
+    schedules.update("ai_schedule", {"enabled": True}, "Asia/Taipei")
+    schedules.ensure_defaults()
+    assert schedules.get("ai_schedule")["enabled"]
 
 
 def test_due_scheduled_pending_job_restarts_without_duplicate(app, monkeypatch):
@@ -1158,7 +1168,13 @@ def test_offline_shortage_is_terminal_for_one_device_day_config(app):
     assert terminal["terminal_outcome_code"] == "NO_ELIGIBLE_CANDIDATES"
 
 
-def test_offline_shortage_retries_after_bounded_cooldown_and_keeps_active_dedupe(app):
+def test_offline_shortage_retries_after_bounded_cooldown_and_keeps_active_dedupe(app, custom_device_schedule):
+    # This contract exercises custom device times and the legacy 20:00 start.
+    app.extensions["inktime_settings_repository"].update_many(
+        {"analysis.execution_mode": "automatic_ai",
+         "offline.future_schedule_prepare_hour_local": 20},
+        changed_by="test", source_ip="test",
+    )
     device_id, _token = app.extensions["inktime_device_repository"].create(
         "冷卻後恢復的離線相框",
         delivery_mode="inktime_offline_schedule",
@@ -1264,7 +1280,13 @@ def test_offline_shortage_retries_after_bounded_cooldown_and_keeps_active_dedupe
     ) == 2
 
 
-def test_offline_scheduler_prepares_only_tomorrow_after_expired_today(app):
+def test_offline_scheduler_prepares_only_tomorrow_after_expired_today(app, custom_device_schedule):
+    # This contract exercises custom device times and the legacy 20:00 start.
+    app.extensions["inktime_settings_repository"].update_many(
+        {"analysis.execution_mode": "automatic_ai",
+         "offline.future_schedule_prepare_hour_local": 20},
+        changed_by="test", source_ip="test",
+    )
     device_id, _token = app.extensions["inktime_device_repository"].create(
         "預先準備明日的離線相框",
         delivery_mode="inktime_offline_schedule",
@@ -1339,7 +1361,13 @@ def test_offline_prefetch_keeps_today_and_tomorrow_decisions_independent():
     ) == [datetime(2026, 8, 4, tzinfo=zone).date()]
 
 
-def test_offline_scheduler_skips_expired_today_but_keeps_a_future_today_slot(app):
+def test_offline_scheduler_skips_expired_today_but_keeps_a_future_today_slot(app, custom_device_schedule):
+    # This contract exercises custom device times and the legacy 20:00 start.
+    app.extensions["inktime_settings_repository"].update_many(
+        {"analysis.execution_mode": "automatic_ai",
+         "offline.future_schedule_prepare_hour_local": 20},
+        changed_by="test", source_ip="test",
+    )
     def offline_jobs(device_id):
         return {
             job["dedupe_key"]
@@ -1626,6 +1654,26 @@ def test_analysis_schedule_cannot_bypass_execution_mode(app, monkeypatch, mode):
     with pytest.raises(ValueError, match="不允許建立排程分析工作"):
         SchedulerRunner(app)._enqueue_task(task, datetime.now(timezone.utc), force=True, trigger_source="manual")
     create.assert_not_called()
+
+
+@pytest.mark.parametrize("target", [None, date(2026, 10, 27)])
+def test_legacy_ai_schedule_respects_morning_delivery_and_tomorrow(app, monkeypatch, target):
+    app.extensions["inktime_settings_repository"].update(
+        "analysis.execution_mode", "seasonal_ai", changed_by="test", source_ip="127.0.0.1"
+    )
+    task = dict(app.extensions["inktime_schedule_repository"].get("ai_schedule"))
+    task["config"] = dict(task["config"], mode="enabled", strategy="single")
+    seasonal = app.extensions["inktime_seasonal_analysis_service"]
+    gate, ensure = Mock(return_value=target), Mock()
+    monkeypatch.setattr(seasonal, "preparation_target", gate)
+    monkeypatch.setattr(seasonal, "ensure", ensure)
+    now = datetime(2026, 10, 26, 0, 1, tzinfo=timezone.utc)
+    SchedulerRunner(app)._enqueue_task(task, now, force=True, trigger_source="manual")
+    gate.assert_called_once_with(now)
+    if target is None:
+        ensure.assert_not_called()
+    else:
+        ensure.assert_called_once_with(date(2026, 10, 27))
 
 
 def test_analysis_schedule_freezes_plan_before_selecting_photos(app, monkeypatch):

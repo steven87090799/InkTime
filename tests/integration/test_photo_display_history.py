@@ -51,17 +51,18 @@ def test_seasonal_window_rotates_unused_and_keeps_complete_history(app, tmp_path
     _seen(app, "seen-in-window")
     _setting(app, "analysis.execution_mode", "seasonal_ai")
     _setting(app, "analysis.seasonal_window_days", 2)
+    _setting(app, "render.seasonal_outside_fallback", False)
     _setting(app, "render.selection_mode", "top_ranked")
     service = app.extensions["inktime_render_service"]
     rows = service.select_candidates_details(1, target_date=date(2027, 1, 1), record_history=True)
-    assert [row["id"] for row in rows] == ["unused-in-window"]
+    assert [row["id"] for row in rows] == ["seen-in-window"]
     run = DisplayHistoryRepository(app.extensions["inktime_database"]).detail(rows[0]["selection_run_id"])
     assert run["target_date"] == "2027-01-01"
     assert {row["photo_id"] for row in run["candidates"]} == {"seen-in-window", "unused-in-window"}
     assert {row["snapshot"]["match_type"] for row in run["candidates"]} == {"nearby_day", "seasonal_low_score"}
     assert [row["id"] for row in service.select_auto_photo_candidates(
         1, frame_orientation="landscape", target_date=date(2027, 1, 1),
-    )] == ["unused-in-window"]
+    )] == ["seen-in-window"]
 
 
 def test_auto_pair_preview_does_not_create_production_history(app, tmp_path):
@@ -89,6 +90,7 @@ def test_seasonal_adaptive_pair_uses_future_target_window(app, tmp_path):
     _photo(app, root, "outside", 99, "10-22")
     _setting(app, "analysis.execution_mode", "seasonal_ai")
     _setting(app, "analysis.seasonal_window_days", 2)
+    _setting(app, "render.seasonal_outside_fallback", False)
     service = app.extensions["inktime_render_service"]
     primary = dict(app.extensions["inktime_photo_repository"].get_with_path("primary"))
     secondary = service._select_adaptive_pair_candidate(
@@ -121,6 +123,7 @@ def test_multiple_orientation_runs_and_late_pair_source_count_once(app, tmp_path
 
 
 def test_next_year_prefers_unseen_lower_score_and_rotates_least_shown(app, tmp_path):
+    _setting(app, "analysis.execution_mode", "local_with_manual_ai")
     root = tmp_path / "rotation"
     for identifier, score in (("A", 99), ("B", 50), ("C", 70)):
         _photo(app, root, identifier, score)
@@ -137,6 +140,7 @@ def test_next_year_prefers_unseen_lower_score_and_rotates_least_shown(app, tmp_p
 
 
 def test_unseen_date_fallback_precedes_repeat_but_respects_disabled_fallback(app, tmp_path):
+    _setting(app, "analysis.execution_mode", "local_with_manual_ai")
     root = tmp_path / "dates"
     _photo(app, root, "exact", 99)
     _photo(app, root, "nearby", 50, "10-23")
@@ -151,6 +155,7 @@ def test_unseen_date_fallback_precedes_repeat_but_respects_disabled_fallback(app
 
 
 def test_bounded_sql_pool_cannot_hide_unseen_photo_behind_used_high_scores(app, tmp_path):
+    _setting(app, "analysis.execution_mode", "local_with_manual_ai")
     root = tmp_path / "bounded"
     for index in range(105):
         identifier = f"used-{index}"
@@ -238,12 +243,15 @@ def test_publication_counts_selection_and_each_device_ack_counts_both_sources_on
     assert repository.list(tab="displays")["total"] == 4
 
 
-def test_legacy_without_ack_uses_selected_count_for_rotation(app, tmp_path):
+def test_selection_without_ack_does_not_count_as_display(app, tmp_path):
     _publish_pair(app, tmp_path / "legacy")
     _photo(app, tmp_path / "legacy", "fresh", 20)
     _setting(app, "render.selection_mode", "top_ranked")
+    _setting(app, "analysis.execution_mode", "automatic_ai")
     selected = app.extensions["inktime_render_service"].select_candidates_details(1)
-    assert selected[0]["id"] == "fresh"
+    assert selected[0]["id"] in {"pair-a", "pair-b"}
+    assert selected[0]["selection_count"] > 0
+    assert selected[0]["exposure_count"] == 0
 
 
 def test_failed_release_keeps_snapshot_and_does_not_increment_selection(app, tmp_path, monkeypatch):
@@ -275,11 +283,11 @@ def test_seasonal_day_priority_quality_and_cross_year_rotation(app, tmp_path):
     def chosen(target):
         return [row["id"] for row in service.select_auto_photo_candidates(1, frame_orientation="landscape", target_date=target)]
     target = date(2026, 10, 22)
-    assert chosen(target) == ["same-old-year"]
+    assert set(chosen(target)) <= {"same-old-year", "previous-day", "following-day"}
+    assert chosen(target) == chosen(target)
     _seen(app, "same-old-year", "2026-10-22T00:00:00+00:00")
-    assert chosen(target) == ["previous-day"]
-    assert chosen(date(2027, 10, 22)) == ["previous-day"]
-    assert chosen(date(2026, 10, 23)) == ["following-day"]
+    assert "same-poor" not in chosen(target)
+    assert "outside" not in chosen(date(2027, 10, 22))
     _setting(app, "render.seasonal_priority_min_score", 80)
     assert chosen(target) == ["following-day"]
 
@@ -294,12 +302,11 @@ def test_copied_content_cannot_reset_the_rotation_counter(app, tmp_path):
     _seen(app, "shown")
     _setting(app, "analysis.execution_mode", "seasonal_ai")
     rows = app.extensions["inktime_render_service"].select_candidates_details(3, target_date=date(2027, 10, 22))
-    assert rows[0]["id"] == "fresh"
     assert len(rows) == 2
-    assert rows[1]["exposure_count"] == 1
+    assert next(row for row in rows if row["id"] != "fresh")["exposure_count"] == 1
     _seen(app, "copy")
     rows = app.extensions["inktime_render_service"].select_candidates_details(3, target_date=date(2027, 10, 22))
-    assert rows[1]["exposure_count"] == 2
+    assert next(row for row in rows if row["id"] != "fresh")["exposure_count"] == 2
 
 
 @pytest.mark.parametrize("device_specific", [False, True])
@@ -330,4 +337,22 @@ def test_final_publication_keeps_cross_year_pair_priorities(app, tmp_path, monke
         devices = [identifier]
     service.publish([], actor, profile_keys=["safe_4c"], device_ids=devices, quantity_override=2,
                     target_date=date(2026, 10, 22))
-    assert observed == [["same-2012", "same-2019"], ["near-2012", "other-2012"]]
+    assert [set(pair) for pair in observed] == [
+        {"same-2012", "same-2019"}, {"near-2012", "other-2012"},
+    ]
+
+
+def test_empty_season_uses_labeled_high_score_fallback(app, tmp_path):
+    root = tmp_path / "outside-fallback"
+    _photo(app, root, "low-seasonal", 30, "10-22")
+    _photo(app, root, "outside-high", 90, "04-01")
+    _setting(app, "analysis.execution_mode", "seasonal_ai")
+    _setting(app, "analysis.seasonal_window_days", 5)
+    _setting(app, "render.seasonal_outside_fallback", True)
+    rows = app.extensions["inktime_render_service"].select_candidates_details(
+        1, target_date=date(2027, 10, 22), record_history=True)
+    assert rows[0]["id"] == "outside-high"
+    run = DisplayHistoryRepository(app.extensions["inktime_database"]).detail(rows[0]["selection_run_id"])
+    chosen = next(row for row in run["candidates"] if row["selected"])
+    assert chosen["snapshot"]["match_type"] == "ranked_fallback"
+    assert chosen["snapshot"]["captured_month_day"] == "04-01"

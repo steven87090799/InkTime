@@ -126,8 +126,8 @@ class ScheduledTaskRepository:
                     """
                     INSERT OR IGNORE INTO scheduled_tasks(
                         key,name,kind,cron,start_time,window_start,window_end,timeout_seconds,retry_count,
-                        retry_interval_seconds,next_run,config_json,created_at,updated_at
-                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                        retry_interval_seconds,next_run,config_json,created_at,updated_at,enabled
+                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                     """,
                     (
                         key,
@@ -144,6 +144,7 @@ class ScheduledTaskRepository:
                         json.dumps({**task["config"], "_cron_semantics": "cronie_v2"}, ensure_ascii=False),
                         utc_now(),
                         utc_now(),
+                        int(key not in {"display_prepare", "ai_schedule"}),
                     ),
                 )
 

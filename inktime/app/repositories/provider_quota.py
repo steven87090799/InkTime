@@ -29,6 +29,28 @@ class ProviderQuotaRepository:
         with self.database.session() as connection:
             return self._allowed(connection, channel, time.time())
 
+    def retry_after(self, channel):
+        """Return a bounded polling delay without acquiring a quota slot."""
+        now = time.time()
+        with self.database.session() as connection:
+            state = connection.execute(
+                "SELECT circuit_until FROM provider_quota_state WHERE scope=?", (self.scope,),
+            ).fetchone()
+            if state and float(state[0]) > now:
+                return max(1.0, float(state[0]) - now)
+            events = connection.execute(
+                "SELECT started_at,tokens FROM provider_quota_events WHERE scope=? AND started_at>? "
+                "ORDER BY started_at", (self.scope, now - 60),
+            ).fetchall()
+            rpm_full = channel.requests_per_minute and len(events) >= channel.requests_per_minute
+            tpm_full = channel.tokens_per_minute and (
+                sum(row[1] for row in events) + channel.request_token_reserve >= channel.tokens_per_minute
+            )
+            if events and (rpm_full or tpm_full):
+                return max(1.0, float(events[0][0]) + 60 - now)
+        # An in-flight request may finish before its crash-recovery lease.
+        return 5.0
+
     def acquire(self, channel):
         now = time.time()
         with self.database.transaction(operation="provider_quota_acquire") as connection:
@@ -45,6 +67,13 @@ class ProviderQuotaRepository:
                  now + max(1, float(getattr(channel.provider, 'timeout', 120))) + 60),
             )
             return identifier
+
+    def cancel(self, identifier):
+        """Cancel an unsent model reservation without changing circuit state."""
+        with self.database.transaction(operation="provider_quota_cancel") as connection:
+            connection.execute(
+                "DELETE FROM provider_quota_events WHERE id=? AND scope=?", (identifier, self.scope),
+            )
 
     def release(self, identifier, channel, *, usage, error, failure_threshold):
         now = time.time()

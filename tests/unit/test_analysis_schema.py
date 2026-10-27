@@ -166,6 +166,45 @@ def test_model_orientation_normalization_is_conservative_and_keeps_input_immutab
     assert validate_analysis_result(result) == result
 
 
+def test_model_category_duplicates_are_repaired_without_mutating_raw_evidence():
+    value = valid_result(types=["人物", "日常", "人物"])
+    result = validate_model_response(value)
+    assert result["types"] == ["人物", "日常"]
+    assert value["types"] == ["人物", "日常", "人物"]
+    assert validate_analysis_result(result) == result
+    with pytest.raises(AnalysisValidationError, match="不可重複"):
+        validate_analysis_result(value)
+
+
+@pytest.mark.parametrize("categories", [
+    [], ["人物"] * 4, ["未知分類", "未知分類"], ["人物", 1],
+])
+def test_category_repair_does_not_accept_malformed_or_oversized_output(categories):
+    with pytest.raises(AnalysisValidationError):
+        validate_model_response(valid_result(types=categories))
+
+
+def test_repeated_orientation_evidence_is_normalized_without_changing_direction_or_raw_input():
+    value = valid_result(visual_orientation={
+        "rotation_cw": 0, "confidence": 0.97, "ambiguous": False,
+        "evidence": ["faces_upright", "faces_upright"],
+    })
+    result = validate_model_response(value)
+    assert result["visual_orientation"] == {**value["visual_orientation"], "evidence": ["faces_upright"]}
+    assert value["visual_orientation"]["evidence"] == ["faces_upright", "faces_upright"]
+    with pytest.raises(AnalysisValidationError, match="不可重複"):
+        validate_analysis_result(value)
+
+
+@pytest.mark.parametrize("evidence", [["faces_upright"] * 7, ["unknown", "unknown"], ["faces_upright", 1]])
+def test_evidence_deduplication_keeps_size_enum_and_type_guards(evidence):
+    value = valid_result(visual_orientation={
+        "rotation_cw": 0, "confidence": 0.97, "ambiguous": False, "evidence": evidence,
+    })
+    with pytest.raises(AnalysisValidationError):
+        validate_model_response(value)
+
+
 @pytest.mark.parametrize("field,invalid", [
     ("confidence", "0.9"), ("confidence", float("nan")), ("confidence", 2),
     ("rotation_cw", 45), ("ambiguous", "false"), ("evidence", ["invalid"]),
@@ -212,6 +251,16 @@ def test_side_caption_controls_cannot_publish_a_contract_the_validator_rejects()
         'side_caption_min_chars': 0, 'side_caption_max_chars': 20,
     })['schema']['properties']['side_caption']
     assert schema['minLength'] == 1 and schema['maxLength'] == 20
+
+
+def test_sixteen_character_requests_preserve_stored_twenty_character_results():
+    result = valid_result(side_caption='山' * 20)
+    assert validate_analysis_result(result)['side_caption'] == '山' * 20
+    with pytest.raises(AnalysisValidationError):
+        validate_model_response(result, caption_controls={'side_caption_max_chars': 16})
+    assert validate_model_response(
+        valid_result(side_caption='山' * 16), caption_controls={'side_caption_max_chars': 16},
+    )['side_caption'] == '山' * 16
 
 
 def test_v5_exact_fields_and_legacy_v4_remains_readable():
@@ -319,3 +368,17 @@ def test_unpaired_surrogate_cannot_reach_database_or_utf8_rendering():
 def test_huge_integer_score_is_a_schema_error_without_float_overflow():
     with pytest.raises(AnalysisValidationError):
         validate_model_response(valid_result(memory_score=10**400))
+
+
+def test_optional_visual_landmark_does_not_change_stored_analysis_or_trigger_repair():
+    from inktime.app.domain.analysis.schema import validate_model_response
+    from inktime.app.providers.openai_compatible import _json_schema_for_provider
+    original = valid_result()
+    for evidence in ({'name': '臺北101', 'confidence': 0.98}, {'name': 'invalid', 'confidence': 'unknown'}):
+        assert validate_model_response(original | {'landmark': evidence}) == original
+    current = _json_schema_for_provider('openrouter', 'single', caption_controls=None,
+                                        prompt_version='photo-analysis-v6-literary20-landmarks-20261026')
+    assert 'landmark' in current['schema']['required']
+    frozen = _json_schema_for_provider('openrouter', 'single', caption_controls=None,
+                                       prompt_version='photo-analysis-v6-literary20-20261021')
+    assert 'landmark' not in frozen['schema']['properties']

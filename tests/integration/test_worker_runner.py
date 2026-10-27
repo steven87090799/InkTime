@@ -274,6 +274,9 @@ def test_runner_permanently_rejects_a_frozen_disabled_analysis_plan(app, tmp_pat
 
 def test_cloud_job_with_an_empty_frozen_route_fails_without_discovering_provider(app, tmp_path):
     app.extensions["inktime_settings_repository"].update(
+        "analysis.ai_mode", "eligible", changed_by="test", source_ip="test"
+    )
+    app.extensions["inktime_settings_repository"].update(
         "analysis.execution_mode", "automatic_ai", changed_by="test", source_ip="127.0.0.1"
     )
     root = tmp_path / "photos"

@@ -347,7 +347,7 @@ class BatchAnalysisService:
             f"""
             SELECT p.id,p.library_id,p.relative_path,p.sha256,p.favorite,p.eligible,
                    p.exclusion_status,p.manual_override,p.file_size,p.width,p.height,p.format,
-                   p.camera_make,p.camera_model,p.exif_json,p.blur_score,p.contrast,
+                   p.camera_make,p.camera_model,p.exif_json,p.gps_lat,p.gps_lon,p.blur_score,p.contrast,
                    p.overexposed_ratio,p.underexposed_ratio,p.screenshot_likelihood,
                    p.local_candidate_score,p.captured_at,p.created_at,l.root_path,
                    EXISTS(SELECT 1 FROM billable_operations paid_single

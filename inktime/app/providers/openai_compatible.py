@@ -17,6 +17,8 @@ from decimal import Decimal
 
 import requests
 
+from inktime.app.domain.analysis.landmarks import LANDMARK_PROMPT, landmark_contract_enabled, with_landmark_schema
+
 from inktime.app.core.logging import log_event, should_log_rate_limited
 from inktime.app.domain.analysis.plan import normalize_reasoning_effort
 from inktime.app.domain.analysis.schema import (
@@ -71,6 +73,8 @@ def _json_schema_for_provider(
         caption_controls=caption_controls,
         schema_version=_analysis_schema_version(prompt_version),
     )
+    if stage != "provider_contract_level2" and _analysis_schema_version(prompt_version) == 6 and landmark_contract_enabled(prompt_version):
+        schema = with_landmark_schema(schema)
     if kind == "openrouter":
         # OpenRouter's free router rejects ``uniqueItems`` even though it is a
         # standard JSON Schema keyword.  Keep InkTime's local canonicalization
@@ -227,6 +231,8 @@ def analysis_prompt_sections(scoring_rules: str, caption_controls: dict[str, Any
                 "text": caption,
             }
         )
+    if _analysis_schema_version(prompt_version) == 6 and landmark_contract_enabled(prompt_version):
+        sections.append({"key": "landmark", "label": "重大地標辨識", "editable": False, "text": LANDMARK_PROMPT})
     return sections
 
 
@@ -402,6 +408,33 @@ class OpenAICompatibleProvider(VisionProvider):
         self.session = session or requests.Session()
         self.last_request_metrics: dict[str, int] = {}
         self._trace_sender = None
+
+    def free_daily_quota(self) -> dict[str, int]:
+        """Read account-wide free requests, never infer exhaustion from a 5xx."""
+        try:
+            if not self.openrouter_compatible:
+                raise ValueError("OpenRouter quota required")
+            response = self._send(
+                "GET", "/key", headers=self._headers(), timeout=(5, 10),
+            )
+            if response.status_code != 200:
+                raise ValueError("Quota endpoint unavailable")
+            quota = response.json()["data"]["free_model_daily_requests"]
+            if not isinstance(quota, dict) or any(
+                type(quota.get(key)) is not int for key in ("used", "limit", "remaining")
+            ):
+                raise ValueError("Quota fields missing")
+            used, limit, remaining = (quota[key] for key in ("used", "limit", "remaining"))
+            if used < 0 or limit <= 0 or remaining != max(0, limit - used):
+                raise ValueError("Quota fields inconsistent")
+            return {"used": used, "limit": limit, "remaining": remaining}
+        except Exception as exc:
+            # This GET contains no image and cannot authorize a paid fallback.
+            raise ProviderHTTPError(
+                "無法確認 OpenRouter 每日免費額度，照片保留排隊，付費接續保持關閉",
+                "VLM-005", retry_after=60,
+                ambiguous=False, vision_started=False, request_started=False,
+            ) from exc
 
     def process_spec(self) -> dict[str, Any]:
         return {
@@ -708,7 +741,7 @@ class OpenAICompatibleProvider(VisionProvider):
             response_request_id = self._provider_request_id(response)
             if response_request_id:
                 response_info["request_id"] = response_request_id
-            openrouter_route_temporarily_unavailable = (
+            openrouter_parameters_unavailable = (
                 self.openrouter_compatible
                 and status == 404
                 and "no endpoints found that can handle the requested parameters"
@@ -719,8 +752,8 @@ class OpenAICompatibleProvider(VisionProvider):
                 if status == 429 and str(error_code).startswith("BATCH")
                 else "VLM-002"
                 if status == 429
-                else "VLM-005"
-                if openrouter_route_temporarily_unavailable
+                else "CONFIG_INVALID"
+                if openrouter_parameters_unavailable
                 else "AUTH_REQUIRED"
                 if status in {401, 403} and str(error_code).startswith("VLM")
                 else "CONFIG_INVALID"

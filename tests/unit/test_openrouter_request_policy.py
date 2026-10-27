@@ -222,7 +222,7 @@ def test_openrouter_400_is_not_retried_and_preserves_bounded_safe_error_details(
     provider.close()
 
 
-def test_openrouter_no_compatible_endpoint_404_is_retryable():
+def test_openrouter_no_compatible_endpoint_404_requires_configuration_review():
     class Response:
         status_code = 404
         headers = {}
@@ -256,7 +256,7 @@ def test_openrouter_no_compatible_endpoint_404_is_retryable():
         provider._post_completion({"model": "openrouter/free", "messages": []})
 
     error = caught.value
-    assert error.code == "VLM-005"
+    assert error.code == "CONFIG_INVALID"
     assert error.http_status == 404
     assert error.response_info["provider_error_code"] == "404"
     assert "No endpoints found" in error.response_info["provider_error_message"]
@@ -265,6 +265,7 @@ def test_openrouter_no_compatible_endpoint_404_is_retryable():
 
 def test_disabled_structured_output_includes_complete_text_schema(tmp_path):
     from inktime.app.domain.analysis.schema import json_schema_for_stage
+    from inktime.app.domain.analysis.landmarks import with_landmark_schema
 
     image = tmp_path / "synthetic.jpg"
     image.write_bytes(b"synthetic")
@@ -276,7 +277,7 @@ def test_disabled_structured_output_includes_complete_text_schema(tmp_path):
     assert "response_format" not in body
     prompt = body["messages"][0]["content"]
     schema = json.loads(prompt.split("完整 JSON Schema：", 1)[1])
-    assert schema == json_schema_for_stage("single")["schema"]
+    assert schema == with_landmark_schema(json_schema_for_stage("single"))["schema"]
 
 
 @pytest.mark.parametrize("model", ["o1", "o3", "o3-2025-04-16", "o4-mini"])
@@ -406,7 +407,7 @@ def test_complete_prompt_retains_original_contract_and_bounds_output():
     from inktime.app.services.analysis import PROMPT_VERSION
 
     assert "8～16 字" in LEGACY_V5_COMMON_PROMPT
-    assert PROMPT_VERSION == "photo-analysis-v6-literary20-20261021"
+    assert PROMPT_VERSION == "photo-analysis-v6-literary20-landmarks-20261026"
     assert "文青風格" in COMMON_PROMPT
     assert "不須加總" in COMMON_PROMPT
     assert "保留所有必填欄位" in COMMON_PROMPT

@@ -36,7 +36,7 @@ from inktime.app.domain.analysis.scoring import (
     ranking_components,
     resolve_score_kind,
 )
-from inktime.app.domain.analysis.schema import normalize_caption_controls, validate_model_response
+from inktime.app.domain.analysis.schema import DEFAULT_SIDE_CAPTION_MAX_CHARS, normalize_caption_controls, validate_model_response
 from inktime.app.domain.photos import ThumbnailCache
 from inktime.app.domain.photos.formats import assert_source_content
 from inktime.app.domain.photos.quality_policy import (
@@ -64,7 +64,7 @@ class AnalysisDisabledError(RuntimeError):
     code = "ANALYSIS-DISABLED"
 
 
-PROMPT_VERSION = "photo-analysis-v6-literary20-20261021"
+PROMPT_VERSION = "photo-analysis-v6-literary20-landmarks-20261026"
 # The compact response still needs enough headroom to complete
 # strict JSON without truncation.
 LOGGER = logging.getLogger("analysis")
@@ -95,6 +95,7 @@ class PhotoAnalysisService:
         observability=None,
         process_boundary=None,
         ai_traces=None,
+        location_enrichment=None,
     ) -> None:
         self.photos = photos
         self.usage = usage
@@ -104,6 +105,7 @@ class PhotoAnalysisService:
         self.observability = observability
         self.process_boundary = process_boundary
         self.ai_traces = ai_traces
+        self.location_enrichment = location_enrichment
 
     def _trace_write(self, method: str, *args, **kwargs):
         """Trace persistence is never allowed to alter production control flow."""
@@ -169,10 +171,10 @@ class PhotoAnalysisService:
     def _caption_controls(self) -> dict:
         settings = self.settings
         if settings is None:
-            return normalize_caption_controls({})
+            return normalize_caption_controls({"side_caption_max_chars": DEFAULT_SIDE_CAPTION_MAX_CHARS})
         return normalize_caption_controls({
             "side_caption_min_chars": int(settings.get("analysis.side_caption_min_chars", 1)),
-            "side_caption_max_chars": int(settings.get("analysis.side_caption_max_chars", 20)),
+            "side_caption_max_chars": int(settings.get("analysis.side_caption_max_chars", DEFAULT_SIDE_CAPTION_MAX_CHARS)),
             "side_caption_custom_rules": str(
                 settings.get("analysis.side_caption_custom_rules", "")
             ),
@@ -197,8 +199,8 @@ class PhotoAnalysisService:
             "execution_mode": execution_mode(settings),
             "ai_mode": str(settings.get("analysis.ai_mode", "top_candidates")),
             "top_n": int(settings.get("analysis.ai_top_n", 50)),
-            "daily_photo_limit": int(settings.get("analysis.ai_daily_photo_limit", 50)),
-            "monthly_photo_limit": int(settings.get("analysis.ai_monthly_photo_limit", 500)),
+            "daily_photo_limit": int(settings.get("analysis.ai_daily_photo_limit", 0)),
+            "monthly_photo_limit": int(settings.get("analysis.ai_monthly_photo_limit", 0)),
         }
         analysis_model_value = settings.get("model.analysis_model", None)
         legacy_model_value = settings.get("model.high_model", None)
@@ -437,10 +439,10 @@ class PhotoAnalysisService:
         policy = execution_policy or {}
         return self.photos.ai_limit_reached(
             daily_limit=int(
-                policy.get("daily_photo_limit", self.settings.get("analysis.ai_daily_photo_limit", 50))
+                policy.get("daily_photo_limit", self.settings.get("analysis.ai_daily_photo_limit", 0))
             ),
             monthly_limit=int(
-                policy.get("monthly_photo_limit", self.settings.get("analysis.ai_monthly_photo_limit", 500))
+                policy.get("monthly_photo_limit", self.settings.get("analysis.ai_monthly_photo_limit", 0))
             ),
             periods=usage_periods(str(self.settings.get("general.timezone", "Asia/Taipei"))),
         )
@@ -515,6 +517,8 @@ class PhotoAnalysisService:
             expected_content_sha256=str(photo["sha256"] or ""),
             connection=connection,
         )
+        if self.location_enrichment is not None and provider != "local":
+            self.location_enrichment.save_visual_landmark(photo, raw, connection=connection)
         self._activity(
             "DEBUG",
             "photo_analysis_completed",
@@ -1442,6 +1446,8 @@ class PhotoAnalysisService:
         if not source.is_file():
             raise FileNotFoundError("SCAN-001 找不到照片檔案")
         assert_source_content(source, photo["sha256"])
+        if self.location_enrichment is not None:
+            self.location_enrichment.enrich(photo)
         photo = self._ensure_e6_suitability(photo_id, photo, source)
         analysis_spec = dict(analysis_plan or {})
         if not analysis_spec:

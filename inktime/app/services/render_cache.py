@@ -13,7 +13,7 @@ from typing import Any
 from PIL import Image, UnidentifiedImageError
 
 
-RENDERER_VERSION = "runtime-cache-image-v11-upright-place-and-date"
+RENDERER_VERSION = "runtime-cache-image-v16-compact-place-fit"
 
 
 class BoundedRenderCache:

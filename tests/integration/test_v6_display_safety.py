@@ -23,6 +23,50 @@ def _save(app, photo_id, **changes):
     )
 
 
+@pytest.mark.parametrize('detected,status', [(False, 'eligible'), (True, 'auto_excluded')])
+def test_model_boolean_controls_content_and_old_holds_reuse_saved_result(app, detected, status):
+    photo_id = _photo(app)
+    _save(app, photo_id, content_filter=content_filter_result(
+        explicit_nudity={'detected': detected, 'confidence': 0.05},
+    ))
+    photos = app.extensions['inktime_photo_repository']
+    assert photos.get_with_path(photo_id)['exclusion_status'] == status
+    database = app.extensions['inktime_database']
+    with database.transaction() as connection:
+        count = connection.execute('SELECT COUNT(*) FROM photo_analysis').fetchone()[0]
+        photos._apply_content_review(connection, photo_id, {
+            'primary_reason': 'explicit_nudity', 'rule': 'content-filter',
+            'rule_version': 'content-filter-v5-strict-display',
+        }, '2026-10-27T00:00:00+00:00')
+    assert photos.reconcile_model_content_holds() == 1
+    assert photos.get_with_path(photo_id)['exclusion_status'] == status
+    assert photos.reconcile_model_content_holds() == 0
+    with database.session() as connection:
+        assert connection.execute('SELECT COUNT(*) FROM photo_analysis').fetchone()[0] == count
+        assert connection.execute('SELECT COUNT(*) FROM api_usage').fetchone()[0] == 0
+
+
+def test_model_negative_reconciliation_keeps_orientation_and_manual_holds(app):
+    photo_id = _photo(app)
+    _save(app, photo_id, visual_orientation={
+        'rotation_cw': 90, 'confidence': 0.8, 'ambiguous': False, 'evidence': ['faces_upright'],
+    })
+    photos = app.extensions['inktime_photo_repository']
+    with app.extensions['inktime_database'].transaction() as connection:
+        photos._apply_content_review(connection, photo_id, {
+            'primary_reason': 'sexualized_content', 'rule': 'content-filter',
+            'rule_version': 'content-filter-v5-strict-display',
+        }, '2026-10-27T00:00:00+00:00')
+        connection.execute('UPDATE photos SET manual_override=1 WHERE id=?', (photo_id,))
+    assert photos.reconcile_model_content_holds() == 0
+    with app.extensions['inktime_database'].transaction() as connection:
+        connection.execute('UPDATE photos SET manual_override=0 WHERE id=?', (photo_id,))
+    assert photos.reconcile_model_content_holds() == 1
+    row = photos.get_with_path(photo_id)
+    assert row['exclusion_status'] == 'pending_review'
+    assert row['reject_reason'] == 'orientation_unverified'
+
+
 @pytest.mark.parametrize("category", ["adult_media_cover", "commercial_model_photo", "screenshot", "document_record"])
 @pytest.mark.parametrize("confidence,status", [(0.97, "auto_excluded"), (0.4, "pending_review")])
 def test_display_categories_hold_delivery_and_only_uncertainty_can_be_reviewed(app, category, confidence, status):
@@ -47,12 +91,10 @@ def test_display_categories_hold_delivery_and_only_uncertainty_can_be_reviewed(a
 
 
 @pytest.mark.parametrize("action", ["restore", "delete_skip", "delete_never_show"])
-def test_legacy_feedback_cannot_resolve_an_uncertain_negative(app, action):
+def test_legacy_feedback_cannot_resolve_an_uncertain_display_category(app, action):
     actor = create_admin(app)
     photo_id = _photo(app)
-    _save(app, photo_id, content_filter=content_filter_result(
-        explicit_nudity={"detected": False, "confidence": 0.2},
-    ))
+    _save(app, photo_id, display_exclusion={"category": "none", "confidence": 0.2})
     photos = app.extensions["inktime_photo_repository"]
     feedback = app.extensions["inktime_resilience_repository"]
     assert photos.get_with_path(photo_id)["exclusion_status"] == "pending_review"
@@ -135,7 +177,7 @@ def test_old_eligible_projection_cannot_bypass_current_safety_evidence(app, risk
     photo_id = _photo(app)
     if risk == "content":
         _save(app, photo_id, content_filter=content_filter_result(
-            explicit_nudity={"detected": False, "confidence": 0.2},
+            explicit_nudity={"detected": True, "confidence": 0.2},
         ))
     else:
         _save(app, photo_id, visual_orientation={

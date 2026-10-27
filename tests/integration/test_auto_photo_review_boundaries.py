@@ -56,7 +56,7 @@ def test_budget_offsets_respect_half_open_day_and_month(app, monkeypatch, timest
     assert snapshot["monthly_effective"] == pytest.approx(monthly)
 
 
-def test_offline_download_summary_requires_hash_and_current_date_and_config(app):
+def test_offline_download_summary_requires_hash_and_current_date_and_config(custom_device_schedule, app):
     create_admin(app)
     device_id, token = app.extensions["inktime_device_repository"].create(
         "Offline evidence", delivery_mode="inktime_offline_schedule",

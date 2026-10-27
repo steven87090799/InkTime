@@ -35,6 +35,7 @@ class FakeBatchProvider(VisionProvider):
         self.downloads = 0
         self.recovered_batch_id = ""
         self.batch_counter = 0
+        self.result = valid_result()
 
     def build_analysis_request_body(self, **kwargs):
         return {
@@ -76,7 +77,7 @@ class FakeBatchProvider(VisionProvider):
     def download_file_content(self, file_id: str, destination: Path) -> Path:
         self.downloads += 1
         destination.parent.mkdir(parents=True, exist_ok=True)
-        result = valid_result()
+        result = self.result
         lines = []
         for custom_id in reversed(self.custom_ids):
             body = {
@@ -954,6 +955,51 @@ def test_fake_batch_imports_unordered_results_once(app, tmp_path):
         )
     assert analysis_count == len(photo_ids)
     assert usage_count == len(photo_ids)
+
+
+@pytest.mark.parametrize("landmark,expected_label", [
+    ({"name": "臺北101", "confidence": 0.98}, "臺北101"),
+    ({"name": "猜測建築", "confidence": 0.6}, ""),
+    ({"name": "無效信心", "confidence": "high"}, None),
+])
+def test_batch_landmarks_survive_import_duplicates_and_cache_without_resend(app, tmp_path, landmark, expected_label):
+    photo_ids = _prepare_photos(app, tmp_path, count=2)
+    photos = app.extensions["inktime_photo_repository"]
+    first, second = (photos.get_with_path(photo_id) for photo_id in photo_ids)
+    (Path(second["root_path"]) / second["relative_path"]).write_bytes(
+        (Path(first["root_path"]) / first["relative_path"]).read_bytes()
+    )
+    database = app.extensions["inktime_database"]
+    with database.session() as connection:
+        connection.execute("UPDATE photos SET sha256=? WHERE id=?", (first["sha256"], second["id"]))
+    fake = FakeBatchProvider()
+    fake.result["landmark"] = landmark
+    service = _wire_fake(app, fake)
+    batch_id = service.submit(scope="sample", sample_count=2, created_by="tester")["batch_ids"][0]
+    service.poll_due(limit=10)
+    imported = service.import_batch(batch_id)
+    assert imported["success"] == 1
+    locations = app.extensions["inktime_location_enrichment_service"].repository
+
+    def assert_places():
+        for photo_id in photo_ids:
+            place = locations.get(photos.get_with_path(photo_id))
+            if expected_label is None:
+                assert place is None
+            else:
+                assert place.display_label == expected_label
+                assert place.landmark == landmark["name"]
+
+    assert_places()
+    service.import_batch(batch_id)
+    with database.session() as connection:
+        assert connection.execute("SELECT COUNT(*) FROM api_usage").fetchone()[0] == 1
+        connection.execute("DELETE FROM photo_analysis")
+        connection.execute("DELETE FROM photo_locations")
+    cached = service.submit(scope="sample", sample_count=2, created_by="tester")
+    assert cached["batch_ids"] == []
+    assert fake.batch_counter == 1
+    assert_places()
 
 
 def test_batch_submission_obeys_global_daily_reservations(app, tmp_path):

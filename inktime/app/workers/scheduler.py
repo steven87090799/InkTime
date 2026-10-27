@@ -177,7 +177,9 @@ class SchedulerRunner:
         now = datetime.now(zone)
         seasonal = self.app.extensions.get("inktime_seasonal_analysis_service")
         if seasonal is not None and seasonal.enabled() and time.monotonic() - self.last_seasonal_scan_at >= 300:
-            self._safe_step("seasonal_analysis", lambda: seasonal.ensure(now.date()))
+            target = seasonal.preparation_target(now)
+            if target is not None:
+                self._safe_step("seasonal_analysis", lambda: seasonal.ensure(target))
             self.last_seasonal_scan_at = time.monotonic()
         schedule_repository = self.app.extensions["inktime_schedule_repository"]
         job_repository = self.app.extensions["inktime_job_repository"]
@@ -386,9 +388,9 @@ class SchedulerRunner:
             server_margin = 15
         server_margin = max(0, min(server_margin, 60))
         try:
-            future_prepare_hour = int(settings.get("offline.future_schedule_prepare_hour_local", 20))
+            future_prepare_hour = int(settings.get("offline.future_schedule_prepare_hour_local", 8))
         except (TypeError, ValueError):
-            future_prepare_hour = 20
+            future_prepare_hour = 8
         future_prepare_hour = max(0, min(future_prepare_hour, 23))
         authoritative_now = now if now.tzinfo is not None else now.replace(tzinfo=timezone.utc)
         devices, _has_more = offline_schedules.due_prefetch_devices(
@@ -428,6 +430,12 @@ class SchedulerRunner:
                 )
                 for target_date in targets[:2]:
                     target_iso = target_date.isoformat()
+                    seasonal = self.app.extensions.get("inktime_seasonal_analysis_service")
+                    if (target_date > local_now.date() and seasonal is not None and seasonal.enabled()
+                            and seasonal.preparation_target(local_now, device_id=device_id) is None):
+                        skip_target_dates.add(target_iso)
+                        retry_deadline = authoritative_now + timedelta(minutes=5)
+                        continue
                     dedupe_key = (
                         f"offline-prepare:{device['id']}:{target_iso}:{int(device['config_version'])}"
                     )
@@ -541,7 +549,7 @@ class SchedulerRunner:
                                 "config_version": int(device["config_version"]),
                             },
                             "trigger_source": "offline-scheduler",
-                            "timeout_seconds": 1800,
+                            "timeout_seconds": 86400,
                             "max_retries": 1,
                             "max_attempts": 2,
                             "retry_interval_seconds": OFFLINE_PREPARE_RETRY_INTERVAL_SECONDS,
@@ -735,7 +743,10 @@ class SchedulerRunner:
             strategy = normalize_analysis_strategy(str(config.get("strategy", "single")))
             settings = self.app.extensions["inktime_settings_repository"]
             if execution_mode(settings) == "seasonal_ai" and strategy != "local":
-                self.app.extensions["inktime_seasonal_analysis_service"].ensure(now.date())
+                seasonal = self.app.extensions["inktime_seasonal_analysis_service"]
+                target = seasonal.preparation_target(now)
+                if target is not None:
+                    seasonal.ensure(target)
                 if is_scheduled:
                     self.app.extensions["inktime_schedule_repository"].mark_enqueued(task, now)
                 return

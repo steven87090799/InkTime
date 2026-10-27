@@ -51,6 +51,11 @@ class OfflineScheduleRepository:
     def __init__(self, database: Database) -> None:
         self.database = database
 
+    def times_for_date(self, target: date, fallback) -> list[str]:
+        from inktime.app.domain.photopainter.weekly_schedule import weekly_times
+        from inktime.app.repositories.settings import SettingsRepository
+        return weekly_times(SettingsRepository(self.database), target, fallback)
+
     @staticmethod
     def playlist_version(
         *,
@@ -1062,6 +1067,7 @@ class OfflineScheduleRepository:
                 sync_strategy, sync_time = normalize_sync_strategy(
                     str(device["sync_strategy"] or "first_display_lead"), device["sync_time"]
                 )
+                configured_times = self.times_for_date(day, configured_times)
                 configured_times = validate_offline_schedule(
                     configured_times,
                     maximum=maximum_slots,

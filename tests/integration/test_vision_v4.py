@@ -32,7 +32,7 @@ def test_defaults_and_settings_ui(app, client):
     assert settings.get("analysis.content_filter_min_confidence") == 0.85
     assert settings.get("analysis.female_glamour_min_confidence") == 0.9
     assert settings.get("analysis.side_caption_min_chars") == 1
-    assert settings.get("analysis.side_caption_max_chars") == 20
+    assert settings.get("analysis.side_caption_max_chars") == 16
     assert settings.get("analysis.side_caption_custom_rules") == ""
     assert settings.get("render.e6_weight") == 20
     response = client.get("/settings?mode=all")
@@ -51,7 +51,7 @@ def test_defaults_and_settings_ui(app, client):
 
 @pytest.mark.parametrize("code", list(CONTENT_FILTER_SWITCHES))
 @pytest.mark.parametrize(
-    "confidence,enabled,status", [(0.95, True, "auto_excluded"), (0.4, True, "pending_review"),
+    "confidence,enabled,status", [(0.95, True, "auto_excluded"), (0.4, True, "auto_excluded"),
                                    (0.95, False, "auto_excluded")]
 )
 def test_authoritative_exclusion_retains_analysis_orientation(app, code, confidence, enabled, status):

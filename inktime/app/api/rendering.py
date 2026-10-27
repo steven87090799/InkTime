@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from inktime.app.domain.photos.formats import SUPPORTED_IMAGE_EXTENSIONS
+from inktime.app.domain.analysis.schema import DEFAULT_SIDE_CAPTION_MAX_CHARS
 
 from datetime import datetime, timezone
 from hashlib import sha256
@@ -179,9 +180,9 @@ def _renderer_request() -> dict:
 def _simulator_caption_max_chars(settings=None) -> int:
     repository = settings or current_app.extensions["inktime_settings_repository"]
     try:
-        maximum = int(repository.get("analysis.side_caption_max_chars", 20))
+        maximum = int(repository.get("analysis.side_caption_max_chars", DEFAULT_SIDE_CAPTION_MAX_CHARS))
     except (TypeError, ValueError):
-        maximum = 20
+        maximum = DEFAULT_SIDE_CAPTION_MAX_CHARS
     return max(1, min(maximum, 120))
 
 

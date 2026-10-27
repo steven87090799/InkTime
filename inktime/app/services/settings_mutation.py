@@ -17,6 +17,9 @@ OFFLINE_PREPARE_POLICY_KEYS = frozenset(
     {
         "offline.server_prefetch_margin_minutes",
         "offline.future_schedule_prepare_hour_local",
+        "display.weekly_schedule_enabled",
+        "display.weekday_times",
+        "display.weekend_times",
     }
 )
 
@@ -104,6 +107,14 @@ class SettingsMutationService:
         )
         actual = set(result["changed_keys"])
         effects: dict[str, int] = {}
+        if actual & {"display.weekly_schedule_enabled", "display.weekday_times", "display.weekend_times"}:
+            # A changed daily playlist is remote configuration: old prepared
+            # snapshots must not be mistaken for the new policy's ready day.
+            connection.execute(
+                "UPDATE devices SET config_version=config_version+1, "
+                "offline_schedule_version=offline_schedule_version+1 "
+                "WHERE enabled=1 AND delivery_mode='inktime_offline_schedule'"
+            )
         if actual & OFFLINE_PREPARE_POLICY_KEYS:
             effects["offline_prepare_deadlines_invalidated"] = (
                 self.offline_schedules.invalidate_prepare_deadlines_for_policy_change(

@@ -122,7 +122,7 @@ def test_photo_only_keeps_local_safety_holds(app, tmp_path, hold):
         )
 
 
-def test_offline_photo_only_playlist_is_ready_without_model_results(app, tmp_path):
+def test_offline_photo_only_playlist_is_ready_without_model_results(custom_device_schedule, app, tmp_path):
     _photo(app, tmp_path / "offline")
     _set(app, "render.content_mode", "photo_only")
     device_id, _ = app.extensions["inktime_device_repository"].create(

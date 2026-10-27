@@ -59,6 +59,23 @@ def test_ordinary_single_person_photos_have_no_gender_heuristic(confidence):
     assert evaluate_content_filter(value["content_filter"])["decision"] == "pass"
 
 
+@pytest.mark.parametrize('code', list(CONTENT_FILTER_SWITCHES))
+@pytest.mark.parametrize('detected', [False, True])
+@pytest.mark.parametrize('confidence', [0.0, 0.05, 1.0])
+def test_v6_exclusion_follows_model_boolean_and_keeps_confidence_as_evidence(code, detected, confidence):
+    content = content_filter_result(**{code: {'detected': detected, 'confidence': confidence}})
+    policy = evaluate_content_filter(content, strict=True)
+    assert policy['decision'] == ('auto_excluded' if detected else 'pass')
+    assert policy['uncertain_codes'] == []
+    assert policy['classifications'][code]['confidence'] == confidence
+    assert policy['classifications'][code]['confidence_threshold_applied'] is False
+
+
+def test_v6_content_requires_a_boolean_instead_of_a_truthy_string():
+    with pytest.raises(ValueError, match='布林值'):
+        evaluate_content_filter(content_filter_result(explicit_nudity={'detected': 'false', 'confidence': 1}), strict=True)
+
+
 def test_prompt_guardrails_and_no_duplicate_default_rubric():
     provider = OpenAICompatibleProvider(name="test", base_url="https://example.com/v1", api_key="test")
     prompt = provider.system_prompt

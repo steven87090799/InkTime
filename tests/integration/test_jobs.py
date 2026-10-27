@@ -57,6 +57,9 @@ def test_job_api_rejects_invalid_worker_settings_without_writes(client, app, set
 def test_forced_paid_recompute_requires_explicit_additional_cost_acceptance(client, app):
     from tests.conftest import create_admin, csrf, login
 
+    app.extensions["inktime_settings_repository"].update(
+        "analysis.execution_mode", "local_with_manual_ai", changed_by="test", source_ip="test"
+    )
     create_admin(app)
     login(client)
     photo_ids = add_photos(app, 1)
@@ -591,6 +594,157 @@ def test_budget_block_returns_item_and_pauses_new_work(app):
     item = repository.list_items(job_id)[0]
     assert item["status"] == "pending"
     assert item["attempts"] == 0
+
+
+def test_unsent_provider_cooldown_preserves_the_whole_queue_and_attempt_budget(app):
+    from inktime.app.providers.openai_compatible import ProviderHTTPError
+
+    service, repository, job_id = create_job(app, 125)
+    service.start(job_id)
+    called = []
+
+    def unavailable(item):
+        called.append(item["id"])
+        raise ProviderHTTPError("cooldown", "VLM-005", retry_after=300)
+
+    before = datetime.now(timezone.utc)
+    worker = BoundedJobWorker(repository, unavailable, concurrency=1)
+    worker.run_job(job_id)
+    assert len(called) == 1
+    assert worker.failure_count == 0
+    job = repository.get(job_id)
+    assert job["status"] == "retrying"
+    assert job["failed_items"] == job["completed_items"] == 0
+    assert job["spent"] == 0
+    with app.extensions["inktime_database"].session() as connection:
+        rows = connection.execute(
+            "SELECT status,attempts,available_at,worker_id,lease_until FROM job_items WHERE job_id=?",
+            (job_id,),
+        ).fetchall()
+    assert len(rows) == 125
+    assert all(row["status"] == "pending" and row["attempts"] == 0 for row in rows)
+    assert all(datetime.fromisoformat(row["available_at"]) >= before + timedelta(seconds=299) for row in rows)
+    assert all(row["worker_id"] is None and row["lease_until"] is None for row in rows)
+    assert repository.claim(job_id, "too-early", 125) == []
+    from inktime.app.api.jobs import _job_status_view, _job_item_view
+    with app.test_request_context():
+        view = _job_status_view(job)
+    assert view["blocker_code"] == "PROVIDER-WAIT"
+    assert view["provider_waiting_items"] == 125
+    assert "未送出" in view["status_summary"]
+    assert _job_item_view(repository.list_items(job_id)[0])["explanation_title"] == "等待 Provider／額度恢復"
+    with app.extensions["inktime_database"].session() as connection:
+        connection.execute(
+            "UPDATE job_items SET available_at=? WHERE job_id=?",
+            ((before - timedelta(seconds=1)).isoformat(), job_id),
+        )
+    BoundedJobWorker(repository, lambda item: {"photo_id": item["photo_id"]}).run_job(job_id)
+    assert repository.get(job_id)["status"] == "completed"
+    assert repository.get(job_id)["completed_items"] == 125
+
+
+@pytest.mark.parametrize("flags", [
+    {"request_started": True}, {"vision_started": True}, {"ambiguous": True},
+])
+def test_provider_error_after_send_never_becomes_safe_queue_deferral(app, flags):
+    from inktime.app.providers.openai_compatible import ProviderHTTPError
+
+    service, repository, job_id = create_job(app, 1)
+    service.start(job_id)
+    error = ProviderHTTPError("not safe to resend", "VLM-005", retry_after=300, **flags)
+    BoundedJobWorker(repository, lambda item: (_ for _ in ()).throw(error), max_attempts=1).run_job(job_id)
+    item = repository.list_items(job_id)[0]
+    assert item["status"] == "failed"
+    assert item["attempts"] == 1
+
+
+def test_provider_deferral_obeys_worker_lease_ownership(app):
+    service, repository, job_id = create_job(app, 2)
+    service.start(job_id)
+    item = repository.claim(job_id, "owner", 1)[0]
+    assert not repository.defer_item(
+        item["id"], "stale-owner", retry_after_seconds=300, defer_pending=True,
+    )
+    assert len(repository.claim(job_id, "other-owner", 1)) == 1
+
+
+@pytest.mark.parametrize("code,expected_calls", [("CONFIG_INVALID", 1), ("AUTH_REQUIRED", 1), ("VLM-004", 3)])
+def test_incompatible_provider_pauses_before_consuming_the_remaining_queue(app, code, expected_calls):
+    from inktime.app.providers.openai_compatible import ProviderHTTPError
+
+    service, repository, job_id = create_job(app, 20)
+    service.start(job_id)
+    called = []
+
+    def incompatible(item):
+        called.append(item["id"])
+        raise ProviderHTTPError("review provider", code, request_started=True)
+
+    BoundedJobWorker(repository, incompatible, concurrency=1).run_job(job_id)
+    assert len(called) == expected_calls
+    assert repository.get(job_id)["status"] == "paused"
+    items = repository.list_items(job_id, limit=50)
+    assert sum(item["status"] == "pending" and item["attempts"] == 0 for item in items) == 20 - expected_calls
+
+
+def test_success_breaks_consecutive_schema_failure_safety_pause(app):
+    from inktime.app.providers.openai_compatible import ProviderHTTPError
+
+    service, repository, job_id = create_job(app, 8)
+    service.start(job_id)
+    called = []
+
+    def alternating(item):
+        called.append(item["id"])
+        if len(called) % 3:
+            raise ProviderHTTPError("invalid schema", "VLM-004", request_started=True)
+        return {"photo_id": item["photo_id"]}
+
+    BoundedJobWorker(repository, alternating, concurrency=1).run_job(job_id)
+    assert len(called) == 8
+    assert repository.get(job_id)["status"] == "completed_with_errors"
+
+
+@pytest.mark.parametrize("wrapped", [False, True])
+def test_isolated_input_rejection_keeps_other_photos_running_after_proven_success(app, wrapped):
+    from inktime.app.providers.base import ProviderCallTrace
+    from inktime.app.providers.openai_compatible import ProviderHTTPError
+
+    service, repository, job_id = create_job(app, 8)
+    service.start(job_id)
+    calls = []
+
+    def process(item):
+        calls.append(item["id"])
+        if len(calls) == 2:
+            raise ProviderHTTPError("rejected image", "CONFIG_INVALID", request_started=True,
+                                    http_status=None if wrapped else 400,
+                                    call_trace=ProviderCallTrace(http_status=400) if wrapped else None)
+        return {"photo_id": item["photo_id"]}
+
+    BoundedJobWorker(repository, process, concurrency=1).run_job(job_id)
+    job = repository.get(job_id)
+    assert len(calls) == 8
+    assert job["status"] == "completed_with_errors"
+    assert job["completed_items"] == 7 and job["failed_items"] == 1
+
+
+def test_repeated_input_rejections_pause_even_after_success(app):
+    from inktime.app.providers.openai_compatible import ProviderHTTPError
+
+    service, repository, job_id = create_job(app, 10)
+    service.start(job_id)
+    calls = []
+
+    def process(item):
+        calls.append(item["id"])
+        if len(calls) > 1:
+            raise ProviderHTTPError("rejected image", "CONFIG_INVALID", http_status=400, request_started=True)
+        return {"photo_id": item["photo_id"]}
+
+    BoundedJobWorker(repository, process, concurrency=1).run_job(job_id)
+    assert len(calls) == 4
+    assert repository.get(job_id)["status"] == "paused"
 
 
 def test_keyset_queue_reaches_old_job_after_more_than_one_hundred(app):

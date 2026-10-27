@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import math
+from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 from flask import Blueprint, Response, abort, current_app, g, render_template, request, stream_with_context
 
@@ -37,7 +39,10 @@ def _seasonal_status():
     if page is None or not 1 <= page <= 100000:
         abort(400, description="分頁不合法")
     service = _seasonal()
-    return service.repository.status(service.today(), service.window(), offset=(page - 1) * 100)
+    target = service.today() + timedelta(days=int(service.settings.get("analysis.prepare_ahead_days", 1)))
+    state = service.repository.status(target, service.window(), offset=(page - 1) * 100)
+    state["waiting_for_display_ack"] = service.preparation_target(datetime.now(timezone.utc)) is None
+    return state
 
 
 @bp.get("/analysis/seasonal")
@@ -173,6 +178,12 @@ def _job_item_view(item) -> dict:
             "explanation_detail": "Worker 已領取此照片，正在執行目前階段。",
             "explanation_tone": "active",
         }
+    if status == "pending" and code in {"VLM-001", "VLM-002", "VLM-005", "AI-PROVIDER-TIMEOUT", "AI-PROVIDER-UNAVAILABLE"}:
+        return {
+            "explanation_title": "等待 Provider／額度恢復",
+            "explanation_detail": "照片尚未送出，保留排隊且不消耗分析重試次數；到期後自動再檢查。",
+            "explanation_tone": "neutral",
+        }
     if status == "pending" and not code:
         return {
             "explanation_title": "等待 Worker",
@@ -256,6 +267,12 @@ def _job_status_view(job) -> dict:
             "SELECT status,stage,COUNT(*) count FROM job_items WHERE job_id=? GROUP BY status,stage",
             (job_id,),
         ).fetchall()
+        provider_wait = connection.execute(
+            "SELECT COUNT(*) count,MIN(available_at) retry_at FROM job_items "
+            "WHERE job_id=? AND status='pending' AND available_at>? "
+            "AND error_code IN ('VLM-001','VLM-002','VLM-005','AI-PROVIDER-TIMEOUT','AI-PROVIDER-UNAVAILABLE')",
+            (job_id, datetime.now(timezone.utc).isoformat()),
+        ).fetchone()
         budget_candidate = connection.execute(
             """
             SELECT photo_id FROM job_items
@@ -307,7 +324,7 @@ def _job_status_view(job) -> dict:
         "preparing": "正在準備分析計畫與照片清單。",
         "running": "Worker 正在處理照片；此頁每 3 秒自動更新。",
         "pausing": "正在等目前的照片處理完成後暫停。",
-        "paused": "工作已由使用者暫停；按「繼續處理」可恢復。",
+        "paused": "工作已暫停；請查看下方錯誤與工作事件，確認設定後按「繼續處理」可恢復。",
         "retrying": "正在重新處理先前暫時失敗的項目。",
         "completed": "所有工作項目都已處理完成。",
         "completed_with_errors": "工作已結束，但仍有失敗項目可重跑。",
@@ -318,6 +335,16 @@ def _job_status_view(job) -> dict:
     action_url = None
     action_label = None
     blocker_code = None
+    if status in {"running", "retrying"} and provider_wait["count"] and not counts.get("running", 0):
+        zone = str(current_app.extensions["inktime_settings_repository"].get("general.timezone", "Asia/Taipei"))
+        retry_at = datetime.fromisoformat(provider_wait["retry_at"]).astimezone(ZoneInfo(zone))
+        summary = (
+            f"Provider 冷卻、限流或每日免費額度等待中；{provider_wait['count']} 張照片保留排隊，"
+            f"未送出且未消耗分析重試次數。預計 {retry_at:%Y-%m-%d %H:%M:%S}（{zone}）再檢查；"
+            "暫時錯誤不會提前切換到受每日免費額度優先保護的付費模型。"
+        )
+        blocker_code = "PROVIDER-WAIT"
+        action_url, action_label = "/providers", "查看模型與免費額度設定"
     if status == "budget_exceeded":
         snapshot = current_app.extensions["inktime_budget_service"].snapshot(
             job_id,
@@ -361,7 +388,7 @@ def _job_status_view(job) -> dict:
     )
     return {
         "status": status,
-        "status_label": JOB_STATUS_LABELS.get(status, status),
+        "status_label": "等待 Provider／額度恢復" if blocker_code == "PROVIDER-WAIT" else JOB_STATUS_LABELS.get(status, status),
         "status_summary": summary,
         "status_tone": tone,
         "blocker_code": blocker_code,
@@ -375,6 +402,8 @@ def _job_status_view(job) -> dict:
         "reused_items": reused_completed,
         "progress_percent": round(processed * 100 / total) if total else 0,
         "last_activity_at": job["heartbeat_at"] or job["created_at"],
+        "provider_waiting_items": int(provider_wait["count"]),
+        "provider_retry_at": provider_wait["retry_at"],
     }
 
 

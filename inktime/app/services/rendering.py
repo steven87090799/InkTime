@@ -8,6 +8,7 @@ import json
 import logging
 from pathlib import Path
 import random
+import re
 import time
 from typing import Any
 
@@ -22,6 +23,7 @@ from inktime.app.db import Database
 from inktime.app.domain.photos import LocationResolver, parse_photo_date
 from inktime.app.domain.photos.places import place_date_label
 from inktime.app.domain.photos.rotation import exposure_count, last_exposure_at
+from inktime.app.domain.analysis.schema import DEFAULT_SIDE_CAPTION_MAX_CHARS
 from inktime.app.repositories.photo_locations import PhotoLocationRepository
 from inktime.app.domain.rendering import (
     AtomicReleasePublisher,
@@ -984,6 +986,11 @@ class RenderService:
             if is_ai_caption
             else {}
         )
+        maximum_characters = int(self.settings.get("analysis.side_caption_max_chars", DEFAULT_SIDE_CAPTION_MAX_CHARS))
+        if is_ai_caption:
+            # A tighter generation limit must not slice a previously accepted
+            # model sentence. Its original text remains a frozen render input.
+            maximum_characters = max(maximum_characters, len(caption))
         record = build_local_caption(
             photo_id=photo_id,
             captured_at=photo["captured_at"],
@@ -996,7 +1003,7 @@ class RenderService:
             existing_caption_is_ai_generated=is_ai_caption if caption else None,
             source_detail=source_detail,
             source_updated_at=str((analysis or {}).get("created_at") or "") or None,
-            maximum_characters=int(self.settings.get("analysis.side_caption_max_chars", 20)),
+            maximum_characters=maximum_characters,
         )
         # Freeze the visible date together with the caption's photo identity.
         # A queued render must not read a different date or visibility setting.
@@ -1383,6 +1390,53 @@ class RenderService:
                 left_side=True, date_at_bottom=True,
             )
 
+    def _compact_pair_metadata_lines(
+        self, draw: ImageDraw.ImageDraw, *, font_path: Path,
+        date_lines: list[str], place: str, sentence: str, width: int, height: int,
+    ) -> list[tuple[str, ImageFont.FreeTypeFont, int]]:
+        """Reserve the full model sentence before fitting place and date text."""
+        sentence_length = min(len(sentence), 20)
+        last_lines: list[str] = []
+        for place_size in (10, 9):
+            place_font = ImageFont.truetype(str(font_path), place_size)
+            place_step = place_size + 4
+            lines: list[str] = []
+            remaining = place
+            while remaining:
+                line = ""
+                while remaining and draw.textlength(line + remaining[0], font=place_font) <= width:
+                    line += remaining[0]
+                    remaining = remaining[1:]
+                if not line:
+                    break
+                lines.append(line)
+            last_lines = lines
+            for date_size in range(14, 9, -1):
+                date_font = ImageFont.truetype(str(font_path), date_size)
+                if any(draw.textlength(line, font=date_font) > width for line in date_lines):
+                    continue
+                dates = [(line, date_font, date_size + 4) for line in date_lines]
+                date_height = len(dates) * (date_size + 4)
+                for sentence_size in (17, 16):
+                    budget = max(0, height - sentence_length * (sentence_size + 2) - 8)
+                    if not remaining and date_height + len(lines) * place_step <= budget:
+                        return dates + [(line, place_font, place_step) for line in lines]
+
+        # Preserve full names without aliases. A legacy 20-char caption or an
+        # oversized manual label can still exceed this fixed strip; only that
+        # exceptional place label gets an explicit ellipsis, never hidden loss.
+        date_font = ImageFont.truetype(str(font_path), 10)
+        dates = [(line, date_font, 14) for line in date_lines]
+        budget = max(0, height - sentence_length * 18 - 8 - len(dates) * 14)
+        maximum_lines = budget // 13
+        visible = last_lines[:maximum_lines]
+        if (len(last_lines) > len(visible) or remaining) and visible:
+            last = visible[-1]
+            while last and draw.textlength(last + "…", font=place_font) > width:
+                last = last[:-1]
+            visible[-1] = last + "…"
+        return dates + [(line, place_font, 13) for line in visible]
+
     def _draw_adaptive_pair_caption(
         self, canvas: Image.Image, record: dict[str, Any], box: Rect, *, left_side: bool,
         date_at_bottom: bool = False,
@@ -1395,46 +1449,33 @@ class RenderService:
             draw.rectangle((box.x, box.y, box.right, box.bottom), fill="white")
             normalized = " ".join(text.split())
             font_path = self.fonts.resolve(str(self.settings.get("render.font_path", "")))
-            horizontal_padding = 10
-            vertical_padding = 12
+            horizontal_padding = 3
+            vertical_padding = 8
             available_width = max(1, box.width - horizontal_padding * 2)
             available_height = max(0, box.height - vertical_padding * 2)
             y = box.y + vertical_padding
-            date_characters = list("".join(date_label.split())) if date_at_bottom else []
-            place_characters = list("".join(str(record.get("capture_place_label") or "").split())) if date_at_bottom else []
-            # Keep the existing date/short-sentence positions when no place is
-            # available. A place uses a second small upright column at the
-            # same bottom baseline; it never changes the photo rectangles.
-            if len(place_characters) > 12:
-                place_characters = place_characters[:11] + ["…"]
-            date_line_height = 14
-            metadata_height = max(len(date_characters), len(place_characters)) * date_line_height
+            date_lines = self._pair_date_lines(date_label)
+            place = str(record.get("capture_place_label") or "").strip()
+            metadata_lines = self._compact_pair_metadata_lines(
+                draw, font_path=font_path, date_lines=date_lines, place=place,
+                sentence=normalized, width=available_width, height=available_height,
+            )
+            metadata_height = sum(advance for _, _, advance in metadata_lines)
             if metadata_height:
-                available_height = max(0, available_height - metadata_height - 12)
-            if date_label and not date_at_bottom:
-                # The narrow side strip keeps the date small and gives the
-                # larger memory sentence most of the available height.
-                date_lines = date_label.replace("年", "年\n", 1).splitlines()
-                date_font = ImageFont.truetype(str(font_path), 10)
-                for date_size in range(14, 9, -1):
-                    candidate_font = ImageFont.truetype(str(font_path), date_size)
-                    if all(
-                        draw.textlength(line, font=candidate_font) <= available_width for line in date_lines
-                    ):
-                        date_font = candidate_font
-                        break
-                for line in date_lines:
-                    bounds = draw.textbbox((0, 0), line, font=date_font)
-                    glyph_width = bounds[2] - bounds[0]
-                    x = box.x + horizontal_padding + (available_width - glyph_width) // 2 - bounds[0]
-                    draw.text((x, y - bounds[1]), line, font=date_font, fill="#17221c")
-                    y += 18
-                y += 8
-                available_height = max(0, box.bottom - vertical_padding - y)
-            font = ImageFont.truetype(str(font_path), 18)
-            for font_size in range(24, 17, -1):
+                available_height = max(0, available_height - metadata_height - 8)
+                metadata_top = box.bottom - vertical_padding - metadata_height if date_at_bottom else y
+                line_top = metadata_top
+                for line, line_font, advance in metadata_lines:
+                    bounds = draw.textbbox((0, 0), line, font=line_font)
+                    x = box.x + horizontal_padding + (available_width - draw.textlength(line, font=line_font)) / 2
+                    draw.text((x, line_top - bounds[1]), line, font=line_font, fill="#17221c")
+                    line_top += advance
+                if not date_at_bottom:
+                    y += metadata_height + 8
+            font = ImageFont.truetype(str(font_path), 16)
+            for font_size in range(17, 15, -1):
                 candidate_font = ImageFont.truetype(str(font_path), font_size)
-                if len(normalized) * (font_size + 4) <= available_height and all(
+                if len(normalized) * (font_size + 2) <= available_height and all(
                     draw.textbbox((0, 0), character, font=candidate_font)[2]
                     - draw.textbbox((0, 0), character, font=candidate_font)[0]
                     <= available_width
@@ -1442,7 +1483,7 @@ class RenderService:
                 ):
                     font = candidate_font
                     break
-            line_height: int = max(1, int(font.size) + 4)
+            line_height: int = max(1, int(font.size) + 2)
             maximum_characters: int = max(0, available_height // line_height)
             characters = list(normalized)
             if len(characters) > maximum_characters:
@@ -1457,18 +1498,6 @@ class RenderService:
                 x = box.x + horizontal_padding + (available_width - glyph_width) // 2 - bounds[0]
                 draw.text((x, y - bounds[1]), character, font=font, fill="#17221c")
                 y += line_height
-            if date_characters or place_characters:
-                date_font = ImageFont.truetype(str(font_path), 12)
-                columns = [(date_characters, box.x + box.width // 2)]
-                if date_characters and place_characters:
-                    columns = [(place_characters, box.x + 13), (date_characters, box.x + box.width - 13)]
-                elif place_characters:
-                    columns = [(place_characters, box.x + box.width // 2)]
-                for characters, center in columns:
-                    y = box.bottom - vertical_padding - len(characters) * date_line_height
-                    for character in characters:
-                        draw.text((center, y), character, font=date_font, fill="black", anchor="mt")
-                        y += date_line_height
             draw.line(
                 (box.right - 2, box.y + 12, box.right - 2, box.bottom - 12),
                 fill="#1d2822",
@@ -1480,11 +1509,16 @@ class RenderService:
         draw.rectangle((box.x, box.y, box.right, box.bottom), fill="white")
         draw.line((box.x + 8, box.y + 2, box.right - 8, box.y + 2), fill="#1d2822", width=1)
         caption_top = box.y + 8
-        if date_label:
+        place = str(record.get("capture_place_label") or "").strip()
+        if date_label or place:
             font_path = self.fonts.resolve(str(self.settings.get("render.font_path", "")))
-            date_font = ImageFont.truetype(str(font_path), 14)
-            draw.text((box.x + 12, caption_top), date_label, font=date_font, fill="#17221c")
-            caption_top += 22
+            date_font = ImageFont.truetype(str(font_path), 10)
+            for index, line in enumerate(self._pair_date_lines(date_label)):
+                draw.text((box.right - 12, caption_top + index * 12), line, font=date_font, fill="#17221c", anchor="rt")
+            if place:
+                place = self._fit_line(draw, place, date_font, max(1, box.width - 88))
+                draw.text((box.x + 12, caption_top + 6), place, font=date_font, fill="#17221c")
+            caption_top += 28
         self._draw_footer_caption(
             draw,
             text,
@@ -1615,26 +1649,37 @@ class RenderService:
         ):
             if photo_id is None or rect is None or photo_id not in parts:
                 continue
-            font = fonts["small"]
-            date_font = ImageFont.truetype(font.path, 14)
+            font_path = fonts["small"].path
             part = parts[photo_id]
-            date_label = part.get("date", "")
-            location_label = part.get("location", "")
-            # Keep the full date. Shorten the place first, reserving room for
-            # the caption even in a two-photo portrait footer.
-            date_pixels = draw.textlength(date_label, font=date_font) if date_label else 0
-            separator_pixels = draw.textlength("・", font=date_font) if date_label else 0
-            place_budget = int(max(0, rect.width * 0.62 - date_pixels - separator_pixels))
-            location_label = self._fit_line(draw, location_label, date_font, place_budget) if place_budget >= 14 else ""
-            date_label = place_date_label(location_label, date_label)
-            date_width = draw.textlength(date_label, font=date_font) if date_label else 0
-            available = max(1, rect.width - 16 - date_width - (12 if date_label else 0))
-            text = self._fit_line(draw, part.get("caption", ""), font, int(available))
-            y = rect.y + rect.height / 2
+            date_lines = self._pair_date_lines(part.get("date", ""))
+            date_font = ImageFont.truetype(font_path, 10)
+            date_width = max((draw.textlength(line, font=date_font) for line in date_lines), default=0)
+            right = float(rect.right - 8)
+            if date_lines:
+                for index, line in enumerate(date_lines):
+                    draw.text((right, rect.y + 2 + index * 12), line, font=date_font, fill="black", anchor="rt")
+                right -= date_width + 10
+            location = self._fit_line(draw, part.get("location", ""), date_font, max(0, int(rect.width * 0.25)))
+            if location:
+                draw.text((right, rect.y + rect.height / 2), location, font=date_font, fill="black", anchor="rm")
+                right -= draw.textlength(location, font=date_font) + 10
+            available = max(1, int(right - rect.x - 8))
+            caption = part.get("caption", "")
+            preferred_size = 22 if rect.width >= 600 else 20
+            for size in range(preferred_size, 15, -1):
+                font = ImageFont.truetype(font_path, size)
+                if draw.textlength(caption, font=font) <= available:
+                    break
+            text = self._fit_line(draw, caption, font, available)
             if text:
-                draw.text((rect.x + 8, y), text, font=font, fill="black", anchor="lm")
-            if date_label:
-                draw.text((rect.right - 8, y), date_label, font=date_font, fill="black", anchor="rm")
+                draw.text((rect.x + 8, rect.y + rect.height / 2), text, font=font, fill="black", anchor="lm")
+
+    @staticmethod
+    def _pair_date_lines(label: str) -> list[str]:
+        match = re.fullmatch(r"(\d{4})年(\d{1,2})月(\d{1,2})日", label.strip())
+        if match:
+            return [match[1], f"{int(match[2])}/{int(match[3])}"]
+        return [label.strip()] if label.strip() else []
 
     def _calendar(self, canvas: Image.Image, fonts, today: date, start_y: int = 75) -> None:
         draw = ImageDraw.Draw(canvas)
@@ -2659,14 +2704,14 @@ class RenderService:
         # 每次只保留真正可用的候選，避免把大型照片庫 materialize 成 Dict。
         # photos has no durable burst_group_id column; captured_at is the
         # existing burst-proximity signal consumed by LocalSelectionPolicy.
-        while len(result) < max(limit, 1):
+        while date_priorities is not None or len(result) < max(limit, 1):
             with self.database.session() as connection:
                 rows = connection.execute(
                     f"""
                     WITH content_exposure AS (
-                        SELECT sha256,MAX(SUM(display_count),SUM(selection_count)) AS used_count,
-                               MAX(MAX(COALESCE(last_displayed_at,''),COALESCE(last_selected_at,''))) AS used_at
-                        FROM photos WHERE length(sha256)=64 AND (display_count>0 OR selection_count>0)
+                        SELECT sha256,SUM(display_count) AS used_count,
+                               MAX(COALESCE(last_displayed_at,'')) AS used_at
+                        FROM photos WHERE length(sha256)=64 AND display_count>0
                         GROUP BY sha256
                     ), ranked_candidates AS (
                     SELECT p.id,p.library_id,p.relative_path,p.captured_at,p.captured_date,p.captured_month_day,
@@ -2684,7 +2729,7 @@ class RenderService:
                            a.memory_score,
                            a.score_kind,a.schema_version,a.local_score,p.local_candidate_score,
                            p.display_count,p.last_displayed_at,p.selection_count,p.last_selected_at,
-                           MAX(p.display_count,p.selection_count,COALESCE(exposure.used_count,0)) exposure_count,
+                           MAX(p.display_count,COALESCE(exposure.used_count,0)) exposure_count,
                            exposure.used_at AS content_last_exposure_at,
                            CASE WHEN ?=0 THEN 0 WHEN {score_expression}>=? THEN
                                COALESCE((SELECT value FROM json_each(?) WHERE key=p.captured_month_day),1000)
@@ -2747,8 +2792,11 @@ class RenderService:
                     candidate.pop("raw_json", None)
                     candidate.pop("exif_json", None)
                     result.append(candidate)
-                    if len(result) >= max(limit, 1):
+                    if date_priorities is None and len(result) >= max(limit, 1):
                         break
+            if date_priorities is not None:
+                from inktime.app.domain.photos.seasonal_rotation import seasonal_order
+                result = seasonal_order(result, target, priority_min_score, float(self.settings.get("render.repeat_high_score", 75)))[:max(limit, 1)]
             last_score = float(rows[-1]["combined_score"])
             last_count = int(rows[-1]["exposure_count"])
             last_priority = int(rows[-1]["date_priority"])
@@ -2867,6 +2915,15 @@ class RenderService:
                 row["seasonal_priority"] = int(row["date_priority"])
                 row["match_type"] = ("seasonal_low_score" if row["seasonal_priority"] == 1000
                                      else "exact_day" if row["day_distance"] == 0 else "nearby_day")
+            minimum = float(self.settings.get("render.seasonal_priority_min_score", 60))
+            if (not any(float(row.get("selection_score") or 0) >= minimum for row in pool.values())
+                    and self.settings.get("render.seasonal_outside_fallback", True)):
+                outside = self._candidate_query(
+                    target=target, month_days=None, older_only=False,
+                    limit=max(500, limit), candidate_years=candidate_years, score_kind=score_kind,
+                )
+                append([row for row in outside if float(row.get("selection_score") or 0) >= minimum],
+                       "ranked_fallback")
         elif mode == "top_ranked":
             append(self._candidate_query(
                 target=target,
@@ -2911,6 +2968,12 @@ class RenderService:
             0 if row.get("seasonal_priority") == 1000 else int(row.get("day_distance") or 0), last_exposure_at(row),
             -float(row.get("combined_score") or 0), str(row["id"]),
         ))
+        if execution_mode(self.settings) == "seasonal_ai":
+            from inktime.app.domain.photos.seasonal_rotation import seasonal_order
+            ordered = seasonal_order(ordered, target, float(self.settings.get("render.seasonal_priority_min_score", 60)), float(self.settings.get("render.repeat_high_score", 75)))
+            if candidate_pool is not None:
+                candidate_pool.extend(ordered)
+            return ordered[:limit]
         if candidate_pool is not None:
             candidate_pool.extend(ordered)
         if limit >= len(ordered):
@@ -2919,19 +2982,12 @@ class RenderService:
 
     @staticmethod
     def _auto_candidate_stages(rows: list[dict[str, Any]]):
-        """Try every unseen composition before admitting displayed sources."""
-        allowed: list[dict[str, Any]] = []
-        def priority(row):
-            return row.get("seasonal_priority", {"exact_day": 0, "nearby_day": 1}.get(row.get("match_type"), 2))
-        for count in sorted({exposure_count(row) for row in rows}):
-            for stage in sorted({priority(row) for row in rows if exposure_count(row) == count}):
-                added = [row for row in rows if exposure_count(row) == count and priority(row) == stage]
-                if added:
-                    allowed.extend(added)
-                    yield list(allowed)
+        # Ordering already applies the quality and history policy. Do not undo
+        # the lottery by forcing every low-score unseen source ahead of repeats.
+        yield list(rows)
 
     def _auto_photo_candidate_pool(self, *, target_date: date | None = None, record_history: bool = False) -> list[dict[str, Any]]:
-        rows = self.select_candidates_details(1000, target_date=target_date, composition_pool=True, record_history=record_history)
+        rows = self.select_candidates_details(1000, target_date=target_date, composition_pool=True, record_history=False)
         result = []
         recent_cutoff = datetime.now(timezone.utc) - timedelta(days=14)
         for row in rows:
@@ -2958,9 +3014,22 @@ class RenderService:
                 break
         # Only publish the sources of actual frames. A 1,000-photo candidate
         # pool must not trip the 200-source release validation limit.
-        return [row for frame in select_auto_photo_frames(
+        selected = [row for frame in select_auto_photo_frames(
             allowed, frame_orientation=frame_orientation, count=quantity,
         ) for row in frame]
+        if record_history:
+            run_id = DisplayHistoryRepository(self.database).record_selection(
+                target=target_date or self._today(), candidates=rows, selected=selected,
+                method="automatic", context={"policy": "confirmed_display_quality_lottery_v3",
+                    "requested_frames": quantity, "composition_pool": True,
+                    "selection_mode": self.settings.get("render.selection_mode", "history_today"),
+                    "execution_mode": execution_mode(self.settings),
+                    "fallback": "seasonal_outside_high_score" if self.settings.get("render.seasonal_outside_fallback", True) else "keep_current",
+                    "seed_date": (target_date or self._today()).isoformat()},
+            )
+            for row in selected:
+                row["selection_run_id"] = run_id
+        return selected
 
     def select_candidates_details(
         self,
@@ -2994,7 +3063,7 @@ class RenderService:
                          "seasonal_priority_min_score": self.settings.get("render.seasonal_priority_min_score", 60),
                          "fallback": self.settings.get("render.history_today_fallback", "nearby_then_ranked"),
                          "candidate_years": candidate_years or [], "requested_count": limit,
-                         "composition_pool": composition_pool, "policy": "least_displayed_seasonal_date_v2"},
+                         "composition_pool": composition_pool, "policy": "confirmed_display_quality_lottery_v3" if mode == "seasonal_ai" else "least_displayed_seasonal_date_v2"},
             )
             for row in selected:
                 row["selection_run_id"] = run_id

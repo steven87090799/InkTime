@@ -274,6 +274,9 @@ def devices_page():
     return render_template(
         "devices.html",
         devices=devices,
+        weekly_schedule_enabled=settings.get("display.weekly_schedule_enabled", True),
+        weekday_times=settings.get("display.weekday_times", "08:00,18:00,20:00,22:00"),
+        weekend_times=settings.get("display.weekend_times", "08:00,10:00,12:00,14:00,16:00,18:00,20:00,22:00"),
         pending_pairings=pending_pairings,
         device_events=_repository().list_events(100),
         notifications=current_app.extensions["inktime_notification_service"].list(100),

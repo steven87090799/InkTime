@@ -67,7 +67,7 @@ def settings_report_snapshot(settings, providers, provider_service, schedules, d
         entry = {
             "key": row["key"], "label": definition["label_zh_tw"],
             "description": definition["description"],
-            "value": _value_label(row["value"], definition),
+            "value": "不限制張數（0）" if row["key"] in {"analysis.ai_daily_photo_limit", "analysis.ai_monthly_photo_limit"} and row["value"] == 0 else _value_label(row["value"], definition),
             "default": _value_label(definition.get("default"), definition),
             "source": "系統設定" if row["updated_by"] else "預設值",
             "scope": SCOPE_LABELS.get(definition["effective_scope"], definition["effective_scope"]),

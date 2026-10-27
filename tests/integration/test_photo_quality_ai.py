@@ -186,6 +186,35 @@ def test_reapply_quality_rules_uses_current_settings_snapshot(client, app, tmp_p
     assert photo["exclusion_status"] == ("auto_excluded" if enabled else "eligible")
 
 
+def test_missing_photo_limit_settings_default_to_unlimited_without_overwriting_explicit_plan(app, monkeypatch):
+    service = app.extensions["inktime_analysis_service"]
+    settings = app.extensions["inktime_settings_repository"]
+    original_get = settings.get
+    limit_keys = {"analysis.ai_daily_photo_limit", "analysis.ai_monthly_photo_limit"}
+
+    def without_limits(key, default=None):
+        return default if key in limit_keys else original_get(key, default)
+
+    monkeypatch.setattr(settings, "get", without_limits)
+    captured = {}
+
+    def check_limits(**kwargs):
+        captured.update(kwargs)
+        return False
+
+    monkeypatch.setattr(service.photos, "ai_limit_reached", check_limits)
+    assert not service._photo_limits_reached()
+    assert captured["daily_limit"] == captured["monthly_limit"] == 0
+    assert not service._photo_limits_reached({"daily_photo_limit": 12, "monthly_photo_limit": 34})
+    assert captured["daily_limit"] == 12
+    assert captured["monthly_limit"] == 34
+    plan = service.build_plan(
+        strategy="local", provider_route=[], scoring_profile_id=str(app.extensions["inktime_scoring_repository"].current()["id"]),
+    )
+    assert plan["ai_execution_policy"]["daily_photo_limit"] == 0
+    assert plan["ai_execution_policy"]["monthly_photo_limit"] == 0
+
+
 def test_ai_off_does_not_call_provider(app, tmp_path):
     photo_id = _scan(app, tmp_path)[0]
     _setting(app, "analysis.ai_mode", "off")

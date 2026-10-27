@@ -150,7 +150,7 @@ class _BoundaryHTTPHandler(BaseHTTPRequestHandler):
             # Keep original semantics available so these boundary cases reach
             # the repair request while still failing schema validation.
             response_content = json.dumps(
-                valid_result(types=["人物", "人物"]), ensure_ascii=False
+                valid_result(types=["未知分類"]), ensure_ascii=False
             )
         else:
             response_content = json.dumps(valid_result(), ensure_ascii=False)
@@ -752,7 +752,7 @@ def test_repair_capacity_timeout_after_vision_is_terminal_without_repair_unknown
 
 def test_router_repair_capacity_is_terminal_to_worker_without_second_vision(app, tmp_path):
     boundary = KillableProcessBoundary(max_processes=1, terminate_grace_seconds=0.05)
-    provider = MockProvider([valid_result(types=["人物", "人物"])])
+    provider = MockProvider([valid_result(types=["未知分類"])])
     router = _PostVisionRepairCapacityRouter([ProviderChannel(provider, max_concurrency=1)])
     photo_id, service = _isolated_service(app, tmp_path, boundary)
     jobs = app.extensions["inktime_job_service"]
@@ -1164,7 +1164,7 @@ def test_new_analysis_plan_uses_minimal_side_caption_controls_and_no_reasoning(a
     )
     assert plan["caption_controls"] == {
         "side_caption_min_chars": 1,
-        "side_caption_max_chars": 20,
+        "side_caption_max_chars": 16,
         "side_caption_custom_rules": "",
     }
     assert plan["reasoning_effort"] == "none"

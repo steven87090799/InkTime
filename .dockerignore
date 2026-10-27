@@ -31,3 +31,6 @@ USER_MANUAL.html
 analyze_photos.py
 scripts/migrate 2.py
 scripts/performance_100k 2.py
+
+!inktime/data/taiwan_districts.zip
+!inktime/data/taiwan_districts.README.txt

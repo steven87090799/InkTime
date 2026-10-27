@@ -62,7 +62,7 @@ def test_auto_preview_handles_self_as_secondary(app, tmp_path):
     assert response.status_code == 400, {"http_status": response.status_code}
 
 
-def test_global_auto_layout_change_preserves_release_until_explicit_rerender(app):
+def test_global_auto_layout_change_preserves_release_until_explicit_rerender(custom_device_schedule, app):
     actor = _configure(app, **{"render.layout": "photo_info"})
     devices = app.extensions["inktime_device_repository"]
     did, _ = devices.create(
@@ -215,7 +215,7 @@ def test_auto_pair_place_and_date_are_upright_without_moving_photo_slots(app, tm
     calls = []
     original = ImageDraw.ImageDraw.text
     def capture(draw, xy, text, *args, **kwargs):
-        if kwargs.get("font") is not None and kwargs["font"].size == 12:
+        if kwargs.get("font") is not None and kwargs["font"].size <= 14:
             calls.append((xy, str(text)))
         return original(draw, xy, text, *args, **kwargs)
     monkeypatch.setattr(ImageDraw.ImageDraw, "text", capture)
@@ -225,13 +225,13 @@ def test_auto_pair_place_and_date_are_upright_without_moving_photo_slots(app, tm
     for photo, caption, pid in zip(after["geometry"]["photo_rects"], after["geometry"]["caption_rects"], ("first", "second"), strict=True):
         box = (photo["x"], photo["y"], photo["x"] + photo["width"], photo["y"] + photo["height"])
         assert ImageChops.difference(logical[0].crop(box), logical[1].crop(box)).getbbox() is None
-        columns = {}
-        for (x, y), text in calls:
-            if caption["x"] <= x < caption["x"] + caption["width"]:
-                columns.setdefault(x, []).append((y, text))
-        texts = ["".join(text for _, text in sorted(glyphs)) for glyphs in columns.values()]
-        assert places[pid] in texts
-        assert after["photo_footer_parts"][pid]["date"] in texts
+        metadata = sorted(
+            ((y, x, text) for (x, y), text in calls
+             if caption["x"] <= x < caption["x"] + caption["width"]),
+        )
+        assert places[pid] in "".join(text for _, _, text in metadata)
+        assert "2024" in [text for _, _, text in metadata]
+        assert f"7/{1 if pid == 'first' else 2}" in [text for _, _, text in metadata]
     for image in [first, second, *logical]:
         image.close()
 
