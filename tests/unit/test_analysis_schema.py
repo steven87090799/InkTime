@@ -253,6 +253,16 @@ def test_side_caption_controls_cannot_publish_a_contract_the_validator_rejects()
     assert schema['minLength'] == 1 and schema['maxLength'] == 20
 
 
+def test_sixteen_character_requests_preserve_stored_twenty_character_results():
+    result = valid_result(side_caption='山' * 20)
+    assert validate_analysis_result(result)['side_caption'] == '山' * 20
+    with pytest.raises(AnalysisValidationError):
+        validate_model_response(result, caption_controls={'side_caption_max_chars': 16})
+    assert validate_model_response(
+        valid_result(side_caption='山' * 16), caption_controls={'side_caption_max_chars': 16},
+    )['side_caption'] == '山' * 16
+
+
 def test_v5_exact_fields_and_legacy_v4_remains_readable():
     assert set(ANALYSIS_JSON_SCHEMA["schema"]["properties"]) == REQUIRED_FIELDS
     assert "display_exclusion" not in LEGACY_V4_JSON_SCHEMA["schema"]["properties"]

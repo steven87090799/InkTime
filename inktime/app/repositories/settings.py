@@ -25,6 +25,7 @@ from inktime.app.domain.analysis.scoring import (
     DEFAULT_SCORING_RULES,
 )
 from inktime.app.domain.analysis.schema import (
+    DEFAULT_SIDE_CAPTION_MAX_CHARS,
     SIDE_CAPTION_MAX_CHARS,
     SIDE_CAPTION_MIN_CHARS,
     normalize_caption_controls,
@@ -157,7 +158,7 @@ SETTING_DEFINITIONS: dict[str, dict[str, Any]] = {
     },
     "analysis.side_caption_max_chars": {
         "category": "照片描述與相框文案",
-        "default": SIDE_CAPTION_MAX_CHARS,
+        "default": DEFAULT_SIDE_CAPTION_MAX_CHARS,
         "type": "integer",
         "description": "相框一句話最多字元數",
         "risk": "必須與最少字數保持 min ≤ max",
@@ -284,8 +285,8 @@ SETTING_DEFINITIONS: dict[str, dict[str, Any]] = {
     'analysis.exclude_sexualized_content': {'category': '舊版 AI 內容排除', 'default': True, 'type': 'boolean', 'description': 'v4/v5 排除偏色情／性感照片；v6 固定排除', 'label': '舊版色情化內容排除', 'risk': '只影響舊版分析；v6 安全排除不可關閉，明確命中也不可人工恢復。', 'restart': False},
     'analysis.exclude_explicit_nudity': {'category': '舊版 AI 內容排除', 'default': True, 'type': 'boolean', 'description': 'v4/v5 排除成人裸露照片；v6 固定排除', 'label': '舊版裸露內容排除', 'risk': '只影響舊版分析；v6 安全排除不可關閉，明確命中也不可人工恢復。', 'restart': False},
     'analysis.exclude_female_glamour_portraits': {'category': '舊版 AI 內容排除', 'default': True, 'type': 'boolean', 'description': 'v4/v5 排除女性寫真；v6 固定排除', 'label': '舊版女性寫真排除', 'risk': '只影響舊版分析；v6 同時辨識不限性別的商業模特照。', 'restart': False},
-    'analysis.content_filter_min_confidence': {'category': '舊版 AI 內容排除', 'default': 0.85, 'type': 'number', 'description': 'v4/v5 內容排除信心門檻', 'label': '舊版內容信心門檻', 'risk': '只影響舊版分析；v6 使用固定安全門檻，低信心疑似照片等待人工確認。', 'restart': False, 'min': 0, 'max': 1},
-    'analysis.female_glamour_min_confidence': {'category': '舊版 AI 內容排除', 'default': 0.9, 'type': 'number', 'description': 'v4/v5 女性寫真信心門檻', 'label': '舊版寫真信心門檻', 'risk': '只影響舊版分析；v6 使用固定安全門檻。', 'restart': False, 'min': 0, 'max': 1},
+    'analysis.content_filter_min_confidence': {'category': '舊版 AI 內容排除', 'default': 0.85, 'type': 'number', 'description': 'v4/v5 內容排除信心門檻', 'label': '舊版內容信心門檻', 'risk': '只影響舊版分析；v6 直接採模型是／否判斷，信心值僅供查閱。', 'restart': False, 'min': 0, 'max': 1},
+    'analysis.female_glamour_min_confidence': {'category': '舊版 AI 內容排除', 'default': 0.9, 'type': 'number', 'description': 'v4/v5 女性寫真信心門檻', 'label': '舊版寫真信心門檻', 'risk': '只影響舊版分析；v6 直接採模型是／否判斷，信心值僅供查閱。', 'restart': False, 'min': 0, 'max': 1},
     "analysis.prefilter_enabled": {
         "category": "本機預篩選",
         "default": True,

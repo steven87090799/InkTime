@@ -26,7 +26,7 @@ def _controls(**updates):
 
 def test_only_minimal_side_caption_settings_are_registered():
     assert SETTING_DEFINITIONS["analysis.side_caption_min_chars"]["default"] == 1
-    assert SETTING_DEFINITIONS["analysis.side_caption_max_chars"]["default"] == 20
+    assert SETTING_DEFINITIONS["analysis.side_caption_max_chars"]["default"] == 16
     custom = SETTING_DEFINITIONS["analysis.side_caption_custom_rules"]
     assert custom["default"] == "" and custom["max_length"] == 1000 and custom["multiline"]
     removed = {

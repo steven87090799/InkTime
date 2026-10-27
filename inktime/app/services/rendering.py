@@ -23,6 +23,7 @@ from inktime.app.db import Database
 from inktime.app.domain.photos import LocationResolver, parse_photo_date
 from inktime.app.domain.photos.places import place_date_label
 from inktime.app.domain.photos.rotation import exposure_count, last_exposure_at
+from inktime.app.domain.analysis.schema import DEFAULT_SIDE_CAPTION_MAX_CHARS
 from inktime.app.repositories.photo_locations import PhotoLocationRepository
 from inktime.app.domain.rendering import (
     AtomicReleasePublisher,
@@ -985,6 +986,11 @@ class RenderService:
             if is_ai_caption
             else {}
         )
+        maximum_characters = int(self.settings.get("analysis.side_caption_max_chars", DEFAULT_SIDE_CAPTION_MAX_CHARS))
+        if is_ai_caption:
+            # A tighter generation limit must not slice a previously accepted
+            # model sentence. Its original text remains a frozen render input.
+            maximum_characters = max(maximum_characters, len(caption))
         record = build_local_caption(
             photo_id=photo_id,
             captured_at=photo["captured_at"],
@@ -997,7 +1003,7 @@ class RenderService:
             existing_caption_is_ai_generated=is_ai_caption if caption else None,
             source_detail=source_detail,
             source_updated_at=str((analysis or {}).get("created_at") or "") or None,
-            maximum_characters=int(self.settings.get("analysis.side_caption_max_chars", 20)),
+            maximum_characters=maximum_characters,
         )
         # Freeze the visible date together with the caption's photo identity.
         # A queued render must not read a different date or visibility setting.
@@ -1384,6 +1390,53 @@ class RenderService:
                 left_side=True, date_at_bottom=True,
             )
 
+    def _compact_pair_metadata_lines(
+        self, draw: ImageDraw.ImageDraw, *, font_path: Path,
+        date_lines: list[str], place: str, sentence: str, width: int, height: int,
+    ) -> list[tuple[str, ImageFont.FreeTypeFont, int]]:
+        """Reserve the full model sentence before fitting place and date text."""
+        sentence_length = min(len(sentence), 20)
+        last_lines: list[str] = []
+        for place_size in (10, 9):
+            place_font = ImageFont.truetype(str(font_path), place_size)
+            place_step = place_size + 4
+            lines: list[str] = []
+            remaining = place
+            while remaining:
+                line = ""
+                while remaining and draw.textlength(line + remaining[0], font=place_font) <= width:
+                    line += remaining[0]
+                    remaining = remaining[1:]
+                if not line:
+                    break
+                lines.append(line)
+            last_lines = lines
+            for date_size in range(14, 9, -1):
+                date_font = ImageFont.truetype(str(font_path), date_size)
+                if any(draw.textlength(line, font=date_font) > width for line in date_lines):
+                    continue
+                dates = [(line, date_font, date_size + 4) for line in date_lines]
+                date_height = len(dates) * (date_size + 4)
+                for sentence_size in (17, 16):
+                    budget = max(0, height - sentence_length * (sentence_size + 2) - 8)
+                    if not remaining and date_height + len(lines) * place_step <= budget:
+                        return dates + [(line, place_font, place_step) for line in lines]
+
+        # Preserve full names without aliases. A legacy 20-char caption or an
+        # oversized manual label can still exceed this fixed strip; only that
+        # exceptional place label gets an explicit ellipsis, never hidden loss.
+        date_font = ImageFont.truetype(str(font_path), 10)
+        dates = [(line, date_font, 14) for line in date_lines]
+        budget = max(0, height - sentence_length * 18 - 8 - len(dates) * 14)
+        maximum_lines = budget // 13
+        visible = last_lines[:maximum_lines]
+        if (len(last_lines) > len(visible) or remaining) and visible:
+            last = visible[-1]
+            while last and draw.textlength(last + "…", font=place_font) > width:
+                last = last[:-1]
+            visible[-1] = last + "…"
+        return dates + [(line, place_font, 13) for line in visible]
+
     def _draw_adaptive_pair_caption(
         self, canvas: Image.Image, record: dict[str, Any], box: Rect, *, left_side: bool,
         date_at_bottom: bool = False,
@@ -1402,29 +1455,11 @@ class RenderService:
             available_height = max(0, box.height - vertical_padding * 2)
             y = box.y + vertical_padding
             date_lines = self._pair_date_lines(date_label)
-            date_font = ImageFont.truetype(str(font_path), 14)
-            for size in range(14, 9, -1):
-                date_font = ImageFont.truetype(str(font_path), size)
-                if all(draw.textlength(line, font=date_font) <= available_width for line in date_lines):
-                    break
-            place_font = ImageFont.truetype(str(font_path), 10)
             place = str(record.get("capture_place_label") or "").strip()
-            metadata_lines = [(line, date_font, int(date_font.size) + 4) for line in date_lines]
-            if place:
-                # Horizontal place lines share the strip width, not the sentence
-                # height of a second long vertical date column.
-                remaining = place
-                while remaining and len(metadata_lines) < len(date_lines) + 3:
-                    line = ""
-                    while remaining and draw.textlength(line + remaining[0], font=place_font) <= available_width:
-                        line += remaining[0]
-                        remaining = remaining[1:]
-                    if not line:
-                        break
-                    metadata_lines.append((line, place_font, 14))
-                if remaining and metadata_lines:
-                    line, line_font, advance = metadata_lines[-1]
-                    metadata_lines[-1] = (self._fit_line(draw, line + "…", line_font, available_width), line_font, advance)
+            metadata_lines = self._compact_pair_metadata_lines(
+                draw, font_path=font_path, date_lines=date_lines, place=place,
+                sentence=normalized, width=available_width, height=available_height,
+            )
             metadata_height = sum(advance for _, _, advance in metadata_lines)
             if metadata_height:
                 available_height = max(0, available_height - metadata_height - 8)

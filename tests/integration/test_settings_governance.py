@@ -1547,7 +1547,7 @@ def test_ui_contains_dirty_search_filter_snapshot_and_accessibility_contracts(cl
     assert "改變 Cache Fingerprint" in body
     assert SETTING_DEFINITIONS["analysis.ai_daily_photo_limit"]["advanced"] is True
     assert SETTING_DEFINITIONS["analysis.side_caption_min_chars"]["default"] == 1
-    assert SETTING_DEFINITIONS["analysis.side_caption_max_chars"]["default"] == 20
+    assert SETTING_DEFINITIONS["analysis.side_caption_max_chars"]["default"] == 16
     assert SETTING_DEFINITIONS["analysis.side_caption_custom_rules"]["default"] == ""
     assert "analysis.caption_variants_enabled" not in SETTING_DEFINITIONS
     assert SETTING_DEFINITIONS["analysis.ai_daily_photo_limit"]["risk"] == "high"

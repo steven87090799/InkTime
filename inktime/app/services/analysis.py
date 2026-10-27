@@ -36,7 +36,7 @@ from inktime.app.domain.analysis.scoring import (
     ranking_components,
     resolve_score_kind,
 )
-from inktime.app.domain.analysis.schema import normalize_caption_controls, validate_model_response
+from inktime.app.domain.analysis.schema import DEFAULT_SIDE_CAPTION_MAX_CHARS, normalize_caption_controls, validate_model_response
 from inktime.app.domain.photos import ThumbnailCache
 from inktime.app.domain.photos.formats import assert_source_content
 from inktime.app.domain.photos.quality_policy import (
@@ -171,10 +171,10 @@ class PhotoAnalysisService:
     def _caption_controls(self) -> dict:
         settings = self.settings
         if settings is None:
-            return normalize_caption_controls({})
+            return normalize_caption_controls({"side_caption_max_chars": DEFAULT_SIDE_CAPTION_MAX_CHARS})
         return normalize_caption_controls({
             "side_caption_min_chars": int(settings.get("analysis.side_caption_min_chars", 1)),
-            "side_caption_max_chars": int(settings.get("analysis.side_caption_max_chars", 20)),
+            "side_caption_max_chars": int(settings.get("analysis.side_caption_max_chars", DEFAULT_SIDE_CAPTION_MAX_CHARS)),
             "side_caption_custom_rules": str(
                 settings.get("analysis.side_caption_custom_rules", "")
             ),

@@ -98,6 +98,7 @@ class SeasonalAnalysisService:
             target = self.preparation_target(datetime.now(timezone.utc))
             if target is None:
                 return {"waiting": False, "job_id": None, "reason": "waiting_for_morning_delivery_ack"}
+        self.photos.reconcile_model_content_holds()
         self.repository.refresh()
         missing: list[dict] = []
         waiting = False

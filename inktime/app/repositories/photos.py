@@ -2260,6 +2260,78 @@ class PhotoRepository:
         rows = connection.execute("SELECT key,value_json FROM settings WHERE key IN (?,?,?,?,?)", tuple(CONTENT_FILTER_DEFAULTS)).fetchall()
         return CONTENT_FILTER_DEFAULTS | {row["key"]: json.loads(row["value_json"]) for row in rows}
 
+    def reconcile_model_content_holds(self, limit: int = 100) -> int:
+        """Recheck old confidence-only holds using saved model verdicts, without AI."""
+        with self.database.session() as connection:
+            exists = connection.execute(
+                "SELECT 1 FROM photos WHERE exclusion_status='pending_review' "
+                "AND reject_rule_version='content-filter-v5-strict-display' LIMIT 1"
+            ).fetchone()
+        if exists is None:
+            return 0
+        changed = 0
+        now = datetime.now(timezone.utc).isoformat()
+        with self.database.transaction(operation="model_content_verdict_reconcile") as connection:
+            rows = connection.execute(
+                """SELECT p.*,a.id AS saved_analysis_id,a.raw_json AS saved_model_json
+                   FROM photos p JOIN photo_analysis a ON a.id=(
+                       SELECT latest.id FROM photo_analysis latest
+                       WHERE latest.photo_id=p.id AND latest.score_kind=?
+                       ORDER BY latest.created_at DESC,latest.id DESC LIMIT 1)
+                   WHERE p.exclusion_status='pending_review' AND p.reject_rule='content-filter'
+                     AND p.reject_rule_version='content-filter-v5-strict-display'
+                     AND p.manual_override=0 AND p.lifecycle_status='active'
+                     AND p.status='analyzed' AND p.local_features_status='complete' AND a.schema_version=6
+                     AND NOT EXISTS(SELECT 1 FROM photo_reviews r WHERE r.photo_id=p.id
+                                    AND r.analysis_id IS NULL AND r.updated_by IS NOT NULL)
+                   ORDER BY p.id LIMIT ?""",
+                (SEMANTIC_SCORE_KIND, max(1, min(int(limit), 500))),
+            ).fetchall()
+            quality_settings = self._local_quality_settings(connection)
+            for row in rows:
+                photo = dict(row)
+                try:
+                    result = validate_analysis_result(photo["saved_model_json"])
+                    content = evaluate_content_filter(result["content_filter"], strict=True)
+                    display = evaluate_display_exclusion(result["display_exclusion"])
+                    orientation = self._orientation_review(photo, result["visual_orientation"])
+                except (ValueError, TypeError, KeyError, json.JSONDecodeError):
+                    continue
+                quality = evaluate_local_quality(photo, settings=quality_settings)
+                checks = [content, display, *([orientation] if orientation is not None else [])]
+                exclusion = next((check for check in checks if check["decision"] == "auto_excluded"), None)
+                hold = next((check for check in checks if check["decision"] == "pending_review"), None)
+                if exclusion is not None:
+                    self._apply_content_exclusion(connection, photo["id"], exclusion, now)
+                elif hold is not None:
+                    self._apply_content_review(connection, photo["id"], hold, now)
+                    changed += 1
+                    continue
+                elif quality["decision"] == "auto_excluded":
+                    self._apply_content_exclusion(connection, photo["id"], {
+                        **quality, "rule": LOCAL_QUALITY_RULE, "rule_version": QUALITY_POLICY_VERSION,
+                    }, now)
+                else:
+                    connection.execute(
+                        """UPDATE photos SET eligible=1,exclusion_status='eligible',reject_reason=NULL,
+                           reject_rule=NULL,reject_rule_version=NULL,reject_details_json=NULL,
+                           rejected_at=NULL,updated_at=? WHERE id=?""", (now, photo["id"]),
+                    )
+                    connection.execute(
+                        "INSERT INTO photo_events(photo_id,event,changes_json,created_at) VALUES (?,?,?,?)",
+                        (photo["id"], "model_content_hold_resolved", json.dumps({
+                            "analysis_id": photo["saved_analysis_id"], "rule_version": content["rule_version"],
+                        }), now),
+                    )
+                connection.execute(
+                    """UPDATE photo_reviews SET review_state='unreviewed',candidate_pool=0,
+                       accepted_at=NULL,version=version+1,updated_at=?
+                       WHERE photo_id=? AND analysis_id IS NULL AND updated_by IS NULL""",
+                    (now, photo["id"]),
+                )
+                changed += 1
+        return changed
+
     @classmethod
     def current_v6_display_risk(cls, connection, photo_id: str) -> str | None:
         """Return a non-overridable risk from the latest semantic v6 result."""

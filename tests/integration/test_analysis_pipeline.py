@@ -1164,7 +1164,7 @@ def test_new_analysis_plan_uses_minimal_side_caption_controls_and_no_reasoning(a
     )
     assert plan["caption_controls"] == {
         "side_caption_min_chars": 1,
-        "side_caption_max_chars": 20,
+        "side_caption_max_chars": 16,
         "side_caption_custom_rules": "",
     }
     assert plan["reasoning_effort"] == "none"

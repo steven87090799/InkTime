@@ -1066,3 +1066,78 @@ def test_compact_pair_dates_leave_both_sentences_and_districts_visible(app, monk
     assert all(size == 14 for text, size in calls if text in {'2022', '8/5'})
     painted = ''.join(text for text, size in calls if size >= 16)
     assert records[0]['text'] in painted and records[1]['text'] in painted
+
+
+@pytest.mark.parametrize('place,visible_place', [
+    ('國立故宮博物院南部院區', '國立故宮博物院南部院區'),
+    ('國立臺灣史前文化博物館南科考古館', '國立臺灣史前文化博物館南科考古館'),
+    ('海邊風景文化展示中心', '海邊風景文化展示中心'),
+    ('山水風光' * 10, None),
+])
+def test_compact_pair_long_places_keep_twenty_characters_and_original_metadata(app, monkeypatch, place, visible_place):
+    from inktime.app.domain.rendering.layout_geometry import resolve_compact_pair_geometry
+
+    service = app.extensions['inktime_render_service']
+    geometry = resolve_compact_pair_geometry(((900, 1600), (900, 1600)))
+    text = '那天微風也記得我們一起走過的路留在心裡面'
+    calls = []
+    original = ImageDraw.ImageDraw.text
+
+    def capture(draw, xy, value, *args, **kwargs):
+        calls.append((str(value), kwargs['font'].size))
+        return original(draw, xy, value, *args, **kwargs)
+
+    monkeypatch.setattr(ImageDraw.ImageDraw, 'text', capture)
+    records = tuple({'photo_id': key, 'text': text} for key in ('a', 'b'))
+    parts = {key: {'date': '2026年12月31日', 'location': place} for key in ('a', 'b')}
+    with Image.new('RGB', (800, 480), 'white') as canvas:
+        service._draw_compact_pair_captions(canvas, geometry, records, parts)
+    assert ''.join(value for value, size in calls if size >= 16) == text * 2
+    place_text = ''.join(value for value, size in calls if size < 16 and value not in {'2026', '12/31'})
+    if visible_place is None:
+        assert '…' in place_text
+    else:
+        assert place_text == visible_place * 2
+    assert all(part['location'] == place for part in parts.values())
+    assert sum(rect.width for rect in geometry.photo_rects) == 684
+
+
+def test_compact_pair_unknown_name_can_shrink_date_and_keep_its_full_name(app):
+    service = app.extensions['inktime_render_service']
+    place = '甲乙丙丁戊己庚辛壬癸子丑寅卯辰巳午未'
+    text = '那天微風也記得我們一起走過的路留在心裡'
+    font_path = service.fonts.resolve(str(service.settings.get('render.font_path', '')))
+    with Image.new('RGB', (44, 480), 'white') as canvas:
+        lines = service._compact_pair_metadata_lines(
+            ImageDraw.Draw(canvas), font_path=font_path, date_lines=['2026', '12/31'],
+            place=place, sentence=text, width=38, height=464,
+        )
+    assert ''.join(value for value, _font, _step in lines[2:]) == place
+    assert 10 <= lines[0][1].size < 14
+
+
+def test_compact_pair_sixteen_character_caption_leaves_room_for_forty_character_landmark(app):
+    service = app.extensions['inktime_render_service']
+    place = '山水風光' * 10
+    font_path = service.fonts.resolve(str(service.settings.get('render.font_path', '')))
+    with Image.new('RGB', (44, 480), 'white') as canvas:
+        lines = service._compact_pair_metadata_lines(
+            ImageDraw.Draw(canvas), font_path=font_path, date_lines=['2026', '12/31'],
+            place=place, sentence='把平凡日子收進光裡讓回憶慢慢發亮', width=38, height=464,
+        )
+    assert ''.join(value for value, _font, _step in lines[2:]) == place
+    assert sum(step for _value, _font, step in lines) + 16 * 18 + 8 <= 464
+
+
+def test_shorter_generation_limit_preserves_existing_model_sentence(app, tmp_path):
+    root = tmp_path / 'retained-caption'
+    root.mkdir()
+    text = '那天微風也記得我們一起走過的路留在心裡面'
+    _analyzed_photo(app, root, 'retained', (1600, 900), '2026-10-27T08:00:00+00:00', side_caption=text)
+    app.extensions['inktime_settings_repository'].update(
+        'analysis.side_caption_max_chars', 16, changed_by=create_admin(app), source_ip='127.0.0.1',
+    )
+    plan = app.extensions['inktime_render_service'].resolve_render_plan(
+        'retained', layout='auto_photo', orientation='landscape',
+    )
+    assert plan['primary_caption']['text'] == text

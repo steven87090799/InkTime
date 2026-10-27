@@ -1,4 +1,4 @@
-"""Server-owned content policy; a model classification is never a decision."""
+"""Use explicit model verdicts for v6 content and retain legacy preferences."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ CONTENT_FILTER_DEFAULTS = {
     "analysis.female_glamour_min_confidence": 0.90,
 }
 CONTENT_FILTER_RULE_VERSION = "content-filter-v4-multilabel"
-STRICT_CONTENT_FILTER_RULE_VERSION = "content-filter-v5-strict-display"
+STRICT_CONTENT_FILTER_RULE_VERSION = "content-filter-v6-model-verdict"
 DISPLAY_EXCLUSION_RULE_VERSION = "display-exclusion-v1"
 DISPLAY_RISK_MIN_CONFIDENCE = 0.60
 CONTENT_FILTER_SWITCHES = {
@@ -26,7 +26,6 @@ def evaluate_content_filter(content_filter: dict, settings=None, *, strict: bool
     policy = CONTENT_FILTER_DEFAULTS | dict(settings or {})
     classifications = {}
     matched_codes = []
-    uncertain_codes = []
     for code, switch in CONTENT_FILTER_SWITCHES.items():
         classification = content_filter[code]
         threshold_key = (
@@ -35,35 +34,34 @@ def evaluate_content_filter(content_filter: dict, settings=None, *, strict: bool
             else "analysis.content_filter_min_confidence"
         )
         confidence = float(classification["confidence"])
-        # A v6 display safety decision cannot be weakened by old preference
-        # switches. Earlier analyses retain their original policy semantics.
+        detected = classification["detected"]
+        if type(detected) is not bool:
+            raise ValueError("內容分類 detected 必須是模型回傳的布林值")
+        # Current v6 exclusions follow the model's explicit yes/no verdict.
+        # Confidence remains diagnostic, never a locally inferred positive.
         threshold = DISPLAY_RISK_MIN_CONFIDENCE if strict else float(policy[threshold_key])
         enabled = True if strict else bool(policy[switch])
-        matched = bool(classification["detected"]) and enabled and confidence >= threshold
-        # Confidence describes the whole yes/no judgement. A weak negative is
-        # still unresolved evidence, rather than proof that display is safe.
-        uncertain = strict and confidence < threshold
+        matched = detected and enabled and (strict or confidence >= threshold)
         value = {
             "detected": classification["detected"], "confidence": confidence,
             "threshold": threshold, "enabled": enabled, "matched": matched,
         }
         if strict:
-            value["uncertain"] = uncertain
+            value["uncertain"] = False
+            value["confidence_threshold_applied"] = False
         classifications[code] = value
         if matched:
             matched_codes.append(code)
-        elif uncertain:
-            uncertain_codes.append(code)
     result = {
-        "decision": "auto_excluded" if matched_codes else "pending_review" if uncertain_codes else "pass",
-        "primary_reason": matched_codes[0] if matched_codes else uncertain_codes[0] if uncertain_codes else "passed",
+        "decision": "auto_excluded" if matched_codes else "pass",
+        "primary_reason": matched_codes[0] if matched_codes else "passed",
         "matched_codes": matched_codes,
         "classifications": classifications,
         "rule": "content-filter",
         "rule_version": STRICT_CONTENT_FILTER_RULE_VERSION if strict else CONTENT_FILTER_RULE_VERSION,
     }
     if strict:
-        result["uncertain_codes"] = uncertain_codes
+        result["uncertain_codes"] = []
     return result
 
 
