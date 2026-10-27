@@ -147,11 +147,12 @@ def with_photo_date_footers(geometry: LayoutGeometry) -> LayoutGeometry:
 
 def resolve_compact_pair_geometry(
     source_sizes: tuple[tuple[int, int], tuple[int, int]],
+    *, compact_spacing: bool = True,
 ) -> LayoutGeometry:
     """Use full-height photo slots; each left column holds its caption and date."""
     if len(source_sizes) != 2 or any(min(size) <= 0 for size in source_sizes):
         raise ValueError("compact pair requires two positive source sizes")
-    caption_width, inner_gap, gutter, outer_margin = 44, 6, 8, 4
+    caption_width, inner_gap, gutter, outer_margin = (44, 2, 4, 0) if compact_spacing else (44, 6, 8, 4)
     available_width = 800 - 2 * (caption_width + inner_gap + outer_margin) - gutter
     ratios = [max(width / height, 0.35) for width, height in source_sizes]
     first_width = max(1, min(available_width - 1, int(available_width * ratios[0] / sum(ratios))))

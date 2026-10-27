@@ -16,7 +16,7 @@ from inktime.app.services.rendering import RenderService
 def test_pairs_use_full_photo_height_with_dates_inside_left_columns(sizes):
     geometry = resolve_compact_pair_geometry(sizes)
     assert geometry.info == ()  # no separate bottom date band
-    assert sum(photo.width for photo in geometry.photo_rects) == 684
+    assert sum(photo.width for photo in geometry.photo_rects) == 704
     for photo, caption in zip(
         geometry.photo_rects, geometry.caption_rects, strict=True
     ):
@@ -27,7 +27,9 @@ def test_pairs_use_full_photo_height_with_dates_inside_left_columns(sizes):
         for rect in (photo, caption):
             assert min(rect.x, rect.y) >= 0
             assert rect.right <= 800 and rect.bottom <= 480
-    assert geometry.secondary_caption.x - geometry.primary_photo.right == 8
+    assert geometry.secondary_caption.x - geometry.primary_photo.right == 4
+    assert geometry.primary_caption.x == 0
+    assert geometry.secondary_photo.right == 800
 
 
 def test_center_fill_preserves_proportions_without_focus_or_extra_zoom(monkeypatch):
@@ -56,6 +58,13 @@ def test_contain_keeps_edges_when_explicitly_selected():
         assert fitted.getpixel((0, 240)) == (255, 255, 255)
         for point in ((37, 240), (304, 240), (171, 0), (171, 479)):
             assert fitted.getpixel(point)[0] > 240 and fitted.getpixel(point)[1] < 20
+
+
+def test_legacy_frozen_pair_keeps_its_original_photo_and_mask_regions():
+    geometry = resolve_compact_pair_geometry(((900, 1600), (900, 1600)), compact_spacing=False)
+    assert [(rect.x, rect.y, rect.width, rect.height) for rect in geometry.photo_rects] == [
+        (54, 0, 342, 480), (454, 0, 342, 480),
+    ]
 
 
 def test_text_and_paper_mask_leaves_photos_unprotected_in_physical_orientation():

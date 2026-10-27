@@ -215,7 +215,7 @@ def test_auto_pair_place_and_date_are_upright_without_moving_photo_slots(app, tm
     calls = []
     original = ImageDraw.ImageDraw.text
     def capture(draw, xy, text, *args, **kwargs):
-        if kwargs.get("font") is not None and kwargs["font"].size <= 14:
+        if kwargs.get("font") is not None and kwargs["font"].size <= 15:
             calls.append((xy, str(text)))
         return original(draw, xy, text, *args, **kwargs)
     monkeypatch.setattr(ImageDraw.ImageDraw, "text", capture)

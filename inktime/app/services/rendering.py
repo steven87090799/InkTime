@@ -10,7 +10,7 @@ from pathlib import Path
 import random
 import re
 import time
-from typing import Any
+from typing import Any, cast
 
 from inktime.app.core.json_values import json_bool, json_int
 from inktime.app.core.logging import log_event, should_log_rate_limited
@@ -399,6 +399,7 @@ class RenderService:
                     sizes = (primary_source_size, second_source.size)
                     geometry = resolve_compact_pair_geometry(sizes)
                     auto_pair_source_sizes = [list(size) for size in sizes]
+                    fit_key = "cover"
             capture_date_labels = {
                 str(photo["id"]): self._date_label(self._captured_date(photo["captured_at"]))
                 if bool(self.settings.get("render.show_capture_date", True)) else ""
@@ -466,6 +467,7 @@ class RenderService:
             "photo_footer_lines": photo_footer_lines,
             "photo_footer_parts": photo_footer_parts,
             "auto_pair_source_sizes": auto_pair_source_sizes,
+            "auto_pair_spacing": "tight" if auto_pair_source_sizes is not None else None,
             "auto_pair_crop_policy": "center" if auto_pair_source_sizes is not None else None,
             "footer_alignment": (
                 {"caption": "left_column", "date": "bottom_vertical"}
@@ -542,6 +544,7 @@ class RenderService:
                 photo_footer_lines=plan.get("photo_footer_lines"),
                 photo_footer_parts=plan.get("photo_footer_parts"),
                 auto_pair_source_sizes=plan.get("auto_pair_source_sizes"),
+                auto_pair_spacing=str(plan.get("auto_pair_spacing") or "legacy"),
                 expected_primary_sha256=plan.get("primary_sha256"),
                 expected_secondary_sha256=plan.get("secondary_sha256"),
             )
@@ -1390,12 +1393,27 @@ class RenderService:
                 left_side=True, date_at_bottom=True,
             )
 
+    @staticmethod
+    def _vertical_caption_run(
+        draw: ImageDraw.ImageDraw, text: str, font: ImageFont.FreeTypeFont,
+    ) -> list[tuple[str, tuple[float, float, float, float], int]]:
+        """Center short glyphs in their cells; punctuation uses a compact cell."""
+        runs = []
+        for character in text:
+            if character.isspace():
+                continue
+            bounds = draw.textbbox((0, 0), character, font=font)
+            ink_height = int(bounds[3] - bounds[1])
+            size = int(font.size)
+            advance = max(ink_height + 2, size // 2) if character in "，。！？、；：,.!?;:" else max(size + 1, ink_height + 1)
+            runs.append((character, bounds, advance))
+        return runs
+
     def _compact_pair_metadata_lines(
         self, draw: ImageDraw.ImageDraw, *, font_path: Path,
         date_lines: list[str], place: str, sentence: str, width: int, height: int,
     ) -> list[tuple[str, ImageFont.FreeTypeFont, int]]:
-        """Reserve the full model sentence before fitting place and date text."""
-        sentence_length = min(len(sentence), 20)
+        """Fit full names while keeping date strokes and line boxes legible."""
         last_lines: list[str] = []
         for place_size in (10, 9):
             place_font = ImageFont.truetype(str(font_path), place_size)
@@ -1411,25 +1429,27 @@ class RenderService:
                     break
                 lines.append(line)
             last_lines = lines
-            for date_size in range(14, 9, -1):
-                date_font = ImageFont.truetype(str(font_path), date_size)
-                if any(draw.textlength(line, font=date_font) > width for line in date_lines):
+            for date_size in (15, 14):
+                date_font = cast(ImageFont.FreeTypeFont, ImageFont.load_default(size=date_size))
+                bounds = [draw.textbbox((0, 0), line, font=date_font) for line in date_lines]
+                if any(box[2] - box[0] > width for box in bounds):
                     continue
-                dates = [(line, date_font, date_size + 4) for line in date_lines]
-                date_height = len(dates) * (date_size + 4)
+                dates = [(line, date_font, max(date_size + 5, int(box[3] - box[1]) + 3))
+                         for line, box in zip(date_lines, bounds, strict=True)]
+                date_height = sum(advance for _line, _font, advance in dates)
                 for sentence_size in (17, 16):
-                    budget = max(0, height - sentence_length * (sentence_size + 2) - 8)
+                    sentence_font = ImageFont.truetype(str(font_path), sentence_size)
+                    sentence_height = sum(advance for _char, _box, advance in self._vertical_caption_run(draw, sentence, sentence_font))
+                    budget = max(0, height - sentence_height - 8)
                     if not remaining and date_height + len(lines) * place_step <= budget:
                         return dates + [(line, place_font, place_step) for line in lines]
 
-        # Preserve full names without aliases. A legacy 20-char caption or an
-        # oversized manual label can still exceed this fixed strip; only that
-        # exceptional place label gets an explicit ellipsis, never hidden loss.
-        date_font = ImageFont.truetype(str(font_path), 10)
-        dates = [(line, date_font, 14) for line in date_lines]
-        budget = max(0, height - sentence_length * 18 - 8 - len(dates) * 14)
-        maximum_lines = budget // 13
-        visible = last_lines[:maximum_lines]
+        date_font = cast(ImageFont.FreeTypeFont, ImageFont.load_default(size=14))
+        dates = [(line, date_font, 19) for line in date_lines]
+        sentence_font = ImageFont.truetype(str(font_path), 16)
+        sentence_height = sum(advance for _char, _box, advance in self._vertical_caption_run(draw, sentence, sentence_font))
+        budget = max(0, height - sentence_height - 8 - len(dates) * 19)
+        visible = last_lines[:budget // 13]
         if (len(last_lines) > len(visible) or remaining) and visible:
             last = visible[-1]
             while last and draw.textlength(last + "…", font=place_font) > width:
@@ -1447,10 +1467,9 @@ class RenderService:
         if left_side:
             draw = ImageDraw.Draw(canvas)
             draw.rectangle((box.x, box.y, box.right, box.bottom), fill="white")
-            normalized = " ".join(text.split())
+            normalized = "".join(text.split())
             font_path = self.fonts.resolve(str(self.settings.get("render.font_path", "")))
-            horizontal_padding = 3
-            vertical_padding = 8
+            horizontal_padding, vertical_padding = 2, 6
             available_width = max(1, box.width - horizontal_padding * 2)
             available_height = max(0, box.height - vertical_padding * 2)
             y = box.y + vertical_padding
@@ -1463,46 +1482,30 @@ class RenderService:
             metadata_height = sum(advance for _, _, advance in metadata_lines)
             if metadata_height:
                 available_height = max(0, available_height - metadata_height - 8)
-                metadata_top = box.bottom - vertical_padding - metadata_height if date_at_bottom else y
-                line_top = metadata_top
+                line_top = box.bottom - vertical_padding - metadata_height if date_at_bottom else y
                 for line, line_font, advance in metadata_lines:
                     bounds = draw.textbbox((0, 0), line, font=line_font)
-                    x = box.x + horizontal_padding + (available_width - draw.textlength(line, font=line_font)) / 2
-                    draw.text((x, line_top - bounds[1]), line, font=line_font, fill="#17221c")
+                    ink_width = bounds[2] - bounds[0]
+                    x = box.x + horizontal_padding + (available_width - ink_width) / 2 - bounds[0]
+                    draw.text((x, line_top - bounds[1]), line, font=line_font, fill="black")
                     line_top += advance
                 if not date_at_bottom:
                     y += metadata_height + 8
-            font = ImageFont.truetype(str(font_path), 16)
-            for font_size in range(17, 15, -1):
-                candidate_font = ImageFont.truetype(str(font_path), font_size)
-                if len(normalized) * (font_size + 2) <= available_height and all(
-                    draw.textbbox((0, 0), character, font=candidate_font)[2]
-                    - draw.textbbox((0, 0), character, font=candidate_font)[0]
-                    <= available_width
-                    for character in normalized
-                ):
-                    font = candidate_font
+            for font_size in (17, 16):
+                font = ImageFont.truetype(str(font_path), font_size)
+                runs = self._vertical_caption_run(draw, normalized, font)
+                if sum(advance for _char, _bounds, advance in runs) <= available_height:
                     break
-            line_height: int = max(1, int(font.size) + 2)
-            maximum_characters: int = max(0, available_height // line_height)
-            characters = list(normalized)
-            if len(characters) > maximum_characters:
-                characters = (
-                    characters[: maximum_characters - 1] + ["…"]
-                    if maximum_characters > 0
-                    else []
-                )
-            for character in characters:
-                bounds = draw.textbbox((0, 0), character, font=font)
-                glyph_width = bounds[2] - bounds[0]
-                x = box.x + horizontal_padding + (available_width - glyph_width) // 2 - bounds[0]
-                draw.text((x, y - bounds[1]), character, font=font, fill="#17221c")
-                y += line_height
-            draw.line(
-                (box.right - 2, box.y + 12, box.right - 2, box.bottom - 12),
-                fill="#1d2822",
-                width=1,
-            )
+            if sum(advance for _char, _bounds, advance in runs) > available_height:
+                while runs and sum(advance for _char, _bounds, advance in runs) + font.size + 1 > available_height:
+                    runs.pop()
+                runs += self._vertical_caption_run(draw, "…", font) if runs else []
+            for character, bounds, advance in runs:
+                ink_height = bounds[3] - bounds[1]
+                x = box.x + horizontal_padding - bounds[0]
+                draw.text((x, y + (advance - ink_height) / 2 - bounds[1]), character,
+                          font=font, fill="black")
+                y += advance
             return
 
         draw = ImageDraw.Draw(canvas)
@@ -1643,26 +1646,37 @@ class RenderService:
     ) -> None:
         draw = ImageDraw.Draw(canvas)
         fonts = self._fonts("\n".join(value for part in parts.values() for value in part.values()))
-        for photo_id, rect in (
-            (primary_id, geometry.primary_caption),
-            (secondary_id, geometry.secondary_caption),
-        ):
+        for index, (photo_id, rect) in enumerate((
+            (primary_id, geometry.primary_caption), (secondary_id, geometry.secondary_caption),
+        )):
             if photo_id is None or rect is None or photo_id not in parts:
                 continue
             font_path = fonts["small"].path
             part = parts[photo_id]
+            photo_rect = geometry.photo_rects[index]
             date_lines = self._pair_date_lines(part.get("date", ""))
-            date_font = ImageFont.truetype(font_path, 10)
-            date_width = max((draw.textlength(line, font=date_font) for line in date_lines), default=0)
+            if photo_rect.width >= photo_rect.height and len(date_lines) == 2:
+                date_lines = ["/".join(date_lines)]
             right = float(rect.right - 8)
             if date_lines:
-                for index, line in enumerate(date_lines):
-                    draw.text((right, rect.y + 2 + index * 12), line, font=date_font, fill="black", anchor="rt")
+                for date_size in range(14, 9, -1):
+                    date_font = cast(ImageFont.FreeTypeFont, ImageFont.load_default(size=date_size))
+                    date_boxes = [draw.textbbox((0, 0), line, font=date_font) for line in date_lines]
+                    date_height = sum(box[3] - box[1] for box in date_boxes) + 2 * (len(date_lines) - 1)
+                    if date_height <= rect.height - 2:
+                        break
+                date_width = max(box[2] - box[0] for box in date_boxes)
+                date_top = rect.y + (rect.height - date_height) / 2
+                for line, bounds in zip(date_lines, date_boxes, strict=True):
+                    draw.text((right - (bounds[2] - bounds[0]) - bounds[0], date_top - bounds[1]),
+                              line, font=date_font, fill="black")
+                    date_top += bounds[3] - bounds[1] + 2
                 right -= date_width + 10
-            location = self._fit_line(draw, part.get("location", ""), date_font, max(0, int(rect.width * 0.25)))
+            location_font = ImageFont.truetype(font_path, 10)
+            location = self._fit_line(draw, part.get("location", ""), location_font, max(0, int(rect.width * 0.25)))
             if location:
-                draw.text((right, rect.y + rect.height / 2), location, font=date_font, fill="black", anchor="rm")
-                right -= draw.textlength(location, font=date_font) + 10
+                draw.text((right, rect.y + rect.height / 2), location, font=location_font, fill="black", anchor="rm")
+                right -= draw.textlength(location, font=location_font) + 10
             available = max(1, int(right - rect.x - 8))
             caption = part.get("caption", "")
             preferred_size = 22 if rect.width >= 600 else 20
@@ -1723,6 +1737,7 @@ class RenderService:
         photo_footer_lines: dict[str, str] | None = None,
         photo_footer_parts: dict[str, dict[str, str]] | None = None,
         auto_pair_source_sizes: list[list[int]] | None = None,
+        auto_pair_spacing: str = "tight",
         expected_primary_sha256: str | None = None,
         expected_secondary_sha256: str | None = None,
     ) -> Image.Image:
@@ -1933,6 +1948,10 @@ class RenderService:
                 and layout_key == "photo_pair" and effective_orientation == "landscape"
             )
             if compact_pair:
+                if auto_pair_spacing not in {"tight", "legacy"}:
+                    raise ValueError("RENDER-005 自動雙照片留白規則無效")
+                if auto_pair_spacing == "tight":
+                    fit_mode_key = "cover"
                 assert auto_pair_source_sizes is not None
                 if len(auto_pair_source_sizes) != 2 or any(len(size) != 2 for size in auto_pair_source_sizes):
                     raise ValueError("RENDER-005 自動雙照片尺寸無效")
@@ -1941,6 +1960,7 @@ class RenderService:
                         (auto_pair_source_sizes[0][0], auto_pair_source_sizes[0][1]),
                         (auto_pair_source_sizes[1][0], auto_pair_source_sizes[1][1]),
                     ),
+                    compact_spacing=auto_pair_spacing == "tight",
                 )
             if layout_key == "full":
                 photo_rect = _required_rect(geometry.primary_photo, "primary_photo")
