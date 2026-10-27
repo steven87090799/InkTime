@@ -102,7 +102,7 @@ def test_auto_photo_resolves_source_count_and_draws_each_capture_date(
         assert all(rect["height"] == 480 for rect in plan["geometry"]["photo_rects"])
     assert len(date_regions) == len(expected_ids)
     for rect in date_regions:
-        assert rect["height"] == (480 if expected_layout == "photo_pair" else 28)
+        assert rect["height"] == (480 if expected_layout == "photo_pair" else 36)
         footer = logical.crop((rect["x"], rect["y"], rect["x"] + rect["width"], rect["y"] + rect["height"]))
         assert footer.convert("L").getextrema()[0] < 32, "Capture-date text must be visible"
         assert footer.getpixel((0, 0)) == (255, 255, 255)
@@ -157,9 +157,9 @@ def test_auto_photo_keeps_caption_footer_when_capture_dates_are_hidden(app, tmp_
     plan = service.resolve_render_plan("primary", layout="auto_photo", orientation="landscape")
     assert plan["capture_date_labels"] == {"primary": ""}
     assert plan["photo_footer_lines"] == {"primary": plan["primary_caption"]["text"]}
-    assert plan["geometry"]["primary_caption"]["height"] == 28
+    assert plan["geometry"]["primary_caption"]["height"] == 36
     image = _logical_landscape(service._render_plan_image(plan))
-    assert image.crop((0, 452, 800, 480)).convert("L").getextrema()[0] < 32
+    assert image.crop((0, 444, 800, 480)).convert("L").getextrema()[0] < 32
 
 
 @pytest.mark.parametrize("size", [(1600, 900), (900, 1600)])
@@ -520,7 +520,7 @@ def test_every_pair_mode_draws_both_photo_captions_and_smaller_capture_dates(
     assert plan["primary_caption"]["capture_date"] == "2024-07-01"
     assert plan["secondary_caption"]["capture_date"] == "2021-12-31"
     assert all(size <= 14 for text, size in calls if "年" in text or "月" in text)
-    assert all(size >= 18 for text, size in calls if "A" in text or "B" in text)
+    assert all(size >= 16 for text, size in calls if "A" in text or "B" in text)
 
 
 @pytest.mark.parametrize("layout", ("photo_pair", "photo_pair_caption", "adaptive_memory"))
@@ -1063,5 +1063,6 @@ def test_compact_pair_dates_leave_both_sentences_and_districts_visible(app, monk
     assert sum(text == '2022' for text, _ in calls) == 2
     assert sum(text == '8/5' for text, _ in calls) == 2
     assert sum(text == '新店區' for text, _ in calls) == 2
-    painted = ''.join(text for text, size in calls if size >= 18)
+    assert all(size == 16 for text, size in calls if text in {'2022', '8/5'})
+    painted = ''.join(text for text, size in calls if size >= 16)
     assert records[0]['text'] in painted and records[1]['text'] in painted

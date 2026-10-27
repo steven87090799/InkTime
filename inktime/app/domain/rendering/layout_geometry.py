@@ -132,7 +132,7 @@ def with_photo_date_footers(geometry: LayoutGeometry) -> LayoutGeometry:
             return None, None
         bottom = existing_caption.bottom if existing_caption is not None else rect.bottom
         height = bottom - rect.y
-        footer = min(28, max(1, height // 4))
+        footer = min(36, max(1, height // 4))
         photo = Rect(rect.x, rect.y, rect.width, height - footer)
         date = Rect(rect.x, photo.bottom, rect.width, footer)
         return photo, date
@@ -151,7 +151,7 @@ def resolve_compact_pair_geometry(
     """Use full-height photo slots; each left column holds its caption and date."""
     if len(source_sizes) != 2 or any(min(size) <= 0 for size in source_sizes):
         raise ValueError("compact pair requires two positive source sizes")
-    caption_width, inner_gap, gutter, outer_margin = 44, 6, 8, 4
+    caption_width, inner_gap, gutter, outer_margin = 56, 6, 8, 4
     available_width = 800 - 2 * (caption_width + inner_gap + outer_margin) - gutter
     ratios = [max(width / height, 0.35) for width, height in source_sizes]
     first_width = max(1, min(available_width - 1, int(available_width * ratios[0] / sum(ratios))))
