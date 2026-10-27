@@ -1396,18 +1396,18 @@ class RenderService:
             draw.rectangle((box.x, box.y, box.right, box.bottom), fill="white")
             normalized = " ".join(text.split())
             font_path = self.fonts.resolve(str(self.settings.get("render.font_path", "")))
-            horizontal_padding = 4
+            horizontal_padding = 3
             vertical_padding = 8
             available_width = max(1, box.width - horizontal_padding * 2)
             available_height = max(0, box.height - vertical_padding * 2)
             y = box.y + vertical_padding
             date_lines = self._pair_date_lines(date_label)
-            date_font = ImageFont.truetype(str(font_path), 16)
-            for size in range(16, 9, -1):
+            date_font = ImageFont.truetype(str(font_path), 14)
+            for size in range(14, 9, -1):
                 date_font = ImageFont.truetype(str(font_path), size)
                 if all(draw.textlength(line, font=date_font) <= available_width for line in date_lines):
                     break
-            place_font = ImageFont.truetype(str(font_path), 12)
+            place_font = ImageFont.truetype(str(font_path), 10)
             place = str(record.get("capture_place_label") or "").strip()
             metadata_lines = [(line, date_font, int(date_font.size) + 4) for line in date_lines]
             if place:
@@ -1421,7 +1421,7 @@ class RenderService:
                         remaining = remaining[1:]
                     if not line:
                         break
-                    metadata_lines.append((line, place_font, 16))
+                    metadata_lines.append((line, place_font, 14))
                 if remaining and metadata_lines:
                     line, line_font, advance = metadata_lines[-1]
                     metadata_lines[-1] = (self._fit_line(draw, line + "…", line_font, available_width), line_font, advance)
@@ -1617,28 +1617,19 @@ class RenderService:
             font_path = fonts["small"].path
             part = parts[photo_id]
             date_lines = self._pair_date_lines(part.get("date", ""))
-            date_size = min(16, max(10, (rect.height - 2) // max(1, len(date_lines))))
-            date_font = ImageFont.truetype(font_path, date_size)
-            place_font = ImageFont.truetype(font_path, 12)
+            date_font = ImageFont.truetype(font_path, 10)
             date_width = max((draw.textlength(line, font=date_font) for line in date_lines), default=0)
             right = float(rect.right - 8)
             if date_lines:
-                date_step = max(1, (rect.height - 2) // len(date_lines))
                 for index, line in enumerate(date_lines):
-                    draw.text((right, rect.y + 1 + index * date_step), line, font=date_font, fill="black", anchor="rt")
+                    draw.text((right, rect.y + 2 + index * 12), line, font=date_font, fill="black", anchor="rt")
                 right -= date_width + 10
-            caption = part.get("caption", "")
-            minimum_font = ImageFont.truetype(font_path, 16)
-            reserved_caption_width = draw.textlength(caption[:20], font=minimum_font)
-            location_budget = min(int(rect.width * 0.25), max(0, int(right - rect.x - 18 - reserved_caption_width)))
-            location = (
-                self._fit_line(draw, part.get("location", ""), place_font, location_budget)
-                if location_budget >= draw.textlength("...", font=place_font) else ""
-            )
+            location = self._fit_line(draw, part.get("location", ""), date_font, max(0, int(rect.width * 0.25)))
             if location:
-                draw.text((right, rect.y + rect.height / 2), location, font=place_font, fill="black", anchor="rm")
-                right -= draw.textlength(location, font=place_font) + 10
+                draw.text((right, rect.y + rect.height / 2), location, font=date_font, fill="black", anchor="rm")
+                right -= draw.textlength(location, font=date_font) + 10
             available = max(1, int(right - rect.x - 8))
+            caption = part.get("caption", "")
             preferred_size = 22 if rect.width >= 600 else 20
             for size in range(preferred_size, 15, -1):
                 font = ImageFont.truetype(font_path, size)

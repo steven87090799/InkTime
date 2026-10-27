@@ -16,7 +16,7 @@ from inktime.app.services.rendering import RenderService
 def test_pairs_use_full_photo_height_with_dates_inside_left_columns(sizes):
     geometry = resolve_compact_pair_geometry(sizes)
     assert geometry.info == ()  # no separate bottom date band
-    assert sum(photo.width for photo in geometry.photo_rects) == 660
+    assert sum(photo.width for photo in geometry.photo_rects) == 684
     for photo, caption in zip(
         geometry.photo_rects, geometry.caption_rects, strict=True
     ):
@@ -93,10 +93,10 @@ def test_compact_geometry_rejects_invalid_source_dimensions(sizes):
 
 
 @pytest.mark.parametrize(("orientation", "size", "photos"), [
-    ("landscape", (800, 480), [(0, 0, 800, 444)]),
-    ("landscape", (800, 480), [(66, 0, 330, 480), (466, 0, 330, 480)]),
-    ("portrait", (480, 800), [(0, 0, 480, 764)]),
-    ("portrait", (480, 800), [(0, 0, 480, 360), (0, 404, 480, 360)]),
+    ("landscape", (800, 480), [(0, 0, 800, 452)]),
+    ("landscape", (800, 480), [(54, 0, 342, 480), (454, 0, 342, 480)]),
+    ("portrait", (480, 800), [(0, 0, 480, 772)]),
+    ("portrait", (480, 800), [(0, 0, 480, 368), (0, 404, 480, 368)]),
 ])
 def test_all_auto_footers_protect_only_existing_non_photo_pixels(orientation, size, photos):
     plan = {"orientation": orientation, "photo_footer_parts": {"source": {"place": "新店區"}},
