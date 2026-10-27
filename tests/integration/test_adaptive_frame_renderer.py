@@ -184,7 +184,7 @@ def test_auto_photo_places_captions_and_dates_without_overlap(app, tmp_path, mon
 
     monkeypatch.setattr(ImageDraw.ImageDraw, "text", record)
     service._render_plan_image(plan)
-    for index, (pid, key) in enumerate((("primary", "primary_caption"), ("secondary", "secondary_caption"))):
+    for index, key in enumerate(("primary_caption", "secondary_caption")):
         rect = plan["geometry"][key]
         if rect is None:
             continue
