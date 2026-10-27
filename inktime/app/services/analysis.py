@@ -199,8 +199,8 @@ class PhotoAnalysisService:
             "execution_mode": execution_mode(settings),
             "ai_mode": str(settings.get("analysis.ai_mode", "top_candidates")),
             "top_n": int(settings.get("analysis.ai_top_n", 50)),
-            "daily_photo_limit": int(settings.get("analysis.ai_daily_photo_limit", 50)),
-            "monthly_photo_limit": int(settings.get("analysis.ai_monthly_photo_limit", 500)),
+            "daily_photo_limit": int(settings.get("analysis.ai_daily_photo_limit", 0)),
+            "monthly_photo_limit": int(settings.get("analysis.ai_monthly_photo_limit", 0)),
         }
         analysis_model_value = settings.get("model.analysis_model", None)
         legacy_model_value = settings.get("model.high_model", None)
@@ -439,10 +439,10 @@ class PhotoAnalysisService:
         policy = execution_policy or {}
         return self.photos.ai_limit_reached(
             daily_limit=int(
-                policy.get("daily_photo_limit", self.settings.get("analysis.ai_daily_photo_limit", 50))
+                policy.get("daily_photo_limit", self.settings.get("analysis.ai_daily_photo_limit", 0))
             ),
             monthly_limit=int(
-                policy.get("monthly_photo_limit", self.settings.get("analysis.ai_monthly_photo_limit", 500))
+                policy.get("monthly_photo_limit", self.settings.get("analysis.ai_monthly_photo_limit", 0))
             ),
             periods=usage_periods(str(self.settings.get("general.timezone", "Asia/Taipei"))),
         )

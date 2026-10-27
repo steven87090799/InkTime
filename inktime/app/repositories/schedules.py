@@ -144,7 +144,7 @@ class ScheduledTaskRepository:
                         json.dumps({**task["config"], "_cron_semantics": "cronie_v2"}, ensure_ascii=False),
                         utc_now(),
                         utc_now(),
-                        int(key != "display_prepare"),
+                        int(key not in {"display_prepare", "ai_schedule"}),
                     ),
                 )
 

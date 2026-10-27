@@ -743,7 +743,10 @@ class SchedulerRunner:
             strategy = normalize_analysis_strategy(str(config.get("strategy", "single")))
             settings = self.app.extensions["inktime_settings_repository"]
             if execution_mode(settings) == "seasonal_ai" and strategy != "local":
-                self.app.extensions["inktime_seasonal_analysis_service"].ensure(now.date())
+                seasonal = self.app.extensions["inktime_seasonal_analysis_service"]
+                target = seasonal.preparation_target(now)
+                if target is not None:
+                    seasonal.ensure(target)
                 if is_scheduled:
                     self.app.extensions["inktime_schedule_repository"].mark_enqueued(task, now)
                 return
