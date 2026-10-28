@@ -1073,6 +1073,9 @@ class PhotoRepository:
                     scan_id,
                 ),
             )
+            # Every scanner entry point (including virtual-display imports)
+            # invalidates the oldest-first cursor in the scan's commit.
+            connection.execute("UPDATE analysis_backfill_control SET cursor_date='',cursor_id='',inventory_done=0 WHERE id=1")
             result = dict(connection.execute("SELECT * FROM scan_runs WHERE id=?", (scan_id,)).fetchone())
         return result
 
@@ -1148,7 +1151,7 @@ class PhotoRepository:
         if required_spec:
             reusable_fingerprint = reusable_analysis_fingerprint(json.loads(required_spec))
         with self.database.session() as connection:
-            target_content = connection.execute("SELECT sha256 FROM photos WHERE id=?", (photo_id,)).fetchone()
+            target_content = connection.execute("SELECT sha256,gps_lat,gps_lon FROM photos WHERE id=?", (photo_id,)).fetchone()
             candidates = connection.execute(
                 f"""
                 SELECT a.*,source.local_candidate_score AS source_local_candidate_score,
@@ -1176,6 +1179,13 @@ class PhotoRepository:
                         break
                 except (TypeError, ValueError):
                     continue
+            if row is None and target_content is not None:
+                covered = connection.execute(
+                    "SELECT analysis_snapshot_json FROM model_analysis_results WHERE content_sha256=?",
+                    (target_content["sha256"],),
+                ).fetchone() if semantic_only and not required_fingerprint else None
+                if covered:
+                    row = json.loads(covered["analysis_snapshot_json"])
             if row is None and target_content is not None:
                 archived = connection.execute(
                     "SELECT analysis_snapshot_json FROM seasonal_analysis_tasks WHERE content_sha256=? "
@@ -1235,6 +1245,19 @@ class PhotoRepository:
             },
             expected_content_sha256=str(target_content["sha256"]) if target_content else None,
         )
+        if semantic_available and target_content is not None:
+            with self.database.session() as connection:
+                covered = connection.execute(
+                    "SELECT analysis_snapshot_json FROM model_analysis_results WHERE content_sha256=?",
+                    (target_content["sha256"],),
+                ).fetchone()
+            evidence = json.loads(covered[0]).get("landmark_evidence") if covered else None
+            if isinstance(evidence, dict) and evidence.get("landmark_source") == "vision":
+                from inktime.app.repositories.photo_locations import PhotoLocationRepository
+                PhotoLocationRepository(self.database).save_landmark(
+                    photo_id, str(target_content["sha256"]), target_content["gps_lat"], target_content["gps_lon"],
+                    name=str(evidence.get("landmark") or ""), confidence=float(evidence.get("landmark_confidence") or 0),
+                )
         return result
 
     def get_with_path(self, photo_id: str):
@@ -2797,6 +2820,7 @@ class PhotoRepository:
                 }
                 record = {
                     "photo_id": photo_id, "job_id": job_id,
+                    "content_sha256": str(current["sha256"] or ""),
                     "schema_version": canonical["schema_version"],
                     "stage": stage, "provider": provider, "model": model,
                     "caption": canonical.get("caption"), "types_json": json.dumps(canonical["types"], ensure_ascii=False),
@@ -2825,6 +2849,10 @@ class PhotoRepository:
                 columns = ",".join(record)
                 placeholders = ",".join("?" for _ in record)
                 cursor = connection.execute(f"INSERT INTO photo_analysis ({columns}) VALUES ({placeholders})", tuple(record.values()))  # noqa: S608 -- fixed internal column names
+                if semantic_available:
+                    from inktime.app.repositories.model_coverage import remember_model_result
+                    remember_model_result(connection, str(current["sha256"] or ""),
+                                          {**record, "id": cursor.lastrowid})
                 if semantic_available and job_id:
                     # Persist the result with the task in the same transaction.
                     # Scanner replacement can archive/delete the live analysis;

@@ -110,7 +110,7 @@ class SeasonalAnalysisService:
             # History adoption cannot create an eligible new paid request:
             # those rows already have an analysis or an unresolved paid state.
             for row in rows:
-                if (row["task_id"] is None and row["existing_analysis_id"] is None
+                if (row["task_id"] is None and row["existing_analysis_id"] is None and not row.get("content_covered")
                         and row["paid_state"] is None and not row["reserved"]):
                     waiting = True
                     if len(missing) < self.CHUNK_SIZE:
@@ -147,11 +147,12 @@ class SeasonalAnalysisService:
                    WHERE p.sha256 IN (SELECT value FROM json_each(?))
                    AND {self.repository.ELIGIBLE}
                    AND NOT EXISTS (SELECT 1 FROM photo_analysis a WHERE a.photo_id=p.id AND a.score_kind='semantic')
-                   AND EXISTS (SELECT 1 FROM seasonal_analysis_tasks t WHERE t.content_sha256=p.sha256
+                   AND (EXISTS (SELECT 1 FROM model_analysis_results c WHERE c.content_sha256=p.sha256)
+                     OR EXISTS (SELECT 1 FROM seasonal_analysis_tasks t WHERE t.content_sha256=p.sha256
                        AND t.id=(SELECT max(latest.id) FROM seasonal_analysis_tasks latest WHERE latest.content_sha256=p.sha256)
-                       AND t.status='completed' AND json_extract(t.analysis_snapshot_json,'$.score_kind')='semantic')
+                       AND t.status='completed' AND json_extract(t.analysis_snapshot_json,'$.score_kind')='semantic'))
                    ORDER BY p.id LIMIT ?""",  # noqa: S608 -- fixed repository eligibility predicate
-                (json.dumps([row["sha256"] for row in rows if row["existing_analysis_id"] or row["task_id"]]), limit),
+                (json.dumps([row["sha256"] for row in rows if row["existing_analysis_id"] or row["task_id"] or row.get("content_covered")]), limit),
             ).fetchall()
         for duplicate in duplicates:
             try:

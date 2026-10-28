@@ -1,6 +1,7 @@
 """Free-first routing uses official account quota; all transports are mocks."""
 
 import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -8,6 +9,53 @@ from inktime.app.providers.base import request_definitely_not_sent
 from inktime.app.providers.openai_compatible import OpenAICompatibleProvider, ProviderHTTPError
 from inktime.app.providers.router import FailoverVisionProvider, ProviderChannel
 from tests.unit.test_provider_router import StubProvider
+from inktime.app.providers.config import normalize_options
+
+
+@pytest.mark.parametrize("pricing,available,vision,accepted", [
+    ({"prompt": "0", "completion": "0", "image": "0"}, True, True, True),
+    ({"prompt": "0.0001", "completion": "0", "image": "0"}, True, True, False),
+    ({"prompt": "0", "completion": "0", "image": "1"}, True, True, False),
+    ({"prompt": "0", "completion": "0", "request": None}, True, True, False),
+    ({"prompt": "0", "completion": "0"}, False, True, False),
+    ({"prompt": "0", "completion": "0"}, True, False, False),
+])
+def test_temporary_free_catalog_guard_is_live_and_fail_closed(monkeypatch, pricing, available, vision, accepted):
+    provider = OpenAICompatibleProvider(name="backfill", kind="openrouter", base_url="https://openrouter.ai/api/v1", api_key="mock")
+    entry = {"id": "mock/temporary-offer", "pricing": pricing,
+             "architecture": {"input_modalities": ["image", "text"] if vision else ["text"]}}
+    response = SimpleNamespace(status_code=200, json=lambda: {"data": [entry] if available else []})
+    monkeypatch.setattr(provider, "_send", lambda *args, **kwargs: response)
+    if accepted:
+        provider.assert_free_model("mock/temporary-offer")
+    else:
+        with pytest.raises(ProviderHTTPError) as raised:
+            provider.assert_free_model("mock/temporary-offer")
+        assert raised.value.code == "BACKFILL-FREE-GUARD"
+        assert request_definitely_not_sent(raised.value)
+
+
+def test_free_only_price_cap_cannot_be_relaxed_by_options():
+    options = normalize_options("openrouter", {"free_only": True, "max_price": {"prompt": 1}})
+    assert options["max_price"] == {"prompt": 0, "completion": 0, "request": 0, "image": 0}
+
+
+def test_backfill_quota_wait_preserves_rpm_and_concurrency_permits():
+    provider = StubProvider("backfill")
+    provider.options = {"free_only": True}
+    provider.assert_free_model = lambda model: None
+    quota = {"used": 1000, "limit": 1000, "remaining": 0}
+    provider.free_daily_quota = lambda: quota
+    channel = ProviderChannel(provider, model="mock/temporary-offer", max_concurrency=2, requests_per_minute=20)
+    router = FailoverVisionProvider([channel])
+    with pytest.raises(ProviderHTTPError) as raised:
+        router.analyze()
+    assert request_definitely_not_sent(raised.value)
+    assert provider.calls == 0
+    assert not channel.request_times
+    quota.update(used=0, remaining=1000)
+    router.analyze()
+    assert provider.calls == 1
 
 
 def router_with_quota(remaining):

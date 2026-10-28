@@ -141,6 +141,8 @@ def build_analysis_plan(
             "priority": int(item.get("priority", 100)),
             "config_revision": str(item.get("config_revision") or item.get("updated_at") or ""),
         }
+        if item.get("usage_scope") == "backfill":
+            route_item["usage_scope"] = "backfill"
         configured_model = str(item.get("model") or "").strip()
         # Keep the historical plan shape/fingerprint unchanged when a
         # Provider intentionally uses the global model fallback.

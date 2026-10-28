@@ -18,6 +18,7 @@ from werkzeug.exceptions import HTTPException
 from inktime import __version__
 from inktime.app.api import (
     ai_traces,
+    analysis_backfill,
     auth,
     batches,
     dashboard,
@@ -98,6 +99,7 @@ def configure_web_application(
 
     for blueprint in (
         ai_traces.bp,
+        analysis_backfill.bp,
         auth.bp,
         batches.bp,
         dashboard.bp,

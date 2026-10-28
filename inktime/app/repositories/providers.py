@@ -67,7 +67,9 @@ class ProviderRepository:
             item["api_key"] = self.secrets.get(row["api_key_secret"]) if row["api_key_secret"] else ""
         return item
 
-    def save(self, payload: dict, user_id: str) -> str:
+    def save(self, payload: dict, user_id: str, *, usage_scope: str | None = None) -> str:
+        if usage_scope not in {None, "normal", "backfill"}:
+            raise ValueError("Provider 使用範圍不合法")
         provider_id = str(payload.get("id") or uuid4())
         secret_key = f"provider.{provider_id}.api_key"
         now = datetime.now(timezone.utc).isoformat()
@@ -151,6 +153,8 @@ class ProviderRepository:
                     "UPDATE providers SET analysis_revision=?,analysis_revision_semantics=? WHERE id=?",
                     (revision, provider_revision(current, semantic=True) if revision else None, provider_id),
                 )
+            if usage_scope is not None:
+                connection.execute("UPDATE providers SET usage_scope=? WHERE id=?", (usage_scope, provider_id))
         return provider_id
 
     @staticmethod

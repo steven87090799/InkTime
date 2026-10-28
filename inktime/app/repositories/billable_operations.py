@@ -68,6 +68,14 @@ class BillableOperationRepository:
                 if payload.get("call_trace"):
                     payload["call_trace"] = ProviderCallTrace(**payload["call_trace"])
                 return str(saved["id"]), ProviderResponse(**payload)
+            backfill = connection.execute(
+                "SELECT 1 FROM jobs WHERE id=? AND json_extract(settings_json,'$.missing_analysis_backfill')=1",
+                ((context or {}).get("job_id"),),
+            ).fetchone()
+            if backfill and connection.execute(
+                "SELECT 1 FROM model_analysis_results WHERE content_sha256=?", (content_sha256,),
+            ).fetchone():
+                raise SeasonalAlreadyProcessedError("相同照片內容已有完整模型資訊，補齊工作沿用原結果")
             # Recheck at the last durable boundary, not only when candidates
             # were selected. An older job/provider can finish in between.
             seasonal = connection.execute(

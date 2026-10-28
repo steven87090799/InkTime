@@ -436,6 +436,37 @@ class OpenAICompatibleProvider(VisionProvider):
                 ambiguous=False, vision_started=False, request_started=False,
             ) from exc
 
+    def assert_free_model(self, model: str) -> None:
+        """Inspect live catalog metadata before dispatch, including temporary offers."""
+        try:
+            if not self.openrouter_compatible:
+                raise ValueError("補齊專用設定只支援 OpenRouter")
+            response = self._send("GET", "/models", headers=self._headers(), timeout=(5, 10))
+            payload = self._json_response(response)
+            entries = payload.get("data")
+            if not isinstance(entries, list):
+                raise ValueError("模型目錄無效")
+            entry = next((item for item in entries if isinstance(item, dict) and item.get("id") == model), None)
+            if entry is None:
+                raise ValueError("指定模型已下架")
+            pricing = entry.get("pricing")
+            if not isinstance(pricing, dict) or not {"prompt", "completion"} <= set(pricing):
+                raise ValueError("無法確認模型價格")
+            for value in pricing.values():
+                if value is None or isinstance(value, bool):
+                    raise ValueError("無法確認模型價格")
+                price = float(value)
+                if not math.isfinite(price) or price != 0:
+                    raise ValueError("模型已非完全免費")
+            if "image" not in (entry.get("architecture") or {}).get("input_modalities", []):
+                raise ValueError("指定模型未宣告支援圖片")
+        except Exception as exc:
+            raise ProviderHTTPError(
+                "補齊已暫停：模型下架、價格非零或無法確認免費圖片能力",
+                "BACKFILL-FREE-GUARD", retry_after=300,
+                ambiguous=False, vision_started=False, request_started=False,
+            ) from exc
+
     def process_spec(self) -> dict[str, Any]:
         return {
             "provider_kind": "openai_compatible",

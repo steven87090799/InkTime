@@ -68,6 +68,7 @@ class SeasonalAnalysisRepository:
                  WHERE source.sha256=p.sha256 AND
                    ((a.score_kind='semantic' AND a.schema_version IN (4,5,6)) OR {historical_model_sql('a')})
                  ORDER BY a.id DESC LIMIT 1) AS existing_analysis_id,
+                EXISTS(SELECT 1 FROM model_analysis_results c WHERE c.content_sha256=p.sha256) AS content_covered,
                 {reserved_analysis_sql()} AS reserved,
                 (SELECT o.state FROM billable_operations o WHERE o.content_sha256=p.sha256
                  AND o.state NOT IN ('not_sent','approved') ORDER BY o.created_at DESC LIMIT 1) AS paid_state
@@ -171,19 +172,21 @@ class SeasonalAnalysisRepository:
                 if row["task_id"] is not None or row["reserved"]:
                     continue
                 analysis_id, paid = row["existing_analysis_id"], row["paid_state"]
-                if analysis_id is None and paid is None:
+                if analysis_id is None and paid is None and not row.get("content_covered"):
                     continue
                 if connection.execute(
                     "SELECT 1 FROM seasonal_analysis_tasks WHERE content_sha256=? LIMIT 1", (row["sha256"],)
                 ).fetchone():
                     continue
-                status = "completed" if analysis_id is not None else "unknown" if paid == "started" else "failed"
+                status = "completed" if analysis_id is not None or row.get("content_covered") else "unknown" if paid == "started" else "failed"
                 analysis = connection.execute("SELECT * FROM photo_analysis WHERE id=?", (analysis_id,)).fetchone() if analysis_id else None
+                covered = connection.execute("SELECT analysis_snapshot_json FROM model_analysis_results WHERE content_sha256=?",
+                                             (row["sha256"],)).fetchone() if row.get("content_covered") else None
                 inserted = connection.execute(
                     """INSERT INTO seasonal_analysis_tasks(content_sha256,photo_id,analysis_id,analysis_snapshot_json,status,error_code,
                         target_date,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)""",
-                    (row["sha256"], row["id"], analysis_id, json.dumps(dict(analysis), ensure_ascii=False) if analysis else None, status,
-                     None if analysis_id else "SEASONAL-PAID-HISTORY", target.isoformat(), utc_now(), utc_now()),
+                    (row["sha256"], row["id"], analysis_id, json.dumps(dict(analysis), ensure_ascii=False) if analysis else covered[0] if covered else None, status,
+                     None if status == "completed" else "SEASONAL-PAID-HISTORY", target.isoformat(), utc_now(), utc_now()),
                 )
                 if status in {"failed", "unknown"}:
                     self.notify_failure(connection, key=f"analysis:seasonal:{inserted.lastrowid}",

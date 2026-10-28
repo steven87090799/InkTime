@@ -629,6 +629,7 @@ class JobRepository:
             "webhook",
             "analysis_batch_import",
             "analysis_batch_poll",
+            "analysis_coverage_audit",
         }:
             raise ValueError("不支援的維護工作")
         job_id = str(uuid4())
@@ -1118,17 +1119,32 @@ class JobRepository:
         with self.database.session() as connection:
             connection.execute("BEGIN IMMEDIATE")
             try:
-                job = connection.execute("SELECT status FROM jobs WHERE id=?", (job_id,)).fetchone()
+                job = connection.execute("SELECT status,settings_json,priority FROM jobs WHERE id=?", (job_id,)).fetchone()
                 if job is None or job["status"] not in {"running", "retrying"}:
                     connection.execute("COMMIT")
                     return []
+                backfill = bool(json.loads(job["settings_json"]).get("missing_analysis_backfill"))
+                if backfill:
+                    control = connection.execute("SELECT enabled,pause_reason FROM analysis_backfill_control WHERE id=1").fetchone()
+                    urgent = connection.execute(
+                        "SELECT 1 FROM jobs j JOIN job_items i ON i.job_id=j.id "
+                        # A render may itself be waiting for these bytes; the
+                        # runner already executes ready renders before backfill.
+                        "WHERE j.id<>? AND j.priority<? AND j.kind<>'render' AND j.status IN ('running','retrying') "
+                        "AND i.status='pending' AND i.available_at<=? LIMIT 1", (job_id, job["priority"], now),
+                    ).fetchone()
+                    if not control["enabled"] or control["pause_reason"] or urgent:
+                        connection.execute("COMMIT")
+                        return []
                 rows = connection.execute(
                     """
                 SELECT * FROM job_items
                 WHERE job_id=? AND status='pending' AND available_at<=?
-                ORDER BY available_at ASC,id ASC LIMIT ?
+                ORDER BY available_at ASC,
+                  CASE WHEN ? THEN (SELECT t.id FROM analysis_backfill_tasks t
+                      WHERE t.job_id=job_items.job_id AND t.photo_id=job_items.photo_id) ELSE 0 END,id ASC LIMIT ?
                     """,
-                    (job_id, now, limit),
+                    (job_id, now, int(backfill), limit),
                 ).fetchall()
                 ids = [row["id"] for row in rows]
                 if ids:

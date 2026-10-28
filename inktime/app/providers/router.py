@@ -152,6 +152,21 @@ class FailoverVisionProvider(VisionProvider):
                     and api_key == getattr(second.provider, "api_key", ""))
 
     def _daily_free_gate(self, channel: ProviderChannel) -> None:
+        if getattr(channel.provider, "options", {}).get("free_only"):
+            guard = getattr(channel.provider, "assert_free_model", None)
+            quota_reader = getattr(channel.provider, "free_daily_quota", None)
+            if not callable(guard) or not callable(quota_reader):
+                raise ProviderHTTPError("免費補齊 Provider 缺少價格或額度檢查", "BACKFILL-FREE-GUARD",
+                                        request_started=False, vision_started=False)
+            guard(str(channel.model or ""))
+            quota = quota_reader()
+            if quota["remaining"] == 0:
+                raise ProviderHTTPError(
+                    "當日免費額度已用完；照片保留佇列等待下一個 UTC 日",
+                    "VLM-005", retry_after=max(1.0, 86400 - time.time() % 86400),
+                    ambiguous=False, vision_started=False, request_started=False,
+                )
+            return
         if not channel.daily_free_first:
             return
         free = channel if self._free_model(channel) else next(
