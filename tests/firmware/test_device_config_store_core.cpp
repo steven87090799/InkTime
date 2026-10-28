@@ -269,6 +269,70 @@ class FakeAbStore {
   }
 };
 
+void test_portal_server_migration_preserves_wifi_and_device_configuration() {
+  const ConfigPayload original = payload("server-migration");
+  ConfigPayload candidate = original;
+  candidate.backend_hostport = "http://192.168.0.92:8765";
+  assert(inktime::preparePortalPairing(
+    candidate, original.backend_hostport.c_str(), candidate.backend_hostport.c_str(), false));
+
+  FakeAbStore store;
+  assert(store.save(original));
+  store.fail_next_put = "active";
+  assert(!store.save(candidate));
+  ConfigPayload rebooted;
+  char active_slot = 0;
+  uint64_t generation = 0;
+  assert(selectCurrent(store.blobs, rebooted, active_slot, generation));
+  assert(rebooted == original);  // Failed save cannot lose the usable old pairing.
+
+  assert(store.save(candidate));
+  assert(selectCurrent(store.blobs, rebooted, active_slot, generation));
+  assert(rebooted.backend_hostport == "http://192.168.0.92:8765");
+  assert(rebooted.auth_state == "unpaired");
+  assert(rebooted.device_secret.empty() && rebooted.device_token.empty());
+  assert(rebooted.credential_version == 0U && rebooted.config_version == 0U);
+  assert(rebooted.pairing_id.empty() && rebooted.pairing_nonce.empty());
+  assert(rebooted.pairing_expires_at_epoch == 0U);
+  assert(rebooted.pairing_retry_at_epoch == 0U && rebooted.pairing_retry_attempt == 0U);
+  assert(rebooted.wifi_ssid == original.wifi_ssid && rebooted.wifi_pass == original.wifi_pass);
+  assert(rebooted.device_id == original.device_id && rebooted.ca_pem == original.ca_pem);
+  assert(rebooted.tz_offset_minutes == original.tz_offset_minutes);
+  assert(rebooted.rotate180 == original.rotate180);
+  assert(rebooted.delivery_mode == original.delivery_mode);
+  assert(rebooted.button_wake_action == original.button_wake_action);
+  assert(rebooted.sync_strategy == original.sync_strategy && rebooted.sync_time == original.sync_time);
+  assert(rebooted.prefetch_lead_minutes == original.prefetch_lead_minutes);
+  assert(rebooted.schedule_count == original.schedule_count);
+  for (size_t index = 0; index < rebooted.schedule_count; ++index) {
+    assert(rebooted.schedule_slots[index].hour == original.schedule_slots[index].hour);
+    assert(rebooted.schedule_slots[index].minute == original.schedule_slots[index].minute);
+  }
+}
+
+void test_portal_pairing_repair_is_explicit_for_the_same_server() {
+  ConfigPayload original = payload("repair");
+  original.backend_hostport = "https://inktime.example.test";
+  for (const char* equivalent : {"https://INKTIME.EXAMPLE.TEST:443/", " inktime.example.test/ "}) {
+    ConfigPayload candidate = original;
+    assert(!inktime::preparePortalPairing(
+      candidate, original.backend_hostport.c_str(), equivalent, false));
+    assert(candidate == original);
+  }
+  for (const char* state : {"auth_invalid", "revoked"}) {
+    ConfigPayload candidate = original;
+    candidate.auth_state = state;
+    const ConfigPayload rejected = candidate;
+    assert(!inktime::preparePortalPairing(
+      candidate, original.backend_hostport.c_str(), original.backend_hostport.c_str(), false));
+    assert(candidate == rejected);  // A 401/403 alone never authorizes new credentials.
+    assert(inktime::preparePortalPairing(
+      candidate, original.backend_hostport.c_str(), original.backend_hostport.c_str(), true));
+    assert(candidate.auth_state == "unpaired" && candidate.device_secret.empty());
+    assert(candidate.device_id == original.device_id && candidate.wifi_pass == original.wifi_pass);
+  }
+}
+
 void test_payload_roundtrip_and_empty_overwrite() {
   ConfigPayload original = payload("roundtrip");
   original.refresh_minute = 17U;
@@ -507,6 +571,8 @@ int main() {
   assert(!inktime::parsePortalInteger("60", 0, 59, portalValue));
   assert(!inktime::parsePortalInteger("9999999999999", -720, 840, portalValue));
 
+  test_portal_server_migration_preserves_wifi_and_device_configuration();
+  test_portal_pairing_repair_is_explicit_for_the_same_server();
   test_payload_roundtrip_and_empty_overwrite();
   test_legacy_schema_defaults_new_sync_policy_fields();
   test_schema4_12_slot_fixture_migrates_to_schema5();
