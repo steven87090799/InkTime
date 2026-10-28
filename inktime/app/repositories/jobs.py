@@ -876,7 +876,7 @@ class JobRepository:
                 (job_id, limit, offset),
             ).fetchall()
 
-    def failed_photo_ids(self, job_id: str) -> list[str]:
+    def failed_photo_ids(self, job_id: str) -> List[str]:
         """Return only failed photo-backed items in their original queue order."""
 
         with self.database.session() as connection:

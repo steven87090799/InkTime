@@ -736,26 +736,26 @@ def control_job(job_id: str, action: str):
         try:
             strategy = normalize_analysis_strategy(job["strategy"])
             plan, _ = _analysis_plan(strategy)
-            result = _service().retry_failed_with_current_plan(
+            retry_result = _service().retry_failed_with_current_plan(
                 job_id,
                 analysis_spec=plan,
                 created_by=str(g.user["id"]),
             )
-            if result["created"]:
-                _service().start(str(result["id"]))
-            elif result["status"] == "pending":
-                _service().start(str(result["id"]))
+            if retry_result["created"]:
+                _service().start(str(retry_result["id"]))
+            elif retry_result["status"] == "pending":
+                _service().start(str(retry_result["id"]))
         except (InvalidJobTransition, AnalysisReservationConflict) as exc:
             return {"error_code": exc.code, "message": str(exc)}, 409
         except ValueError as exc:
             return {"error_code": "VLM-001", "message": str(exc)}, 409
         return {
             "status": "ok",
-            "id": result["id"],
-            "affected": result["affected"],
-            "created": result["created"],
-            "detail_url": f"/jobs/{result['id']}",
-        }, 201 if result["created"] else 200
+            "id": retry_result["id"],
+            "affected": retry_result["affected"],
+            "created": retry_result["created"],
+            "detail_url": f"/jobs/{retry_result['id']}",
+        }, 201 if retry_result["created"] else 200
     actions = {
         "start": _service().start,
         "pause": _service().pause,
@@ -767,14 +767,14 @@ def control_job(job_id: str, action: str):
     if function is None:
         abort(404)
     try:
-        result = function(job_id)
+        action_result = function(job_id)
         if action == "retry-failed":
-            if not isinstance(result, int) or result < 1:
+            if not isinstance(action_result, int) or action_result < 1:
                 raise InvalidJobTransition("沒有可重跑的失敗項目")
             _service().start(job_id)
     except (InvalidJobTransition, AnalysisReservationConflict) as exc:
         return {"error_code": exc.code, "message": str(exc)}, 409
-    return {"status": "ok", "affected": result if isinstance(result, int) else None}
+    return {"status": "ok", "affected": action_result if isinstance(action_result, int) else None}
 
 
 @bp.get("/api/v1/jobs/<job_id>")
