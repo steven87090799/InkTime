@@ -485,6 +485,8 @@ def _available_job_actions(job) -> list[str]:
         actions.append("cancel")
     if status in {"failed", "completed_with_errors"} and int(job["failed_items"] or 0) > 0 and not json.loads(job["settings_json"]).get("seasonal_analysis"):
         actions.append("retry-failed")
+        if str(job["kind"]) == "analysis" and normalize_analysis_strategy(job["strategy"]) != "local":
+            actions.append("retry-failed-current")
     return actions
 
 
@@ -722,6 +724,38 @@ def control_job(job_id: str, action: str):
     job = _job_or_404(job_id)
     if action == "retry-failed" and json.loads(job["settings_json"]).get("seasonal_analysis"):
         return {"message": "同期分析失敗項目請至同期分析頁面逐張確認重試", "detail_url": "/analysis/seasonal"}, 409
+    if action == "retry-failed-current":
+        payload = _payload()
+        if payload.get("accept_additional_cost") is not True:
+            return {
+                "error_code": "VLM-RECOMPUTE-CONFIRM",
+                "message": "改用目前模型會建立新的模型請求；必須確認可能再次計費。",
+            }, 400
+        if json.loads(job["settings_json"]).get("seasonal_analysis"):
+            return {"message": "同期分析失敗項目請至同期分析頁面逐張確認重試", "detail_url": "/analysis/seasonal"}, 409
+        try:
+            strategy = normalize_analysis_strategy(job["strategy"])
+            plan, _ = _analysis_plan(strategy)
+            result = _service().retry_failed_with_current_plan(
+                job_id,
+                analysis_spec=plan,
+                created_by=str(g.user["id"]),
+            )
+            if result["created"]:
+                _service().start(str(result["id"]))
+            elif result["status"] == "pending":
+                _service().start(str(result["id"]))
+        except (InvalidJobTransition, AnalysisReservationConflict) as exc:
+            return {"error_code": exc.code, "message": str(exc)}, 409
+        except ValueError as exc:
+            return {"error_code": "VLM-001", "message": str(exc)}, 409
+        return {
+            "status": "ok",
+            "id": result["id"],
+            "affected": result["affected"],
+            "created": result["created"],
+            "detail_url": f"/jobs/{result['id']}",
+        }, 201 if result["created"] else 200
     actions = {
         "start": _service().start,
         "pause": _service().pause,

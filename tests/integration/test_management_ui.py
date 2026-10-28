@@ -424,6 +424,90 @@ def test_retry_failed_control_reports_analysis_reservation_conflict(client, app)
     assert repository.get(owner)["status"] == "pending"
 
 
+def test_current_model_retry_creates_only_failed_photo_rescue_job(client, app):
+    administrator_id = create_admin(app)
+    login(client)
+    provider_repository = app.extensions["inktime_provider_repository"]
+    provider_repository.save(
+        {
+            "name": "current rescue provider",
+            "kind": "openai_compatible",
+            "base_url": "https://provider.invalid/v1",
+            "api_key": "fixture-secret",
+            "model": "new-vision-model",
+            "enabled": True,
+            "priority": 10,
+        },
+        user_id=administrator_id,
+    )
+    repository = app.extensions["inktime_job_repository"]
+    photo_ids = add_photos(app, 3)
+    original_id = repository.create(
+        name="old frozen route",
+        strategy="single",
+        settings={"force_ai": True},
+        created_by=administrator_id,
+        photo_ids=photo_ids,
+        analysis_fingerprint="old-fingerprint",
+        analysis_spec={"strategy": "single", "provider_route": [{"model": "old-model"}]},
+    )
+    items = repository.list_items(original_id)
+    failed_photo_id = str(items[-1]["photo_id"])
+    with app.extensions["inktime_database"].session() as connection:
+        connection.execute(
+            "UPDATE jobs SET status='completed_with_errors',completed_items=2,failed_items=1 WHERE id=?",
+            (original_id,),
+        )
+        connection.execute(
+            "UPDATE job_items SET status='completed',stage='single' WHERE job_id=? AND photo_id<>?",
+            (original_id, failed_photo_id),
+        )
+        connection.execute(
+            "UPDATE job_items SET status='failed',stage='single',error_code='CONFIG_INVALID' "
+            "WHERE job_id=? AND photo_id=?",
+            (original_id, failed_photo_id),
+        )
+
+    page = client.get(f"/jobs/{original_id}")
+    assert page.status_code == 200
+    body = page.get_data(as_text=True)
+    assert "沿用原模型重跑失敗項目" in body
+    assert "改用目前模型重試失敗照片" in body
+    assert 'data-action="retry-failed-current"' in body
+
+    endpoint = f"/api/v1/jobs/{original_id}/retry-failed-current"
+    headers = {"X-CSRF-Token": csrf(client)}
+    rejected = client.post(endpoint, json={}, headers=headers)
+    assert rejected.status_code == 400
+    assert rejected.json["error_code"] == "VLM-RECOMPUTE-CONFIRM"
+
+    response = client.post(endpoint, json={"accept_additional_cost": True}, headers=headers)
+    assert response.status_code == 201
+    assert response.json["affected"] == 1
+    rescue_id = response.json["id"]
+    rescue = repository.get(rescue_id)
+    rescue_items = repository.list_items(rescue_id)
+    rescue_plan = json.loads(rescue["analysis_spec_json"])
+    rescue_settings = json.loads(rescue["settings_json"])
+    assert rescue["status"] == "running"
+    assert rescue["total_items"] == 1
+    assert [str(item["photo_id"]) for item in rescue_items] == [failed_photo_id]
+    assert rescue_plan["provider_route"][0]["model"] == "new-vision-model"
+    assert rescue_settings["parent_job_id"] == original_id
+    assert rescue_settings["source"] == "retry-failed-current-route"
+    assert repository.get(original_id)["status"] == "completed_with_errors"
+    assert [item["status"] for item in repository.list_items(original_id)].count("completed") == 2
+
+    replay = client.post(endpoint, json={"accept_additional_cost": True}, headers=headers)
+    assert replay.status_code == 200
+    assert replay.json["id"] == rescue_id
+    with app.extensions["inktime_database"].session() as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM jobs WHERE settings_json LIKE ?",
+            (f'%"parent_job_id": "{original_id}"%',),
+        ).fetchone()[0] == 1
+
+
 def test_simulator_superseded_compare_aborts_fetch_and_poll_delay(client, app):
     create_admin(app)
     login(client)

@@ -876,6 +876,20 @@ class JobRepository:
                 (job_id, limit, offset),
             ).fetchall()
 
+    def failed_photo_ids(self, job_id: str) -> list[str]:
+        """Return only failed photo-backed items in their original queue order."""
+
+        with self.database.session() as connection:
+            rows = connection.execute(
+                """
+                SELECT photo_id FROM job_items
+                WHERE job_id=? AND status='failed' AND photo_id IS NOT NULL
+                ORDER BY id
+                """,
+                (job_id,),
+            ).fetchall()
+        return [str(row["photo_id"]) for row in rows]
+
     def failure_codes(self, job_id: str, *, connection=None) -> List[str]:
         context = nullcontext(connection) if connection is not None else self.database.session()
         with context as active_connection:

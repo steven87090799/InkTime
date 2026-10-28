@@ -60,7 +60,7 @@ _register("JOB-FINALIZER-001", "工作結果的最後儲存步驟失敗", "項�
 _register("QUEUE-NO-WORKER JOB-HEARTBEAT-STALE", "背景工作沒有持續回報進度", "有待處理的執行中工作，但尚未收到有效的工作心跳；這不等於 Worker 數量不足。", "查看工作頁及系統診斷，確認背景服務是否運作；已暫停的工作需先恢復。")
 _register("NO_PHOTOS NO_CONTENT NO_ELIGIBLE_CANDIDATES", "目前沒有符合條件的照片可處理", "照片可能已排除、已處理、尚未完成掃描，或不符合本次篩選。", "核對照片庫數量、排除條件與選片範圍後再建立工作。")
 _register("ANALYSIS_DISABLED ANALYSIS-DISABLED", "照片分析目前已停用", "系統設定禁止建立新的分析工作。", "到「系統設定」確認分析執行模式，再選擇本機或模型分析。")
-_register("CONFIG_INVALID UNSUPPORTED_CONFIGURATION", "目前設定無法執行這個操作", "設定值、模型能力或工作建立時保存的設定不相容。", "查看具體欄位原因，修正設定後重新建立工作。")
+_register("CONFIG_INVALID UNSUPPORTED_CONFIGURATION", "目前設定無法執行這個操作", "設定值、模型能力或工作建立時保存的設定不相容。", "查看具體欄位原因；若已更換相容模型，使用工作頁的「改用目前模型重試失敗照片」，只建立失敗照片的補救工作。")
 _register("ANALYSIS-RESERVATION-CONFLICT", "這張照片已有分析處理紀錄", "相同照片內容已有即時或 Batch 工作持有，或保留了先前付費證據，因此本次沒有重新送出。", "先核對原工作與付費結果；仍在執行時等待完成，有結果則從原批次或完整備份恢復，結果不明先對帳。")
 _register("AI-CACHE-001", "等待相同照片的分析結果逾時", "另一個工作正在計算相同分析，尚未取得可沿用的結果。", "查看原工作是否仍在執行，完成後再試，避免重複送入模型。")
 _register("ACTIVITY-001 AI-TRACE-001 DECISION-001 REVIEW-001 HISTORY-001", "篩選或查詢條件不合法", "分頁位置、日期、照片範圍或篩選值不符合要求。", "清除篩選或重新整理頁面，再輸入符合欄位提示的條件。")
