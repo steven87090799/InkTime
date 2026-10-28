@@ -422,8 +422,8 @@ def test_invalid_settings_quarantine_preserves_running_item_ownership(app):
 def test_scan_requested_by_ui_runs_as_background_job(client, app, tmp_path):
     from tests.conftest import create_admin, csrf, login
 
-    root = tmp_path / "ui-photos"
-    root.mkdir()
+    root = app.extensions["inktime_runtime_config"].photo_dir / "ui-photos"
+    root.mkdir(parents=True)
     Image.new("RGB", (100, 80), "green").save(root / "new.jpg")
     create_admin(app)
     login(client)

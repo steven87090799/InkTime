@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from inktime.app.domain.analysis.plan import FULL_ANALYSIS_TOKEN_CAP, fingerprint, normalize_analysis_strategy, stored_analysis_fingerprint
+from inktime.app.domain.analysis.plan import DEFAULT_ANALYSIS_TOKEN_CAP, fingerprint, normalize_analysis_strategy, stored_analysis_fingerprint
 from inktime.app.domain.jobs.failure_policy import NoEligibleCandidatesError
 from inktime.app.domain.jobs.settings import validate_worker_settings
 from inktime.app.repositories.jobs import JobRepository
@@ -163,7 +163,7 @@ class JobService:
         *,
         pricing: dict | None = None,
         input_tokens: int = 8000,
-        output_tokens: int = FULL_ANALYSIS_TOKEN_CAP,
+        output_tokens: int = DEFAULT_ANALYSIS_TOKEN_CAP,
     ) -> dict:
         normalized = normalize_analysis_strategy(strategy)
         image_calls = 0 if normalized == "local" else photo_count
