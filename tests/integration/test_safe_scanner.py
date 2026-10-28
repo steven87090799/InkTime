@@ -265,6 +265,23 @@ def test_missing_is_safe_and_reappearing_photo_preserves_analysis(app, tmp_path)
     assert analysis_count == 1
 
 
+def test_unreadable_scan_source_preserves_actionable_code_without_creating_library(app, tmp_path, monkeypatch):
+    root = tmp_path / "blocked-photos"
+    root.mkdir()
+    scanner, _ = make_scanner(app, tmp_path)
+
+    def denied(_root):
+        raise PermissionError(13, "permission denied", "private NAS path")
+
+    monkeypatch.setattr("inktime.app.workers.scanner.os.scandir", denied)
+    with pytest.raises(OSError, match="SCAN-002") as failure:
+        scanner.scan("NAS", root, build_thumbnails=False)
+    assert failure.value.code == "SCAN-002"
+    assert "private NAS path" not in str(failure.value)
+    with app.extensions["inktime_database"].session() as connection:
+        assert connection.execute("SELECT COUNT(*) FROM libraries").fetchone()[0] == 0
+
+
 def test_mount_failure_and_cancelled_scan_never_mark_library_missing(app, tmp_path):
     root = tmp_path / "photos"
     seed_files(root, 4)

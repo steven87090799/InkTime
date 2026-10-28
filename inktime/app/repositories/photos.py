@@ -1140,6 +1140,14 @@ class PhotoRepository:
         with self.database.session() as connection:
             return connection.execute("SELECT * FROM scan_runs WHERE id=?", (scan_id,)).fetchone()
 
+    def latest_scan(self, root: Path) -> dict | None:
+        with self.database.session() as connection:
+            row = connection.execute(
+                "SELECT * FROM scan_runs WHERE root_path=? ORDER BY rowid DESC LIMIT 1",
+                (str(root),),
+            ).fetchone()
+        return dict(row) if row else None
+
     def inherit_existing_analysis(
         self, photo_id: str, job_id: str | None, *, analysis_context: dict | None = None,
         include_self: bool = False,

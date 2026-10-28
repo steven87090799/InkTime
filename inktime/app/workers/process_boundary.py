@@ -86,7 +86,13 @@ def _call_child(function: Callable[..., Any], kwargs: dict[str, Any], sender) ->
         sender.send(("ok", function(**kwargs)))
     except BaseException as exc:
         # Do not pass exception strings: SDK errors can contain URLs or request data.
-        sender.send(("error", type(exc).__name__))
+        # Local scan preflight codes are fixed, actionable identifiers. Preserve
+        # only this allowlist, never filesystem paths or exception messages.
+        code = getattr(exc, "code", None)
+        if isinstance(code, str) and code in {"SCAN-001", "SCAN-002"}:
+            sender.send(("error", {"type": type(exc).__name__, "code": code}))
+        else:
+            sender.send(("error", type(exc).__name__))
     finally:
         sender.close()
 

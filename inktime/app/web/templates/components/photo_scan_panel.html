@@ -1,0 +1,49 @@
+{% from "components/error_notice.html" import error_notice with context %}
+<section class="panel" id="photo-scan" aria-labelledby="photo-scan-heading">
+  <div class="panel-head"><div><h2 id="photo-scan-heading">照片來源與掃描</h2><p>上傳到 NAS 的照片需要先掃描，才會出現在照片庫。照片數為 0 不代表來源資料夾是空的。</p></div><a href="/photos">瀏覽照片</a></div>
+  <p>目前來源：<code>{{ scan.root }}</code>；會遞迴納入年月與其他子目錄。增量掃描只處理新增或變更的照片，建立本機索引與縮圖，不修改原始照片，也不呼叫 AI 模型。</p>
+  <div class="notice" role="status">
+    <strong>{{ scan.job_label }}</strong>
+    {% if scan.job %}
+      <span>工作項目：完成 {{ scan.job.completed_items }}／{{ scan.job.total_items }}，失敗 {{ scan.job.failed_items }}。</span>
+      <a href="/jobs/{{ scan.job.id }}">查看進度與失敗原因</a>
+      {% if scan.job.error_code and scan.job.status in ['failed','completed_with_errors'] %}<div class="warning">{{ error_notice(scan.job.error_code, '') }}</div>{% endif %}
+      {% if scan.job.kind == 'virtual_display' %}<p>這筆工作包含掃描及虛擬墨水屏發布；工作失敗不一定表示照片掃描失敗，請核對下方掃描結果及工作原因。</p>{% endif %}
+    {% else %}<p>第一次使用，請按「立即掃描照片」。預設使用增量掃描，成功後回到照片庫即可瀏覽。</p>{% endif %}
+    {% if scan.run %}
+      <p>最近一次掃描：{{ scan.run.started_at|human_datetime }}；檢查 {{ scan.run.checked_count }}，新增 {{ scan.run.new_count }}，變更 {{ scan.run.changed_count }}，略過 {{ scan.run.skipped_count }}，失敗 {{ scan.run.failed_count }}，排除影片／動畫 {{ scan.run.excluded_video_count }}。
+      <a href="/api/v1/scans/{{ scan.run.id }}">查看掃描結果與失敗／排除明細</a></p>
+    {% elif scan.job %}<p>尚無可核對的掃描紀錄；如果工作已失敗，請先查看失敗原因，確認來源可讀取後再重試。</p>{% endif %}
+  </div>
+  {% if g.user.role == 'administrator' %}
+  <form id="scan-form" class="form-stack">
+    <details><summary>照片來源與進階掃描選項</summary>
+      <label>照片庫名稱<input name="library_name" value="{{ scan.library_name }}" required></label>
+      <label>照片資料夾（容器內路徑）<input name="root_path" value="{{ scan.root }}" required><small>NAS Docker 部署通常使用 /photos，對應 Compose 掛載的照片資料夾。</small></label>
+      <label>掃描模式<select name="mode"><option value="incremental">增量（只處理新增或變更，建議）</option><option value="full">完整重算 Metadata 與本機特徵</option><option value="metadata-only">只補 Metadata</option><option value="local-features-only">只補本機特徵</option><option value="manual">手動增量</option></select></label>
+      <label><input type="checkbox" name="build_thumbnails" checked> 為新增或變更照片建立 512px 本機縮圖</label>
+    </details>
+    <button class="primary" {% if scan.active %}disabled{% endif %}>立即掃描照片</button>
+  </form>
+  <p id="scan-status" role="status" aria-live="polite"></p>
+  {% else %}<p>請由管理員建立掃描工作與調整頻率。</p>{% endif %}
+  <p><a href="/jobs">查看工作列表</a> · <a href="/activity">查看執行監控</a> · <a href="/photos/excluded">複核已排除照片</a> · <button type="button" class="secondary" id="photo-scan-refresh">更新掃描狀態</button></p>
+  <h3>自動掃描頻率</h3>
+  <dl><dt>目前設定（{{ scan.timezone }}）</dt><dd>{{ scan.frequency.label }}</dd>
+    <dt>下次執行</dt><dd>{{ scan.schedule.next_run|human_datetime if scan.schedule and scan.schedule.next_run else '尚未排定／已停用' }}</dd>
+    <dt>上次排程成功</dt><dd>{{ scan.schedule.last_success|human_datetime if scan.schedule and scan.schedule.last_success else '尚無' }}</dd>
+    <dt>上次排程失敗</dt><dd>{{ scan.schedule.last_failure|human_datetime if scan.schedule and scan.schedule.last_failure else '尚無' }}</dd></dl>
+  {% if scan.schedule and (scan.schedule.window_start or scan.schedule.window_end) %}<p>目前允許執行時段：{{ scan.schedule.window_start or '不限' }}–{{ scan.schedule.window_end or '不限' }}（{{ scan.timezone }}）。</p>{% endif %}
+  <p>新安裝預設每月掃描一次。每天上傳照片時，可改為「每天」；上傳後想立即看到照片，也可手動掃描。排程時間到後會排入背景工作，NAS 高負載或已有工作時可能延後。</p>
+  {% if g.user.role == 'administrator' and scan.schedule %}
+  <form id="photo-scan-schedule" class="inline-form">
+    <label>自動掃描頻率<select name="frequency" required>
+      {% for value,label in [('manual','僅手動'),('daily','每天（適合每天上傳）'),('weekly','每週一'),('monthly','每月 1 日'),('custom','保留目前自訂排程')] %}<option value="{{ value }}" {% if scan.frequency.preset == value %}selected{% endif %}>{{ label }}</option>{% endfor %}
+    </select></label>
+    <label>掃描時間（{{ scan.timezone }}）<input name="time" type="time" value="{{ scan.frequency.time }}" required></label>
+    <button>儲存掃描頻率</button>
+  </form>
+  <p id="scan-schedule-status" role="status" aria-live="polite"></p>
+  <small>按儲存後才會變更排程。簡易頻率會以所選時間取代原本的星期與允許時段限制；其他工作設定保留。自訂 Cron 與高負載等進階選項請到 <a href="/schedules#schedule-incremental_scan">增量掃描進階排程</a>。</small>
+  {% endif %}
+</section>

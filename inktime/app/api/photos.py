@@ -41,6 +41,7 @@ from inktime.app.web.access import administrator_required, login_required
 from inktime.app.domain.photos.orientation import original_exif_orientation, resolve_effective_orientation
 from inktime.app.repositories.analysis_history import display_analysis_order_sql, historical_model_sql
 from inktime.app.services.usage_periods import usage_periods
+from inktime.app.services.photo_scan_overview import photo_scan_overview
 
 
 bp = Blueprint("photos", __name__)
@@ -295,6 +296,13 @@ def photos_page():
         previous_url=page_url(page - 1) if page > 1 else None,
         next_url=page_url(page + 1) if page < total_pages else None,
         filter_args=filter_args,
+        scan=photo_scan_overview(
+            photos=_repository(),
+            jobs=current_app.extensions["inktime_job_repository"],
+            schedules=current_app.extensions["inktime_schedule_repository"],
+            photo_dir=current_app.config["INKTIME_PHOTO_DIR"],
+            timezone=str(current_app.extensions["inktime_settings_repository"].get("general.timezone")),
+        ),
     )
 
 

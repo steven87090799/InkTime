@@ -816,6 +816,19 @@ class JobRepository:
                 (user_id, limit),
             ).fetchall()
 
+    def latest_photo_scan(self, root_path: str) -> dict | None:
+        with self.database.session() as connection:
+            row = connection.execute(
+                """SELECT id,kind,status,total_items,completed_items,failed_items,created_at,
+                     (SELECT error_code FROM job_errors WHERE job_id=jobs.id
+                      ORDER BY id DESC LIMIT 1) AS error_code
+                   FROM jobs WHERE kind IN ('scan','virtual_display')
+                     AND CASE WHEN json_valid(settings_json) THEN json_extract(settings_json,'$.root_path') END=?
+                   ORDER BY rowid DESC LIMIT 1""",
+                (root_path,),
+            ).fetchone()
+        return dict(row) if row else None
+
     def iter_runnable(self, page_size: int = 100):
         """以 keyset 走訪所有可執行 Job，避免舊工作被最新 100 筆遮蔽。"""
         last: tuple[int, str, str] | None = None

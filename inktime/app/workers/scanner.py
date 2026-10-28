@@ -145,6 +145,16 @@ def _scan_error(
     }
 
 
+class ScanSourceMissingError(FileNotFoundError):
+    code = "SCAN-001"
+
+
+class ScanSourceError(OSError):
+    """A source preflight failure with a safe code for isolated workers."""
+
+    code = "SCAN-002"
+
+
 class PhotoScanner:
     def __init__(
         self, repository: PhotoRepository, preprocessor: PhotoPreprocessor, thumbnails: ThumbnailCache,
@@ -237,12 +247,12 @@ class PhotoScanner:
             raise ValueError("SCAN-004 不支援的掃描來源")
         root = root.expanduser().resolve()
         if not root.is_dir():
-            raise FileNotFoundError("SCAN-001 照片資料夾不存在或無法讀取")
+            raise ScanSourceMissingError("SCAN-001 照片資料夾不存在或無法讀取")
         try:
             with os.scandir(root) as entries:
                 next(entries, None)
         except OSError as exc:
-            raise OSError("SCAN-002 照片資料夾無法讀取") from exc
+            raise ScanSourceError("SCAN-002 照片資料夾無法讀取") from exc
 
         disk_batch_size = max(100, min(int(disk_batch_size), 10_000))
         write_batch_size = max(100, min(int(write_batch_size), 2_000))

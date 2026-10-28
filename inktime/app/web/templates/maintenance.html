@@ -9,6 +9,8 @@
   </div>
 </div>
 
+{% include "components/photo_scan_panel.html" %}
+
 <section class="panel narrow">
   <h2>虛擬墨水屏快速測試</h2>
   <p>將 JPG、PNG、WebP 或 HEIC 等照片放入投放資料夾，再按一次按鈕。系統只做本機掃描、480×800 排版與正式色盤發布，不呼叫模型。</p>
@@ -20,26 +22,14 @@
   <p class="test-status" id="virtual-status" role="status" aria-live="polite"></p>
 </section>
 
-<section class="panel narrow">
-  <h2>增量掃描其他照片資料夾</h2>
-  <form id="scan-form" class="form-stack">
-    <label>照片庫名稱<input name="library_name" value="主要照片庫"></label>
-    <label>主機或容器內路徑<input name="root_path" value="{{ photo_dir }}" required></label>
-    <label data-help="增量只處理新增或變更檔案；完整會重算 Metadata 與本機特徵；其餘模式只補指定階段。掃描本身不會自動送入 AI。">掃描模式<select name="mode"><option value="incremental">增量（建議）</option><option value="full">完整重算 Metadata 與本地特徵</option><option value="metadata-only">只補 Metadata</option><option value="local-features-only">只補本地特徵</option><option value="manual">手動增量</option></select></label>
-    <label><input type="checkbox" name="build_thumbnails" checked> 為新增或變更照片建立 512px 本地縮圖</label>
-    <button class="primary" data-help="把掃描要求加入背景工作佇列；按下後會前往工作詳情，原始照片不會被修改或刪除。">建立增量掃描工作</button>
-  </form>
-  <p id="scan-status" role="status" aria-live="polite"></p>
-</section>
-
 <section class="panel">
   <h2>其他維護</h2>
   <p><a href="/schedules">低資源排程與 Worker 模式</a> · <a href="/backups">立即備份與下載</a> · <a href="/photos">清理縮圖快取</a> · <a href="/diagnostics">資料庫完整性與系統狀態</a></p>
 </section>
 {% endblock %}
 {% block scripts %}
+<script nonce="{{ csp_nonce }}" src="{{ url_for('static', filename='photo-scan.js') }}" defer></script>
 <script nonce="{{ csp_nonce }}">
-document.getElementById('scan-form').onsubmit=async event=>{event.preventDefault();const form=new FormData(event.target);const body={library_name:form.get('library_name'),root_path:form.get('root_path'),mode:form.get('mode'),build_thumbnails:form.has('build_thumbnails')};const response=await window.inktimeFetch('/api/v1/maintenance/scan',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}),data=await window.inktimeDecodeJson(response);if(response.ok)location.href=data.detail_url;else window.inktimeSetStatus('#scan-status',data.message||'建立失敗','error');};
 const virtualButton=document.getElementById('publish-virtual');
 if(virtualButton)virtualButton.onclick=()=>window.inktimeRunAction({button:virtualButton,status:'#virtual-status',unknownMessage:'建立結果尚未確認；請先查看工作列表，避免重複建立。'},async()=>{
   const status=document.getElementById('virtual-status');status.textContent='正在建立掃描與發布工作…';
