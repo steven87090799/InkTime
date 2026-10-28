@@ -963,8 +963,9 @@ def test_scoring_test_upload_is_normalized_and_not_persisted(client, app, monkey
     login(client)
     observed = {}
 
-    def fake_analyze(path):
+    def fake_analyze(path, *, idempotency_key=None):
         observed["exists_during_analysis"] = path.exists()
+        assert idempotency_key.startswith("idempotency:scoring-test:")
         return {"ranking_score": 88, "analysis": {"caption": "測試照片"}}
 
     monkeypatch.setattr(app.extensions["inktime_scoring_lab_service"], "analyze", fake_analyze)

@@ -1204,29 +1204,23 @@ class OfflineScheduleRepository:
                     time.min,
                     tzinfo=ZoneInfo(str(device["timezone"])),
                 ).astimezone(timezone.utc)
+                releases = {str(row["id"]): row for row in connection.execute(
+                    "SELECT id,manifest_json FROM releases WHERE id IN (SELECT value FROM json_each(?)) "
+                    "AND status='published' AND reconciliation_status!='payload_pruned' AND render_profile=?",
+                    (json.dumps(normalized_release_ids), str(device["panel_profile"])),
+                )}
+                queued_releases = {str(row[0]) for row in connection.execute(
+                    "SELECT release_id FROM device_content_queue_items WHERE device_id=? "
+                    "AND release_id IN (SELECT value FROM json_each(?))",
+                    (device_id, json.dumps(normalized_release_ids)),
+                )}
                 for slot_index, slot in enumerate(configured_times):
                     release_id = normalized_release_ids[slot_index]
-                    release = connection.execute(
-                        """
-                        SELECT id,manifest_json FROM releases r
-                        WHERE r.id=? AND r.status='published'
-                          AND r.reconciliation_status!='payload_pruned'
-                          AND r.render_profile=?
-                        """,
-                        (release_id, str(device["panel_profile"])),
-                    ).fetchone()
+                    release = releases.get(release_id)
                     if release is None:
                         raise ValueError("QUEUE-002 Release 不存在、未發布或 Profile 不相容")
                     entry = self._manifest_entry(str(release["manifest_json"]))
-                    duplicate = connection.execute(
-                        """
-                        SELECT 1 FROM device_content_queue_items
-                        WHERE device_id=? AND release_id=?
-                        LIMIT 1
-                        """,
-                        (device_id, release_id),
-                    ).fetchone()
-                    if duplicate:
+                    if release_id in queued_releases:
                         raise ValueError("QUEUE-005 Release 已存在於裝置 Queue 歷史，不可重複使用")
                     show_at = resolved_starts[slot_index].isoformat()
                     deadline = deadlines[slot_index]

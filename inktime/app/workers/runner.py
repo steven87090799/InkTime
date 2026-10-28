@@ -285,7 +285,7 @@ def _execute_job_item(app, item, *, job, settings, provider, provider_error, ana
 def _run_local_job_item(*, config, item, context):
     from inktime.app.bootstrap import bootstrap_services
 
-    container = bootstrap_services(config, role="worker")
+    container = bootstrap_services(config, role="worker", initialize_database=False)
     try:
         repository = container.extensions["inktime_job_repository"]
 

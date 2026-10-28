@@ -14,6 +14,7 @@ from inktime.app.core.logging import bind_log_context, configure_logging, log_ev
 from inktime.app.core.runtime_config import RuntimeConfig, resolve_runtime_config
 from inktime.app.core.preflight import run_production_preflight
 from inktime.app.db import Database, backfill_photo_capture_dates, migrate
+from inktime.app.db.migrations import MIGRATIONS, MigrationError
 from inktime.app.domain.photos import LocationResolver, ThumbnailCache
 from inktime.app.domain.rendering import AtomicReleasePublisher, FontManager
 from inktime.app.repositories.auth import AuthRepository
@@ -211,6 +212,7 @@ def bootstrap_services(
     *,
     role: RuntimeRole,
     lock_provider: LockProvider | None = None,
+    initialize_database: bool = True,
 ) -> ServiceContainer:
     """Build one process role from the same resolved deployment configuration."""
 
@@ -234,8 +236,16 @@ def bootstrap_services(
         path.mkdir(parents=True, exist_ok=True)
 
     database = Database(config.database_path)
-    migrate(database, None if config.testing else config.backup_dir)
-    backfill_photo_capture_dates(database)
+    if initialize_database:
+        migrate(database, None if config.testing else config.backup_dir)
+        backfill_photo_capture_dates(database)
+    else:
+        # Only children of an initialized worker use this path. Never run a
+        # child against a stale/unrecognized schema or silently migrate it.
+        with database.session() as connection:
+            applied = dict(connection.execute("SELECT version,name FROM schema_migrations"))
+        if applied != {item.version: item.name for item in MIGRATIONS}:
+            raise MigrationError("MIGRATION-004 子程序資料庫版本與已初始化的 Worker 不一致")
     extensions: dict[str, object] = {
         "inktime_runtime_config": config,
         "inktime_database": database,
@@ -247,9 +257,11 @@ def bootstrap_services(
     secret = _persistent_secret(config, locks)
     _assert_master_secret_identity(database, secret, testing=config.testing)
     settings_repository = SettingsRepository(database)
-    settings_repository.ensure_defaults()
+    if initialize_database:
+        settings_repository.ensure_defaults()
     schedule_repository = ScheduledTaskRepository(database)
-    schedule_repository.ensure_defaults(config.timezone)
+    if initialize_database:
+        schedule_repository.ensure_defaults(config.timezone)
     offline_schedule_repository = OfflineScheduleRepository(database)
     device_repository = DeviceRepository(database, secret)
     settings_mutation_service = SettingsMutationService(

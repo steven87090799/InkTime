@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from dataclasses import replace
+from hashlib import file_digest
 from pathlib import Path
 import time
 from uuid import uuid4
 
 from inktime.app.domain.photos.formats import load_rgb
+from inktime.app.core.idempotency import request_fingerprint
 
 from inktime.app.domain.analysis.plan import analysis_output_token_cap
 from inktime.app.domain.analysis.schema import AnalysisValidationError, validate_model_response
@@ -16,6 +19,7 @@ from inktime.app.domain.photos.quality_policy import evaluate_local_quality, loc
 from inktime.app.repositories.scoring import ScoringProfileRepository
 from inktime.app.repositories.settings import SettingsRepository
 from inktime.app.repositories.usage import UsageRepository
+from inktime.app.repositories.billable_operations import BillableOperationRepository
 from inktime.app.providers.base import VisionAttemptState, IncompleteProviderResponse, assert_complete_response
 from inktime.app.services.budgets import BudgetService
 from inktime.app.services.providers import ProviderService
@@ -53,7 +57,7 @@ class ScoringLabService:
             scoring_profile_id=str(self.profiles.current()["id"]),
         )
 
-    def analyze(self, image_path: Path) -> dict:
+    def analyze(self, image_path: Path, *, idempotency_key: str | None = None) -> dict:
         plan = self._plan()
         provider = self.providers.build_router(
             plan["provider_route"], scoring_rules=plan["scoring_rules"], caption_controls=plan["caption_controls"],
@@ -61,19 +65,33 @@ class ScoringLabService:
         if provider is None:
             raise ValueError("VLM-008 尚未設定可用 Provider")
         try:
-            return self._analyze_with_provider(image_path, provider, plan=plan)
+            return self._analyze_with_provider(image_path, provider, plan=plan, idempotency_key=idempotency_key)
         finally:
             close_provider = getattr(provider, "close", None)
             if callable(close_provider):
                 close_provider()
 
-    def _analyze_with_provider(self, image_path: Path, provider, *, plan: dict | None = None) -> dict:
-        self.budgets.assert_request_allowed(None, None)
+    def _analyze_with_provider(
+        self, image_path: Path, provider, *, plan: dict | None = None, idempotency_key: str | None = None,
+    ) -> dict:
         profile = self.profiles.current()
         plan = plan or self._plan()
         model = str(plan["model"])
         max_tokens = analysis_output_token_cap(self.settings)
-        provider_request_context_id = f"scoring_test|{uuid4()}"
+        with image_path.open("rb") as source:
+            content_sha256 = file_digest(source, "sha256").hexdigest()
+        operations = BillableOperationRepository(self.usage.database)
+        operation_id, checkpoint = operations.begin(
+            content_sha256, idempotency_key or f"scoring-test:{uuid4()}", reuse_completed=True,
+            context={"request_signature": request_fingerprint({"plan": plan, "max_tokens": max_tokens}), "kind": "scoring_test"},
+        )
+        provider_request_context_id = f"scoring_test|{operation_id}"
+        if checkpoint is None:
+            try:
+                self.budgets.reserve(operation_id, self.budgets.estimate_reserve(provider, model, output_tokens=max_tokens))
+            except Exception:
+                operations.finish(operation_id, not_sent=True)
+                raise
         selected_provider = provider
         provider_id = ""
         provider_name = provider.name
@@ -104,7 +122,11 @@ class ScoringLabService:
         ) -> dict:
             usage = response.usage
             recorded_model = str(response.served_model or model)
-            estimated = provider.estimate_cost(recorded_model, usage)
+            saved = (response.request_metrics or {}).get("scoring_checkpoint", {})
+            estimated = saved.get("estimated_cost") if saved else (
+                provider.estimate_cost(recorded_model, usage) if usage.tokens_reported else None
+            )
+            latency_ms = int(saved.get("latency_ms", (time.perf_counter() - started_perf) * 1000))
             reported = usage.provider_reported_cost
             source = "provider_reported" if reported is not None else "estimated" if estimated is not None else "unknown"
             metrics = dict(response.request_metrics or getattr(selected_provider, "last_request_metrics", {}) or {})
@@ -145,7 +167,7 @@ class ScoringLabService:
                 estimated_cost=estimated,
                 actual_cost=max(0.0, float(reported)) if reported is not None else None,
                 started_at=started_at,
-                latency_ms=int((time.perf_counter() - started_perf) * 1000),
+                latency_ms=latency_ms,
                 status="completed",
                 retry_count=retry_count,
                 request_id=response.request_id,
@@ -156,6 +178,8 @@ class ScoringLabService:
                 schema_chars=metrics.get("schema_chars", 0),
                 request_body_bytes=metrics.get("request_body_bytes", 0),
                 image_bytes=metrics.get("image_bytes", 0),
+                operation_id=operation_id,
+                tokens_reported=usage.tokens_reported,
             )
             result = {
                 "request_type": request_type,
@@ -166,7 +190,7 @@ class ScoringLabService:
                 "actual_cost": reported,
                 "effective_cost": effective,
                 "cost_source": source,
-                "latency_ms": int((time.perf_counter() - started_perf) * 1000),
+                "latency_ms": latency_ms,
                 "image_bytes": metrics.get("image_bytes", 0),
             }
             attempt_summary.append(result)
@@ -232,7 +256,7 @@ class ScoringLabService:
         vision_started_at = datetime.now(timezone.utc).isoformat()
         vision_started_perf = time.perf_counter()
         try:
-            response = provider.analyze(
+            response = checkpoint or provider.analyze(
                 image_path=image_path,
                 model=model,
                 detail=str(plan["vision_input"]["detail"]),
@@ -262,8 +286,31 @@ class ScoringLabService:
                     image_request=True,
                     error=error,
                 )
+            else:
+                operations.finish(operation_id, not_sent=True)
+                self.budgets.release(operation_id)
             raise
         refresh_provider_identity()
+        if checkpoint is None:
+            # Persist the paid response before validation or usage projection.
+            # A crash at either later step must never authorize another POST.
+            response = replace(response, request_metrics={
+                **(response.request_metrics or {}),
+                "scoring_checkpoint": {
+                    "provider_id": provider_id, "provider_name": provider_name, "model": model,
+                    "started_at": vision_started_at,
+                    "latency_ms": int((time.perf_counter() - vision_started_perf) * 1000),
+                    "estimated_cost": provider.estimate_cost(str(response.served_model or model), response.usage)
+                    if response.usage.tokens_reported else None,
+                },
+            })
+            operations.save_response(operation_id, response)
+        else:
+            saved = (response.request_metrics or {}).get("scoring_checkpoint", {})
+            provider_id = str(saved.get("provider_id", provider_id))
+            provider_name = str(saved.get("provider_name", provider_name))
+            model = str(saved.get("model", model))
+            vision_started_at = str(saved.get("started_at", vision_started_at))
         vision_summary = record_attempt(
             response,
             request_type="scoring_test_vision",
@@ -272,6 +319,9 @@ class ScoringLabService:
             retry_count=0,
             image_bytes=True,
         )
+        if vision_summary["cost_source"] != "unknown":
+            self.budgets.release(operation_id)
+        operations.finish(operation_id)
         try:
             assert_complete_response(response)
         except IncompleteProviderResponse as error:

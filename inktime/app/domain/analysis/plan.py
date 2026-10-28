@@ -15,7 +15,7 @@ REASONING_EFFORTS = ("none", "low", "medium", "high", "xhigh", "max")
 SINGLE_ANALYSIS_STRATEGIES = {"single", "single_high", "high_quality"}
 LEGACY_ANALYSIS_STRATEGIES = {"custom", "low_cost", "smart", "smart_two_stage"}
 REPAIR_TOKEN_CAP = 1200
-FULL_ANALYSIS_TOKEN_CAP = 512
+FULL_ANALYSIS_TOKEN_CAP = 1200
 
 
 def analysis_output_token_cap(settings) -> int:

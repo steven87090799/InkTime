@@ -28,6 +28,23 @@ def _config(root: Path) -> RuntimeConfig:
     )
 
 
+def test_initialized_child_skips_mutating_bootstrap_but_rejects_wrong_schema(tmp_path, monkeypatch):
+    from inktime.app.db import Database, MigrationError
+    import inktime.app.bootstrap as bootstrap
+
+    config = _config(tmp_path)
+    parent = bootstrap_services(config, role="worker")
+    parent.close()
+    monkeypatch.setattr(bootstrap, "migrate", lambda *args: pytest.fail("child must not migrate"))
+    monkeypatch.setattr(bootstrap, "backfill_photo_capture_dates", lambda *args: pytest.fail("child must not backfill"))
+    child = bootstrap_services(config, role="worker", initialize_database=False)
+    child.close()
+    with Database(config.database_path).transaction() as connection:
+        connection.execute("UPDATE schema_migrations SET name='unrecognized' WHERE version=1")
+    with pytest.raises(MigrationError, match="MIGRATION-004"):
+        bootstrap_services(config, role="worker", initialize_database=False)
+
+
 def test_factory_module_import_has_no_filesystem_side_effect(tmp_path: Path):
     script = (
         "from inktime.app.factory import create_app; print(create_app.__name__)"

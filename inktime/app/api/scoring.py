@@ -3,6 +3,7 @@ from __future__ import annotations
 from inktime.app.domain.photos.formats import SUPPORTED_IMAGE_EXTENSIONS
 
 from pathlib import Path
+from hashlib import file_digest
 import json
 from statistics import median
 import tempfile
@@ -11,6 +12,8 @@ from flask import Blueprint, abort, current_app, g, render_template, request
 from PIL import UnidentifiedImageError
 
 from inktime.app.core.json_values import JsonScalarError, json_object_payload
+from inktime.app.core.idempotency import scoped_idempotency_key
+from inktime.app.repositories.billable_operations import UnreconciledOperationError
 from inktime.app.domain.analysis import AnalysisValidationError
 from inktime.app.domain.analysis.scoring import (
     DISTINCTIVE_SCORING_RULES,
@@ -229,10 +232,17 @@ def test_scoring():
                 destination.write(chunk)
         try:
             current_app.extensions["inktime_scoring_lab_service"].normalize_image(source, normalized)
-            result = current_app.extensions["inktime_scoring_lab_service"].analyze(normalized)
+            with normalized.open("rb") as source_file:
+                fallback_key = file_digest(source_file, "sha256").hexdigest()
+            key = scoped_idempotency_key(
+                "scoring-test", str(g.user["id"]), request.headers.get("Idempotency-Key") or fallback_key,
+            )
+            result = current_app.extensions["inktime_scoring_lab_service"].analyze(normalized, idempotency_key=key)
         except (UnidentifiedImageError, OSError):
             abort(400, description="IMG-002 無法解碼測試照片")
         except BudgetExceeded as exc:
+            abort(409, description=f"{exc.code} {exc}")
+        except UnreconciledOperationError as exc:
             abort(409, description=f"{exc.code} {exc}")
         except ProviderHTTPError as exc:
             abort(502, description=f"{exc.code} {exc}")
@@ -241,7 +251,7 @@ def test_scoring():
         except ValueError as exc:
             description = str(exc)
             abort(
-                400,
+                409 if description == "IDEMPOTENCY_CONFLICT" else 400,
                 description=(description if "-" in description[:12] else f"VLM-008 {description}"),
             )
     raw_score = float(result["ranking_score"])

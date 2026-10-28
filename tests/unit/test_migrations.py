@@ -39,7 +39,7 @@ def test_both_draft_schemas_upgrade_without_losing_records(tmp_path, monkeypatch
             )
     monkeypatch.setattr(migrations_module, "MIGRATIONS", MIGRATIONS)
     backups = tmp_path / "backups"
-    assert migrate(database, backups) == ([72, 73, 75, 76] if source == "seasonal" else [74, 75, 76])
+    assert migrate(database, backups) == ([72, 73, 75, 76, 77] if source == "seasonal" else [74, 75, 76, 77])
     assert any(backups.iterdir())
     assert migrate(database) == []
     with database.session() as connection:
@@ -89,7 +89,7 @@ def test_display_counter_upgrade_preserves_unconfirmed_history_and_webhook_state
         )
         connection.execute("DELETE FROM device_notifications WHERE id=100")
     monkeypatch.setattr(migrations_module, "MIGRATIONS", MIGRATIONS)
-    assert migrate(database) == [72, 73, 74, 75, 76]
+    assert migrate(database) == [72, 73, 74, 75, 76, 77]
     with database.session() as connection:
         photo = connection.execute("SELECT * FROM photos WHERE id='p'").fetchone()
         assert photo["display_count"] == 1
@@ -122,7 +122,7 @@ def _run_capture_date_backfill(database_path: str, start, results) -> None:
 
 
 def test_fresh_database_is_migrated(tmp_path):
-    assert CURRENT_SCHEMA_VERSION == 76
+    assert CURRENT_SCHEMA_VERSION == 77
     database = Database(tmp_path / "inktime.db")
     assert migrate(database) == list(range(1, CURRENT_SCHEMA_VERSION + 1))
     assert database.integrity_check() == "ok"

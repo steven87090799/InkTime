@@ -14,6 +14,8 @@ from typing import Any, BinaryIO, cast
 from uuid import uuid4
 from datetime import datetime, timezone
 from decimal import Decimal
+from email.utils import parsedate_to_datetime
+import random
 
 import requests
 
@@ -249,6 +251,22 @@ def analysis_response_format(kind: str, stage: str, *, supports_json_schema: boo
     return {"type": "json_schema", "json_schema": _json_schema_for_provider(
         kind, stage, caption_controls=caption_controls, prompt_version=prompt_version,
     )}
+
+
+def _request_json_size(value: Any) -> int:
+    """Count compact UTF-8 JSON without copying an entire base64 image again."""
+    if isinstance(value, dict):
+        return 2 + max(0, len(value) - 1) + sum(
+            _request_json_size(str(key)) + 1 + _request_json_size(item) for key, item in value.items()
+        )
+    if isinstance(value, list):
+        return 2 + max(0, len(value) - 1) + sum(_request_json_size(item) for item in value)
+    if isinstance(value, str) and value.startswith("data:image/") and re.fullmatch(
+        r"data:image/[a-zA-Z0-9.+-]+;base64,[A-Za-z0-9+/=]*", value,
+    ):
+        # The generated image URI is ASCII with no JSON escapes.
+        return len(value) + 2
+    return len(json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
 
 
 class ProviderHTTPError(RuntimeError):
@@ -596,9 +614,13 @@ class OpenAICompatibleProvider(VisionProvider):
     def _retry_after(response) -> float | None:
         value = response.headers.get("Retry-After") if hasattr(response, "headers") else None
         try:
-            return max(0.0, float(value)) if value is not None else None
+            seconds = float(value) if value is not None else None
         except (TypeError, ValueError):
-            return None
+            try:
+                seconds = (parsedate_to_datetime(str(value)) - datetime.now(timezone.utc)).total_seconds()
+            except (TypeError, ValueError, OverflowError):
+                return None
+        return max(0.0, seconds) if seconds is not None and math.isfinite(seconds) else None
 
     @staticmethod
     def _provider_request_id(response) -> str:
@@ -674,7 +696,7 @@ class OpenAICompatibleProvider(VisionProvider):
                     ) from exc
                 if attempt == attempts - 1:
                     raise ProviderHTTPError("Provider API 逾時", "VLM-001") from exc
-                time.sleep(min(1.0, 0.1 * (attempt + 1)))
+                time.sleep(random.SystemRandom().uniform(0.1, min(1.0, 0.2 * 2 ** attempt)))
                 continue
             except requests.RequestException as exc:
                 request_sent = not self._transport_failed_before_send(exc)
@@ -687,7 +709,7 @@ class OpenAICompatibleProvider(VisionProvider):
                     ) from exc
                 if attempt == attempts - 1:
                     raise ProviderHTTPError("Provider 連線失敗", "VLM-001") from exc
-                time.sleep(min(1.0, 0.1 * (attempt + 1)))
+                time.sleep(random.SystemRandom().uniform(0.1, min(1.0, 0.2 * 2 ** attempt)))
                 continue
             last_response = response
             if response_received_callback is not None:
@@ -732,13 +754,14 @@ class OpenAICompatibleProvider(VisionProvider):
                         self._retry_after(response),
                         http_status=status,
                     )
-                if attempt == attempts - 1:
+                retry_after = self._retry_after(response)
+                if attempt == attempts - 1 or (retry_after is not None and retry_after > 5):
                     code = "VLM-002" if status == 429 else "VLM-007"
                     raise ProviderHTTPError(
-                        self._redact(f"Provider 回應 HTTP {status}"), code, self._retry_after(response)
+                        self._redact(f"Provider 回應 HTTP {status}"), code, retry_after, http_status=status,
                     )
-                delay = self._retry_after(response) or min(1.0, 0.1 * (attempt + 1))
-                time.sleep(min(30.0, delay))
+                delay = max(retry_after or 0.0, random.SystemRandom().uniform(0.1, min(1.0, 0.2 * 2 ** attempt)))
+                time.sleep(delay)
                 continue
             return response
         raise ProviderHTTPError("Provider API 重試失敗", "VLM-007") from last_response
@@ -1152,7 +1175,7 @@ class OpenAICompatibleProvider(VisionProvider):
                 if message.get("role") == "system"
             ),
             "schema_chars": len(json.dumps(body.get("response_format", {}), ensure_ascii=False)),
-            "request_body_bytes": len(json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode("utf-8")),
+            "request_body_bytes": _request_json_size(body),
             "image_bytes": max(0, int(image_bytes)),
         }
         return body
@@ -1328,7 +1351,7 @@ class OpenAICompatibleProvider(VisionProvider):
         self.last_request_metrics = {
             "prompt_chars": len(invalid_content[:12000]) + len(validation_error),
             "schema_chars": len(json.dumps(body.get("response_format", {}), ensure_ascii=False)),
-            "request_body_bytes": len(json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode("utf-8")),
+            "request_body_bytes": _request_json_size(body),
             "image_bytes": 0,
         }
         return self._post_completion(body, retry_policy=NO_RETRY_SIDE_EFFECT)

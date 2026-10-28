@@ -80,7 +80,7 @@ def test_complete_prompt_and_schema_have_no_advanced_caption_contract(tmp_path):
     assert prompt.startswith(COMMON_PROMPT + "\n\n")
     assert "Schema v6 單行 JSON" not in COMMON_PROMPT
     assert "8～16 字" in LEGACY_V5_COMMON_PROMPT
-    assert FULL_ANALYSIS_TOKEN_CAP == 512
+    assert FULL_ANALYSIS_TOKEN_CAP == 1200
     assert PhotoAnalysisService._prompt_version(None) == PROMPT_VERSION
 
     schema = json_schema_for_stage("single", caption_controls=controls)

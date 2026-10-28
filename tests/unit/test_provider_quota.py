@@ -62,6 +62,23 @@ def test_rpm_and_circuit_survive_router_reconstruction(tmp_path):
     assert not restarted.acquire_channel(restarted.channels[0])
 
 
+def test_cleanup_covers_inactive_scopes_without_releasing_old_inflight_leases(app, monkeypatch):
+    from inktime.app.repositories import provider_quota
+
+    monkeypatch.setattr(provider_quota.time, "time", lambda: 1000.0)
+    database = app.extensions["inktime_database"]
+    with database.transaction() as connection:
+        connection.executemany("INSERT INTO provider_quota_events VALUES (?,?,?,?,?)", [
+            ("expired", "unused-account", 100, 1, 0),
+            ("inflight", "active-account", 100, 60, 1100),
+            ("recent", "active-account", 980, 1, 0),
+        ])
+    router = _router(database.path, scope="active-account")
+    assert not router.acquire_channel(router.channels[0])
+    with database.session() as connection:
+        assert {row[0] for row in connection.execute("SELECT id FROM provider_quota_events")} == {"inflight", "recent"}
+
+
 def test_shared_circuit_exposes_its_remaining_wait_without_consuming_quota(tmp_path, monkeypatch):
     from inktime.app.repositories import provider_quota
     from inktime.app.providers.base import request_definitely_not_sent

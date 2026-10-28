@@ -18,9 +18,9 @@ def test_estimates_follow_model_prices_and_preserve_unknown():
     # Each preview is independently rounded for display. Scaling an already
     # rounded cheap estimate loses precision and is not the billing contract.
     assert a["estimated_input_tokens"] == b["estimated_input_tokens"] == 80000
-    assert a["estimated_output_tokens"] == b["estimated_output_tokens"] == 5120
-    assert a["average_cost"] == pytest.approx(0.0902)
-    assert b["average_cost"] == pytest.approx(0.9024)
+    assert a["estimated_output_tokens"] == b["estimated_output_tokens"] == 12000
+    assert a["average_cost"] == pytest.approx(0.104)
+    assert b["average_cost"] == pytest.approx(1.04)
     assert service.estimate(10, "single")["average_cost"] is None
     assert service.estimate(10, "local")["average_cost"] == 0
     assert service.estimate(0, "single")["image_calls"] == 0

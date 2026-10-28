@@ -204,7 +204,7 @@ def test_scoring_lab_uses_current_plan_and_rejects_incompatible_answers(app, tmp
     assert requests[0]["model"] == "openai/gpt-6-luna"
     assert requests[0]["caption_controls"]["side_caption_max_chars"] == 14
     assert requests[0]["reasoning_effort"] == "none"
-    assert requests[0]["max_tokens"] == 512
+    assert requests[0]["max_tokens"] == 1200
     with service.usage.database.session() as connection:
         assert connection.execute("SELECT COUNT(*) FROM api_usage").fetchone()[0] == 1
 
@@ -250,7 +250,7 @@ def test_scoring_lab_records_usage_and_uses_current_profile(app, tmp_path, monke
 
 @pytest.mark.parametrize(
     ("global_cap", "analysis_cap", "expected"),
-    [(8000, 256, 256), (8000, 384, 384), (300, 1200, 300), (8000, 1200, 512)],
+    [(8000, 256, 256), (8000, 384, 384), (300, 1200, 300), (8000, 1200, 1200)],
 )
 def test_scoring_lab_honors_analysis_and_global_token_limits(
     app, tmp_path, monkeypatch, global_cap, analysis_cap, expected,
@@ -332,3 +332,77 @@ def test_scoring_lab_does_not_record_pre_network_failure(
         service.analyze(image_path)
     with app.extensions["inktime_database"].session() as connection:
         assert connection.execute("SELECT COUNT(*) FROM api_usage").fetchone()[0] == 0
+
+
+def test_scoring_retry_reuses_durable_response_after_usage_write_failure(app, tmp_path, monkeypatch):
+    service = app.extensions["inktime_scoring_lab_service"]
+    calls = []
+
+    class CountProvider(LabProvider):
+        def analyze(self, **kwargs):
+            calls.append(kwargs)
+            return super().analyze(**kwargs)
+
+    monkeypatch.setattr(service.providers, "build_router", lambda *args, **kwargs: CountProvider())
+    image = tmp_path / "checkpoint.jpg"
+    Image.new("RGB", (64, 64), "orange").save(image)
+    record = service.usage.record
+    monkeypatch.setattr(service.usage, "record", lambda **kwargs: (_ for _ in ()).throw(RuntimeError("disk full")))
+    with pytest.raises(RuntimeError, match="disk full"):
+        service.analyze(image, idempotency_key="durable-test")
+    monkeypatch.setattr(service.usage, "record", record)
+    result = service.analyze(image, idempotency_key="durable-test")
+    assert service.analyze(image, idempotency_key="durable-test")["analysis"] == result["analysis"]
+    assert len(calls) == 1
+    with service.usage.database.session() as connection:
+        assert connection.execute("SELECT COUNT(*) FROM api_usage").fetchone()[0] == 1
+        assert connection.execute("SELECT COUNT(*) FROM budget_reservations WHERE state='active'").fetchone()[0] == 0
+
+
+def test_scoring_unknown_response_blocks_even_a_different_retry_key(app, tmp_path, monkeypatch):
+    from inktime.app.repositories.billable_operations import UnreconciledOperationError
+
+    service = app.extensions["inktime_scoring_lab_service"]
+    provider = FailingScoringProvider(vision_error=ProviderHTTPError("lost", "VLM-AMBIGUOUS", ambiguous=True))
+    monkeypatch.setattr(service.providers, "build_router", lambda *args, **kwargs: provider)
+    image = tmp_path / "lost.jpg"
+    Image.new("RGB", (64, 64), "orange").save(image)
+    with pytest.raises(ProviderHTTPError):
+        service.analyze(image, idempotency_key="first")
+    with pytest.raises(UnreconciledOperationError):
+        service.analyze(image, idempotency_key="new-key")
+    with service.usage.database.session() as connection:
+        assert connection.execute("SELECT COUNT(*) FROM billable_operations").fetchone()[0] == 1
+        assert connection.execute("SELECT COUNT(*) FROM budget_reservations WHERE state='active'").fetchone()[0] == 1
+
+
+def test_scoring_idempotency_key_rejects_changed_plan(app, tmp_path, monkeypatch):
+    service = app.extensions["inktime_scoring_lab_service"]
+    monkeypatch.setattr(service.providers, "build_router", lambda *args, **kwargs: LabProvider())
+    image = tmp_path / "plan.jpg"
+    Image.new("RGB", (64, 64), "orange").save(image)
+    service.analyze(image, idempotency_key="same-key")
+    plan = {**service._plan(), "prompt_version": "different-prompt"}
+    monkeypatch.setattr(service, "_plan", lambda: plan)
+    with pytest.raises(ValueError, match="IDEMPOTENCY_CONFLICT"):
+        service.analyze(image, idempotency_key="same-key")
+
+
+def test_scoring_invalid_checkpoint_never_resends_a_paid_image(app, tmp_path, monkeypatch):
+    from inktime.app.domain.analysis.schema import AnalysisValidationError
+
+    service = app.extensions["inktime_scoring_lab_service"]
+    calls = []
+
+    class InvalidProvider(LabProvider):
+        def analyze(self, **kwargs):
+            calls.append(kwargs)
+            return ProviderResponse("{}", Usage(10, 5))
+
+    monkeypatch.setattr(service.providers, "build_router", lambda *args, **kwargs: InvalidProvider())
+    image = tmp_path / "invalid.jpg"
+    Image.new("RGB", (64, 64), "orange").save(image)
+    for _ in range(2):
+        with pytest.raises(AnalysisValidationError):
+            service.analyze(image, idempotency_key="invalid")
+    assert len(calls) == 1

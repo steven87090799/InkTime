@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from datetime import datetime, timedelta, timezone
-from hashlib import sha256
+from hashlib import sha256, file_digest
 import json
 import os
 from pathlib import Path
@@ -24,6 +24,7 @@ from inktime.app.domain.rendering import (
     render_photo,
 )
 from inktime.app.db import Database
+from inktime.app.core.locks import FcntlLockProvider
 from inktime.app.domain.photos import LocationResolver
 from inktime.app.domain.rendering.text_mask import render_plan_text_mask
 from inktime.app.repositories.photos import PhotoRepository
@@ -478,6 +479,8 @@ class RenderWorkloadService:
         self.settings = settings_repository
         self.process_boundary = process_boundary
         self.jobs = job_repository
+        self._files = FcntlLockProvider()
+        self._files_lock = self.root / ".maintenance.lock"
         self.retention = timedelta(days=2)
         self.max_result_entries = 128
         self.max_result_bytes = 256 * 1024 * 1024
@@ -503,7 +506,9 @@ class RenderWorkloadService:
         except Exception:
             self.delete_input(token, suffix=".png")
             raise
-        return token, sha256(destination.read_bytes()).hexdigest()
+        with destination.open("rb") as source:
+            digest = file_digest(source, "sha256").hexdigest()
+        return token, digest
 
     @staticmethod
     def _input_file_token(path: Path) -> str:
@@ -512,15 +517,17 @@ class RenderWorkloadService:
 
     def _reserve_input(self, token: str, maximum_bytes: int) -> None:
         self.cleanup()
-        with self.jobs.database.transaction(operation="render_input_reserve") as connection:
-            leases = connection.execute("SELECT token,size_bytes FROM render_input_leases").fetchall()
+        with self._files.exclusive(self._files_lock):
+            with self.jobs.database.session() as connection:
+                leases = connection.execute("SELECT token,size_bytes FROM render_input_leases").fetchall()
             leased = {str(row[0]) for row in leases}
             extra = [path for path in self.input_root.iterdir() if path.is_file() and self._input_file_token(path) not in leased]
             total = sum(int(row[1]) for row in leases) + sum(path.stat().st_size for path in extra)
             if len(leases) + len(extra) >= 128 or total + maximum_bytes > self.max_result_bytes:
                 raise ValueError("RENDER-009 輸入容量已滿；保留可續行／尚未落帳的輸入，請完成或取消既有工作")
-            connection.execute("INSERT INTO render_input_leases(token,size_bytes,created_at) VALUES (?,?,?)",
-                               (token, maximum_bytes, datetime.now(timezone.utc).isoformat()))
+            with self.jobs.database.transaction(operation="render_input_reserve") as connection:
+                connection.execute("INSERT INTO render_input_leases(token,size_bytes,created_at) VALUES (?,?,?)",
+                                   (token, maximum_bytes, datetime.now(timezone.utc).isoformat()))
 
     def _record_input_size(self, token: str, size: int) -> None:
         with self.jobs.database.transaction(operation="render_input_size") as connection:
@@ -585,9 +592,10 @@ class RenderWorkloadService:
         return self.input_root / f"{token}{suffix}"
 
     def delete_input(self, token: str, *, suffix: str) -> None:
-        with self.jobs.database.transaction(operation="render_input_delete") as connection:
+        with self._files.exclusive(self._files_lock):
             self.input_path(token, suffix=suffix).unlink(missing_ok=True)
-            connection.execute("DELETE FROM render_input_leases WHERE token=?", (token,))
+            with self.jobs.database.transaction(operation="render_input_delete") as connection:
+                connection.execute("DELETE FROM render_input_leases WHERE token=?", (token,))
 
     def _open_input(self, token: str) -> Image.Image:
         path = self.input_root / f"{self._validate_token(token)}.png"
@@ -787,10 +795,7 @@ class RenderWorkloadService:
             if not isinstance(result, dict):
                 raise ValueError("invalid renderer metadata")
         except (OSError, ValueError, json.JSONDecodeError):
-            for path in (self.result_root / token).glob("*"):
-                path.unlink(missing_ok=True)
-            if (self.result_root / token).exists():
-                (self.result_root / token).rmdir()
+            # Reads must never delete another worker's in-flight publication.
             return None
         for name in ("original", "legacy", "new"):
             result[name] = self._result_url(token, name)
@@ -844,7 +849,8 @@ class RenderWorkloadService:
             separators=(",", ":"),
         )
         token = sha256(fingerprint.encode("utf-8")).hexdigest()[:32]
-        cached = self._cached_compare(token)
+        with self._files.exclusive(self._files_lock):
+            cached = self._cached_compare(token)
         if cached is not None:
             self.delete_input(input_token, suffix=suffix)
             cached["cache_hit"] = True
@@ -861,10 +867,18 @@ class RenderWorkloadService:
                 },
                 process_name="inktime-render-child",
             )
-            final = self.result_root / token
-            if final.exists():
-                shutil.rmtree(final)
-            prepared.replace(final)
+            response.update({name: self._result_url(token, name) for name in ("original", "legacy", "new")})
+            self._atomic_json(prepared / "result.json", response)
+            with self._files.exclusive(self._files_lock):
+                cached = self._cached_compare(token)
+                if cached is not None:
+                    response = {**cached, "cache_hit": True}
+                    shutil.rmtree(prepared)
+                else:
+                    final = self.result_root / token
+                    if final.exists():
+                        shutil.rmtree(final)
+                    prepared.replace(final)
         except Exception:
             shutil.rmtree(prepared, ignore_errors=True)
             raise
@@ -875,7 +889,6 @@ class RenderWorkloadService:
                 "new": self._result_url(token, "new"),
             }
         )
-        self._atomic_json(self.result_root / token / "result.json", response)
         self.delete_input(input_token, suffix=suffix)
         self.cleanup()
         return response
@@ -895,10 +908,11 @@ class RenderWorkloadService:
                 },
                 process_name="inktime-render-child",
             )
-            final = self.result_root / token
-            if final.exists():
-                shutil.rmtree(final)
-            prepared.replace(final)
+            with self._files.exclusive(self._files_lock):
+                final = self.result_root / token
+                if final.exists():
+                    shutil.rmtree(final)
+                prepared.replace(final)
         except Exception:
             shutil.rmtree(prepared, ignore_errors=True)
             raise
@@ -1131,23 +1145,27 @@ class RenderWorkloadService:
             shutil.rmtree(prepared, ignore_errors=True)
 
     def cleanup(self) -> int:
-        with self.jobs.database.transaction(operation="render_input_cleanup") as connection:
-            terminal = "('completed','completed_with_errors','failed','cancelled')"
-            invalid = connection.execute(
-                f"SELECT 1 FROM jobs WHERE status NOT IN {terminal} AND NOT json_valid(settings_json) LIMIT 1"  # noqa: S608 -- fixed SQL statuses
-            ).fetchone()
-            protected = {str(row[0]) for row in connection.execute(
-                f"SELECT json_extract(settings_json,'$.input_token') FROM jobs WHERE status NOT IN {terminal} AND json_valid(settings_json) "  # noqa: S608
-                "UNION SELECT token FROM render_input_leases WHERE staged=1"
-            ) if row[0]}
+        # Serialize input reservations/publications with a filesystem lock,
+        # not SQLite's sole writer. NAS stat/unlink can take a long time.
+        with self._files.exclusive(self._files_lock):
+            with self.jobs.database.session() as connection:
+                terminal = "('completed','completed_with_errors','failed','cancelled')"
+                invalid = connection.execute(
+                    f"SELECT 1 FROM jobs WHERE status NOT IN {terminal} AND NOT json_valid(settings_json) LIMIT 1"  # noqa: S608
+                ).fetchone()
+                protected = {str(row[0]) for row in connection.execute(
+                    f"SELECT json_extract(settings_json,'$.input_token') FROM jobs WHERE status NOT IN {terminal} AND json_valid(settings_json) "  # noqa: S608
+                    "UNION SELECT token FROM render_input_leases WHERE staged=1"
+                ) if row[0]}
+                leases = connection.execute("SELECT token FROM render_input_leases WHERE staged=0").fetchall()
             if invalid:
                 protected.update(self._input_file_token(path) for path in self.input_root.iterdir() if path.is_file())
             removed = self._cleanup_locked(protected)
-            leases = connection.execute("SELECT token FROM render_input_leases WHERE staged=0").fetchall()
-            for row in leases:
-                token = str(row[0])
-                if token not in protected and not any(self._input_file_token(path) == token for path in self.input_root.iterdir()):
-                    connection.execute("DELETE FROM render_input_leases WHERE token=?", (token,))
+            remaining = {self._input_file_token(path) for path in self.input_root.iterdir()}
+            unused = [(str(row[0]),) for row in leases if str(row[0]) not in protected | remaining]
+            if unused:
+                with self.jobs.database.transaction(operation="render_input_cleanup") as connection:
+                    connection.executemany("DELETE FROM render_input_leases WHERE token=? AND staged=0", unused)
             return removed
 
     def _cleanup_locked(self, protected: set[str]) -> int:

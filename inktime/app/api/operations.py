@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timezone
+from pathlib import Path
 from typing import Literal, TypedDict
 
 from flask import Blueprint, abort, current_app, g, render_template, request, send_file
@@ -658,6 +659,11 @@ def enqueue_scan():
     root_path = str(payload.get("root_path", "")).strip()
     if not root_path:
         abort(400, description="SCAN-001 請輸入照片資料夾路徑")
+    root = Path(root_path).resolve()
+    photo_root = Path(current_app.config["INKTIME_PHOTO_DIR"]).resolve()
+    if not root.is_relative_to(photo_root):
+        abort(400, description="SCAN-003 掃描路徑必須位於已設定的照片掛載目錄內")
+    root_path = str(root)
     mode = str(payload.get("mode", "incremental"))
     if mode not in SCAN_MODES:
         abort(400, description="SCAN-003 不支援的掃描模式")

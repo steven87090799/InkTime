@@ -11,13 +11,14 @@ class UsageRepository:
         self.database = database
 
     @staticmethod
-    def _refresh_job_spent(connection, job_id: str | None) -> None:
+    def _add_job_cost(connection, job_id: str | None, usage_id: int, cost: float) -> None:
         if job_id:
+            # The first ledger receipt replaces legacy item-cost estimates.
+            # Later receipts add only their own cost, not a scan of all N rows.
             connection.execute(
-                "UPDATE jobs SET spent=(SELECT COALESCE(SUM(COALESCE(actual_cost,estimated_cost)),0) "
-                "FROM api_usage WHERE job_id=? AND cost_source<>'unknown') "
-                "+(SELECT COALESCE(SUM(cost),0) FROM usage_cost_archive WHERE job_id=?) WHERE id=?",
-                (job_id, job_id, job_id),
+                "UPDATE jobs SET spent=CASE WHEN EXISTS(SELECT 1 FROM api_usage WHERE job_id=? AND id<>?) "
+                "OR EXISTS(SELECT 1 FROM usage_cost_archive WHERE job_id=?) THEN spent+? ELSE ? END WHERE id=?",
+                (job_id, usage_id, job_id, cost, cost, job_id),
             )
 
     @staticmethod
@@ -113,7 +114,11 @@ class UsageRepository:
             )
             if cursor.rowcount:
                 connection.execute("UPDATE api_usage SET usage_complete=? WHERE id=?", (int(tokens_reported), cursor.lastrowid))
-            self._refresh_job_spent(connection, job_id)
+                self._add_job_cost(
+                    connection, job_id, int(cursor.lastrowid or 0),
+                    max(0.0, float(actual_cost if actual_cost is not None else estimated_cost or 0))
+                    if cost_source in {"provider_reported", "estimated"} else 0.0,
+                )
         if cursor.lastrowid is None:
             raise RuntimeError("USAGE-001 inserted usage id unavailable")
         return int(cursor.lastrowid)
@@ -187,5 +192,9 @@ class UsageRepository:
             )
             if cursor.rowcount:
                 connection.execute("UPDATE api_usage SET usage_complete=? WHERE id=?", (int(tokens_reported), cursor.lastrowid))
-            self._refresh_job_spent(connection, job_id)
+                self._add_job_cost(
+                    connection, job_id, int(cursor.lastrowid or 0),
+                    max(0.0, float(actual_cost if actual_cost is not None else estimated_cost or 0))
+                    if cost_source in {"provider_reported", "estimated"} else 0.0,
+                )
         return bool(cursor.rowcount)

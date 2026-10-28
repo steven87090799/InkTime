@@ -2997,145 +2997,144 @@ class BatchAnalysisService:
             if callable(close):
                 close()
         provider = self._provider(str(batch["provider_id"]), plan)
-        records = BatchResultStore(self.database, batch_id)
-        successes: set[str] = set()
-        errors: set[str] = set()
-        try:
-            current_batch = self.batches.get(batch_id)
-            self._read_results(
-                Path(str(current_batch["local_output_path"])) if current_batch["local_output_path"] else None,
-                current_batch,
-                is_error=False,
-                records=records,
-            )
-            current_batch = self.batches.get(batch_id)
-            self._read_results(
-                Path(str(current_batch["local_error_path"])) if current_batch["local_error_path"] else None,
-                current_batch,
-                is_error=True,
-                records=records,
-            )
-        finally:
-            close = getattr(provider, "close", None)
-            if callable(close):
-                close()
-        expected: dict[str, dict[str, Any]] = {
-            str(item["custom_id"]): item for item in self.batches.items(batch_id)
-        }
-        try:
-            _current_plan, current_analysis_fingerprint, _current_model = self._plan()
-        except Exception:
-            current_analysis_fingerprint = None
-        unknown = set(records) - set(expected)
-        if unknown:
-            self.batches.update_batch(
-                batch_id,
-                reconciliation_error_code="unexpected_custom_id",
-                reconciliation_error_message=f"結果檔含 {len(unknown)} 個未預期 custom_id",
-            )
-        for custom_id, (kind, record, body) in records.items():
-            expected_item: dict[str, Any] | None = expected.get(custom_id)
-            if expected_item is None:
-                continue
-            remote_response = record.get("response")
-            receipt_body = remote_response.get("body") if isinstance(remote_response, dict) else None
-            if isinstance(receipt_body, dict):
-                self._persist_result_receipt(batch, expected_item, record, receipt_body, provider)
-            if kind == "duplicate":
-                self._mark_item_error(
-                    expected_item,
-                    "duplicate_custom_id",
-                    "同一 custom_id 出現在多個結果行或成功／錯誤檔",
-                    "duplicate_custom_id",
-                    job_id=str(batch["job_id"]),
+        with BatchResultStore(self.database, batch_id) as records:
+            successes: set[str] = set()
+            errors: set[str] = set()
+            try:
+                current_batch = self.batches.get(batch_id)
+                self._read_results(
+                    Path(str(current_batch["local_output_path"])) if current_batch["local_output_path"] else None,
+                    current_batch,
+                    is_error=False,
+                    records=records,
                 )
-                errors.add(custom_id)
-            elif kind == "error":
-                error = record.get("error") or {}
-                self._mark_item_error(
-                    expected_item,
-                    str(error.get("code") or "BATCH-HTTP-ERROR"),
-                    str(error.get("message") or "遠端 Batch 項目失敗"),
-                    "failed",
-                    job_id=str(batch["job_id"]),
+                current_batch = self.batches.get(batch_id)
+                self._read_results(
+                    Path(str(current_batch["local_error_path"])) if current_batch["local_error_path"] else None,
+                    current_batch,
+                    is_error=True,
+                    records=records,
                 )
-                errors.add(custom_id)
-            elif kind == "schema_invalid":
-                self._mark_item_error(
-                    expected_item,
-                    "BATCH-RESPONSE-BODY",
-                    "Batch Response Body 不是 JSON Object",
-                    "schema_invalid",
-                    job_id=str(batch["job_id"]),
+            finally:
+                close = getattr(provider, "close", None)
+                if callable(close):
+                    close()
+            expected: dict[str, dict[str, Any]] = {
+                str(item["custom_id"]): item for item in self.batches.items(batch_id)
+            }
+            try:
+                _current_plan, current_analysis_fingerprint, _current_model = self._plan()
+            except Exception:
+                current_analysis_fingerprint = None
+            unknown = set(records) - set(expected)
+            if unknown:
+                self.batches.update_batch(
+                    batch_id,
+                    reconciliation_error_code="unexpected_custom_id",
+                    reconciliation_error_message=f"結果檔含 {len(unknown)} 個未預期 custom_id",
                 )
-                errors.add(custom_id)
-            elif kind == "success" and body is not None:
-                outcome = self._import_success(
-                    batch,
-                    expected_item,
-                    record,
-                    body,
-                    plan,
-                    provider,
-                    current_analysis_fingerprint,
-                )
-                if outcome in {"imported", "already_imported"}:
-                    successes.add(custom_id)
-                elif outcome not in {"pending", "submitted", "retry_pending"}:
+            for custom_id, (kind, record, body) in records.items():
+                expected_item: dict[str, Any] | None = expected.get(custom_id)
+                if expected_item is None:
+                    continue
+                remote_response = record.get("response")
+                receipt_body = remote_response.get("body") if isinstance(remote_response, dict) else None
+                if isinstance(receipt_body, dict):
+                    self._persist_result_receipt(batch, expected_item, record, receipt_body, provider)
+                if kind == "duplicate":
+                    self._mark_item_error(
+                        expected_item,
+                        "duplicate_custom_id",
+                        "同一 custom_id 出現在多個結果行或成功／錯誤檔",
+                        "duplicate_custom_id",
+                        job_id=str(batch["job_id"]),
+                    )
                     errors.add(custom_id)
-        seen = set(records)
-        for custom_id, item in expected.items():
-            if custom_id in seen:
-                continue
-            if str(item["status"]) in {
-                "imported",
-                "failed",
-                "schema_invalid",
-                "stale",
-                "duplicate_custom_id",
-            }:
-                continue
-            self.batches.update_item(
-                str(item["id"]),
-                status="retry_pending",
-                error_code="missing_result",
-                error_message="Output/Error File 未包含此 custom_id",
-            )
-            if item.get("job_item_id"):
-                self.jobs.fail_batch_item(
-                    str(batch["job_id"]),
-                    str(item["job_item_id"]),
-                    "missing_result",
-                    "Output/Error File 未包含此 custom_id",
+                elif kind == "error":
+                    error = record.get("error") or {}
+                    self._mark_item_error(
+                        expected_item,
+                        str(error.get("code") or "BATCH-HTTP-ERROR"),
+                        str(error.get("message") or "遠端 Batch 項目失敗"),
+                        "failed",
+                        job_id=str(batch["job_id"]),
+                    )
+                    errors.add(custom_id)
+                elif kind == "schema_invalid":
+                    self._mark_item_error(
+                        expected_item,
+                        "BATCH-RESPONSE-BODY",
+                        "Batch Response Body 不是 JSON Object",
+                        "schema_invalid",
+                        job_id=str(batch["job_id"]),
+                    )
+                    errors.add(custom_id)
+                elif kind == "success" and body is not None:
+                    outcome = self._import_success(
+                        batch,
+                        expected_item,
+                        record,
+                        body,
+                        plan,
+                        provider,
+                        current_analysis_fingerprint,
+                    )
+                    if outcome in {"imported", "already_imported"}:
+                        successes.add(custom_id)
+                    elif outcome not in {"pending", "submitted", "retry_pending"}:
+                        errors.add(custom_id)
+            seen = set(records)
+            for custom_id, item in expected.items():
+                if custom_id in seen:
+                    continue
+                if str(item["status"]) in {
+                    "imported",
+                    "failed",
+                    "schema_invalid",
+                    "stale",
+                    "duplicate_custom_id",
+                }:
+                    continue
+                self.batches.update_item(
+                    str(item["id"]),
+                    status="retry_pending",
+                    error_code="missing_result",
+                    error_message="Output/Error File 未包含此 custom_id",
                 )
-        current = self.batches.get(batch_id)
-        if current is not None:
-            self._cleanup_remote(current, plan)
-        current = self.batches.get(batch_id)
-        if current is not None and str(current["cleanup_status"]) == "completed":
-            self._finish(batch_id)
-        records.close()
-        result = {
-            "batch_id": batch_id,
-            "success": len(successes),
-            "errors": len(errors),
-            "missing": len(set(expected) - seen),
-        }
-        log_event(
-            LOGGER,
-            logging.INFO if not errors else logging.WARNING,
-            "Batch result ingest completed",
-            event="batch_result_ingest_completed",
-            batch_id=batch_id,
-            job_id=str(batch["job_id"] or ""),
-            duration_ms=int((time.monotonic() - import_started) * 1000),
-            details={
-                "success": result["success"],
-                "errors": result["errors"],
-                "missing": result["missing"],
-            },
-        )
-        return result
+                if item.get("job_item_id"):
+                    self.jobs.fail_batch_item(
+                        str(batch["job_id"]),
+                        str(item["job_item_id"]),
+                        "missing_result",
+                        "Output/Error File 未包含此 custom_id",
+                    )
+            current = self.batches.get(batch_id)
+            if current is not None:
+                self._cleanup_remote(current, plan)
+            current = self.batches.get(batch_id)
+            if current is not None and str(current["cleanup_status"]) == "completed":
+                self._finish(batch_id)
+            result = {
+                "batch_id": batch_id,
+                "success": len(successes),
+                "errors": len(errors),
+                "missing": len(set(expected) - seen),
+            }
+            log_event(
+                LOGGER,
+                logging.INFO if not errors else logging.WARNING,
+                "Batch result ingest completed",
+                event="batch_result_ingest_completed",
+                batch_id=batch_id,
+                job_id=str(batch["job_id"] or ""),
+                duration_ms=int((time.monotonic() - import_started) * 1000),
+                details={
+                    "success": result["success"],
+                    "errors": result["errors"],
+                    "missing": result["missing"],
+                },
+            )
+            return result
 
     def get_detail(self, batch_id: str) -> dict[str, Any] | None:
         batch = self.batches.get(batch_id)

@@ -2720,6 +2720,24 @@ MIGRATIONS = (
             "CREATE INDEX idx_photos_oldest_content ON photos(COALESCE(captured_at,created_at),id) WHERE lifecycle_status='active'",
         ),
     ),
+    Migration(
+        77,
+        "索引歷史模型優先序、照片帳務紀錄與過期配額租約",
+        (
+            "ALTER TABLE billable_operations ADD COLUMN request_signature TEXT",
+            "CREATE INDEX idx_analysis_display_order ON photo_analysis(photo_id,"
+            "CASE WHEN schema_version IN (4,5,6) AND score_kind='semantic' THEN 0 "
+            "WHEN (schema_version IN (1,2,3) AND score_kind='legacy' "
+            "AND lower(trim(COALESCE(provider,''))) NOT IN "
+            "('','inherited','local','local-prefilter','local-quality-v3','virtual-display-local') "
+            "AND lower(COALESCE(stage,'')) IN ('single','stage_one','stage_two','cache','inherited')) THEN 1 "
+            "WHEN score_kind='local_quality' THEN 2 ELSE 3 END,created_at DESC,id DESC)",
+            "CREATE INDEX idx_usage_photo_time ON api_usage(photo_id,started_at DESC,id DESC)",
+            "CREATE INDEX idx_job_errors_photo_time ON job_errors(photo_id,last_seen_at DESC,id DESC)",
+            "CREATE INDEX idx_quota_expiry ON provider_quota_events(lease_until,started_at)",
+            "CREATE INDEX idx_quota_scope_lease ON provider_quota_events(scope,lease_until,started_at)",
+        ),
+    ),
 )
 
 

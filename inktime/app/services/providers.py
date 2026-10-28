@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from hashlib import sha256
 from typing import Any
+from inktime.app.domain.analysis.plan import analysis_output_token_cap
 
 from inktime.app.domain.analysis.scoring import normalize_scoring_rules
 from inktime.app.domain.jobs.failure_policy import JobConfigurationError
@@ -89,7 +90,7 @@ class ProviderService:
                         self.repository.database,
                         sha256((provider.base_url + "|" + str(config.get("api_key") or "") + "|" + str(config.get("project_id") or "")).encode()).hexdigest(),
                     ),
-                    request_token_reserve=max(8000, int(self.settings.get("budget.max_tokens", 8000))) + 512,
+                    request_token_reserve=max(8000, int(self.settings.get("budget.max_tokens", 8000))) + analysis_output_token_cap(self.settings),
                     priority=int(snapshot.get("priority", config["priority"])),
                     max_concurrency=(1 if config.get("options", {}).get("daily_free_first")
                                      else config["max_concurrency"]),

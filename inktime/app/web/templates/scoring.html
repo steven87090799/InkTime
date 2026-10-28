@@ -119,6 +119,8 @@
   const testButton = testForm.querySelector('button[type="submit"]');
   const testButtonInitiallyEnabled = !testButton.disabled;
   let testInFlight = false;
+  let testRequestKey = null;
+  testForm.addEventListener('change', () => { testRequestKey = null; });
   const decodeJson = window.inktimeDecodeJson;
   testForm.addEventListener('submit', async event => {
     event.preventDefault();
@@ -133,7 +135,10 @@
     result.hidden = true;
     result.replaceChildren();
     try {
-      const response = await window.inktimeFetch('/api/v1/scoring/test', {method: 'POST', body: new FormData(testForm)});
+      testRequestKey ||= crypto.randomUUID();
+      const response = await window.inktimeFetch('/api/v1/scoring/test', {
+        method: 'POST', headers: {'Idempotency-Key': testRequestKey}, body: new FormData(testForm)
+      });
       const data = await decodeJson(response);
       if (!response.ok) throw new Error(data.message || data.error || `測試失敗（HTTP ${response.status}）`);
       if (!data.analysis) throw new Error(data.message || '測試回應缺少分析結果');
@@ -182,6 +187,7 @@
         usageRows
       );
       result.hidden = false;
+      testRequestKey = null;
     } catch (error) {
       status.className = 'test-status error';
       status.textContent = error?.message || '測試失敗';

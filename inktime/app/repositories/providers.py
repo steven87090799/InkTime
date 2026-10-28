@@ -279,7 +279,7 @@ class ProviderRepository:
             rows = connection.execute(
                 f"""
                 SELECT id,input_tokens,output_tokens,cached_tokens,reasoning_tokens,cache_write_tokens,
-                       processing_mode
+                       processing_mode,job_id
                 FROM api_usage
                 WHERE provider_id=? AND model=? AND cost_source='unknown' AND usage_complete=1 AND {evidence}
                 ORDER BY id
@@ -287,6 +287,7 @@ class ProviderRepository:
                 (provider_key, model_key),
             ).fetchall()
             updates = []
+            job_costs: dict[str, float] = {}
             for row in rows:
                 if pricing is None:
                     continue
@@ -303,10 +304,17 @@ class ProviderRepository:
                 )
                 if estimated is not None:
                     updates.append((float(estimated), int(row["id"])))
+                    if row["job_id"]:
+                        job_id = str(row["job_id"])
+                        job_costs[job_id] = job_costs.get(job_id, 0.0) + float(estimated)
             if updates:
                 connection.executemany(
                     "UPDATE api_usage SET estimated_cost=?,actual_cost=NULL,cost_source='estimated' WHERE id=?",
                     updates,
+                )
+                connection.executemany(
+                    "UPDATE jobs SET spent=spent+? WHERE id=?",
+                    [(cost, job_id) for job_id, cost in job_costs.items()],
                 )
                 reconciled = len(updates)
             remaining = connection.execute(

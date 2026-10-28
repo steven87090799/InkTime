@@ -9,7 +9,7 @@ import time
 from typing import Any
 
 from inktime.app.core.logging import log_event, should_log_rate_limited
-from .base import ProviderResponse, Usage, VisionProvider
+from .base import ProviderResponse, Usage, VisionProvider, provider_process_timeout
 from .openai_compatible import ProviderHTTPError
 
 
@@ -43,7 +43,7 @@ class ProviderChannel:
     # falls back to the frozen/global analysis model for compatibility.
     model: str | None = None
     shared_quota: Any = None
-    request_token_reserve: int = 8512
+    request_token_reserve: int = 9200
     analysis_revision: str = ""
     daily_free_first: bool = False
     semaphore: threading.BoundedSemaphore = field(init=False)
@@ -453,7 +453,7 @@ class FailoverVisionProvider(VisionProvider):
                     response = boundary.call_provider(
                         specification,
                         method,
-                        timeout_seconds=float(getattr(channel.provider, "timeout", 120)),
+                        timeout_seconds=provider_process_timeout(channel.provider),
                         kwargs=call_kwargs,
                     )
         except Exception as exc:
@@ -483,7 +483,7 @@ class FailoverVisionProvider(VisionProvider):
                     response = boundary.call_provider(
                         specification,
                         "analyze",
-                        timeout_seconds=float(getattr(channel.provider, "timeout", 120)),
+                        timeout_seconds=provider_process_timeout(channel.provider),
                         kwargs=call_kwargs,
                     )
             except Exception as exc:

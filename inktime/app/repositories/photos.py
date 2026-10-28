@@ -2629,6 +2629,18 @@ class PhotoRepository:
     ) -> None:
         import json
 
+        # JSON/schema and model-only checks do not depend on mutable photo or
+        # policy state. Keep them outside our writer transaction; all content,
+        # manual override and current-policy checks remain inside it.
+        result_version = result.get("schema_version")
+        result_schema = (
+            LEGACY_V4_JSON_SCHEMA if result_version == 4 else
+            V5_ANALYSIS_JSON_SCHEMA if result_version == 5 else ANALYSIS_JSON_SCHEMA
+        )
+        result_fields = set(result_schema["schema"]["required"])
+        canonical = validate_analysis_result({key: result[key] for key in result_fields})
+        strict_display = canonical["schema_version"] >= 6
+        display_evaluation = evaluate_display_exclusion(canonical["display_exclusion"]) if strict_display else None
         now = datetime.now(timezone.utc).isoformat()
         context = self.database.session() if connection is None else nullcontext(connection)
         with context as active_connection:
@@ -2684,22 +2696,9 @@ class PhotoRepository:
                         # rather than inventing a non-existent system account.
                         (photo_id, event, json.dumps(changes, ensure_ascii=False), None, now),
                     )
-                result_version = result.get("schema_version")
-                result_schema = (
-                    LEGACY_V4_JSON_SCHEMA if result_version == 4 else
-                    V5_ANALYSIS_JSON_SCHEMA if result_version == 5 else
-                    ANALYSIS_JSON_SCHEMA
-                )
-                result_fields = set(result_schema["schema"]["required"])
-                canonical = validate_analysis_result({key: result[key] for key in result_fields})
                 current = dict(connection.execute("SELECT * FROM photos WHERE id=?", (photo_id,)).fetchone())
-                strict_display = canonical["schema_version"] >= 6
                 content_evaluation = evaluate_content_filter(
                     canonical["content_filter"], self._content_settings(connection), strict=strict_display
-                )
-                display_evaluation = (
-                    evaluate_display_exclusion(canonical["display_exclusion"])
-                    if strict_display else None
                 )
                 orientation_evaluation = (
                     self._orientation_review(current, canonical["visual_orientation"])

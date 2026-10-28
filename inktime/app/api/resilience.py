@@ -13,6 +13,7 @@ from inktime.app.core.json_values import (
     json_object_payload,
 )
 from inktime.app.core.paths import UnsafePathError
+from inktime.app.core.idempotency import scoped_idempotency_key
 from inktime.app.web.access import administrator_required, login_required
 
 
@@ -256,6 +257,9 @@ def get_queue(device_id: str):
 @administrator_required
 def generate_queue(device_id: str):
     payload = _payload()
+    raw_key = request.headers.get("Idempotency-Key", "").strip()
+    if len(raw_key) > 128:
+        abort(400, description="QUEUE-005 Idempotency-Key 不可超過 128 字元")
     try:
         depth = json_int(
             payload,
@@ -291,7 +295,7 @@ def generate_queue(device_id: str):
                 priority=priority,
                 display_after=payload.get("display_after"),
                 expires_at=payload.get("expires_at"),
-                idempotency_key=request.headers.get("Idempotency-Key"),
+                idempotency_key=scoped_idempotency_key("queue-generate", str(g.user["id"]), raw_key),
                 delivery_mode=delivery_mode,
                 offline_prefetch_allowed=offline_prefetch_allowed,
                 offline_slot=str(payload.get("offline_slot", "")).strip() or None,
@@ -305,7 +309,7 @@ def generate_queue(device_id: str):
     except KeyError:
         abort(404, description="QUEUE-001 找不到或停用的裝置")
     except ValueError as exc:
-        abort(400, description=str(exc))
+        abort(409 if str(exc) == "IDEMPOTENCY_CONFLICT" else 400, description=str(exc))
     return {"queue": _repo().queue(device_id), "item": item}, 201
 
 

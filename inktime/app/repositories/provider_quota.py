@@ -16,8 +16,10 @@ class ProviderQuotaRepository:
             return False
         row = connection.execute(
             "SELECT COUNT(*),COALESCE(SUM(tokens),0),COALESCE(SUM(lease_until>?),0) "
-            "FROM provider_quota_events WHERE scope=? AND (started_at>? OR lease_until>?)",
-            (now, self.scope, now - 60, now),
+            "FROM (SELECT tokens,lease_until FROM provider_quota_events WHERE scope=? AND started_at>? "
+            "UNION ALL SELECT tokens,lease_until FROM provider_quota_events "
+            "WHERE scope=? AND lease_until>? AND started_at<=?)",
+            (now, self.scope, now - 60, self.scope, now, now - 60),
         ).fetchone()
         return (
             (not channel.requests_per_minute or row[0] < channel.requests_per_minute)
@@ -55,8 +57,8 @@ class ProviderQuotaRepository:
         now = time.time()
         with self.database.transaction(operation="provider_quota_acquire") as connection:
             connection.execute(
-                "DELETE FROM provider_quota_events WHERE scope=? AND started_at<=? AND lease_until<=?",
-                (self.scope, now - 60, now),
+                "DELETE FROM provider_quota_events WHERE lease_until<=? AND started_at<=?",
+                (now, now - 60),
             )
             if not self._allowed(connection, channel, now):
                 return None
