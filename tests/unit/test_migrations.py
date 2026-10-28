@@ -122,7 +122,7 @@ def _run_capture_date_backfill(database_path: str, start, results) -> None:
 
 
 def test_fresh_database_is_migrated(tmp_path):
-    assert CURRENT_SCHEMA_VERSION == 75
+    assert CURRENT_SCHEMA_VERSION == 76
     database = Database(tmp_path / "inktime.db")
     assert migrate(database) == list(range(1, CURRENT_SCHEMA_VERSION + 1))
     assert database.integrity_check() == "ok"
@@ -2106,9 +2106,14 @@ def test_migration_58_recomposes_ai_scores_without_rewriting_evidence(monkeypatc
     with database.session() as connection:
         assert [{key: row[key] for key in photos_before[0]}
                 for row in connection.execute("SELECT * FROM photos ORDER BY id")] == photos_before
-        assert [dict(row) for row in connection.execute(
+        # Later migrations may add columns, but every pre-upgrade evidence
+        # field must retain its exact value, just as for the photos above.
+        assert [{key: row[key] for key in non_semantic_before[0]} for row in connection.execute(
             "SELECT * FROM photo_analysis WHERE score_kind<>'semantic' ORDER BY id"
         )] == non_semantic_before
+        assert all(row[0] is None for row in connection.execute(
+            "SELECT content_sha256 FROM photo_analysis WHERE score_kind<>'semantic'"
+        ))
         rows = {row["photo_id"]: dict(row) for row in connection.execute(
             "SELECT * FROM photo_analysis WHERE score_kind='semantic'"
         )}

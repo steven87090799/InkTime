@@ -22,7 +22,7 @@ NUMBERED_CODE = re.compile(r"\b[A-Z][A-Z0-9]*(?:-[A-Z0-9]+)*-\d{3}\b")
 ERROR_PREFIXES = (
     "AI-", "ANALYSIS-", "BATCH-", "DEVICE-", "DISPLAY-", "JOB-", "SCAN-", "NOTIFY-",
     "QUEUE-", "VLM-", "SCHEDULE-", "RENDER-", "PAIR-", "DISK-", "HTTP-", "DB-",
-    "BUDGET-", "PREFLIGHT-", "RESTORE-", "RETENTION-", "IMG-",
+    "BUDGET-", "PREFLIGHT-", "RESTORE-", "RETENTION-", "IMG-", "BACKFILL-",
 )
 
 

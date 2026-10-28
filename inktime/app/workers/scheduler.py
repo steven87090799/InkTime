@@ -181,10 +181,6 @@ class SchedulerRunner:
             if target is not None:
                 self._safe_step("seasonal_analysis", lambda: seasonal.ensure(target))
             self.last_seasonal_scan_at = time.monotonic()
-        backfill = self.app.extensions.get("inktime_analysis_backfill_service")
-        if backfill is not None:
-            self._safe_step("model_coverage_monthly_audit", lambda: backfill.enqueue_audit(now))
-            self._safe_step("missing_analysis_backfill", backfill.ensure)
         schedule_repository = self.app.extensions["inktime_schedule_repository"]
         job_repository = self.app.extensions["inktime_job_repository"]
         for task in schedule_repository.due(now):
@@ -255,6 +251,12 @@ class SchedulerRunner:
             "offline_prefetch",
             lambda: self._prepare_due_offline_devices(datetime.now(timezone.utc)),
         )
+        # Existing scheduled work and frame preparation get their first start
+        # attempt before the low-priority coverage audit/backfill is enqueued.
+        backfill = self.app.extensions.get("inktime_analysis_backfill_service")
+        if backfill is not None:
+            self._safe_step("model_coverage_monthly_audit", lambda: backfill.enqueue_audit(now))
+            self._safe_step("missing_analysis_backfill", backfill.ensure)
         if monotonic_now - self.last_release_reconcile_at >= RELEASE_RECONCILE_INTERVAL_SECONDS:
             coordinator = self.app.extensions.get("inktime_release_coordinator")
             if coordinator is not None:
