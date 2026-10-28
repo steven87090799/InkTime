@@ -1,13 +1,13 @@
 # InkTime 現行版本與功能基線
 
-更新日期：2026-10-23；基底為 `origin/main=799e5bb`，整合 NAS 記憶體優化、D 色彩／雙圖版面與 Python 3.12 依賴更新；保留 v6 顯示安全、同期分析、顯示歷史與分析失敗通知。獨立的 [GPS／地標原型](../experiments/GPS_LOCATION_20261022.md) 仍需手動查詢／匯入，不自動呼叫外部服務。原始碼、Hosted CI、部署及實體相框驗收是不同狀態；部署版本請從「診斷」核對 Git revision，實體裝置則核對回報的韌體版本。
+更新日期：2026-10-28；此分支接續 PR #182 的 `71b3a2d`，新增預設關閉的一鍵免費補齊、獨立 API Key 與依照片內容保存的模型資訊；保留 v6 顯示安全、同期分析、顯示歷史與分析失敗通知。獨立的 [GPS／地標原型](../experiments/GPS_LOCATION_20261022.md) 仍需手動查詢／匯入。原始碼、Hosted CI、部署及實體相框驗收是不同狀態；部署版本請從「診斷」核對 Git revision，實體裝置則核對回報的韌體版本。
 
 ## 版本不是同一個數字
 
 | 項目 | 原始碼值 | 權威來源 |
 |---|---|---|
 | Python 套件 | `2.0.0.dev0`，部署／CI 支援 Python 3.12（`>=3.12,<3.13`） | [`inktime/_version.py`](../../inktime/_version.py)、[`pyproject.toml`](../../pyproject.toml) |
-| SQLite Migration | 連續 `1–75`；64–66 保護配送／渲染輸入並支援雙圖附說明，67 索引活動清理，68 永久保存照片內容版本與模型證據，69 加入 Batch 候選分頁索引與逐項失敗重試授權，70 支援橫單直雙與拍攝日期的自動版型，71 新增獨立地點證據與精確 GPS 快取，72 保存顯示／選定次數與完整選片快照，73 加入分析失敗持久通知，74 保存同期分析任務、去重與重跑確認，75 僅將未經管理員另選的 C 預設更新為 D；保留歷史／外鍵 | [`migrations.py`](../../inktime/app/db/migrations.py) |
+| SQLite Migration | 連續 `1–76`；64–66 保護配送／渲染輸入並支援雙圖附說明，67 索引活動清理，68 永久保存照片內容版本與模型證據，69 加入 Batch 候選分頁索引與逐項失敗重試授權，70 支援橫單直雙與拍攝日期的自動版型，71 新增獨立地點證據與精確 GPS 快取，72 保存顯示／選定次數與完整選片快照，73 加入分析失敗持久通知，74 保存同期分析任務、去重與重跑確認，75 更新未另選的色彩預設為 D，76 保存內容模型資訊、補齊專用 Provider 與佇列；保留歷史／外鍵 | [`migrations.py`](../../inktime/app/db/migrations.py) |
 | AI Analysis Schema | 嚴格 v6；保留 v4/v5 相容閱讀。正式發布要求 v6 安全分析，舊結果不自動重付費 | [`plan.py`](../../inktime/app/domain/analysis/plan.py)、[`schema.py`](../../inktime/app/domain/analysis/schema.py) |
 | ESP32 7C／PhotoPainter 韌體 | `2.8.9`（本分支；未刷機） | [`ink-display-7C-photo.ino`](../../esp32/ink-display-7C-photo/ink-display-7C-photo.ino) |
 | ESP32 Config Store payload | v5，讀取 v1–v5；舊容量 12、新 payload 24 slots read compatibility | [`device_config_store_core.h`](../../esp32/ink-display-7C-photo/device_config_store_core.h) |
@@ -20,7 +20,9 @@ Config Store v5 是裝置本機儲存格式，不是所有 HTTP Manifest 的版�
 ## 執行與分析
 
 - 三程序為 Web（`server:app`）、Worker（`inktime.app.workers.runner`）、Scheduler（`inktime.app.workers.scheduler`），共用 `/data` 與唯讀 `/photos`。
-- 新安裝 `analysis.execution_mode=local_only`。只有設定 Provider 不會開啟 AI；一般 AI 工作需要 `automatic_ai`，單張手動 AI 可使用 `local_with_manual_ai`。`disabled` 拒絕新分析。正式相框發布要求 v6 視覺安全分析，純本機分析不產生可發布照片。
+- 新安裝 `analysis.execution_mode=seasonal_ai`，依同期日期分批準備；需要設定可用 Provider 才能呼叫模型。一般完整自動 AI 可選 `automatic_ai`，僅本機模式為 `local_only`，單張手動 AI 可使用 `local_with_manual_ai`。`disabled` 拒絕新分析。正式相框發布要求 v6 視覺安全分析，純本機分析不產生可發布照片。
+- `/analysis/missing` 提供「補齊缺少項目」：預設關閉、並行 2、20 RPM、獨立加密 OpenRouter API Key 與免費專用模型；沒有每日掃圖張數上限。每次送出前檢查即時價格／圖片能力／官方免費額度，請求最高價格固定 US$0；額度不足保留佇列，模型改收費／下架／未知成本暫停。相同 SHA 與有效 v4/v5/v6 模型結果不因換模型、Key、提示詞或資料夾而重送，空白地標與模型排除也算完成。失敗可改用目前專用模型，只重試原失敗照片；結果不明項目須先對帳。
+- 補齊按拍攝日期由舊到新，每批最多為設定並行數且受 Worker 容量限制；每批重新檢查相框優先權。關閉後停止新領取，已送出請求安全完成，日常同期模式與顯示排程保留。每次掃描更新缺少數量與游標，每月另做模型資訊安全核對；完整一致性掃描預設每月，升級保留自訂週期及停用狀態。
 - 可選 `seasonal_ai` 歷年同期按需模式：以顯示日期前後 `analysis.seasonal_window_days` 天（預設 5）搜尋各年照片，逐張補齊缺少的模型資料，再以既有資料排名。日期以閏年日曆循環計算，支援跨年及 2 月 29 日；非當期新照片等到有顯示需求才處理。服務重啟、日期重疊或模型升級均不自動重送已處理內容。詳見[同期分析](../analysis/SEASONAL_ANALYSIS_ZH_TW.md)。
 - 全年逐日運作時以分頁載入候選／進度，每次最多建立 500 張新分析工作；模型已完成、失敗或結果不明的內容不自動重送，窗口內未選中的照片仍保留。首次窗口補齊後，隔天正常僅增加新進窗口的一天；遲到的新照片或未完成積欠工作另補齊。
 - 同期選片先避免重複（含相同內容副本），再以歷年同日優先，依日期距離向前、向後找；預設 60 分日期優先門檻可在「渲染設定」調整，低分照片只作同一使用次數的末段候補，不改模型原分數。明確截圖在送模型、選片與正式下載前皆阻擋。照片列表／單張頁可查看分數，顯示歷史保存當次候選及實際發布來源。
