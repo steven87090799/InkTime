@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timezone
+from pathlib import Path
 from typing import Literal, TypedDict
 
 from flask import Blueprint, abort, current_app, g, render_template, request, send_file
@@ -20,6 +21,7 @@ from inktime.app.repositories.photo_analysis_retention import PhotoAnalysisReten
 from inktime.app.core.paths import safe_join
 from inktime.app.web.access import administrator_required, login_required
 from inktime.app.workers.scanner import SCAN_MODES
+from inktime.app.services.photo_scan_overview import photo_scan_overview
 
 
 bp = Blueprint("operations", __name__)
@@ -475,6 +477,13 @@ def maintenance_page():
     return render_template(
         "maintenance.html",
         photo_dir=current_app.config["INKTIME_PHOTO_DIR"],
+        scan=photo_scan_overview(
+            photos=current_app.extensions["inktime_photo_repository"],
+            jobs=current_app.extensions["inktime_job_repository"],
+            schedules=current_app.extensions["inktime_schedule_repository"],
+            photo_dir=current_app.config["INKTIME_PHOTO_DIR"],
+            timezone=str(current_app.extensions["inktime_settings_repository"].get("general.timezone")),
+        ),
     )
 
 
@@ -658,6 +667,11 @@ def enqueue_scan():
     root_path = str(payload.get("root_path", "")).strip()
     if not root_path:
         abort(400, description="SCAN-001 請輸入照片資料夾路徑")
+    root = Path(root_path).resolve()
+    photo_root = Path(current_app.config["INKTIME_PHOTO_DIR"]).resolve()
+    if not root.is_relative_to(photo_root):
+        abort(400, description="SCAN-003 掃描路徑必須位於已設定的照片掛載目錄內")
+    root_path = str(root)
     mode = str(payload.get("mode", "incremental"))
     if mode not in SCAN_MODES:
         abort(400, description="SCAN-003 不支援的掃描模式")

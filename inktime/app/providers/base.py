@@ -22,6 +22,12 @@ def request_definitely_not_sent(error: Exception) -> bool:
 MAX_BATCH_RESULT_BYTES = 256 * 1024 * 1024
 
 
+def provider_process_timeout(provider) -> float:
+    """Allow connection setup and child startup beyond the HTTP read timeout."""
+    timeout = float(getattr(provider, "timeout", 120))
+    return timeout + min(10.0, timeout) + 5.0
+
+
 @dataclass(frozen=True)
 class Usage:
     input_tokens: int = 0

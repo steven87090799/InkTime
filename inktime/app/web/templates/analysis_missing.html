@@ -1,0 +1,88 @@
+{% extends "base.html" %}
+{% block title %}補齊模型資訊 · InkTime{% endblock %}
+{% block content %}
+<div class="page-head"><div><h1>補齊模型資訊</h1><p>按拍攝日期由舊到新，只處理缺少有效模型資訊的照片。</p></div><a href="/analysis/seasonal">歷年同期分析</a></div>
+{% set labels = {'completed':'已完成模型資訊','missing':'尚未處理','queued':'排隊中','running':'處理中','failed':'失敗','unknown':'回應／成本待確認','excluded':'本機排除／禁止上傳','preprocessing':'等待本機預處理'} %}
+<section class="panel">
+  <h2>照片庫進度</h2>
+  <p class="muted">統計啟用照片庫內的現存照片；完全相同內容的副本會共用模型資訊。</p>
+  <p>照片庫總數 <strong id="total">{{ state.total }}</strong> · 完成 <strong id="percent">{{ state.percent }}</strong>%</p>
+  <progress id="coverage-progress" max="100" value="{{ state.percent }}" aria-label="模型資訊完成比例"></progress>
+  <div class="metrics">
+    {% for key,label in labels.items() %}<article><a href="?status={{ key }}"><span>{{ label }}</span><strong id="count-{{ key }}">{{ state[key] }}</strong></a></article>{% endfor %}
+  </div>
+  <p id="speed">{% if state.photos_per_minute %}今天約 {{ state.photos_per_minute }} 張／分鐘；待處理部分約需 {{ state.eta_minutes }} 分鐘（額度、暫停與排程優先權會影響時間）。{% else %}累積實際補齊結果後顯示處理速度與粗略剩餘時間。{% endif %}</p>
+  <p class="muted">拍攝日期不明的照片按加入日期排序。地標留空及模型判定排除都算有效完成；不因更換模型、Key 或提示詞重送。待確認項目請查看 <a href="/paid-operations">原始請求</a>，失敗項目請從原工作只重試失敗照片。</p>
+</section>
+<section class="panel">
+  <h2>一鍵補齊</h2>
+  <p id="backfill-state">{% if state.control.pause_reason %}已自動暫停：{{ state.control.pause_reason }}{% elif state.control.enabled %}補齊已開啟；相框及日常工作優先。{% else %}補齊已關閉；維持原本歷年同期前後五天模式。{% endif %}</p>
+  <button type="button" id="enable-backfill" class="primary">{% if state.control.pause_reason %}重新檢查並繼續補齊{% else %}補齊缺少項目{% endif %}</button>
+  <button type="button" id="disable-backfill" class="secondary">關閉補齊</button>
+  <p class="muted">每次送出前檢查免費價格與當日剩餘額度；請求的最高價格固定為 US$0。額度用完保留佇列，下個 UTC 日再檢查；模型下架、改收費或成本待確認會自動暫停。沒有每日掃圖張數上限。</p>
+  <p class="muted">關閉後停止領取新項目，已送出的請求會安全完成。相框排程與日常模型設定保持原值。</p>
+  <div id="backfill-message" role="status" aria-live="polite"></div>
+</section>
+<section class="panel">
+  <h2>補齊專用模型設定</h2>
+  <p>使用獨立 API Key；留空可保留已儲存的 Key。更改前請先關閉補齊，並等待處理中項目完成。</p>
+  <form id="backfill-profile" class="form-grid">
+    <label>OpenRouter 模型 ID<input name="model" required maxlength="200" value="{{ state.profile.model }}" placeholder="provider/model:free"></label>
+    <label>專用 API Key<input name="api_key" type="password" autocomplete="new-password" maxlength="2048" placeholder="{% if state.profile.api_key_configured %}已儲存；留空保留{% else %}尚未設定{% endif %}"></label>
+    <label>並行數<input name="concurrency" type="number" min="1" max="8" required value="{{ state.profile.concurrency }}"></label>
+    <label>每分鐘請求數 RPM<input name="rpm" type="number" min="1" max="20" required value="{{ state.profile.rpm }}"></label>
+    <p class="muted">實際並行數也受 Worker 容量限制。專用 Key 若屬於同一 OpenRouter 帳號，免費額度可能與日常 Key 共用。</p>
+    <button class="primary" type="submit">儲存專用設定</button>
+  </form>
+</section>
+<section class="panel">
+  <h2>照片與工作</h2>
+  <form method="get"><label>狀態<select name="status"><option value="">全部</option>{% for key,label in labels.items() %}<option value="{{ key }}" {% if state.category == key %}selected{% endif %}>{{ label }}</option>{% endfor %}</select></label><button type="submit" class="secondary">篩選</button></form>
+  <div class="table-wrap"><table><thead><tr><th>照片</th><th>拍攝日期</th><th>狀態</th></tr></thead><tbody>
+  {% for item in state['items'] %}<tr><td><a href="/photos/{{ item.id }}">{{ item.relative_path }}</a></td><td>{{ item.captured_at or '日期不明' }}</td><td>{{ labels[item.coverage_status] }}{% if item.last_job_id %} · <a href="/jobs/{{ item.last_job_id }}">原工作與錯誤原因</a>{% endif %}</td></tr>{% else %}<tr><td colspan="3">沒有符合條件的照片</td></tr>{% endfor %}
+  </tbody></table></div>
+  <div class="actions">{% if state.page > 1 %}<a href="?status={{ state.category }}&page={{ state.page - 1 }}">上一頁</a>{% endif %}{% if state['items']|length == 50 %}<a href="?status={{ state.category }}&page={{ state.page + 1 }}">下一頁</a>{% endif %}<button type="button" class="secondary" id="refresh-list">更新列表</button></div>
+  {% for job in state.active_jobs %}<p><a href="/jobs/{{ job.id }}">補齊工作 {{ job.id[:8] }}</a> · {{ job.status }} · 完成 {{ job.completed_items }}／{{ job.total_items }} · 失敗 {{ job.failed_items }}</p>{% endfor %}
+  {% for job in state.failed_jobs %}<p><a href="/jobs/{{ job.id }}">補齊工作 {{ job.id[:8] }}</a> · 成功 {{ job.completed_items }} · 失敗 {{ job.failed_items }} <button type="button" data-retry-backfill="{{ job.id }}" class="secondary">改用目前專用模型，只重試失敗照片</button></p>{% endfor %}
+  <p class="muted">上次照片庫掃描：{{ state.last_scan_at|human_datetime }} · 上次資訊核對：{{ state.control.last_reconciled_at|human_datetime }} · 每月完整安全核對：{{ state.control.last_monthly_audit or '尚未執行' }}</p>
+</section>
+{% endblock %}
+{% block scripts %}
+<script nonce="{{ csp_nonce }}">
+(() => {
+  const message = document.getElementById('backfill-message');
+  async function change(button, path, payload) {
+    return window.inktimeRunAction({button, status: message}, async () => {
+      const response = await window.inktimeFetch(path, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)});
+      const data = await response.json();
+      if (!response.ok) { window.inktimeSetStatus(message, data.message || '設定未儲存，請稍後再試', 'error'); return; }
+      location.reload();
+    });
+  }
+  document.getElementById('enable-backfill').addEventListener('click', event => change(event.currentTarget, '/api/v1/analysis/missing/toggle', {enabled:true}));
+  document.getElementById('disable-backfill').addEventListener('click', event => change(event.currentTarget, '/api/v1/analysis/missing/toggle', {enabled:false}));
+  document.getElementById('backfill-profile').addEventListener('submit', event => {
+    event.preventDefault();
+    const form = event.currentTarget;
+    change(form.querySelector('button'), '/api/v1/analysis/missing/profile', window.inktimeFormJson(form, {concurrency:'integer', rpm:'integer'}));
+  });
+  document.getElementById('refresh-list').addEventListener('click', () => location.reload());
+  document.querySelectorAll('[data-retry-backfill]').forEach(button => button.addEventListener('click', () => change(button, '/api/v1/analysis/missing/jobs/' + button.dataset.retryBackfill + '/retry-failed', {})));
+  async function refresh() {
+    try {
+      const response = await window.inktimeFetch('/api/v1/analysis/missing' + location.search);
+      if (!response.ok) return;
+      const data = await response.json();
+      for (const key of ['completed','missing','queued','running','failed','unknown','excluded','preprocessing']) document.getElementById('count-' + key).textContent = data[key];
+      document.getElementById('total').textContent = data.total;
+      document.getElementById('percent').textContent = data.percent;
+      document.getElementById('coverage-progress').value = data.percent;
+      document.getElementById('backfill-state').textContent = data.control.pause_reason ? '已自動暫停：' + data.control.pause_reason : data.control.enabled ? '補齊已開啟；相框及日常工作優先。' : '補齊已關閉；維持原本歷年同期前後五天模式。';
+      if (data.photos_per_minute) document.getElementById('speed').textContent = `今天約 ${data.photos_per_minute} 張／分鐘；待處理部分約需 ${data.eta_minutes} 分鐘（僅供參考）。`;
+    } catch (_) { /* A status read never retries a model request. */ }
+    finally { setTimeout(refresh, 10000); }
+  }
+  setTimeout(refresh, 10000);
+})();
+</script>
+{% endblock %}

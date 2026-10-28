@@ -46,11 +46,15 @@ class BillableOperationRepository:
         now = datetime.now(timezone.utc).isoformat()
         with self.database.transaction() as connection:
             prior = connection.execute(
-                "SELECT content_sha256 FROM billable_operations WHERE request_fingerprint=? LIMIT 1",
+                "SELECT content_sha256,request_signature FROM billable_operations WHERE request_fingerprint=? "
+                "ORDER BY created_at DESC LIMIT 1",
                 (request_fingerprint,),
             ).fetchone()
             if prior and str(prior["content_sha256"]) != content_sha256:
                 raise ValueError("IDEMPOTENCY_CONFLICT")
+            if prior and (context or {}).get("request_signature"):
+                if prior["request_signature"] != (context or {}).get("request_signature"):
+                    raise ValueError("IDEMPOTENCY_CONFLICT")
             unknown = connection.execute(
                 "SELECT id FROM billable_operations WHERE content_sha256=? AND state='started' LIMIT 1",
                 (content_sha256,),
@@ -68,6 +72,14 @@ class BillableOperationRepository:
                 if payload.get("call_trace"):
                     payload["call_trace"] = ProviderCallTrace(**payload["call_trace"])
                 return str(saved["id"]), ProviderResponse(**payload)
+            backfill = connection.execute(
+                "SELECT 1 FROM jobs WHERE id=? AND json_extract(settings_json,'$.missing_analysis_backfill')=1",
+                ((context or {}).get("job_id"),),
+            ).fetchone()
+            if backfill and connection.execute(
+                "SELECT 1 FROM model_analysis_results WHERE content_sha256=?", (content_sha256,),
+            ).fetchone():
+                raise SeasonalAlreadyProcessedError("相同照片內容已有完整模型資訊，補齊工作沿用原結果")
             # Recheck at the last durable boundary, not only when candidates
             # were selected. An older job/provider can finish in between.
             seasonal = connection.execute(
@@ -84,9 +96,9 @@ class BillableOperationRepository:
             assert_no_batch_content_owner(connection, content_sha256)
             operation_id = str(uuid4())
             connection.execute(
-                "INSERT INTO billable_operations(id,content_sha256,request_fingerprint,state,created_at,updated_at,resolution_note) "
-                "VALUES (?,?,?,'started',?,?,?)", (operation_id, content_sha256, request_fingerprint, now, now,
-                                                      json.dumps(context, ensure_ascii=False) if context else None),
+                "INSERT INTO billable_operations(id,content_sha256,request_fingerprint,state,created_at,updated_at,resolution_note,request_signature) "
+                "VALUES (?,?,?,'started',?,?,?,?)", (operation_id, content_sha256, request_fingerprint, now, now,
+                    json.dumps(context, ensure_ascii=False) if context else None, (context or {}).get("request_signature")),
             )
             return operation_id, None
 

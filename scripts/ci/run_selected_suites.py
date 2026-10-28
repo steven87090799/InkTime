@@ -55,8 +55,10 @@ RUNNER_SUITE_TEST_PATHS: dict[str, tuple[str, ...]] = {
     "web_ui_owner": (
         "tests/integration/test_offline_download_display.py",
         "tests/integration/test_management_ui.py",
+        "tests/integration/test_photo_scan_ui.py",
     ),
     "web_api_owner": (
+        "tests/integration/test_analysis_backfill.py",
         "tests/integration/test_photo_display_history.py",
         "tests/integration/test_analysis_failure_notifications.py",
         "tests/integration/test_seasonal_analysis.py",
@@ -68,12 +70,14 @@ RUNNER_SUITE_TEST_PATHS: dict[str, tuple[str, ...]] = {
         "tests/integration/test_deployment_modes.py",
         "tests/integration/test_photopainter_stock_api.py",
         "tests/integration/test_review_workbench.py",
+        "tests/integration/test_photo_scan_ui.py",
     ),
     "auth_security_owner": (
         "tests/security",
         "tests/integration/test_deployment_modes.py",
     ),
     "runtime_scheduler_owner": (
+        "tests/integration/test_analysis_backfill.py",
         "tests/integration/test_seasonal_analysis.py",
         "tests/integration/test_auto_publish_pool_regression.py",
         "tests/unit/test_runtime_concurrency.py",
@@ -98,6 +102,7 @@ RUNNER_SUITE_TEST_PATHS: dict[str, tuple[str, ...]] = {
         "tests/integration/test_v6_display_safety.py",
     ),
     "persistence_owner": (
+        "tests/integration/test_analysis_backfill.py",
         "tests/integration/test_automatic_photo_locations.py",
         "tests/unit/test_offline_districts.py",
         "tests/integration/test_seasonal_analysis.py",
@@ -184,6 +189,7 @@ RUNNER_SUITE_TEST_PATHS: dict[str, tuple[str, ...]] = {
         "tests/integration/test_budget_calendar.py",
     ),
     "provider_analysis_owner": (
+        "tests/integration/test_analysis_backfill.py",
         "tests/integration/test_automatic_photo_locations.py",
         "tests/unit/test_offline_districts.py",
         "tests/unit/test_batch_multipart.py",

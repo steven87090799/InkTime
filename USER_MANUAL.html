@@ -1240,7 +1240,7 @@
     <main class="main-content">
         <article class="markdown-body" id="content">
             <h1 id="inktime-墨水屏電子相框系統-終極百科全書級操作手冊與開發者指南" class="doc-h1">InkTime 墨水屏電子相框系統 終極百科全書級操作手冊與開發者指南</h1>
-<p class="doc-p"><a class="doc-link" href="docs/AI_NAVIGATION.md">AI 修改導航</a> · <a class="doc-link" href="docs/AI_CONTEXT_INDEX.json">機器可讀任務索引</a> · <a class="doc-link" href="AGENTS.md">AGENTS.md</a>。<strong>選片與通知：</strong>新增顯示成功／系統選定次數、優先未使用照片、完整候選歷史頁，以及模型失敗的持久未讀警示與既有 Webhook 通知。<strong>2026-10-23 本分支文件更新：</strong>功能基準為目前 checkout 原始碼，Migration 75、嚴格 AI Schema v6、ESP32 2.8.9（HTTP JSON 接收修復；尚未刷機），新增安裝預設 <code>local_only</code>。本分支加入需手動啟用的<a href="docs/experiments/GPS_LOCATION_20261022.md">GPS／地標原型與模型成本研究</a>，不自動呼叫外部服務。版本與驗證範圍見<a class="doc-link" href="docs/reference/CURRENT_STATE_ZH_TW.md">現行基線</a>；歷史 CI 與實板量測保留原日期。</p>
+<p class="doc-p"><a class="doc-link" href="docs/AI_NAVIGATION.md">AI 修改導航</a> · <a class="doc-link" href="docs/AI_CONTEXT_INDEX.json">機器可讀任務索引</a> · <a class="doc-link" href="AGENTS.md">AGENTS.md</a>。<strong>選片與通知：</strong>保存顯示成功／系統選定次數、完整候選歷史及模型失敗通知。<strong>2026-10-28 本分支文件更新：</strong>功能基準為目前 checkout，Migration 77、嚴格 AI Schema v6、ESP32 2.8.10（尚未刷機），新安裝分析模式預設 <code>seasonal_ai</code>。新增 <code>/analysis/missing</code> 一鍵免費補齊：預設關閉、專用 API Key／模型、並行 2、20 RPM，沒有每日掃圖張數上限；相同內容與有效模型資訊會沿用，空白地標及模型排除也算完成。模型改收費、下架或成本不明時暫停；失敗項目可改用目前專用模型單獨補救。每次掃描更新缺少數量，每月進行完整安全核對。獨立的<a href="docs/experiments/GPS_LOCATION_20261022.md">GPS／地標原型與成本研究</a>仍需手動啟用。版本與驗證範圍見<a class="doc-link" href="docs/reference/CURRENT_STATE_ZH_TW.md">現行基線</a>；歷史 CI 與實板量測保留原日期。</p>
 
 
 <hr class="doc-divider">
@@ -1965,7 +1965,7 @@ INKTIME_GUNICORN_LOG_LEVEL=warning
 <tr><td>budget.photo_max</td><td>成本設定</td><td>0.25</td><td>0 ~ 1000</td><td>單張照片成本上限</td><td>過低可能使高品質分析無法執行</td></tr>
 <tr><td>budget.unknown_request_reserve</td><td>成本設定</td><td>0.25</td><td>0.01 ~ 100</td><td>每筆尚未完成成本定價的請求預留金額（美元）</td><td>只對有可計費證據的 unknown 請求計入；同照片或同工作仍會阻擋重試</td></tr>
 <tr><td>budget.max_tokens</td><td>成本設定</td><td>8000</td><td>256 ~ 1000000</td><td>單次請求最大 Token 估算上限</td><td>需與 Provider 模型能力相容</td></tr>
-<tr><td>budget.full_analysis_max_tokens</td><td>成本設定</td><td>1200</td><td>256 ~ 1200</td><td>單次完整 Vision 分析的硬上限</td><td>過高會增加成本；實際值仍受 budget.max_tokens 夾制</td></tr>
+<tr><td>budget.full_analysis_max_tokens</td><td>成本設定</td><td>512</td><td>256 ~ 1200</td><td>完整 Vision 回應 Token 上限；預設 512，截斷不自動重送</td><td>過高會增加成本；實際值仍受 budget.max_tokens 夾制</td></tr>
 <tr><td>budget.caption_variants_max_tokens</td><td>成本設定</td><td>1200</td><td>256 ~ 1200</td><td>現行 Schema 相框短句輸出上限</td><td>固定只產生一個 side_caption，實際值仍受 budget.max_tokens 夾制</td></tr>
 <tr><td>budget.repair_max_tokens</td><td>成本設定</td><td>1200</td><td>256 ~ 1200</td><td>文字 JSON 修復請求的硬上限</td><td>修復不可重新上傳圖片；實際值仍受 budget.max_tokens 夾制</td></tr>
 <tr><td>render.memory_threshold</td><td>渲染設定</td><td>70</td><td>0 ~ 100</td><td>歷史今日選片最低回憶分數</td><td>過高可能沒有候選照片</td></tr>

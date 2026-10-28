@@ -67,7 +67,9 @@ class ProviderRepository:
             item["api_key"] = self.secrets.get(row["api_key_secret"]) if row["api_key_secret"] else ""
         return item
 
-    def save(self, payload: dict, user_id: str) -> str:
+    def save(self, payload: dict, user_id: str, *, usage_scope: str | None = None) -> str:
+        if usage_scope not in {None, "normal", "backfill"}:
+            raise ValueError("Provider 使用範圍不合法")
         provider_id = str(payload.get("id") or uuid4())
         secret_key = f"provider.{provider_id}.api_key"
         now = datetime.now(timezone.utc).isoformat()
@@ -151,6 +153,8 @@ class ProviderRepository:
                     "UPDATE providers SET analysis_revision=?,analysis_revision_semantics=? WHERE id=?",
                     (revision, provider_revision(current, semantic=True) if revision else None, provider_id),
                 )
+            if usage_scope is not None:
+                connection.execute("UPDATE providers SET usage_scope=? WHERE id=?", (usage_scope, provider_id))
         return provider_id
 
     @staticmethod
@@ -275,7 +279,7 @@ class ProviderRepository:
             rows = connection.execute(
                 f"""
                 SELECT id,input_tokens,output_tokens,cached_tokens,reasoning_tokens,cache_write_tokens,
-                       processing_mode
+                       processing_mode,job_id
                 FROM api_usage
                 WHERE provider_id=? AND model=? AND cost_source='unknown' AND usage_complete=1 AND {evidence}
                 ORDER BY id
@@ -283,6 +287,7 @@ class ProviderRepository:
                 (provider_key, model_key),
             ).fetchall()
             updates = []
+            job_costs: dict[str, float] = {}
             for row in rows:
                 if pricing is None:
                     continue
@@ -299,10 +304,17 @@ class ProviderRepository:
                 )
                 if estimated is not None:
                     updates.append((float(estimated), int(row["id"])))
+                    if row["job_id"]:
+                        job_id = str(row["job_id"])
+                        job_costs[job_id] = job_costs.get(job_id, 0.0) + float(estimated)
             if updates:
                 connection.executemany(
                     "UPDATE api_usage SET estimated_cost=?,actual_cost=NULL,cost_source='estimated' WHERE id=?",
                     updates,
+                )
+                connection.executemany(
+                    "UPDATE jobs SET spent=spent+? WHERE id=?",
+                    [(cost, job_id) for job_id, cost in job_costs.items()],
                 )
                 reconciled = len(updates)
             remaining = connection.execute(

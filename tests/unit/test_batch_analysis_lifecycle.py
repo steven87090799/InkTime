@@ -957,6 +957,33 @@ def test_fake_batch_imports_unordered_results_once(app, tmp_path):
     assert usage_count == len(photo_ids)
 
 
+def test_import_failure_cleans_staging_but_preserves_receipt_and_incremental_cost(app, tmp_path, monkeypatch):
+    _prepare_photos(app, tmp_path, count=1)
+    service = _wire_fake(app, FakeBatchProvider())
+    batch_id = service.submit(scope="sample", sample_count=1, created_by="tester")["batch_ids"][0]
+    service.poll_due(limit=10)
+    import_success = service._import_success
+
+    def fail(*args, **kwargs):
+        raise RuntimeError("synthetic import crash")
+
+    monkeypatch.setattr(service, "_import_success", fail)
+    with pytest.raises(RuntimeError, match="synthetic import crash"):
+        service.import_batch(batch_id)
+    database = app.extensions["inktime_database"]
+    with database.session() as connection:
+        assert connection.execute("SELECT COUNT(*) FROM batch_result_staging WHERE batch_id=?", (batch_id,)).fetchone()[0] == 0
+        assert connection.execute("SELECT COUNT(*) FROM batch_result_raw WHERE batch_id=?", (batch_id,)).fetchone()[0] == 1
+        assert connection.execute("SELECT COUNT(*) FROM api_usage WHERE batch_id=?", (batch_id,)).fetchone()[0] == 1
+    monkeypatch.setattr(service, "_import_success", import_success)
+    service.import_batch(batch_id)
+    service.import_batch(batch_id)
+    with database.session() as connection:
+        receipt = connection.execute("SELECT job_id,COALESCE(actual_cost,estimated_cost) AS cost FROM api_usage WHERE batch_id=?", (batch_id,)).fetchall()
+        assert len(receipt) == 1
+        assert connection.execute("SELECT spent FROM jobs WHERE id=?", (receipt[0]["job_id"],)).fetchone()[0] == pytest.approx(receipt[0]["cost"])
+
+
 @pytest.mark.parametrize("landmark,expected_label", [
     ({"name": "臺北101", "confidence": 0.98}, "臺北101"),
     ({"name": "猜測建築", "confidence": 0.6}, ""),

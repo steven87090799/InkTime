@@ -46,7 +46,7 @@ from inktime.app.domain.photos.quality_policy import (
     local_candidate_score,
 )
 from inktime.app.providers.base import ProviderResponse, Usage, VisionAttemptState, VisionProvider, request_definitely_not_sent
-from inktime.app.providers.base import assert_complete_response
+from inktime.app.providers.base import assert_complete_response, provider_process_timeout
 from inktime.app.repositories.photos import PhotoRepository
 from inktime.app.repositories.settings import SettingsRepository
 from inktime.app.repositories.usage import UsageRepository
@@ -1180,7 +1180,7 @@ class PhotoAnalysisService:
                         response = self.process_boundary.call_provider(
                             specification,
                             "analyze",
-                            timeout_seconds=float(getattr(provider, "timeout", 120)),
+                            timeout_seconds=provider_process_timeout(provider),
                             kwargs=call,
                         )
                 else:

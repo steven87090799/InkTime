@@ -38,6 +38,7 @@ OPENROUTER_OPTION_KEYS = set(OPENROUTER_ROUTING_KEYS) | {
     "session_sticky",
     "allow_private_http",
     "daily_free_first",
+    "free_only",
 }
 GENERIC_OPTION_KEYS = {"allow_private_http"}
 
@@ -166,6 +167,7 @@ def normalize_options(kind: str, options: Any, *, base_url: str | None = None) -
             "allow_private_http",
             "enforce_distillable_text",
             "daily_free_first",
+            "free_only",
         }:
             if type(value) is not bool:
                 raise ValueError(f"PROVIDER-008 {key} 必須是 JSON Boolean")
@@ -212,6 +214,8 @@ def normalize_options(kind: str, options: Any, *, base_url: str | None = None) -
         # Keep routing on endpoints that can honor the requested structured
         # output contract unless an administrator explicitly opts out.
         result.setdefault("require_parameters", True)
+        if result.get("free_only"):
+            result["max_price"] = {"prompt": 0, "completion": 0, "request": 0, "image": 0}
     return result
 
 

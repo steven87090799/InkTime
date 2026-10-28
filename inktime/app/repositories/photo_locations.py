@@ -71,6 +71,13 @@ class PhotoLocationRepository:
                 "gps_key=excluded.gps_key,place_json=excluded.place_json,updated_at=excluded.updated_at",
                 (photo_id, content_sha256, gps_key, json.dumps(merged.as_dict(), ensure_ascii=False), now),
             )
+            if "landmark" in fields:
+                evidence = {key: merged.as_dict()[key] for key in self._LANDMARK_FIELDS}
+                connection.execute(
+                    "UPDATE model_analysis_results SET analysis_snapshot_json=json_set("
+                    "analysis_snapshot_json,'$.landmark_evidence',json(?)) WHERE content_sha256=?",
+                    (json.dumps(evidence, ensure_ascii=False), content_sha256),
+                )
         return merged
 
     def cached(self, latitude, longitude, *, provider: str, language: str) -> PhotoPlace | None:

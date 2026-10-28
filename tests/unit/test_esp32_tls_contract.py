@@ -100,12 +100,16 @@ def test_portal_normalizes_lan_origin_and_keeps_tls_ca_advanced_only():
         "家用 Wi-Fi",
         "InkTime 伺服器",
         "裝置狀態",
-        "儲存後，相框會自動連接 InkTime 並顯示配對碼。",
+        "更換伺服器後會重新配對，保留 Wi-Fi 與本機照片。",
+        "重新配對目前伺服器",
         "畫面旋轉 180°",
         "儲存並連線",
         "進階設定",
     ):
         assert label in page
+    # Repair is an explicit, unchecked portal action; opening the page alone
+    # must not request replacement credentials.
+    assert "type='checkbox' name='repair_pairing' value='1'>" in page
     assert "@media(max-width:420px)" in page
     assert "min-height:48px" in page
     assert "id='tls_fields'" in page

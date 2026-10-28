@@ -601,7 +601,7 @@ def import_settings():
 def providers_page():
     provider_repository = current_app.extensions["inktime_provider_repository"]
     provider_service = current_app.extensions["inktime_provider_service"]
-    providers = provider_repository.list()
+    providers = [row for row in provider_repository.list() if row.get("usage_scope", "normal") == "normal"]
     analysis_model = str(
         current_app.extensions["inktime_settings_repository"].get("model.analysis_model", "gpt-4o")
     ).strip()
@@ -632,6 +632,10 @@ def providers_page():
 @administrator_required
 def save_provider():
     payload = _payload("SET-003")
+    if payload.get("id"):
+        existing = current_app.extensions["inktime_provider_repository"].get(str(payload["id"]))
+        if existing and existing.get("usage_scope") == "backfill":
+            return {"message": "補齊專用設定請至「補齊模型資訊」頁修改"}, 409
     try:
         reject_unknown_fields(
             payload,

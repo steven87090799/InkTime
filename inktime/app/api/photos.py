@@ -41,6 +41,7 @@ from inktime.app.web.access import administrator_required, login_required
 from inktime.app.domain.photos.orientation import original_exif_orientation, resolve_effective_orientation
 from inktime.app.repositories.analysis_history import display_analysis_order_sql, historical_model_sql
 from inktime.app.services.usage_periods import usage_periods
+from inktime.app.services.photo_scan_overview import photo_scan_overview
 
 
 bp = Blueprint("photos", __name__)
@@ -55,6 +56,13 @@ def _repository():
 
 def _payload() -> dict:
     return json_object_payload(request, maximum_bytes=256 * 1024, error_prefix="IMG-004")
+
+
+def _batch_photo_ids(payload: dict) -> list[str]:
+    values = payload.get("photo_ids", [])
+    if not isinstance(values, list) or len(values) > 500 or any(not isinstance(value, str) for value in values):
+        abort(400, description="IMG-004 每次手動操作請提供最多 500 張照片；不會截斷或漏送，完整照片庫請使用補齊工作")
+    return list(dict.fromkeys(values))
 
 
 def _ai_job_error(exc: ValueError) -> dict:
@@ -100,7 +108,7 @@ def _queue_ai(
     ):
         raise ValueError("已達 AI 每日或每月照片上限；目前會保留本機選片結果")
     selected = (
-        list(dict.fromkeys(photo_ids))[:500]
+        list(dict.fromkeys(photo_ids))
         if force_ai or frozen_photo_ids
         else _repository().active_eligible_requested_ids(photo_ids, limit=daily_limit or len(photo_ids))
     )
@@ -288,6 +296,13 @@ def photos_page():
         previous_url=page_url(page - 1) if page > 1 else None,
         next_url=page_url(page + 1) if page < total_pages else None,
         filter_args=filter_args,
+        scan=photo_scan_overview(
+            photos=_repository(),
+            jobs=current_app.extensions["inktime_job_repository"],
+            schedules=current_app.extensions["inktime_schedule_repository"],
+            photo_dir=current_app.config["INKTIME_PHOTO_DIR"],
+            timezone=str(current_app.extensions["inktime_settings_repository"].get("general.timezone")),
+        ),
     )
 
 
@@ -351,7 +366,7 @@ def change_upload_privacy(photo_id: str):
 @administrator_required
 def change_exclusions_batch():
     payload = _payload()
-    photo_ids = [str(value) for value in payload.get("photo_ids", [])][:500]
+    photo_ids = _batch_photo_ids(payload)
     action = str(payload.get("action", ""))
     if not photo_ids or action not in {"restore", "exclude", "favorite", "candidate", "reanalyze"}:
         abort(400, description="IMG-004 批次操作不合法")
@@ -402,7 +417,7 @@ def queue_photo_ai(photo_id: str):
 @administrator_required
 def queue_exclusions_ai():
     payload = _payload()
-    photo_ids = [str(value) for value in payload.get("photo_ids", [])][:500]
+    photo_ids = _batch_photo_ids(payload)
     photo_ids = [
         photo_id
         for photo_id in photo_ids
@@ -640,6 +655,10 @@ def queue_ai_mode_run():
 @bp.get("/photos/<photo_id>")
 @login_required
 def photo_detail(photo_id: str):
+    history_page = request.args.get("history_page", 1, type=int)
+    if history_page is None or not 1 <= history_page <= 100_000:
+        abort(400, description="IMG-004 歷史頁碼不合法")
+    history_offset = (history_page - 1) * 100
     photo = _repository().get_with_path(photo_id)
     if photo is None:
         abort(404)
@@ -692,10 +711,12 @@ def photo_detail(photo_id: str):
             (photo_id,),
         ).fetchall()
         usage = connection.execute(
-            "SELECT * FROM api_usage WHERE photo_id=? ORDER BY started_at DESC", (photo_id,)
+            "SELECT * FROM api_usage WHERE photo_id=? ORDER BY started_at DESC,id DESC LIMIT 101 OFFSET ?",
+            (photo_id, history_offset),
         ).fetchall()
         errors = connection.execute(
-            "SELECT * FROM job_errors WHERE photo_id=? ORDER BY last_seen_at DESC", (photo_id,)
+            "SELECT * FROM job_errors WHERE photo_id=? ORDER BY last_seen_at DESC,id DESC LIMIT 101 OFFSET ?",
+            (photo_id, history_offset),
         ).fetchall()
         events = connection.execute(
             "SELECT * FROM photo_events WHERE photo_id=? ORDER BY created_at DESC LIMIT 100", (photo_id,)
@@ -818,8 +839,10 @@ def photo_detail(photo_id: str):
         photo=photo,
         analyses=analyses,
         analysis_total=analysis_total,
-        usage=usage,
-        errors=errors,
+        usage=usage[:100],
+        errors=errors[:100],
+        history_page=history_page,
+        history_has_more=len(usage) > 100 or len(errors) > 100,
         events=events,
         allowed_types=sorted(ALLOWED_TYPES),
         location_name=location_name,

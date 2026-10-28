@@ -19,6 +19,23 @@ from inktime.app.repositories.resilience import ResilienceRepository
 CURRENT_SCHEMA_VERSION = max(migration.version for migration in MIGRATIONS)
 
 
+@pytest.mark.parametrize("actor,expected", [(None, "512"), ("administrator", "1200")])
+def test_output_limit_upgrade_keeps_effective_default_and_admin_choice(tmp_path, monkeypatch, actor, expected):
+    monkeypatch.setattr(migrations_module, "MIGRATIONS", MIGRATIONS[:-1])
+    database = Database(tmp_path / "output-limit.db")
+    migrate(database)
+    with database.transaction() as connection:
+        connection.execute(
+            "INSERT OR REPLACE INTO settings(key,category,value_json,value_type,requires_restart,updated_at,updated_by) "
+            "VALUES ('budget.full_analysis_max_tokens','成本設定','1200','integer',0,'2026-10-28',?)", (actor,),
+        )
+    monkeypatch.setattr(migrations_module, "MIGRATIONS", MIGRATIONS)
+    assert migrate(database) == [77]
+    with database.session() as connection:
+        row = connection.execute("SELECT value_json,updated_by FROM settings WHERE key='budget.full_analysis_max_tokens'").fetchone()
+        assert tuple(row) == (expected, actor)
+
+
 @pytest.mark.parametrize("source", ["seasonal", "history"])
 def test_both_draft_schemas_upgrade_without_losing_records(tmp_path, monkeypatch, source):
     seasonal = next(migration for migration in MIGRATIONS if migration.version == 74)
@@ -39,7 +56,7 @@ def test_both_draft_schemas_upgrade_without_losing_records(tmp_path, monkeypatch
             )
     monkeypatch.setattr(migrations_module, "MIGRATIONS", MIGRATIONS)
     backups = tmp_path / "backups"
-    assert migrate(database, backups) == ([72, 73, 75] if source == "seasonal" else [74, 75])
+    assert migrate(database, backups) == ([72, 73, 75, 76, 77] if source == "seasonal" else [74, 75, 76, 77])
     assert any(backups.iterdir())
     assert migrate(database) == []
     with database.session() as connection:
@@ -89,7 +106,7 @@ def test_display_counter_upgrade_preserves_unconfirmed_history_and_webhook_state
         )
         connection.execute("DELETE FROM device_notifications WHERE id=100")
     monkeypatch.setattr(migrations_module, "MIGRATIONS", MIGRATIONS)
-    assert migrate(database) == [72, 73, 74, 75]
+    assert migrate(database) == [72, 73, 74, 75, 76, 77]
     with database.session() as connection:
         photo = connection.execute("SELECT * FROM photos WHERE id='p'").fetchone()
         assert photo["display_count"] == 1
@@ -122,7 +139,7 @@ def _run_capture_date_backfill(database_path: str, start, results) -> None:
 
 
 def test_fresh_database_is_migrated(tmp_path):
-    assert CURRENT_SCHEMA_VERSION == 75
+    assert CURRENT_SCHEMA_VERSION == 77
     database = Database(tmp_path / "inktime.db")
     assert migrate(database) == list(range(1, CURRENT_SCHEMA_VERSION + 1))
     assert database.integrity_check() == "ok"
@@ -2106,9 +2123,14 @@ def test_migration_58_recomposes_ai_scores_without_rewriting_evidence(monkeypatc
     with database.session() as connection:
         assert [{key: row[key] for key in photos_before[0]}
                 for row in connection.execute("SELECT * FROM photos ORDER BY id")] == photos_before
-        assert [dict(row) for row in connection.execute(
+        # Later migrations may add columns, but every pre-upgrade evidence
+        # field must retain its exact value, just as for the photos above.
+        assert [{key: row[key] for key in non_semantic_before[0]} for row in connection.execute(
             "SELECT * FROM photo_analysis WHERE score_kind<>'semantic' ORDER BY id"
         )] == non_semantic_before
+        assert all(row[0] is None for row in connection.execute(
+            "SELECT content_sha256 FROM photo_analysis WHERE score_kind<>'semantic'"
+        ))
         rows = {row["photo_id"]: dict(row) for row in connection.execute(
             "SELECT * FROM photo_analysis WHERE score_kind='semantic'"
         )}

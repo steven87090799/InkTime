@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from hashlib import sha256
 import json
+import logging
 import os
 from pathlib import Path
 import shutil
@@ -14,6 +15,7 @@ import zipfile
 from inktime import __version__
 from inktime.app.db import Database
 from inktime.app.db.migrations import MIGRATIONS, migrate
+from inktime.app.core.logging import log_event
 
 
 BACKUP_FORMAT_VERSION = 2
@@ -39,6 +41,9 @@ IMPORTANT_TABLES = (
     "display_history",
     "seasonal_analysis_tasks",
     "seasonal_rerun_confirmations",
+    "model_analysis_results",
+    "analysis_backfill_control",
+    "analysis_backfill_tasks",
     "photo_selection_runs",
     "photo_selection_candidates",
     "photo_selection_releases",
@@ -69,6 +74,9 @@ _COUNT_SQL = {
     "display_history": "SELECT COUNT(*) FROM display_history",
     "seasonal_analysis_tasks": "SELECT COUNT(*) FROM seasonal_analysis_tasks",
     "seasonal_rerun_confirmations": "SELECT COUNT(*) FROM seasonal_rerun_confirmations",
+    "model_analysis_results": "SELECT COUNT(*) FROM model_analysis_results",
+    "analysis_backfill_control": "SELECT COUNT(*) FROM analysis_backfill_control",
+    "analysis_backfill_tasks": "SELECT COUNT(*) FROM analysis_backfill_tasks",
     "photo_selection_runs": "SELECT COUNT(*) FROM photo_selection_runs",
     "photo_selection_candidates": "SELECT COUNT(*) FROM photo_selection_candidates",
     "photo_selection_releases": "SELECT COUNT(*) FROM photo_selection_releases",
@@ -563,6 +571,14 @@ class BackupService:
     def enforce_retention(self, keep: int) -> int:
         removed = 0
         for path in self.list()[max(1, keep) :]:
-            path.unlink()
-            removed += 1
+            try:
+                path.unlink(missing_ok=True)
+                removed += 1
+            except OSError as error:
+                log_event(
+                    logging.getLogger(__name__), logging.WARNING,
+                    "Backup retention could not remove an expired backup",
+                    event="backup_retention_delete_failed", error_code="BACKUP-001",
+                    failure_class=type(error).__name__, details={"filename": path.name},
+                )
         return removed

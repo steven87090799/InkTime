@@ -9,7 +9,7 @@ import time
 from typing import Any
 
 from inktime.app.core.logging import log_event, should_log_rate_limited
-from .base import ProviderResponse, Usage, VisionProvider
+from .base import ProviderResponse, Usage, VisionProvider, provider_process_timeout
 from .openai_compatible import ProviderHTTPError
 
 
@@ -43,7 +43,7 @@ class ProviderChannel:
     # falls back to the frozen/global analysis model for compatibility.
     model: str | None = None
     shared_quota: Any = None
-    request_token_reserve: int = 8512
+    request_token_reserve: int = 9200
     analysis_revision: str = ""
     daily_free_first: bool = False
     semaphore: threading.BoundedSemaphore = field(init=False)
@@ -152,6 +152,21 @@ class FailoverVisionProvider(VisionProvider):
                     and api_key == getattr(second.provider, "api_key", ""))
 
     def _daily_free_gate(self, channel: ProviderChannel) -> None:
+        if getattr(channel.provider, "options", {}).get("free_only"):
+            guard = getattr(channel.provider, "assert_free_model", None)
+            quota_reader = getattr(channel.provider, "free_daily_quota", None)
+            if not callable(guard) or not callable(quota_reader):
+                raise ProviderHTTPError("免費補齊 Provider 缺少價格或額度檢查", "BACKFILL-FREE-GUARD",
+                                        request_started=False, vision_started=False)
+            guard(str(channel.model or ""))
+            quota = quota_reader()
+            if quota["remaining"] == 0:
+                raise ProviderHTTPError(
+                    "當日免費額度已用完；照片保留佇列等待下一個 UTC 日",
+                    "VLM-005", retry_after=max(1.0, 86400 - time.time() % 86400),
+                    ambiguous=False, vision_started=False, request_started=False,
+                )
+            return
         if not channel.daily_free_first:
             return
         free = channel if self._free_model(channel) else next(
@@ -438,7 +453,7 @@ class FailoverVisionProvider(VisionProvider):
                     response = boundary.call_provider(
                         specification,
                         method,
-                        timeout_seconds=float(getattr(channel.provider, "timeout", 120)),
+                        timeout_seconds=provider_process_timeout(channel.provider),
                         kwargs=call_kwargs,
                     )
         except Exception as exc:
@@ -468,7 +483,7 @@ class FailoverVisionProvider(VisionProvider):
                     response = boundary.call_provider(
                         specification,
                         "analyze",
-                        timeout_seconds=float(getattr(channel.provider, "timeout", 120)),
+                        timeout_seconds=provider_process_timeout(channel.provider),
                         kwargs=call_kwargs,
                     )
             except Exception as exc:

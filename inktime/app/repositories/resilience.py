@@ -659,6 +659,9 @@ class ResilienceRepository:
         terminal_ack_retention: str | None = None,
     ) -> dict[str, Any]:
         item_id, now = str(uuid4()), utc_now()
+        idempotency_key = str(idempotency_key or "").strip() or None
+        if idempotency_key and len(idempotency_key) > 256:
+            raise ValueError("QUEUE-005 Idempotency-Key 過長")
         if delivery_mode not in {"online_queue", "offline_schedule"}:
             raise ValueError("QUEUE-005 delivery_mode 不合法")
         if delivery_mode == "online_queue" and offline_prefetch_allowed:
@@ -670,6 +673,22 @@ class ResilienceRepository:
         if delivery_mode == "online_queue" and offline_schedule_id is not None:
             raise ValueError("QUEUE-005 online Queue 不得綁定 offline_schedule_id")
         with self.database.transaction() as connection:
+            if idempotency_key:
+                prior = connection.execute(
+                    "SELECT * FROM device_content_queue_items WHERE device_id=? AND idempotency_key=?",
+                    (device_id, idempotency_key),
+                ).fetchone()
+                if prior:
+                    expected = {"release_id": release_id, "priority": max(1, min(int(priority), 1000)),
+                                "display_after": display_after, "expires_at": expires_at,
+                                "delivery_mode": delivery_mode, "offline_prefetch_allowed": int(offline_prefetch_allowed),
+                                "offline_slot": offline_slot, "ack_deadline": ack_deadline,
+                                "offline_schedule_id": offline_schedule_id, "terminal_ack_retention": terminal_ack_retention}
+                    if any(prior[key] != value for key, value in expected.items()) or (
+                        position is not None and int(prior["position"]) != position
+                    ):
+                        raise ValueError("IDEMPOTENCY_CONFLICT")
+                    return dict(prior)
             queue = connection.execute(
                 "SELECT depth FROM device_content_queues WHERE device_id=?", (device_id,)
             ).fetchone()

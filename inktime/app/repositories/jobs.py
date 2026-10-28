@@ -629,6 +629,7 @@ class JobRepository:
             "webhook",
             "analysis_batch_import",
             "analysis_batch_poll",
+            "analysis_coverage_audit",
         }:
             raise ValueError("不支援的維護工作")
         job_id = str(uuid4())
@@ -815,6 +816,19 @@ class JobRepository:
                 (user_id, limit),
             ).fetchall()
 
+    def latest_photo_scan(self, root_path: str) -> dict | None:
+        with self.database.session() as connection:
+            row = connection.execute(
+                """SELECT id,kind,status,total_items,completed_items,failed_items,created_at,
+                     (SELECT error_code FROM job_errors WHERE job_id=jobs.id
+                      ORDER BY id DESC LIMIT 1) AS error_code
+                   FROM jobs WHERE kind IN ('scan','virtual_display')
+                     AND CASE WHEN json_valid(settings_json) THEN json_extract(settings_json,'$.root_path') END=?
+                   ORDER BY rowid DESC LIMIT 1""",
+                (root_path,),
+            ).fetchone()
+        return dict(row) if row else None
+
     def iter_runnable(self, page_size: int = 100):
         """以 keyset 走訪所有可執行 Job，避免舊工作被最新 100 筆遮蔽。"""
         last: tuple[int, str, str] | None = None
@@ -875,6 +889,20 @@ class JobRepository:
                 """,
                 (job_id, limit, offset),
             ).fetchall()
+
+    def failed_photo_ids(self, job_id: str) -> List[str]:
+        """Return only failed photo-backed items in their original queue order."""
+
+        with self.database.session() as connection:
+            rows = connection.execute(
+                """
+                SELECT photo_id FROM job_items
+                WHERE job_id=? AND status='failed' AND photo_id IS NOT NULL
+                ORDER BY id
+                """,
+                (job_id,),
+            ).fetchall()
+        return [str(row["photo_id"]) for row in rows]
 
     def failure_codes(self, job_id: str, *, connection=None) -> List[str]:
         context = nullcontext(connection) if connection is not None else self.database.session()
@@ -1104,17 +1132,32 @@ class JobRepository:
         with self.database.session() as connection:
             connection.execute("BEGIN IMMEDIATE")
             try:
-                job = connection.execute("SELECT status FROM jobs WHERE id=?", (job_id,)).fetchone()
+                job = connection.execute("SELECT status,settings_json,priority FROM jobs WHERE id=?", (job_id,)).fetchone()
                 if job is None or job["status"] not in {"running", "retrying"}:
                     connection.execute("COMMIT")
                     return []
+                backfill = bool(json.loads(job["settings_json"]).get("missing_analysis_backfill"))
+                if backfill:
+                    control = connection.execute("SELECT enabled,pause_reason FROM analysis_backfill_control WHERE id=1").fetchone()
+                    urgent = connection.execute(
+                        "SELECT 1 FROM jobs j JOIN job_items i ON i.job_id=j.id "
+                        # A render may itself be waiting for these bytes; the
+                        # runner already executes ready renders before backfill.
+                        "WHERE j.id<>? AND j.priority<? AND j.kind<>'render' AND j.status IN ('running','retrying') "
+                        "AND i.status='pending' AND i.available_at<=? LIMIT 1", (job_id, job["priority"], now),
+                    ).fetchone()
+                    if not control["enabled"] or control["pause_reason"] or urgent:
+                        connection.execute("COMMIT")
+                        return []
                 rows = connection.execute(
                     """
                 SELECT * FROM job_items
                 WHERE job_id=? AND status='pending' AND available_at<=?
-                ORDER BY available_at ASC,id ASC LIMIT ?
+                ORDER BY available_at ASC,
+                  CASE WHEN ? THEN (SELECT t.id FROM analysis_backfill_tasks t
+                      WHERE t.job_id=job_items.job_id AND t.photo_id=job_items.photo_id) ELSE 0 END,id ASC LIMIT ?
                     """,
-                    (job_id, now, limit),
+                    (job_id, now, int(backfill), limit),
                 ).fetchall()
                 ids = [row["id"] for row in rows]
                 if ids:
@@ -1202,7 +1245,7 @@ class JobRepository:
                     )
                     if cursor.rowcount:
                         connection.execute(
-                            "UPDATE jobs SET completed_items=completed_items+1, spent=CASE WHEN (EXISTS(SELECT 1 FROM api_usage WHERE job_id=jobs.id) OR EXISTS(SELECT 1 FROM usage_cost_archive WHERE job_id=jobs.id)) THEN (SELECT COALESCE(SUM(COALESCE(actual_cost,estimated_cost)),0) FROM api_usage WHERE job_id=jobs.id AND cost_source<>'unknown')+(SELECT COALESCE(SUM(cost),0) FROM usage_cost_archive WHERE job_id=jobs.id) ELSE spent+? END, heartbeat_at=? WHERE id=?",
+                            "UPDATE jobs SET completed_items=completed_items+1, spent=CASE WHEN (EXISTS(SELECT 1 FROM api_usage WHERE job_id=jobs.id) OR EXISTS(SELECT 1 FROM usage_cost_archive WHERE job_id=jobs.id)) THEN spent ELSE spent+? END, heartbeat_at=? WHERE id=?",
                             (actual_cost, now, job_id),
                         )
                 connection.execute("COMMIT")
@@ -1237,7 +1280,7 @@ class JobRepository:
             if cursor.rowcount:
                 connection.execute(
                     """
-                    UPDATE jobs SET failed_items=failed_items+1,spent=CASE WHEN (EXISTS(SELECT 1 FROM api_usage WHERE job_id=jobs.id) OR EXISTS(SELECT 1 FROM usage_cost_archive WHERE job_id=jobs.id)) THEN (SELECT COALESCE(SUM(COALESCE(actual_cost,estimated_cost)),0) FROM api_usage WHERE job_id=jobs.id AND cost_source<>'unknown')+(SELECT COALESCE(SUM(cost),0) FROM usage_cost_archive WHERE job_id=jobs.id) ELSE spent+? END,heartbeat_at=?
+                    UPDATE jobs SET failed_items=failed_items+1,spent=CASE WHEN (EXISTS(SELECT 1 FROM api_usage WHERE job_id=jobs.id) OR EXISTS(SELECT 1 FROM usage_cost_archive WHERE job_id=jobs.id)) THEN spent ELSE spent+? END,heartbeat_at=?
                     WHERE id=?
                     """,
                     (actual_cost, now, job_id),
@@ -1611,7 +1654,7 @@ class JobRepository:
             )
             if cursor.rowcount:
                 connection.execute(
-                    "UPDATE jobs SET completed_items=completed_items+1,spent=CASE WHEN (EXISTS(SELECT 1 FROM api_usage WHERE job_id=jobs.id) OR EXISTS(SELECT 1 FROM usage_cost_archive WHERE job_id=jobs.id)) THEN (SELECT COALESCE(SUM(COALESCE(actual_cost,estimated_cost)),0) FROM api_usage WHERE job_id=jobs.id AND cost_source<>'unknown')+(SELECT COALESCE(SUM(cost),0) FROM usage_cost_archive WHERE job_id=jobs.id) ELSE spent+? END,heartbeat_at=? WHERE id=?",
+                    "UPDATE jobs SET completed_items=completed_items+1,spent=CASE WHEN (EXISTS(SELECT 1 FROM api_usage WHERE job_id=jobs.id) OR EXISTS(SELECT 1 FROM usage_cost_archive WHERE job_id=jobs.id)) THEN spent ELSE spent+? END,heartbeat_at=? WHERE id=?",
                     (actual_cost, now, job_id),
                 )
             return bool(cursor.rowcount)

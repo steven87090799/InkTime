@@ -126,7 +126,7 @@ def test_migration_75_promotes_only_untouched_default(monkeypatch, tmp_path, val
             (json.dumps(value), actor),
         )
     monkeypatch.setattr(migrations_module, "MIGRATIONS", all_migrations)
-    assert migrate(database) == [75]
+    assert migrate(database) == [migration.version for migration in all_migrations if migration.version >= 75]
     with database.session() as connection:
         row = connection.execute("SELECT value_json,updated_by FROM settings WHERE key='render.dither'").fetchone()
     assert json.loads(row["value_json"]) == expected
@@ -149,7 +149,7 @@ def test_draft_color_schema_upgrades_without_skipping_gps_tables(tmp_path, monke
     migrate(database)
     monkeypatch.setattr(migrations_module, "MIGRATIONS", full)
     backups = tmp_path / "backups"
-    assert migrate(database, backups) == [71, 72, 73, 74]
+    assert migrate(database, backups) == [migration.version for migration in full if migration.version >= 71 and migration.version != 75]
     assert any(backups.iterdir())
     assert migrate(database) == []
     with database.session() as connection:

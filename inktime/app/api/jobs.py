@@ -485,6 +485,8 @@ def _available_job_actions(job) -> list[str]:
         actions.append("cancel")
     if status in {"failed", "completed_with_errors"} and int(job["failed_items"] or 0) > 0 and not json.loads(job["settings_json"]).get("seasonal_analysis"):
         actions.append("retry-failed")
+        if str(job["kind"]) == "analysis" and normalize_analysis_strategy(job["strategy"]) != "local":
+            actions.append("retry-failed-current")
     return actions
 
 
@@ -722,6 +724,38 @@ def control_job(job_id: str, action: str):
     job = _job_or_404(job_id)
     if action == "retry-failed" and json.loads(job["settings_json"]).get("seasonal_analysis"):
         return {"message": "同期分析失敗項目請至同期分析頁面逐張確認重試", "detail_url": "/analysis/seasonal"}, 409
+    if action == "retry-failed-current":
+        payload = _payload()
+        if payload.get("accept_additional_cost") is not True:
+            return {
+                "error_code": "VLM-RECOMPUTE-CONFIRM",
+                "message": "改用目前模型會建立新的模型請求；必須確認可能再次計費。",
+            }, 400
+        if json.loads(job["settings_json"]).get("seasonal_analysis"):
+            return {"message": "同期分析失敗項目請至同期分析頁面逐張確認重試", "detail_url": "/analysis/seasonal"}, 409
+        try:
+            strategy = normalize_analysis_strategy(job["strategy"])
+            plan, _ = _analysis_plan(strategy)
+            retry_result = _service().retry_failed_with_current_plan(
+                job_id,
+                analysis_spec=plan,
+                created_by=str(g.user["id"]),
+            )
+            if retry_result["created"]:
+                _service().start(str(retry_result["id"]))
+            elif retry_result["status"] == "pending":
+                _service().start(str(retry_result["id"]))
+        except (InvalidJobTransition, AnalysisReservationConflict) as exc:
+            return {"error_code": exc.code, "message": str(exc)}, 409
+        except ValueError as exc:
+            return {"error_code": "VLM-001", "message": str(exc)}, 409
+        return {
+            "status": "ok",
+            "id": retry_result["id"],
+            "affected": retry_result["affected"],
+            "created": retry_result["created"],
+            "detail_url": f"/jobs/{retry_result['id']}",
+        }, 201 if retry_result["created"] else 200
     actions = {
         "start": _service().start,
         "pause": _service().pause,
@@ -733,14 +767,14 @@ def control_job(job_id: str, action: str):
     if function is None:
         abort(404)
     try:
-        result = function(job_id)
+        action_result = function(job_id)
         if action == "retry-failed":
-            if not isinstance(result, int) or result < 1:
+            if not isinstance(action_result, int) or action_result < 1:
                 raise InvalidJobTransition("沒有可重跑的失敗項目")
             _service().start(job_id)
     except (InvalidJobTransition, AnalysisReservationConflict) as exc:
         return {"error_code": exc.code, "message": str(exc)}, 409
-    return {"status": "ok", "affected": result if isinstance(result, int) else None}
+    return {"status": "ok", "affected": action_result if isinstance(action_result, int) else None}
 
 
 @bp.get("/api/v1/jobs/<job_id>")

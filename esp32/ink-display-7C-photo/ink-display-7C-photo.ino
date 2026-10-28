@@ -213,7 +213,7 @@ GxEPD2_7C<
 #define DEVICE_PAIRING_CLAIM_PATH "/api/device/v1/pairing/claim"
 #define DEVICE_PAIRING_CONFIRM_PATH "/api/device/v1/pairing/confirm"
 #define DEVICE_PAIRING_REPAIR_PERMISSION_PATH "/api/device/v1/pairing/repair-permission"
-#define INKTIME_FIRMWARE_VERSION "2.8.9"
+#define INKTIME_FIRMWARE_VERSION "2.8.10"
 
 static constexpr uint8_t kQueueAckBatchMaxEvents = 8U;
 static constexpr size_t kQueueAckBatchMaxBodyBytes = 12U * 1024U;
@@ -2408,7 +2408,7 @@ String buildConfigPage() {
 
   html += F("<section><h2>裝置狀態</h2><strong>");
   html += htmlEscape(deviceState);
-  html += F("</strong><p class='muted'>儲存後，相框會自動連接 InkTime 並顯示配對碼。</p><label class='check'><input type='checkbox' name='rot180' value='1'");
+  html += F("</strong><p class='muted'>更換伺服器後會重新配對，保留 Wi-Fi 與本機照片。內網會自動加入；公開網站須由管理員核准。</p><label class='check'><input type='checkbox' name='repair_pairing' value='1'> 重新配對目前伺服器</label><p class='hint'>已更換網址但仍無法通過認證時，勾選後儲存。這只重建此相框的配對，不會清除 Wi-Fi 或照片。</p><label class='check'><input type='checkbox' name='rot180' value='1'");
   if (rot180) html += F(" checked");
   html += F("> 畫面旋轉 180°</label><button type='submit'>儲存並連線</button></section>");
 
@@ -2497,6 +2497,11 @@ void handleSave() {
   String minuteStr = server.arg("minute");
   String tzStr    = server.arg("tz");
   bool rot180Req  = (server.arg("rot180") == "1");
+  const bool repairPairingRequested = server.arg("repair_pairing") == "1";
+  if (server.hasArg("repair_pairing") && !repairPairingRequested) {
+    server.send(400, "text/plain; charset=utf-8", "PAIRING-002 重新配對選項不合法");
+    return;
+  }
 
   ssid.trim();
   host.trim();
@@ -2579,6 +2584,9 @@ void handleSave() {
     return;
   }
 
+  const bool pairingReset = inktime::preparePortalPairing(
+    newCfg, g_cfg.backend_hostport.c_str(), newCfg.backend_hostport.c_str(),
+    repairPairingRequested);
   String saveError;
   if (!saveConfig(newCfg, &saveError)) {
     server.send(
@@ -2587,6 +2595,15 @@ void handleSave() {
       String(saveError.length() > 0 ? saveError : "PAIRING-NVS-001") + " 設定未寫入，裝置不會重新啟動"
     );
     return;
+  }
+  if (pairingReset) {
+    // The committed unpaired payload ignores old repair backoff metadata.
+    // Cleanup happens only after commit, so failed saves retain the old pairing.
+    PairingRetryMetadataStore retryStore;
+    String retryError;
+    if (!retryStore.clear(retryError)) {
+      INK_LOG_WARN("pairing_retry_cleanup_pending", "Old pairing retry metadata cleanup remains pending");
+    }
   }
   portalSaveAllowed = false; portalSetupSecret = ""; portalNonce = "";
 

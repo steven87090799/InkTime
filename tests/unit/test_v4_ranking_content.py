@@ -89,7 +89,11 @@ def test_prompt_guardrails_and_no_duplicate_default_rubric():
         assert text in prompt
     for old in ("technical_quality_score", "emotion_score", "memory_grade", "reason_codes"):
         assert old not in prompt
-    assert FULL_ANALYSIS_TOKEN_CAP == 512
+    from inktime.app.domain.analysis.plan import DEFAULT_ANALYSIS_TOKEN_CAP, analysis_output_token_cap
+
+    assert DEFAULT_ANALYSIS_TOKEN_CAP == 512
+    assert analysis_output_token_cap(None) == DEFAULT_ANALYSIS_TOKEN_CAP
+    assert FULL_ANALYSIS_TOKEN_CAP == 1200
     provider.close()
 
 

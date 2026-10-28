@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from inktime.app.domain.analysis.plan import FULL_ANALYSIS_TOKEN_CAP, fingerprint, normalize_analysis_strategy, stored_analysis_fingerprint
+from inktime.app.domain.analysis.plan import DEFAULT_ANALYSIS_TOKEN_CAP, fingerprint, normalize_analysis_strategy, stored_analysis_fingerprint
 from inktime.app.domain.jobs.failure_policy import NoEligibleCandidatesError
 from inktime.app.domain.jobs.settings import validate_worker_settings
 from inktime.app.repositories.jobs import JobRepository
@@ -99,6 +99,63 @@ class JobService:
     def retry_failed(self, job_id: str) -> int:
         return self.repository.retry_failed(job_id)
 
+    def retry_failed_with_current_plan(
+        self,
+        job_id: str,
+        *,
+        analysis_spec: dict,
+        created_by: str,
+    ) -> dict:
+        """Create a new current-route job containing only the old failed photos."""
+
+        original = self.repository.get(job_id)
+        if original is None or str(original["kind"]) != "analysis":
+            raise InvalidJobTransition("只有照片分析工作可改用目前模型補救")
+        if str(original["status"]) not in {"failed", "completed_with_errors"}:
+            raise InvalidJobTransition("目前工作沒有可建立補救工作的失敗狀態")
+        strategy = normalize_analysis_strategy(original["strategy"])
+        if strategy == "local":
+            raise InvalidJobTransition("本機工作沒有可改用模型補救的項目")
+        photo_ids = self.repository.failed_photo_ids(job_id)
+        if not photo_ids:
+            raise InvalidJobTransition("沒有可改用目前模型重試的失敗照片")
+
+        analysis_fingerprint = stored_analysis_fingerprint(analysis_spec)
+        dedupe_key = f"retry-current-route:{job_id}:{analysis_fingerprint}"
+        existing = self.repository.get_by_dedupe_key(dedupe_key)
+        if existing is not None:
+            return {
+                "id": str(existing["id"]),
+                "affected": len(photo_ids),
+                "created": False,
+                "status": str(existing["status"]),
+            }
+
+        rescue_id = self.create_analysis_job(
+            name=f"{str(original['name'])}－失敗照片補救",
+            strategy=strategy,
+            settings={
+                "force_ai": True,
+                "source": "retry-failed-current-route",
+                "parent_job_id": job_id,
+            },
+            created_by=created_by,
+            budget_limit=original["budget_limit"],
+            photo_ids=photo_ids,
+            priority=int(original["priority"] or 3),
+            dedupe_key=dedupe_key,
+            selection_mode="force_all",
+            analysis_fingerprint=analysis_fingerprint,
+            force_recompute=True,
+            analysis_spec=analysis_spec,
+        )
+        return {
+            "id": rescue_id,
+            "affected": len(photo_ids),
+            "created": True,
+            "status": "pending",
+        }
+
     def estimate(
         self,
         photo_count: int,
@@ -106,7 +163,7 @@ class JobService:
         *,
         pricing: dict | None = None,
         input_tokens: int = 8000,
-        output_tokens: int = FULL_ANALYSIS_TOKEN_CAP,
+        output_tokens: int = DEFAULT_ANALYSIS_TOKEN_CAP,
     ) -> dict:
         normalized = normalize_analysis_strategy(strategy)
         image_calls = 0 if normalized == "local" else photo_count

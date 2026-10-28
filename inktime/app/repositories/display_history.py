@@ -76,6 +76,9 @@ class DisplayHistoryRepository:
         with context as connection:
             previous_publications: set[str] = set()
             new_publications: set[str] = set()
+            source_photos = {str(row["id"]): row for row in connection.execute(
+                "SELECT * FROM photos WHERE id IN (SELECT value FROM json_each(?))", (json.dumps(photo_ids),),
+            )}
             for run_id in dict.fromkeys(run_ids):
                 run = connection.execute("SELECT * FROM photo_selection_runs WHERE id=?", (run_id,)).fetchone()
                 if run is None:
@@ -89,7 +92,7 @@ class DisplayHistoryRepository:
                 # Layout resolution may add a second source after the initial
                 # ranking. Always retain and count every actual published source.
                 for identifier in set(photo_ids) - candidate_ids:
-                    photo = connection.execute("SELECT * FROM photos WHERE id=?", (identifier,)).fetchone()
+                    photo = source_photos.get(identifier)
                     if photo is None:
                         continue
                     next_rank += 1

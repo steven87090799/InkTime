@@ -39,7 +39,7 @@ TASK_DEFAULTS: dict[str, dict[str, Any]] = {
     "full_reconcile": {
         "name": "完整一致性掃描",
         "kind": "scan",
-        "cron": "0 4 1 1 *",
+        "cron": "0 4 1 * *",
         "start_time": "04:00",
         "window_start": "00:00",
         "window_end": "08:00",

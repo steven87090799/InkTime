@@ -3,9 +3,10 @@
 {% block title %}低資源排程｜InkTime{% endblock %}
 {% block content %}
 <div class="page-head"><div><p class="eyebrow">背景工作控制中心</p><h1>低資源排程</h1><p>每項工作各自保存逾時、重試、上次成功／失敗、下次執行與錯誤狀態；其中一項失敗不會重啟整個 Scheduler。</p></div></div>
+<p><a href="/photos#photo-scan">照片瀏覽、手動掃描與簡易頻率設定</a> · <a href="/maintenance#photo-scan">照片掃描與維護</a>。此頁提供進階 Cron、允許時段與高負載設定。</p>
 <section class="notice"><strong>N100 預設：</strong>重工作並行數為 1，閒置 Worker 使用低頻等待；Queue 依優先級、狀態與建立時間取用，逾期 Lease 會回收。ESP32 下載 Release 不會同步等待這些背景工作。</section>
 {% for task in tasks %}
-<section class="panel schedule-task" data-key="{{ task.key }}"><div class="panel-head"><div><h2>{{ task.name }}</h2><p>{{ labels[task.key] }}</p></div><span class="status {{ 'ok' if task.enabled else 'muted' }}">{{ '啟用' if task.enabled else '停用' }}</span></div>
+<section class="panel schedule-task" id="schedule-{{ task.key }}" data-key="{{ task.key }}"><div class="panel-head"><div><h2>{{ task.name }}</h2><p>{{ labels[task.key] }}</p></div><span class="status {{ 'ok' if task.enabled else 'muted' }}">{{ '啟用' if task.enabled else '停用' }}</span></div>
   <dl><dt>上次成功</dt><dd>{{ task.last_success or '尚無' }}</dd><dt>上次失敗</dt><dd>{{ task.last_failure or '尚無' }}{% if task.error_status %}<div class="warning">{{ error_notice('', task.error_status) }}</div>{% endif %}</dd><dt>下次執行</dt><dd>{{ task.next_run or '停用' }}</dd></dl>
   {% if g.user.role == 'administrator' %}<form class="form-stack schedule-form">
     <label>啟用<select name="enabled"><option value="true" {% if task.enabled %}selected{% endif %}>啟用</option><option value="false" {% if not task.enabled %}selected{% endif %}>停用</option></select></label>

@@ -952,7 +952,7 @@ def test_realtime_and_batch_reserve_one_owner_when_candidates_race(app):
     assert len(repository.list()) == 1
 
 
-@pytest.mark.parametrize("configured_cap, expected_cap", [(1200, 512), (8000, 512), (300, 300)])
+@pytest.mark.parametrize("configured_cap, expected_cap", [(1200, 1200), (8000, 1200), (300, 300)])
 def test_cost_preview_uses_same_output_ceiling_as_live_analysis(app, configured_cap, expected_cap):
     from inktime.app.api.jobs import _estimate_plan
     from inktime.app.domain.analysis.plan import analysis_output_token_cap

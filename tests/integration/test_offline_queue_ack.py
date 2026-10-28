@@ -22,6 +22,23 @@ def _release(app, source_photo_id: str = "offline-ack") -> dict:
     )[0]
 
 
+def test_queue_idempotency_replays_terminal_item_and_rejects_changed_request(app):
+    queue = app.extensions["inktime_resilience_repository"]
+    device, _ = app.extensions["inktime_device_repository"].create("idempotent queue")
+    queue.ensure_queue(device)
+    first = _release(app, "idempotent-first")
+    second = _release(app, "idempotent-second")
+    item = queue.enqueue_release(device_id=device, release_id=first["release_id"], idempotency_key="same-key")
+    with app.extensions["inktime_database"].transaction() as connection:
+        connection.execute("UPDATE device_content_queue_items SET status='DISPLAYED' WHERE id=?", (item["id"],))
+    replay = queue.enqueue_release(device_id=device, release_id=first["release_id"], idempotency_key="same-key")
+    assert replay["id"] == item["id"]
+    assert replay["status"] == "DISPLAYED"
+    for changed in ({"release_id": second["release_id"]}, {"release_id": first["release_id"], "priority": 50}):
+        with pytest.raises(ValueError, match="IDEMPOTENCY_CONFLICT"):
+            queue.enqueue_release(device_id=device, idempotency_key="same-key", **changed)
+
+
 def _ack(client, token: str, item_id: str, version: int, event: str, key: str, **extra):
     return client.post(
         "/api/device/v1/queue/ack",

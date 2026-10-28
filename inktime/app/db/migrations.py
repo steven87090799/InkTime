@@ -2689,6 +2689,60 @@ MIGRATIONS = (
             "AND (updated_by IS NULL OR updated_by='')",
         ),
     ),
+    Migration(
+        76,
+        "依照片內容永久保存有效模型資訊與獨立免費補齊佇列",
+        (
+            "ALTER TABLE providers ADD COLUMN usage_scope TEXT NOT NULL DEFAULT 'normal' CHECK(usage_scope IN ('normal','backfill'))",
+            "ALTER TABLE photo_analysis ADD COLUMN content_sha256 TEXT",
+            "UPDATE photo_analysis SET content_sha256=(SELECT sha256 FROM photos WHERE id=photo_analysis.photo_id)",
+            "CREATE INDEX idx_analysis_content_kind ON photo_analysis(content_sha256,score_kind,id)",
+            "CREATE TABLE model_analysis_results(content_sha256 TEXT PRIMARY KEY,"
+            "analysis_snapshot_json TEXT NOT NULL,schema_version INTEGER NOT NULL,updated_at TEXT NOT NULL)",
+            "CREATE TABLE analysis_backfill_control(id INTEGER PRIMARY KEY CHECK(id=1),"
+            "enabled INTEGER NOT NULL DEFAULT 0 CHECK(enabled IN (0,1)),"
+            "provider_id TEXT REFERENCES providers(id) ON DELETE RESTRICT,"
+            "concurrency INTEGER NOT NULL DEFAULT 2 CHECK(concurrency BETWEEN 1 AND 8),"
+            "rpm INTEGER NOT NULL DEFAULT 20 CHECK(rpm BETWEEN 1 AND 20),"
+            "pause_reason TEXT,last_reconciled_at TEXT,last_monthly_audit TEXT,"
+            "cursor_date TEXT NOT NULL DEFAULT '',cursor_id TEXT NOT NULL DEFAULT '',"
+            "inventory_done INTEGER NOT NULL DEFAULT 0 CHECK(inventory_done IN (0,1)),"
+            "updated_by TEXT,updated_at TEXT NOT NULL)",
+            "INSERT INTO analysis_backfill_control(id,updated_at) VALUES (1,datetime('now'))",
+            "CREATE TABLE analysis_backfill_tasks(id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            "content_sha256 TEXT NOT NULL,photo_id TEXT REFERENCES photos(id) ON DELETE SET NULL,"
+            "job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE RESTRICT,"
+            "status TEXT NOT NULL CHECK(status IN ('queued','running','completed','failed','unknown')),"
+            "error_code TEXT,created_at TEXT NOT NULL,updated_at TEXT NOT NULL,UNIQUE(job_id,content_sha256))",
+            "CREATE INDEX idx_backfill_content ON analysis_backfill_tasks(content_sha256,id DESC)",
+            "CREATE INDEX idx_backfill_job ON analysis_backfill_tasks(job_id,status)",
+            "CREATE UNIQUE INDEX idx_backfill_active_content ON analysis_backfill_tasks(content_sha256) WHERE status IN ('queued','running')",
+            "CREATE INDEX idx_photos_oldest_content ON photos(COALESCE(captured_at,created_at),id) WHERE lifecycle_status='active'",
+        ),
+    ),
+    Migration(
+        77,
+        "索引歷史模型優先序、照片帳務紀錄與過期配額租約",
+        (
+            # Preserve the old effective 512 ceiling for untouched defaults;
+            # explicitly configured output ceilings remain administrator-owned.
+            "UPDATE settings SET value_json='512',updated_at=datetime('now') "
+            "WHERE key='budget.full_analysis_max_tokens' AND value_json='1200' "
+            "AND (updated_by IS NULL OR updated_by='')",
+            "ALTER TABLE billable_operations ADD COLUMN request_signature TEXT",
+            "CREATE INDEX idx_analysis_display_order ON photo_analysis(photo_id,"
+            "CASE WHEN schema_version IN (4,5,6) AND score_kind='semantic' THEN 0 "
+            "WHEN (schema_version IN (1,2,3) AND score_kind='legacy' "
+            "AND lower(trim(COALESCE(provider,''))) NOT IN "
+            "('','inherited','local','local-prefilter','local-quality-v3','virtual-display-local') "
+            "AND lower(COALESCE(stage,'')) IN ('single','stage_one','stage_two','cache','inherited')) THEN 1 "
+            "WHEN score_kind='local_quality' THEN 2 ELSE 3 END,created_at DESC,id DESC)",
+            "CREATE INDEX idx_usage_photo_time ON api_usage(photo_id,started_at DESC,id DESC)",
+            "CREATE INDEX idx_job_errors_photo_time ON job_errors(photo_id,last_seen_at DESC,id DESC)",
+            "CREATE INDEX idx_quota_expiry ON provider_quota_events(lease_until,started_at)",
+            "CREATE INDEX idx_quota_scope_lease ON provider_quota_events(scope,lease_until,started_at)",
+        ),
+    ),
 )
 
 
@@ -3606,6 +3660,22 @@ def migrate(database: Database, backup_dir: Path | None = None) -> list[int]:
                         _apply_migration_66_contracts(connection)
                     if migration.version == 70:
                         _apply_migration_70_contracts(connection)
+                    if migration.version == 76:
+                        from inktime.app.repositories.model_coverage import reconcile_model_results
+                        reconcile_model_results(connection)
+                        # Promote only the old built-in annual full scan. A
+                        # custom cadence is preserved; disabled stays disabled.
+                        from zoneinfo import ZoneInfo
+                        zone_row = connection.execute("SELECT value_json FROM settings WHERE key='general.timezone'").fetchone()
+                        zone = ZoneInfo(str(json.loads(zone_row[0])) if zone_row else "Asia/Taipei")
+                        now = datetime.now(zone)
+                        next_month = now.replace(year=now.year + (now.month == 12), month=now.month % 12 + 1,
+                                                 day=1, hour=4, minute=0, second=0, microsecond=0)
+                        connection.execute(
+                            "UPDATE scheduled_tasks SET cron='0 4 1 * *',next_run=?,updated_at=? "
+                            "WHERE key='full_reconcile' AND cron='0 4 1 1 *' AND weekdays_json='[]' "
+                            "AND json_extract(config_json,'$.mode')='full'", (next_month.isoformat(), _utc_now()),
+                        )
                     connection.execute(
                         "INSERT INTO schema_migrations(version, name, applied_at) VALUES (?, ?, ?)",
                         (migration.version, migration.name, _utc_now()),

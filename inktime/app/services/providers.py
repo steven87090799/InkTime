@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from hashlib import sha256
 from typing import Any
+from inktime.app.domain.analysis.plan import analysis_output_token_cap
 
 from inktime.app.domain.analysis.scoring import normalize_scoring_rules
 from inktime.app.domain.jobs.failure_policy import JobConfigurationError
@@ -52,6 +53,8 @@ class ProviderService:
                 raise ValueError(f"VLM-008 Job 指定的 Provider 已刪除：{provider_id}")
             if not summary["enabled"]:
                 raise ValueError(f"VLM-008 Job 指定的 Provider 已停用：{provider_id}")
+            if str(summary.get("usage_scope", "normal")) != str(snapshot.get("usage_scope", "normal")):
+                raise ValueError("VLM-008 補齊專用 Provider 不可用於日常分析路由")
             revision = str(snapshot.get("config_revision") or "")
             if revision and revision != self.config_revision(summary):
                 raise ValueError(f"VLM-008 Job 指定的 Provider 設定已變更：{provider_id}")
@@ -87,7 +90,7 @@ class ProviderService:
                         self.repository.database,
                         sha256((provider.base_url + "|" + str(config.get("api_key") or "") + "|" + str(config.get("project_id") or "")).encode()).hexdigest(),
                     ),
-                    request_token_reserve=max(8000, int(self.settings.get("budget.max_tokens", 8000))) + 512,
+                    request_token_reserve=max(8000, int(self.settings.get("budget.max_tokens", 8000))) + analysis_output_token_cap(self.settings),
                     priority=int(snapshot.get("priority", config["priority"])),
                     max_concurrency=(1 if config.get("options", {}).get("daily_free_first")
                                      else config["max_concurrency"]),
@@ -137,7 +140,7 @@ class ProviderService:
                 "config_revision": self.config_revision(row),
             }
             for row in sorted(
-                (row for row in self.repository.list() if row["enabled"]),
+                (row for row in self.repository.list() if row["enabled"] and row.get("usage_scope", "normal") == "normal"),
                 key=lambda row: (int(row.get("priority") or 100), str(row.get("name") or row["id"])),
             )
         ]

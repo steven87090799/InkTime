@@ -36,6 +36,8 @@ def _execute_job_item(app, item, *, job, settings, provider, provider_error, ana
         raise AnalysisDisabledError("Frozen Analysis Plan 指定完全停用；工作項目已拒絕")
     if provider_error is not None:
         raise provider_error
+    if job["kind"] == "analysis_coverage_audit":
+        return app.extensions["inktime_analysis_backfill_service"].repository.reconcile(month=settings.get("month"))
     if job["kind"] == "analysis_batch_poll":
         return app.extensions["inktime_batch_analysis_service"].poll_due(limit=2)
     if job["kind"] == "analysis_batch_import":
@@ -106,7 +108,7 @@ def _execute_job_item(app, item, *, job, settings, provider, provider_error, ana
             app.extensions["inktime_thumbnail_cache"],
             location_enrichment=app.extensions["inktime_location_enrichment_service"],
         )
-        return scanner.scan(
+        scan_result = scanner.scan(
             settings.get("library_name", "主要照片庫"),
             Path(settings["root_path"]),
             mode=str(settings.get("mode", "incremental")),
@@ -124,6 +126,14 @@ def _execute_job_item(app, item, *, job, settings, provider, provider_error, ana
             progress_interval_seconds=progress_seconds,
             **scanner_safety,
         )
+        backfill = app.extensions.get("inktime_analysis_backfill_service")
+        if backfill is not None:
+            backfill.repository.refresh()
+            scan_result["model_coverage"] = {
+                key: value for key, value in backfill.repository.status().items()
+                if key in {"total", "completed", "missing", "unknown", "excluded"}
+            }
+        return scan_result
     if job["kind"] == "render":
         offline_prepare = settings.get("offline_prepare")
         if isinstance(offline_prepare, dict):
@@ -256,6 +266,7 @@ def _execute_job_item(app, item, *, job, settings, provider, provider_error, ana
             int(settings["notification_id"])
         )
     analyze = (
+        app.extensions["inktime_analysis_backfill_service"].analyze_item if settings.get("missing_analysis_backfill") else
         app.extensions["inktime_seasonal_analysis_service"].analyze_item
         if settings.get("seasonal_analysis") else analysis.analyze_photo
     )
@@ -274,7 +285,7 @@ def _execute_job_item(app, item, *, job, settings, provider, provider_error, ana
 def _run_local_job_item(*, config, item, context):
     from inktime.app.bootstrap import bootstrap_services
 
-    container = bootstrap_services(config, role="worker")
+    container = bootstrap_services(config, role="worker", initialize_database=False)
     try:
         repository = container.extensions["inktime_job_repository"]
 
@@ -335,6 +346,9 @@ class WorkerRunner:
                 settings = validate_worker_settings(json.loads(job["settings_json"]))
             except (ValueError, TypeError):
                 repository.fail_invalid_settings(str(job["id"]))
+                continue
+            backfill = self.app.extensions.get("inktime_analysis_backfill_service")
+            if settings.get("missing_analysis_backfill") and backfill is not None and not backfill.can_run(str(job["id"])):
                 continue
             seasonal = self.app.extensions.get("inktime_seasonal_analysis_service")
             if str(job["kind"]) == "render" and seasonal is not None:
@@ -502,11 +516,10 @@ class WorkerRunner:
                         # JOB-LOCAL-FAILED made it TERMINAL_NO_RETRY, so a routine
                         # `docker stop` or NAS reboot permanently dead-lettered
                         # whatever was running.
-                        exc.code = (
-                            "JOB-SHUTDOWN-CANCELLED"
-                            if getattr(exc, "cancelled", False)
-                            else "JOB-LOCAL-FAILED"
-                        )
+                        if getattr(exc, "cancelled", False):
+                            exc.code = "JOB-SHUTDOWN-CANCELLED"
+                        elif exc.code not in {"SCAN-001", "SCAN-002"}:
+                            exc.code = "JOB-LOCAL-FAILED"
                         raise
                 return _execute_job_item(
                     self.app, item, job=job, settings=settings, provider=provider, provider_error=provider_error, analysis=analysis, analysis_plan=analysis_plan, execution=execution, progress_items=progress_items, progress_seconds=progress_seconds, scanner_disk_batch_size=scanner_disk_batch_size, scanner_write_batch_size=scanner_write_batch_size, scanner_missing_threshold_ratio=scanner_missing_threshold_ratio, scanner_safety=scanner_safety, runtime_settings=runtime_settings, scan_cancel_requested=scan_cancel_requested, log_scan_progress=log_scan_progress
@@ -683,6 +696,14 @@ class WorkerRunner:
                     },
                 )
             self.current = None
+            if settings.get("missing_analysis_backfill") and backfill is not None:
+                backfill.repository.refresh()
+                backfill.ensure()
+                # Re-read priorities from the beginning after every small batch.
+                # A keyset iterator already at priority 6 cannot see a newly
+                # enqueued priority-1/2 frame job until the next run_once.
+                processed_jobs += 1
+                break
             processed_jobs += 1
         return processed_jobs
 
