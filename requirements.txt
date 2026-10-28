@@ -8,7 +8,7 @@ Pillow==13.0.0
 pillow-heif==1.8.1
 cryptography==50.0.2
 gunicorn==26.2.0
-psutil==7.0.0
+psutil==7.2.2
 fonttools==4.66.1
 opencv-python-headless==4.14.0.94
 # Runtime and CI target Python 3.12; keep both architecture locks aligned.
