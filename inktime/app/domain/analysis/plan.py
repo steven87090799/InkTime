@@ -15,13 +15,14 @@ REASONING_EFFORTS = ("none", "low", "medium", "high", "xhigh", "max")
 SINGLE_ANALYSIS_STRATEGIES = {"single", "single_high", "high_quality"}
 LEGACY_ANALYSIS_STRATEGIES = {"custom", "low_cost", "smart", "smart_two_stage"}
 REPAIR_TOKEN_CAP = 1200
+DEFAULT_ANALYSIS_TOKEN_CAP = 512
 FULL_ANALYSIS_TOKEN_CAP = 1200
 
 
 def analysis_output_token_cap(settings) -> int:
     """One output ceiling for request building, Batch and cost preview."""
     global_cap = int(settings.get("budget.max_tokens", 8000)) if settings else 8000
-    requested_cap = int(settings.get("budget.full_analysis_max_tokens", FULL_ANALYSIS_TOKEN_CAP)) if settings else FULL_ANALYSIS_TOKEN_CAP
+    requested_cap = int(settings.get("budget.full_analysis_max_tokens", DEFAULT_ANALYSIS_TOKEN_CAP)) if settings else DEFAULT_ANALYSIS_TOKEN_CAP
     return max(256, min(global_cap, requested_cap, FULL_ANALYSIS_TOKEN_CAP))
 
 

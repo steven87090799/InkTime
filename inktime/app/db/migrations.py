@@ -2724,6 +2724,11 @@ MIGRATIONS = (
         77,
         "索引歷史模型優先序、照片帳務紀錄與過期配額租約",
         (
+            # Preserve the old effective 512 ceiling for untouched defaults;
+            # explicitly configured output ceilings remain administrator-owned.
+            "UPDATE settings SET value_json='512',updated_at=datetime('now') "
+            "WHERE key='budget.full_analysis_max_tokens' AND value_json='1200' "
+            "AND (updated_by IS NULL OR updated_by='')",
             "ALTER TABLE billable_operations ADD COLUMN request_signature TEXT",
             "CREATE INDEX idx_analysis_display_order ON photo_analysis(photo_id,"
             "CASE WHEN schema_version IN (4,5,6) AND score_kind='semantic' THEN 0 "

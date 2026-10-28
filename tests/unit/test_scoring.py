@@ -204,7 +204,7 @@ def test_scoring_lab_uses_current_plan_and_rejects_incompatible_answers(app, tmp
     assert requests[0]["model"] == "openai/gpt-6-luna"
     assert requests[0]["caption_controls"]["side_caption_max_chars"] == 14
     assert requests[0]["reasoning_effort"] == "none"
-    assert requests[0]["max_tokens"] == 1200
+    assert requests[0]["max_tokens"] == 512
     with service.usage.database.session() as connection:
         assert connection.execute("SELECT COUNT(*) FROM api_usage").fetchone()[0] == 1
 

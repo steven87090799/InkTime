@@ -14,6 +14,16 @@ from inktime.app.repositories.usage import UsageRepository
 from tests.conftest import create_admin, csrf, login
 
 
+def test_cost_saving_default_and_explicit_output_ceiling_are_distinct():
+    from inktime.app.domain.analysis.plan import analysis_output_token_cap
+    from inktime.app.repositories.settings import SETTING_DEFINITIONS
+
+    assert SETTING_DEFINITIONS["budget.full_analysis_max_tokens"]["default"] == 512
+    assert analysis_output_token_cap(None) == 512
+    assert analysis_output_token_cap({"budget.full_analysis_max_tokens": 1200}) == 1200
+    assert analysis_output_token_cap({"budget.full_analysis_max_tokens": 1200, "budget.max_tokens": 300}) == 300
+
+
 @pytest.mark.parametrize("body", [
     {}, {"中文": "引號\"與換行\n", "n": [1, True, None, -0.5]},
     {"messages": [{"url": "data:image/jpeg;base64," + "ABC+/=" * 1000}]},

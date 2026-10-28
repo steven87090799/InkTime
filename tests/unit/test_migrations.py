@@ -19,6 +19,23 @@ from inktime.app.repositories.resilience import ResilienceRepository
 CURRENT_SCHEMA_VERSION = max(migration.version for migration in MIGRATIONS)
 
 
+@pytest.mark.parametrize("actor,expected", [(None, "512"), ("administrator", "1200")])
+def test_output_limit_upgrade_keeps_effective_default_and_admin_choice(tmp_path, monkeypatch, actor, expected):
+    monkeypatch.setattr(migrations_module, "MIGRATIONS", MIGRATIONS[:-1])
+    database = Database(tmp_path / "output-limit.db")
+    migrate(database)
+    with database.transaction() as connection:
+        connection.execute(
+            "INSERT OR REPLACE INTO settings(key,category,value_json,value_type,requires_restart,updated_at,updated_by) "
+            "VALUES ('budget.full_analysis_max_tokens','成本設定','1200','integer',0,'2026-10-28',?)", (actor,),
+        )
+    monkeypatch.setattr(migrations_module, "MIGRATIONS", MIGRATIONS)
+    assert migrate(database) == [77]
+    with database.session() as connection:
+        row = connection.execute("SELECT value_json,updated_by FROM settings WHERE key='budget.full_analysis_max_tokens'").fetchone()
+        assert tuple(row) == (expected, actor)
+
+
 @pytest.mark.parametrize("source", ["seasonal", "history"])
 def test_both_draft_schemas_upgrade_without_losing_records(tmp_path, monkeypatch, source):
     seasonal = next(migration for migration in MIGRATIONS if migration.version == 74)

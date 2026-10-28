@@ -713,9 +713,9 @@ SETTING_DEFINITIONS: dict[str, dict[str, Any]] = {
     },
     "budget.full_analysis_max_tokens": {
         "category": "成本設定",
-        "default": 1200,
+        "default": 512,
         "type": "integer",
-        "description": "單次完整 Vision 分析的硬上限",
+        "description": "完整 Vision 回應 Token 上限；預設 512，截斷不自動重送",
         "risk": "過高會增加成本；實際值仍受 budget.max_tokens 夾制",
         "min": 256,
         "max": 1200,
