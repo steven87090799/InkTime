@@ -1390,7 +1390,7 @@ class RenderService:
             self._draw_adaptive_pair_caption(
                 canvas, {**record, "capture_date_label": metadata.get("date", ""),
                          "capture_place_label": metadata.get("location", "")}, caption_box,
-                left_side=True, date_at_bottom=True,
+                left_side=True,
             )
 
     @staticmethod
@@ -1409,62 +1409,71 @@ class RenderService:
             runs.append((character, bounds, advance))
         return runs
 
-    def _compact_pair_metadata_lines(
+    def _compact_pair_text_layout(
         self, draw: ImageDraw.ImageDraw, *, font_path: Path,
         date_lines: list[str], place: str, sentence: str, width: int, height: int,
-    ) -> list[tuple[str, ImageFont.FreeTypeFont, int]]:
-        """Fit full names while keeping date strokes and line boxes legible."""
-        last_lines: list[str] = []
-        for place_size in (10, 9):
-            place_font = ImageFont.truetype(str(font_path), place_size)
-            lines: list[str] = []
-            remaining = place
-            while remaining:
-                line = ""
-                while remaining and draw.textlength(line + remaining[0], font=place_font) <= width:
-                    line += remaining[0]
-                    remaining = remaining[1:]
-                if not line:
-                    break
-                lines.append(line)
-            last_lines = lines
-            place_step = max(place_size + 2, max(
-                (int(draw.textbbox((0, 0), line, font=place_font)[3]
-                     - draw.textbbox((0, 0), line, font=place_font)[1]) for line in lines), default=0,
-            ) + 2)
-            for date_size in range(19, 13, -1):
-                date_font = cast(ImageFont.FreeTypeFont, ImageFont.load_default(size=date_size))
-                bounds = [draw.textbbox((0, 0), line, font=date_font) for line in date_lines]
-                if any(box[2] - box[0] > width for box in bounds):
-                    continue
+    ) -> dict[str, Any]:
+        """Keep upright place glyphs readable; never shrink them into tiny rows."""
+        dates = []
+        for size in range(19, 13, -1):
+            date_font = cast(ImageFont.FreeTypeFont, ImageFont.load_default(size=size))
+            bounds = [draw.textbbox((0, 0), line, font=date_font) for line in date_lines]
+            if all(box[2] - box[0] <= width for box in bounds):
                 dates = [(line, date_font, int(box[3] - box[1]) + 3)
                          for line, box in zip(date_lines, bounds, strict=True)]
-                date_height = sum(advance for _line, _font, advance in dates)
-                for sentence_size in (17, 16):
-                    sentence_font = ImageFont.truetype(str(font_path), sentence_size)
-                    sentence_height = sum(advance for _char, _box, advance in self._vertical_caption_run(draw, sentence, sentence_font))
-                    budget = max(0, height - sentence_height - 8)
-                    if not remaining and date_height + len(lines) * place_step <= budget:
-                        return dates + [(line, place_font, place_step) for line in lines]
+                break
+        date_height = sum(step for _line, _font, step in dates)
+        gap = (8 if sentence and (place or dates) else 0) + (8 if place and dates else 0)
 
-        date_font = cast(ImageFont.FreeTypeFont, ImageFont.load_default(size=14))
-        dates = [(line, date_font, int(draw.textbbox((0, 0), line, font=date_font)[3]
-                                     - draw.textbbox((0, 0), line, font=date_font)[1]) + 3)
-                 for line in date_lines]
-        sentence_font = ImageFont.truetype(str(font_path), 16)
-        sentence_height = sum(advance for _char, _box, advance in self._vertical_caption_run(draw, sentence, sentence_font))
-        budget = max(0, height - sentence_height - 8 - sum(advance for _line, _font, advance in dates))
-        visible = last_lines[:budget // place_step]
-        if (len(last_lines) > len(visible) or remaining) and visible:
-            last = visible[-1]
-            while last and draw.textlength(last + "…", font=place_font) > width:
-                last = last[:-1]
-            visible[-1] = last + "…"
-        return dates + [(line, place_font, place_step) for line in visible]
+        def columns(runs, count):
+            length = max(1, (len(runs) + count - 1) // count)
+            return [runs[index:index + length] for index in range(0, len(runs), length)]
+
+        for sentence_size in range(20, 16, -1):
+            sentence_font = ImageFont.truetype(str(font_path), sentence_size)
+            sentence_runs = self._vertical_caption_run(draw, sentence, sentence_font)
+            sentence_height = sum(run[2] for run in sentence_runs)
+            place_font = ImageFont.truetype(str(font_path), min(18, sentence_size - 1))
+            place_runs = self._vertical_caption_run(draw, place, place_font)
+            max_columns = max(1, min(2, (width + 3) // (int(place_font.size) + 3)))
+            for count in range(1, max_columns + 1):
+                place_columns = columns(place_runs, count)
+                place_height = max((sum(run[2] for run in column) for column in place_columns), default=0)
+                if sentence_height + place_height + date_height + gap <= height:
+                    return {"sentence": sentence_runs, "sentence_font": sentence_font,
+                            "place": place_columns, "place_font": place_font, "dates": dates}
+
+        # Preserve legibility for unusually long legacy captions/landmarks.
+        # Ellipses affect display only; the stored caption/location stay intact.
+        sentence_font = ImageFont.truetype(str(font_path), 17)
+        place_font = ImageFont.truetype(str(font_path), 16)
+        sentence_runs = self._vertical_caption_run(draw, sentence, sentence_font)
+        place_runs = self._vertical_caption_run(draw, place, place_font)
+        minimum_place_height = max((run[2] for run in place_runs), default=0) * min(3, len(place_runs))
+        sentence_budget = max(0, height - date_height - gap - minimum_place_height)
+        if sum(run[2] for run in sentence_runs) > sentence_budget:
+            ellipsis = self._vertical_caption_run(draw, "…", sentence_font)
+            while sentence_runs and sum(run[2] for run in sentence_runs + ellipsis) > sentence_budget:
+                sentence_runs.pop()
+            sentence_runs += ellipsis if sentence_budget >= ellipsis[0][2] else []
+        place_budget = max(0, height - date_height - gap - sum(run[2] for run in sentence_runs))
+        count = max(1, min(2, (width + 3) // (int(place_font.size) + 3)))
+        visible = list(place_runs)
+        while visible and max(sum(run[2] for run in column) for column in columns(visible, count)) > place_budget:
+            visible.pop()
+        if len(visible) < len(place_runs) and visible:
+            ellipsis = self._vertical_caption_run(draw, "…", place_font)
+            while visible:
+                candidate = visible[:-1] + ellipsis
+                if max(sum(run[2] for run in column) for column in columns(candidate, count)) <= place_budget:
+                    visible = candidate
+                    break
+                visible.pop()
+        return {"sentence": sentence_runs, "sentence_font": sentence_font,
+                "place": columns(visible, count), "place_font": place_font, "dates": dates}
 
     def _draw_adaptive_pair_caption(
         self, canvas: Image.Image, record: dict[str, Any], box: Rect, *, left_side: bool,
-        date_at_bottom: bool = False,
     ) -> None:
         """Draw one frozen caption only inside its photo's authoritative region."""
         text = str(record["text"])
@@ -1472,46 +1481,37 @@ class RenderService:
         if left_side:
             draw = ImageDraw.Draw(canvas)
             draw.rectangle((box.x, box.y, box.right, box.bottom), fill="white")
-            normalized = "".join(text.split())
             font_path = self.fonts.resolve(str(self.settings.get("render.font_path", "")))
-            horizontal_padding, vertical_padding = 2, 6
-            available_width = max(1, box.width - horizontal_padding * 2)
-            available_height = max(0, box.height - vertical_padding * 2)
-            y = box.y + vertical_padding
-            date_lines = self._pair_date_lines(date_label)
-            place = str(record.get("capture_place_label") or "").strip()
-            metadata_lines = self._compact_pair_metadata_lines(
-                draw, font_path=font_path, date_lines=date_lines, place=place,
-                sentence=normalized, width=available_width, height=available_height,
+            layout = self._compact_pair_text_layout(
+                draw, font_path=font_path, date_lines=self._pair_date_lines(date_label),
+                place=str(record.get("capture_place_label") or "").strip(), sentence="".join(text.split()),
+                width=max(1, box.width - 4), height=max(0, box.height - 12),
             )
-            metadata_height = sum(advance for _, _, advance in metadata_lines)
-            if metadata_height:
-                available_height = max(0, available_height - metadata_height - 8)
-                line_top = box.bottom - vertical_padding - metadata_height if date_at_bottom else y
-                for line, line_font, advance in metadata_lines:
-                    bounds = draw.textbbox((0, 0), line, font=line_font)
-                    ink_width = bounds[2] - bounds[0]
-                    x = box.x + horizontal_padding + (available_width - ink_width) / 2 - bounds[0]
-                    draw.text((x, line_top - bounds[1]), line, font=line_font, fill="black")
-                    line_top += advance
-                if not date_at_bottom:
-                    y += metadata_height + 8
-            for font_size in range(26, 15, -1):
-                font = ImageFont.truetype(str(font_path), font_size)
-                runs = self._vertical_caption_run(draw, normalized, font)
-                if sum(advance for _char, _bounds, advance in runs) <= available_height:
-                    break
-            if sum(advance for _char, _bounds, advance in runs) > available_height:
-                while runs and sum(advance for _char, _bounds, advance in runs) + font.size + 1 > available_height:
-                    runs.pop()
-                runs += self._vertical_caption_run(draw, "…", font) if runs else []
-            for character, bounds, advance in runs:
-                ink_height = bounds[3] - bounds[1]
-                ink_width = bounds[2] - bounds[0]
-                x = box.x + horizontal_padding + (available_width - ink_width) / 2 - bounds[0]
-                draw.text((x, y + (advance - ink_height) / 2 - bounds[1]), character,
-                          font=font, fill="black")
-                y += advance
+
+            def paint_vertical(runs, font, center_x, top):
+                for character, bounds, advance in runs:
+                    ink_width, ink_height = bounds[2] - bounds[0], bounds[3] - bounds[1]
+                    draw.text((center_x - ink_width / 2 - bounds[0], top + (advance - ink_height) / 2 - bounds[1]),
+                              character, font=font, fill="black")
+                    top += advance
+
+            center_x = box.x + box.width / 2
+            paint_vertical(layout["sentence"], layout["sentence_font"], center_x, box.y + 6)
+            date_height = sum(step for _line, _font, step in layout["dates"])
+            date_top = box.bottom - 6 - date_height
+            line_top = date_top
+            for line, font, advance in layout["dates"]:
+                bounds = draw.textbbox((0, 0), line, font=font)
+                draw.text((center_x - (bounds[2] - bounds[0]) / 2 - bounds[0], line_top - bounds[1]),
+                          line, font=font, fill="black")
+                line_top += advance
+            place_height = max((sum(run[2] for run in column) for column in layout["place"]), default=0)
+            place_top = date_top - (8 if layout["dates"] else 0) - place_height
+            step = layout["place_font"].size + 3
+            for index, column in enumerate(layout["place"]):
+                # Traditional vertical text reads down, then right to left.
+                x = center_x + ((len(layout["place"]) - 1) / 2 - index) * step
+                paint_vertical(column, layout["place_font"], x, place_top)
             return
 
         draw = ImageDraw.Draw(canvas)
