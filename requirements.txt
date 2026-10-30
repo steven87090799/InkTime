@@ -2,6 +2,7 @@ Flask==3.1.3
 # Security baseline for Flask's transitive dependency; keep both runtime locks aligned.
 Werkzeug==3.1.9
 requests==2.34.2
+openai==3.41.0
 # Security baseline for the TLS CA bundle; keep both runtime locks aligned.
 certifi==2026.10.19
 Pillow==13.0.0

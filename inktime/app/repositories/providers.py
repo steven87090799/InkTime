@@ -21,6 +21,7 @@ from inktime.app.providers.config import (
     validate_model_id,
 )
 from inktime.app.providers.openai_compatible import calculate_usage_cost
+from inktime.app.providers.openai_models import DEFAULT_OPENAI_MODEL, official_openai_pricing, openai_model_capabilities
 from inktime.app.providers.config import provider_analysis_revision, provider_revision
 from inktime.app.repositories.settings import SecretStore
 
@@ -92,15 +93,29 @@ class ProviderRepository:
             raise ValueError(f"PROVIDER-020 {kind} 不支援 Batch")
         with self.database.transaction(operation="provider_save") as connection:
             previous_row = connection.execute("SELECT * FROM providers WHERE id=?", (provider_id,)).fetchone()
+            if not model_provided and previous_row is not None:
+                model = previous_row["model"]
+            previous_kind = (effective_provider_kind(str(previous_row["kind"]), str(previous_row["base_url"]))
+                             if previous_row is not None else None)
+            if previous_row is not None and previous_kind != kind and previous_row["api_key_secret"] and not api_key:
+                raise ValueError("PROVIDER-023 切換 Provider 類型須另外提供該服務的 Key；建議新增獨立 Provider")
+            if kind == "openai" and previous_row is None:
+                options.setdefault("api_mode", "responses")
+                model = model or DEFAULT_OPENAI_MODEL
+                if options["api_mode"] == "responses":
+                    options.setdefault("reasoning_effort", "none")
+            if kind == "openai" and options.get("api_mode") == "responses":
+                model = model or DEFAULT_OPENAI_MODEL
+                spec = openai_model_capabilities(model)
+                if options.get("reasoning_effort", "none") not in spec["reasoning_efforts"]:
+                    raise ValueError("PROVIDER-023 此模型不支援所選 reasoning effort")
+                if not capabilities.json_schema:
+                    raise ValueError("PROVIDER-023 OpenAI Responses 照片分析必須啟用嚴格 JSON Schema")
             expected = payload.get("expected_updated_at")
             if expected is not None and (previous_row is None or previous_row["updated_at"] != expected):
                 raise ValueError("CONFIG_CONFLICT 設定已被其他管理員修改，請重新載入")
             if api_key:
                 self.secrets.set(secret_key, api_key, user_id, connection=connection)
-            if not model_provided:
-                existing = connection.execute("SELECT model FROM providers WHERE id=?", (provider_id,)).fetchone()
-                if existing is not None:
-                    model = existing["model"]
             connection.execute(
                 """
                 INSERT INTO providers(id,name,kind,base_url,model,api_key_secret,enabled,priority,supports_vision,supports_batch,
@@ -168,10 +183,11 @@ class ProviderRepository:
 
     def pricing(self, provider_id: str, *, connection=None) -> dict[str, dict[str, float]]:
         with (nullcontext(connection) if connection is not None else self.database.session()) as connection:
+            provider = connection.execute("SELECT kind,options_json FROM providers WHERE id=?", (provider_id,)).fetchone()
             rows = connection.execute(
                 "SELECT * FROM model_pricing WHERE provider_id=? AND enabled=1", (provider_id,)
             ).fetchall()
-        return {
+        prices = {
             row["model"]: {
                 "input_per_million": row["input_per_million"],
                 "cached_input_per_million": row["cached_input_per_million"],
@@ -183,6 +199,9 @@ class ProviderRepository:
             }
             for row in rows
         }
+        if provider is not None and provider["kind"] == "openai" and self._options(dict(provider)).get("api_mode") == "responses":
+            return {**official_openai_pricing(), **prices}
+        return prices
 
     def save_pricing(self, provider_id: str, payload: dict) -> dict[str, int]:
         model = str(payload.get("model") or "").strip()

@@ -7,6 +7,7 @@ from inktime.app.domain.analysis.plan import analysis_output_token_cap
 from inktime.app.domain.analysis.scoring import normalize_scoring_rules
 from inktime.app.domain.jobs.failure_policy import JobConfigurationError
 from inktime.app.providers.openai_compatible import OpenAICompatibleProvider
+from inktime.app.providers.openai_responses import create_vision_provider
 from inktime.app.providers.config import (
     capabilities_for,
     provider_revision,
@@ -64,7 +65,7 @@ class ProviderService:
             effective_kind = effective_provider_kind(
                 str(config.get("kind") or "openai_compatible"), str(config.get("base_url") or "")
             )
-            provider: Any = OpenAICompatibleProvider(
+            provider: Any = create_vision_provider(
                 name=config["name"],
                 base_url=config["base_url"],
                 api_key=config.get("api_key", ""),
@@ -83,12 +84,17 @@ class ProviderService:
             )
             provider.provider_id = provider_id
             provider.display_name = str(config["name"])
+            options = config.get("options") or {}
+            quota_identity = "|".join((provider.base_url, str(config.get("api_key") or ""),
+                                       str(options.get("project_id") or config.get("project_id") or "")))
+            if options.get("organization_id"):
+                quota_identity += "|" + str(options["organization_id"])
             channels.append(
                 ProviderChannel(
                     provider=provider,
                     shared_quota=ProviderQuotaRepository(
                         self.repository.database,
-                        sha256((provider.base_url + "|" + str(config.get("api_key") or "") + "|" + str(config.get("project_id") or "")).encode()).hexdigest(),
+                        sha256(quota_identity.encode()).hexdigest(),
                     ),
                     request_token_reserve=max(8000, int(self.settings.get("budget.max_tokens", 8000))) + analysis_output_token_cap(self.settings),
                     priority=int(snapshot.get("priority", config["priority"])),
@@ -108,6 +114,10 @@ class ProviderService:
                     daily_free_first=bool(config.get("options", {}).get("daily_free_first")),
                 )
             )
+            # An explicitly selected OpenAI primary owns its billing boundary,
+            # including while cooling down. Do not instantiate fallback keys.
+            if len(channels) == 1 and effective_kind == "openai":
+                break
         for paid in channels:
             if not paid.daily_free_first or FailoverVisionProvider._free_model(paid):
                 continue
@@ -138,6 +148,8 @@ class ProviderService:
                 "priority": int(row.get("priority") or 100),
                 "model": str(row.get("model") or "").strip(),
                 "config_revision": self.config_revision(row),
+                **({"reasoning_effort": str(row.get("options", {}).get("reasoning_effort") or "none")}
+                   if row.get("kind") == "openai" and row.get("options", {}).get("api_mode") == "responses" else {}),
             }
             for row in sorted(
                 (row for row in self.repository.list() if row["enabled"] and row.get("usage_scope", "normal") == "normal"),
@@ -189,13 +201,16 @@ class ProviderService:
         if config is None:
             raise ValueError(f"VLM-008 找不到 Job 指定的 Provider：{provider_id}")
         base_url = OpenAICompatibleProvider.normalize_base_url(str(config.get("base_url") or ""))
-        project_id = str(config.get("project_id") or config.get("project") or "")
+        project_id = str(config.get("options", {}).get("project_id") or config.get("project_id") or config.get("project") or "")
         account_secret = str(config.get("api_key") or "")
+        account_identity = account_secret
+        if config.get("options", {}).get("organization_id"):
+            account_identity += "|" + str(config["options"]["organization_id"])
         return {
             "provider_config_revision": self.config_revision(config),
             "provider_base_url_fingerprint": sha256(base_url.encode("utf-8")).hexdigest(),
             "provider_project_id": project_id,
             "provider_account_fingerprint": (
-                sha256(account_secret.encode("utf-8")).hexdigest() if account_secret else ""
+                sha256(account_identity.encode("utf-8")).hexdigest() if account_secret else ""
             ),
         }

@@ -143,6 +143,15 @@ class BoundedJobWorker:
 
     def _record_failure(self, job_id: str, item_id: str, exc: Exception) -> None:
         code = failure_code(exc)
+        if code == "API_CREDIT_EXHAUSTED":
+            if self.repository.defer_item(item_id, self.worker_id, error_code=code):
+                self.repository.request_pause(job_id)
+                self.repository.add_event(
+                    job_id, "provider_credit_pause",
+                    "OpenAI 額度／支出上限已用盡，已暫停新增請求；請至 OpenAI Billing 核對後手動恢復",
+                    {"item_id": item_id, "error_code": code},
+                )
+            return
         if code in {"VLM-001", "VLM-002", "VLM-005", "AI-PROVIDER-TIMEOUT", "AI-PROVIDER-UNAVAILABLE"} and request_definitely_not_sent(exc):
             try:
                 delay = float(getattr(exc, "retry_after", None) or 60)

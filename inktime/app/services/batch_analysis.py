@@ -41,6 +41,8 @@ from inktime.app.services.budgets import BudgetService
 from inktime.app.repositories.batch_result_staging import BatchResultStore
 from inktime.app.providers.base import MAX_BATCH_RESULT_BYTES, Usage
 from inktime.app.providers.openai_compatible import OpenAICompatibleProvider, calculate_usage_cost
+from inktime.app.providers.openai_responses import responses_to_completion
+from inktime.app.providers.openai_models import DEFAULT_OPENAI_MODEL
 from inktime.app.repositories.analysis_reservations import (
     AnalysisReservationConflict,
     held_batch_sql,
@@ -315,7 +317,10 @@ class BatchAnalysisService:
             provider_route=route,
             scoring_profile_id=str(scoring.get("id", "")),
         )
-        model = str(self.settings.get("batch.model", "gpt-5.6-luna")).strip()
+        config = self.providers.get(str(route[0]["provider_id"])) or {}
+        direct_responses = config.get("kind") == "openai" and config.get("options", {}).get("api_mode") == "responses"
+        model = str((config.get("model") or DEFAULT_OPENAI_MODEL) if direct_responses
+                    else self.settings.get("batch.model", "gpt-5.6-luna")).strip()
         if not model:
             raise BatchLifecycleError("Batch 模型不可空白", "BATCH-MODEL-001")
         # Batch is a single full analysis.  The legacy smart_two_stage path is
@@ -323,11 +328,12 @@ class BatchAnalysisService:
         plan["strategy"] = "single"
         plan["model"] = model
         plan["processing_mode"] = "batch"
-        plan["batch_endpoint"] = self.ENDPOINT
+        plan["batch_endpoint"] = "/v1/responses" if direct_responses else self.ENDPOINT
         plan["batch_schema_kind"] = "full"
         plan["batch_completion_window"] = "24h"
         plan["reasoning_effort"] = normalize_reasoning_effort(
-            self.settings.get("batch.reasoning_effort", "none")
+            config.get("options", {}).get("reasoning_effort", "none") if direct_responses
+            else self.settings.get("batch.reasoning_effort", "none")
         )
         plan["provider_prompt_contract_sha256"] = provider_prompt_contract_sha256(
             prompt_version=str(plan.get("prompt_version") or ""),
@@ -903,7 +909,7 @@ class BatchAnalysisService:
             payload = {
                 "custom_id": str(item["custom_id"]),
                 "method": "POST",
-                "url": self.ENDPOINT,
+                "url": str(plan.get("batch_endpoint") or self.ENDPOINT),
                 "body": body,
             }
             return json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8") + b"\n"
@@ -968,7 +974,6 @@ class BatchAnalysisService:
                 self.batches.update_batch(
                     batch_id,
                     local_input_path=str(path),
-                    total_items=int(shard["items_count"]),
                     peak_rss_bytes=int(shard["peak_rss_bytes"]),
                     input_file_bytes=int(shard["bytes"]),
                 )
@@ -1040,6 +1045,10 @@ class BatchAnalysisService:
         batch = self.batches.get(batch_id)
         if batch is None:
             raise KeyError(batch_id)
+        if plan.get("batch_endpoint") == "/v1/responses" and batch["job_id"]:
+            parent = self.jobs.get(str(batch["job_id"]))
+            if parent is not None and str(parent["status"]) in {"paused", "pausing", "budget_exceeded", "cancelled", "failed"}:
+                raise BatchLifecycleError("Batch 工作已暫停，未新增遠端上傳或請求", "BATCH-JOB-PAUSED")
         if str(batch["status"]) in {"upload_unknown", "submission_unknown"}:
             raise BatchLifecycleError(
                 "Batch 外部 side effect 結果未知，必須先由管理員 Recovery 或 Abandon",
@@ -1194,6 +1203,13 @@ class BatchAnalysisService:
                 self.batches.release_side_effect_claim(batch_id, owner)
             elif local_failure or not has_uploaded_file:
                 self.batches.fail_local_batch(batch_id, code, str(exc))
+            if code == "API_CREDIT_EXHAUSTED" and current is not None and current["job_id"]:
+                parent_id = str(current["job_id"])
+                self.jobs.request_pause(parent_id)
+                self.batches.hold_prepared_for_credit(parent_id)
+                self.jobs.add_event(parent_id, "provider_credit_pause",
+                                    "OpenAI 額度／支出上限已用盡；未提交分片保留本機，核對 Billing 後手動恢復",
+                                    {"batch_id": batch_id, "error_code": code})
             raise
         finally:
             close = getattr(provider, "close", None)
@@ -1208,11 +1224,14 @@ class BatchAnalysisService:
         photo_ids: Iterable[str] | None = None,
         created_by: str | None = None,
         budget_limit: float | None = None,
+        privacy_acknowledged: bool = False,
         _retry_authorization: str | None = None,
     ) -> dict[str, Any]:
         submit_started = time.monotonic()
         self._assert_ai_submission_allowed()
         plan, analysis_fp, model = self._plan()
+        if plan.get("batch_endpoint") == "/v1/responses" and privacy_acknowledged is not True:
+            raise BatchLifecycleError("請先明確同意將縮圖以 Files／Batch API 上傳與暫存", "BATCH-PRIVACY-CONSENT")
         provider_id = str(plan["provider_route"][0]["provider_id"])
         provider_identity = self._provider_identity(provider_id)
         candidates, skipped, seed = self._candidate_rows(
@@ -1255,7 +1274,8 @@ class BatchAnalysisService:
                 kind="analysis_batch",
                 name=f"OpenAI Batch：{scope}",
                 strategy="single",
-                settings={"processing_mode": "batch", "scope": scope, "sample_seed": seed},
+                settings={"processing_mode": "batch", "scope": scope, "sample_seed": seed,
+                          "batch_privacy_acknowledged": privacy_acknowledged is True},
                 photo_ids=[str(item["photo"]["id"]) for item in candidates],
                 created_by=created_by,
                 budget_limit=budget_limit,
@@ -1298,7 +1318,7 @@ class BatchAnalysisService:
                     "job_id": job_id,
                     "provider_id": provider_id,
                     "model": model,
-                    "endpoint": self.ENDPOINT,
+                    "endpoint": str(plan.get("batch_endpoint") or self.ENDPOINT),
                     "analysis_fingerprint": analysis_fp,
                     "estimated_cost": estimate["estimated_cost"],
                     "sample_seed": seed,
@@ -1372,6 +1392,8 @@ class BatchAnalysisService:
                     batch_id=current_id,
                     error_code=str(getattr(exc, "code", "BATCH-SUBMIT-001")),
                 )
+                if str(getattr(exc, "code", "")) == "API_CREDIT_EXHAUSTED":
+                    break
                 continue
         log_event(
             LOGGER,
@@ -1572,6 +1594,18 @@ class BatchAnalysisService:
                     continue
                 status = str(current["status"])
                 if status == "preparing":
+                    if current["last_error_code"] == "API_CREDIT_EXHAUSTED" and current["job_id"]:
+                        parent = self.jobs.get(str(current["job_id"]))
+                        if parent is not None and parent["status"] in {"running", "retrying"}:
+                            # This marker is written only after every local
+                            # shard was prepared and a definite billing rejection.
+                            # A regular interrupted preparation is never resent.
+                            plan = json.loads(str(parent["analysis_spec_json"] or "{}"))
+                            if not isinstance(plan, dict) or plan.get("batch_endpoint") not in {"/v1/responses", self.ENDPOINT}:
+                                raise BatchLifecycleError("Frozen Batch 計畫不相容", "BATCH-POLL-PLAN-001")
+                            self.batches.release_side_effect_claim(batch_id, owner)
+                            self._submit_one(batch_id, plan)
+                        continue
                     if self._phase_is_stale(current):
                         if any(
                             current[key]
@@ -1914,7 +1948,16 @@ class BatchAnalysisService:
             raise BatchLifecycleError(str(exc), "BATCH-RESERVATION-CONFLICT") from exc
         except ValueError as exc:
             raise BatchLifecycleError(str(exc), "BATCH-RETRY-001") from exc
+        batch = self.batches.get(batch_id)
+        job = self.jobs.get(str(batch["job_id"])) if batch and batch["job_id"] else None
+        try:
+            saved_settings = json.loads(str(job["settings_json"] or "{}")) if job else {}
+        except (ValueError, TypeError):
+            saved_settings = {}
+        if not isinstance(saved_settings, dict):
+            saved_settings = {}
         return self.submit(scope="manual_selection", photo_ids=photo_ids, created_by=created_by,
+                           privacy_acknowledged=saved_settings.get("batch_privacy_acknowledged") is True,
                            _retry_authorization=token)
 
     def recover_uploaded_file(self, batch_id: str, remote_file_id: str) -> dict[str, Any]:
@@ -2065,7 +2108,7 @@ class BatchAnalysisService:
                 provider.close()
         if not isinstance(remote, dict) or str(remote.get("id") or "") != remote_id:
             raise BatchLifecycleError("遠端 Batch ID 與人工輸入不一致", "BATCH-RECOVERY-OWNERSHIP-001")
-        if str(remote.get("endpoint") or "") != self.ENDPOINT:
+        if str(remote.get("endpoint") or "") != str(batch.get("endpoint") or self.ENDPOINT):
             raise BatchLifecycleError("遠端 Batch endpoint 不符合本機契約", "BATCH-RECOVERY-OWNERSHIP-002")
         if str(remote.get("input_file_id") or "") != str(batch["input_file_id"] or ""):
             raise BatchLifecycleError(
@@ -2341,6 +2384,13 @@ class BatchAnalysisService:
         response = line.get("response") or {}
         request_id = response.get("request_id") or line.get("request_id")
         usage = self._usage_from_body(body)
+        if str(batch["endpoint"] or self.ENDPOINT) == "/v1/responses":
+            try:
+                body = responses_to_completion(body)
+            except Exception as exc:
+                self._mark_item_error(item, "BATCH-RESPONSE-BODY", type(exc).__name__, "schema_invalid",
+                                      job_id=str(batch["job_id"]))
+                return "schema_invalid"
         choice = (body.get("choices") or [{}])[0]
         if choice.get("finish_reason") in {"length", "content_filter", "max_tokens"} or (choice.get("message") or {}).get("refusal"):
             self._mark_item_error(

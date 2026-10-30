@@ -189,6 +189,8 @@ RUNNER_SUITE_TEST_PATHS: dict[str, tuple[str, ...]] = {
         "tests/integration/test_budget_calendar.py",
     ),
     "provider_analysis_owner": (
+        "tests/unit/test_openai_responses.py",
+        "tests/integration/test_openai_direct.py",
         "tests/integration/test_analysis_backfill.py",
         "tests/integration/test_automatic_photo_locations.py",
         "tests/unit/test_offline_districts.py",

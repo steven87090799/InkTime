@@ -23,7 +23,8 @@ from inktime.app.core.json_values import (
     reject_unknown_fields,
 )
 from inktime.app.core.logging import configure_logging
-from inktime.app.providers.openai_compatible import OpenAICompatibleProvider
+from inktime.app.providers.openai_responses import OpenAIResponsesProvider, create_vision_provider
+from inktime.app.providers.openai_compatible import ProviderHTTPError
 from inktime.app.providers.config import (
     PROVIDER_KINDS,
     capabilities_for,
@@ -39,6 +40,7 @@ from inktime.app.repositories.settings import (
 )
 from inktime.app.web.ai_readiness import ai_readiness_snapshot
 from inktime.app.services.usage_periods import usage_periods
+from inktime.app.services.openai_costs import openai_cost_projection
 from inktime.app.web.access import administrator_required, login_required
 from inktime.app.web.control_glossary import action_entries, setting_entries
 from inktime.app.domain.rendering.system_presets import SYSTEM_PRESETS
@@ -724,6 +726,30 @@ def save_provider():
     return {"id": provider_id}, 201
 
 
+@bp.get("/api/v1/providers/<provider_id>/models")
+@administrator_required
+def openai_account_models(provider_id: str):
+    config = current_app.extensions["inktime_provider_repository"].get(provider_id, include_secret=True)
+    if config is None:
+        abort(404)
+    if config["kind"] != "openai":
+        abort(400, description="此模型權限查驗僅用於 OpenAI 官方 API")
+    if not config.get("api_key"):
+        return {"message": "請先在服務端儲存 OpenAI API Key", "error_code": "AUTH_REQUIRED"}, 400
+    provider = OpenAIResponsesProvider(
+        name=config["name"], kind="openai", base_url=config["base_url"], api_key=config["api_key"],
+        options=config["options"], timeout=15,
+    )
+    try:
+        return {"models": provider.available_models(), "billing_balance": None,
+                "billing_message": "需至 OpenAI Billing 查詢",
+                "message": "已查詢帳戶模型清單；圖片與 Schema 能力仍須以自選的合成圖片測試確認"}
+    except ProviderHTTPError as exc:
+        return {"error_code": exc.code, "message": "OpenAI 模型清單查詢失敗，請核對金鑰、權限與 Billing"}, 400
+    finally:
+        provider.close()
+
+
 @bp.post("/api/v1/providers/<provider_id>/test")
 @administrator_required
 def test_provider(provider_id: str):
@@ -741,7 +767,7 @@ def test_provider(provider_id: str):
     kind = effective_provider_kind(
         str(config.get("kind") or "openai_compatible"), str(config.get("base_url") or "")
     )
-    provider = OpenAICompatibleProvider(
+    provider = create_vision_provider(
         name=config["name"],
         base_url=config["base_url"],
         api_key=config.get("api_key", ""),
@@ -766,6 +792,7 @@ def test_provider(provider_id: str):
             base_url=str(config.get("base_url") or ""),
             required=True,
         )
+        provider.configured_model = model
         operations = BillableOperationRepository(current_app.extensions["inktime_database"])
         key = scoped_idempotency_key("provider-test", str(g.user["id"]),
                                      request.headers.get("Idempotency-Key") or str(uuid4()))
@@ -857,6 +884,19 @@ def save_provider_pricing(provider_id: str):
     return {"status": "ok", "provider_id": provider_id, "model": payload["model"], **reconciliation}
 
 
+@bp.get("/api/v1/costs/openai-projection")
+@administrator_required
+def openai_projection():
+    try:
+        remaining = int(request.args["remaining"]) if "remaining" in request.args else None
+        if remaining is not None and not 0 <= remaining <= 100_000_000:
+            raise ValueError
+        return openai_cost_projection(current_app.extensions["inktime_database"],
+                                      model=request.args.get("model", "gpt-6-luna"), remaining=remaining)
+    except (ValueError, TypeError):
+        abort(400, description="remaining 必須是 0 至 100000000 的張數")
+
+
 @bp.get("/costs")
 @login_required
 def costs_page():
@@ -912,4 +952,5 @@ def costs_page():
     summary["usage_retention_days"] = (
         int(usage_retention["retention_days"]) if usage_retention is not None else None
     )
-    return render_template("costs.html", summary=summary, by_model=by_model)
+    return render_template("costs.html", summary=summary, by_model=by_model,
+                           openai_projection=openai_cost_projection(database))

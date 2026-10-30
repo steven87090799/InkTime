@@ -121,6 +121,20 @@ class BillableOperationRepository:
                 ("not_sent" if not_sent else "completed", datetime.now(timezone.utc).isoformat(), operation_id),
             )
 
+    def finish_rejected(self, operation_id: str) -> None:
+        """Close a definite OpenAI 4xx rejection, retaining sent-request evidence.
+
+        The legacy not_sent state also releases a call the provider explicitly
+        refused to execute. It must never be used for a timeout or generic 5xx.
+        """
+        with self.database.transaction() as connection:
+            connection.execute(
+                "UPDATE billable_operations SET state='not_sent',resolution_note=?,updated_at=? "
+                "WHERE id=? AND state='started'",
+                ("OpenAI definitive HTTP rejection; model execution was not accepted",
+                 datetime.now(timezone.utc).isoformat(), operation_id),
+            )
+
     def approve_resend(self, operation_id: str, *, reason: str) -> None:
         """Explicit operator decision; retain unknown billing and the original evidence."""
         if not reason.strip():

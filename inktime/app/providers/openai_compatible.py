@@ -32,6 +32,7 @@ from inktime.app.domain.analysis.schema import (
 )
 from inktime.app.domain.analysis.scoring import DEFAULT_SCORING_RULES
 from inktime.app.core.ai_trace_payloads import bounded_text, sanitize_trace_value
+from inktime.app.core.security import register_secret
 from inktime.app.providers.config import (
     PROVIDER_KINDS,
     OPENROUTER_ROUTING_KEYS,
@@ -332,14 +333,11 @@ def calculate_usage_cost(
               usage.reasoning_tokens, usage.cache_write_tokens)
     if any(type(value) is not int or not 0 <= value <= 9_223_372_036_854_775_807 for value in counts):
         return None
-    if usage.cached_tokens > usage.input_tokens or usage.reasoning_tokens > usage.output_tokens:
+    if usage.cached_tokens + usage.cache_write_tokens > usage.input_tokens or usage.reasoning_tokens > usage.output_tokens:
         return None
     input_tokens = max(0, int(usage.input_tokens))
     cached_tokens = max(0, int(usage.cached_tokens))
     output_tokens = max(0, int(usage.output_tokens))
-    if usage.cache_write_tokens > 0:
-        # The current pricing schema has no cache-write price field.
-        return None
     if input_tokens == 0 and cached_tokens == 0 and output_tokens == 0:
         return 0.0
     if not isinstance(pricing, dict):
@@ -351,6 +349,7 @@ def calculate_usage_cost(
     standard_input = decimal_price(pricing.get("input_per_million"))
     standard_cached = decimal_price(pricing.get("cached_input_per_million"))
     standard_output = decimal_price(pricing.get("output_per_million"))
+    write_price = decimal_price(pricing.get("cache_write_per_million"))
     if batch:
         multiplier = decimal_price(pricing.get("batch_multiplier", 0.5))
         if multiplier is None:
@@ -366,11 +365,22 @@ def calculate_usage_cost(
             cached_price = standard_input * multiplier
         if output_price is None and standard_output is not None:
             output_price = standard_output * multiplier
+        if write_price is not None:
+            write_price *= multiplier
     else:
         input_price = standard_input
         cached_price = standard_cached if standard_cached is not None else standard_input
         output_price = standard_output
-    uncached_tokens = max(0, input_tokens - cached_tokens)
+    # Official modern OpenAI cache writes replace ordinary-input billing.
+    # Unknown/custom price tables still fail closed when no write rate exists.
+    uncached_tokens = max(0, input_tokens - cached_tokens - usage.cache_write_tokens)
+    if usage.cache_write_tokens and write_price is None:
+        return None
+    if input_tokens > int(pricing.get("long_context_threshold") or 9_223_372_036_854_775_807):
+        input_price = input_price * 2 if input_price is not None else None
+        cached_price = cached_price * 2 if cached_price is not None else None
+        write_price = write_price * 2 if write_price is not None else None
+        output_price = output_price * Decimal("1.5") if output_price is not None else None
     if uncached_tokens and input_price is None:
         return None
     if cached_tokens and cached_price is None:
@@ -381,6 +391,7 @@ def calculate_usage_cost(
         uncached_tokens * (input_price or Decimal(0))
         + cached_tokens * (cached_price or Decimal(0))
         + output_tokens * (output_price or Decimal(0))
+        + usage.cache_write_tokens * (write_price or Decimal(0))
     ) / Decimal(1_000_000))
     return total if math.isfinite(total) and total >= 0 else None
 
@@ -388,6 +399,9 @@ def calculate_usage_cost(
 class OpenAICompatibleProvider(VisionProvider):
     supports_upload_guard = True
     supports_prompt_version = True
+    completion_path = "/chat/completions"
+    api_mode = "chat_completions"
+    batch_endpoint = "/v1/chat/completions"
     def __init__(
         self,
         *,
@@ -416,6 +430,7 @@ class OpenAICompatibleProvider(VisionProvider):
         self.openrouter_compatible = self.kind == "openrouter"
         self.provider_id = str(provider_id or name)
         self.api_key = api_key
+        register_secret(api_key)
         self.pricing = pricing or {}
         self.timeout = timeout
         self.request_timeout = (min(10.0, timeout), timeout)
@@ -423,6 +438,7 @@ class OpenAICompatibleProvider(VisionProvider):
         self.scoring_rules = scoring_rules.strip() or DEFAULT_SCORING_RULES
         self.caption_controls = dict(caption_controls or {})
         self.supports_reasoning_effort = bool(supports_reasoning_effort)
+        self.configured_model = ""
         self.session = session or requests.Session()
         self.last_request_metrics: dict[str, int] = {}
         self._trace_sender = None
@@ -505,7 +521,11 @@ class OpenAICompatibleProvider(VisionProvider):
     def from_process_spec(cls, specification: dict[str, Any]):
         if str(specification.get("provider_kind")) != "openai_compatible":
             raise ValueError("unsupported provider process specification")
-        return cls(
+        provider_class = cls
+        if specification.get("kind") == "openai" and (specification.get("options") or {}).get("api_mode") == "responses":
+            from .openai_responses import OpenAIResponsesProvider
+            provider_class = OpenAIResponsesProvider
+        return provider_class(
             name=str(specification["name"]),
             base_url=str(specification["base_url"]),
             api_key=str(specification.get("api_key", "")),
@@ -525,7 +545,7 @@ class OpenAICompatibleProvider(VisionProvider):
     @staticmethod
     def normalize_base_url(base_url: str) -> str:
         value = str(base_url or "").strip().rstrip("/")
-        for suffix in ("/chat/completions", "/batches"):
+        for suffix in ("/chat/completions", "/responses", "/batches"):
             if value.endswith(suffix):
                 value = value[: -len(suffix)].rstrip("/")
         if not value:
@@ -550,6 +570,10 @@ class OpenAICompatibleProvider(VisionProvider):
         headers = {"Content-Type": "application/json"}
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
+        if self.kind == "openai":
+            for option, header in (("organization_id", "OpenAI-Organization"), ("project_id", "OpenAI-Project")):
+                if self.options.get(option):
+                    headers[header] = self.options[option]
         if self.kind == "openrouter":
             if self.options.get("http_referer"):
                 headers["HTTP-Referer"] = str(self.options["http_referer"])
@@ -582,7 +606,7 @@ class OpenAICompatibleProvider(VisionProvider):
         counts_valid = (
             detail_objects_valid and input_count is not None and output_count is not None
             and cached_count is not None and reasoning_count is not None and cache_write_count is not None
-            and cached_count <= input_count and reasoning_count <= output_count
+            and cached_count + cache_write_count <= input_count and reasoning_count <= output_count
         )
         reported_cost = usage.get("cost")
         if reported_cost is None:
@@ -608,7 +632,7 @@ class OpenAICompatibleProvider(VisionProvider):
         value = str(message)
         if self.api_key:
             value = value.replace(self.api_key, "[REDACTED]")
-        return value.replace("Authorization", "[REDACTED-AUTHORIZATION]")
+        return str(sanitize_trace_value(value)).replace("Authorization", "[REDACTED-AUTHORIZATION]")
 
     @staticmethod
     def _retry_after(response) -> float | None:
@@ -722,6 +746,10 @@ class OpenAICompatibleProvider(VisionProvider):
                     http_status=status,
                 )
             if status == 429 or status >= 500:
+                if self.kind == "openai" and status == 429:
+                    # Inspect the structured code before any safe-read retry.
+                    # Exhausted credits and spend caps never become rate-limit retries.
+                    self._raise_openai_billing_error(response)
                 if status == 429 and no_retry:
                     # A rate-limit response is a definite rejection of this
                     # request, but preserve its structured provider error for
@@ -801,6 +829,7 @@ class OpenAICompatibleProvider(VisionProvider):
                 and "no endpoints found that can handle the requested parameters"
                 in str(provider_error_message or "").lower()
             )
+            self._raise_openai_billing_error(response)
             classified_code = (
                 "BATCH-RATE-LIMITED"
                 if status == 429 and str(error_code).startswith("BATCH")
@@ -835,6 +864,28 @@ class OpenAICompatibleProvider(VisionProvider):
             raise ProviderHTTPError(
                 "Provider 回應必須是 JSON Object", error_code, ambiguous=ambiguous_on_invalid
             )
+        return payload
+
+    def _raise_openai_billing_error(self, response) -> None:
+        if self.kind != "openai" or int(getattr(response, "status_code", 0) or 0) not in {402, 429}:
+            return
+        try:
+            error = response.json().get("error", {})
+            code = str(error.get("code") or error.get("type") or "")
+        except (ValueError, AttributeError, TypeError):
+            return
+        if code in {"insufficient_quota", "credit_balance_exhausted", "billing_hard_limit_reached",
+                    "organization_spend_limit_exceeded", "project_spend_limit_exceeded",
+                    "organization_usage_limit_exceeded"}:
+            raise ProviderHTTPError(
+                "OpenAI 額度或支出上限已用盡；工作已保留，請至 OpenAI Billing 查詢",
+                "API_CREDIT_EXHAUSTED", http_status=int(response.status_code),
+                provider_error_code=code, request_started=True, vision_started=True,
+                request_id=self._provider_request_id(response) or None,
+                response_info={"provider_error_code": code, "request_id": self._provider_request_id(response)},
+            )
+
+    def _completion_payload(self, payload: dict) -> dict:
         return payload
 
     def _post_completion(
@@ -872,8 +923,8 @@ class OpenAICompatibleProvider(VisionProvider):
                 except Exception:  # noqa: BLE001 -- a hostile SDK property is observation-only
                     raw_response = None
                 return ProviderCallTrace(
-                    endpoint=self._url("/chat/completions"),
-                    api_mode="chat_completions",
+                    endpoint=self._url(self.completion_path),
+                    api_mode=self.api_mode,
                     http_status=(
                         error.http_status
                         if error is not None
@@ -919,7 +970,7 @@ class OpenAICompatibleProvider(VisionProvider):
             provider=self.name,
             provider_id=self.provider_id,
             model=model,
-            operation="chat_completion",
+            operation=self.api_mode,
         )
         try:
             if upload_guard is not None:
@@ -943,7 +994,7 @@ class OpenAICompatibleProvider(VisionProvider):
                 assert_upload_allowed(**upload_guard)
             response = self._send(
                 "POST",
-                "/chat/completions",
+                self.completion_path,
                 retry_policy=retry_policy,
                 request_started_callback=mark_request_started,
                 **({"response_received_callback": archive_transport_response} if upload_guard else {}),
@@ -975,7 +1026,7 @@ class OpenAICompatibleProvider(VisionProvider):
                 provider=self.name,
                 provider_id=self.provider_id,
                 model=model,
-                operation="chat_completion",
+                operation=self.api_mode,
                 http_status=int(exc.http_status or 0),
                 provider_request_id=str(exc.request_id or "")[:128],
                 duration_ms=int((time.monotonic() - started) * 1000),
@@ -993,7 +1044,9 @@ class OpenAICompatibleProvider(VisionProvider):
             save_model_transport_response(Database(Path(upload_guard["database_path"])),
                                           upload_guard["operation_id"], response.text)
         try:
-            payload = self._json_response(response, error_code="VLM-006", ambiguous_on_invalid=True)
+            payload = self._completion_payload(
+                self._json_response(response, error_code="VLM-006", ambiguous_on_invalid=True)
+            )
         except ProviderHTTPError as exc:
             exc.vision_started = True
             exc.request_started = True
@@ -1012,7 +1065,7 @@ class OpenAICompatibleProvider(VisionProvider):
                 provider=self.name,
                 provider_id=self.provider_id,
                 model=model,
-                operation="chat_completion",
+                operation=self.api_mode,
                 http_status=int(exc.http_status or 0),
                 provider_request_id=str(exc.request_id or "")[:128],
                 duration_ms=int((time.monotonic() - started) * 1000),
@@ -1044,7 +1097,7 @@ class OpenAICompatibleProvider(VisionProvider):
                 provider=self.name,
                 provider_id=self.provider_id,
                 model=model,
-                operation="chat_completion",
+                operation=self.api_mode,
                 provider_request_id=self._provider_request_id(response),
                 http_status=int(getattr(response, "status_code", 0) or 0),
                 duration_ms=int((time.monotonic() - started) * 1000),
@@ -1078,7 +1131,7 @@ class OpenAICompatibleProvider(VisionProvider):
             provider=self.name,
             provider_id=self.provider_id,
             model=model,
-            operation="chat_completion",
+            operation=self.api_mode,
             provider_request_id=self._provider_request_id(response),
             http_status=int(getattr(response, "status_code", 0) or 0),
             duration_ms=int((time.monotonic() - started) * 1000),
@@ -1099,7 +1152,7 @@ class OpenAICompatibleProvider(VisionProvider):
         prompt_version: str | None = None,
     ) -> dict[str, Any]:
         capabilities = model_request_capabilities(self.kind, model)
-        if not capabilities["chat_completions"]:
+        if not capabilities["chat_completions"] and self.api_mode != "responses":
             raise ValueError("PROVIDER-022 此模型需要 Responses API，不能用目前的 Chat Completions 路徑")
         if not capabilities["vision"]:
             raise ValueError("PROVIDER-022 指定模型不支援圖片輸入")
@@ -1171,10 +1224,10 @@ class OpenAICompatibleProvider(VisionProvider):
             # benchmark label it as prompt text.
             "prompt_chars": sum(
                 len(str(message.get("content", "")))
-                for message in body.get("messages", [])
+                for message in body.get("messages", body.get("input", []))
                 if message.get("role") == "system"
             ),
-            "schema_chars": len(json.dumps(body.get("response_format", {}), ensure_ascii=False)),
+            "schema_chars": len(json.dumps(body.get("response_format", body.get("text", {})), ensure_ascii=False)),
             "request_body_bytes": _request_json_size(body),
             "image_bytes": max(0, int(image_bytes)),
         }
@@ -1202,6 +1255,8 @@ class OpenAICompatibleProvider(VisionProvider):
         capabilities = model_request_capabilities(self.kind, model)
         if capabilities["token_parameter"] != "max_tokens" and "max_tokens" in body:  # noqa: S105 -- parameter name
             body[capabilities["token_parameter"]] = body.pop("max_tokens")
+        if self.kind == "openai":
+            body["store"] = False
         if not capabilities["chat_completions"]:
             raise ValueError("PROVIDER-022 此模型需要 Responses API，不能用目前的 Chat Completions 路徑")
         if not capabilities["temperature"]:
@@ -1350,7 +1405,7 @@ class OpenAICompatibleProvider(VisionProvider):
         )
         self.last_request_metrics = {
             "prompt_chars": len(invalid_content[:12000]) + len(validation_error),
-            "schema_chars": len(json.dumps(body.get("response_format", {}), ensure_ascii=False)),
+            "schema_chars": len(json.dumps(body.get("response_format", body.get("text", {})), ensure_ascii=False)),
             "request_body_bytes": _request_json_size(body),
             "image_bytes": 0,
         }
@@ -1369,7 +1424,7 @@ class OpenAICompatibleProvider(VisionProvider):
                 item = dict(request_item)
                 item.setdefault("custom_id", f"inktime-{index}")
                 item.setdefault("method", "POST")
-                item.setdefault("url", "/v1/chat/completions")
+                item.setdefault("url", self.batch_endpoint)
                 if "body" not in item:
                     raise ValueError("Batch 每個請求都需要 body")
                 content.write(json.dumps(item, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
@@ -1395,9 +1450,8 @@ class OpenAICompatibleProvider(VisionProvider):
 
     def _upload_batch_stream(self, stream: BinaryIO, *, size: int, filename: str) -> str:
         body = BatchMultipartBody(stream, size=size, filename=filename)
-        headers = {"Content-Type": body.content_type}
-        if self.api_key:
-            headers["Authorization"] = f"Bearer {self.api_key}"
+        headers = self._headers()
+        headers["Content-Type"] = body.content_type
         response = self._send(
             "POST",
             "/files",
@@ -1426,7 +1480,7 @@ class OpenAICompatibleProvider(VisionProvider):
             raise ValueError("BATCH-REMOTE-002 input_file_id 不可空白")
         body: dict[str, Any] = {
             "input_file_id": input_file_id,
-            "endpoint": "/v1/chat/completions",
+            "endpoint": self.batch_endpoint,
             "completion_window": completion_window,
         }
         if metadata:

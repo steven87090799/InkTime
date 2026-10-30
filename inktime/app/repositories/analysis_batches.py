@@ -315,10 +315,22 @@ class AnalysisBatchRepository:
                 (child_id, now, *selected),
             )
             connection.execute(
-                "UPDATE analysis_batches SET total_items=?,updated_at=? WHERE id=?",
-                (int(parent["total_items"] or 0) - len(selected), now, parent_id),
+                "UPDATE analysis_batches SET total_items=?,estimated_cost=?,updated_at=? WHERE id=?",
+                (int(parent["total_items"] or 0) - len(selected),
+                 float(parent["estimated_cost"] or 0) *
+                 (int(parent["total_items"] or 0) - len(selected)) / max(1, int(parent["total_items"] or 1)),
+                 now, parent_id),
             )
         return len(selected)
+
+    def hold_prepared_for_credit(self, job_id: str) -> None:
+        """Mark fully prepared, unuploaded siblings for explicit manual resume."""
+        with self.database.transaction() as connection:
+            connection.execute(
+                "UPDATE analysis_batches SET last_error_code='API_CREDIT_EXHAUSTED',last_error_message=?,updated_at=? "
+                "WHERE job_id=? AND status='preparing' AND input_file_id IS NULL AND remote_batch_id IS NULL",
+                ("OpenAI 額度／支出上限已用盡，分片保留本機，等待手動恢復", utc_now(), job_id),
+            )
 
     def get(self, batch_id: str):
         with self.database.session() as connection:
