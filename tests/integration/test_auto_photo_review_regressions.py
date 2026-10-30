@@ -215,10 +215,8 @@ def test_auto_pair_place_and_date_are_upright_without_moving_photo_slots(app, tm
     calls = []
     original = ImageDraw.ImageDraw.text
     def capture(draw, xy, text, *args, **kwargs):
-        if kwargs.get("font") is not None and (
-            kwargs["font"].size <= 15 or str(text).replace('/', '').isdigit()
-        ):
-            calls.append((xy, str(text)))
+        if kwargs.get("font") is not None:
+            calls.append((xy, str(text), kwargs["font"].size))
         return original(draw, xy, text, *args, **kwargs)
     monkeypatch.setattr(ImageDraw.ImageDraw, "text", capture)
     second = service._render_plan_image(after)
@@ -227,13 +225,17 @@ def test_auto_pair_place_and_date_are_upright_without_moving_photo_slots(app, tm
     for photo, caption, pid in zip(after["geometry"]["photo_rects"], after["geometry"]["caption_rects"], ("first", "second"), strict=True):
         box = (photo["x"], photo["y"], photo["x"] + photo["width"], photo["y"] + photo["height"])
         assert ImageChops.difference(logical[0].crop(box), logical[1].crop(box)).getbbox() is None
-        metadata = sorted(
-            ((y, x, text) for (x, y), text in calls
-             if caption["x"] <= x < caption["x"] + caption["width"]),
-        )
-        assert places[pid] in "".join(text for _, _, text in metadata)
-        assert "2024" in [text for _, _, text in metadata]
-        assert f"7/{1 if pid == 'first' else 2}" in [text for _, _, text in metadata]
+        own = [(xy, text, size) for xy, text, size in calls
+               if caption["x"] <= xy[0] < caption["x"] + caption["width"]]
+        day = f"7/{1 if pid == 'first' else 2}"
+        date_indexes = [index for index, (_xy, text, _size) in enumerate(own) if text in {"2024", day}]
+        assert len(date_indexes) == 2
+        # Places are now readable upright glyphs, painted after the date rows.
+        # Preserve their right-to-left column order rather than interleaving by y.
+        place_runs = own[date_indexes[-1] + 1:]
+        assert "".join(text for _xy, text, _size in place_runs) == places[pid]
+        assert all(len(text) == 1 and 16 <= size <= 18 for _xy, text, size in place_runs)
+        assert max(xy[1] + size for xy, _text, size in place_runs) < min(own[index][0][1] for index in date_indexes)
     for image in [first, second, *logical]:
         image.close()
 
