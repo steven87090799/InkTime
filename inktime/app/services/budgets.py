@@ -10,6 +10,7 @@ from inktime.app.providers.base import Usage, request_definitely_not_sent
 from inktime.app.repositories.usage import UsageRepository
 from inktime.app.repositories.settings import SettingsRepository
 from inktime.app.services.usage_periods import usage_periods
+from inktime.app.services.openai_budget import OpenAIBudget
 
 
 class BudgetExceeded(RuntimeError):
@@ -24,6 +25,18 @@ class BudgetService:
     def __init__(self, database: Database, settings: SettingsRepository) -> None:
         self.database = database
         self.settings = settings
+        self.openai = OpenAIBudget(database, settings)
+
+    def _dedicated_lane(self, job_id, provider_id=None):
+        if not job_id or not self.openai.enabled():
+            return False
+        with self.database.session() as connection:
+            return connection.execute(
+                "SELECT 1 FROM jobs WHERE id=? AND json_extract(settings_json,'$.complementary_lane') "
+                "IN ('openai_backfill','openrouter_daily') AND json_array_length(analysis_spec_json,'$.provider_route')=1 "
+                "AND json_extract(analysis_spec_json,'$.provider_route[0].complementary_lane')=json_extract(settings_json,'$.complementary_lane') "
+                "AND (? IS NULL OR json_extract(analysis_spec_json,'$.provider_route[0].provider_id')=?)", (job_id, provider_id, provider_id),
+            ).fetchone() is not None
 
     def _reservation_cutoff(self) -> str:
         try:
@@ -158,7 +171,7 @@ class BudgetService:
         if guard.exists():
             raise BudgetExceeded("資料庫還原後須先核對供應商帳務與未完成 Batch，請至付費操作對帳頁解除暫停")
 
-    def reserve(self, reservation_id: str, amount: float, *, job_id=None, photo_id=None) -> None:
+    def reserve(self, reservation_id: str, amount: float, *, job_id=None, photo_id=None, provider_id=None) -> None:
         self.assert_restore_reconciled()
         """Serialize projected-budget checks with every new paid reservation."""
         if not math.isfinite(amount) or amount < 0:
@@ -166,22 +179,27 @@ class BudgetService:
         with self.database.transaction(operation="budget_reserve") as connection:
             if connection.execute("SELECT 1 FROM budget_reservations WHERE id=? AND state='active'", (reservation_id,)).fetchone():
                 return
+            native = self.openai.is_openai(provider_id)
+            if self.openai.enabled() and native:
+                self.openai.assert_reserve(amount)
+            dedicated = self._dedicated_lane(job_id, provider_id)
             snapshot = self.snapshot(job_id, photo_id)
             if snapshot["job_limit"] is not None and snapshot["job_effective"] + amount > snapshot["job_limit"]:
                 raise BudgetExceeded("付費請求預留金額超過工作預算")
             for current, maximum in (
-                (snapshot["daily_effective"], float(self.settings.get("budget.daily_stop", 10))),
-                (snapshot["monthly_effective"], float(self.settings.get("budget.monthly_stop", 100))),
+                (snapshot["daily_effective"], 0 if dedicated else float(self.settings.get("budget.daily_stop", 10))),
+                (snapshot["monthly_effective"], 0 if dedicated else float(self.settings.get("budget.monthly_stop", 100))),
                 (snapshot["photo_effective"], float(self.settings.get("budget.photo_max", 0.25)) if photo_id else 0),
                 (snapshot["job_effective"], snapshot["job_limit"] or 0),
             ):
                 if maximum > 0 and current + amount > maximum:
                     raise BudgetExceeded("付費請求預留金額超過可用預算")
             connection.execute(
-                "INSERT INTO budget_reservations(id,amount,job_id,photo_id,state,created_at) "
-                "VALUES (?,?,?,?,'active',?) ON CONFLICT(id) DO UPDATE SET "
-                "amount=excluded.amount,job_id=excluded.job_id,photo_id=excluded.photo_id,state='active',created_at=excluded.created_at",
-                (reservation_id, amount, job_id, photo_id, datetime.now(timezone.utc).isoformat()),
+                "INSERT INTO budget_reservations(id,amount,job_id,photo_id,state,created_at,provider_id,provider_kind) "
+                "VALUES (?,?,?,?,'active',?,?,?) ON CONFLICT(id) DO UPDATE SET "
+                "amount=excluded.amount,job_id=excluded.job_id,photo_id=excluded.photo_id,state='active',created_at=excluded.created_at,provider_id=excluded.provider_id,provider_kind=excluded.provider_kind",
+                (reservation_id, amount, job_id, photo_id, datetime.now(timezone.utc).isoformat(), provider_id,
+                 "openai" if native else "other" if provider_id else None),
             )
 
     def release(self, reservation_id: str) -> None:
@@ -204,7 +222,7 @@ class BudgetService:
         reservation_id = str(uuid4())
         model = str(kwargs["model"])
         self.reserve(reservation_id, self.estimate_reserve(
-            provider, model, output_tokens=int(kwargs.get("max_tokens") or 2048)))
+            provider, model, output_tokens=int(kwargs.get("max_tokens") or 2048)), provider_id=getattr(provider, "provider_id", None))
         started_at = datetime.now(timezone.utc).isoformat()
         started = time.monotonic()
         try:
@@ -233,15 +251,16 @@ class BudgetService:
     def assert_request_allowed(self, job_id: str | None, photo_id: str | None) -> None:
         self.assert_restore_reconciled()
         usage = self.snapshot(job_id, photo_id)
+        dedicated = self._dedicated_lane(job_id)
         checks = (
             (
                 usage["daily_effective"],
-                float(self.settings.get("budget.daily_stop", 10)),
+                0 if dedicated else float(self.settings.get("budget.daily_stop", 10)),
                 "每日 API 預算已達停止值",
             ),
             (
                 usage["monthly_effective"],
-                float(self.settings.get("budget.monthly_stop", 100)),
+                0 if dedicated else float(self.settings.get("budget.monthly_stop", 100)),
                 "每月 API 預算已達停止值",
             ),
             (

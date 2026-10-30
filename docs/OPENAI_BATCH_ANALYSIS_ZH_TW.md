@@ -2,7 +2,7 @@
 
 Batch 是明確啟用的 AI 路徑：先核對 `analysis.execution_mode`、Provider Batch 能力、模型、價格與預算。新安裝本機模式不等於已準備好 Batch；OpenRouter／Ollama 不進入這條 Files／Batches 路徑。先做文末 1–3 張非敏感 smoke，再考慮 100 張 sample。
 
-InkTime 的 Batch 是「一行一個獨立 Chat Completions Request」，不是把 100 張照片塞進同一個 Prompt。每一行都有匿名 `custom_id`，結果檔可能亂序，匯入一定以 `custom_id` 對應 SQLite 的 Batch Item；不以輸出順序或檔名對應照片。
+新建 OpenAI Responses Provider 的 Batch 使用「一行一個獨立 Responses Request」，既有設定保留 Chat Completions Request，不是把 100 張照片塞進同一個 Prompt。每一行都有匿名 `custom_id`，結果檔可能亂序，匯入一定以 `custom_id` 對應 SQLite 的 Batch Item；不以輸出順序或檔名對應照片。
 
 ## 正式生命週期
 
@@ -35,9 +35,13 @@ InkTime 的 Batch 是「一行一個獨立 Chat Completions Request」，不是�
 
 ## 隱私與資料邊界
 
+Responses 提交需明確勾選 Files／Batch 上傳與暫存同意，服務端也會檢查，並保存在 Job 設定。`store:false` 不免除 Files／Batch 的保留與濫用監測規則；取消可能需數分鐘，已執行項目仍可能計費。請先閱讀 [OpenAI 官方 API 指南](OPENAI_DIRECT_API_ZH_TW.md) 與 [官方資料政策](https://developers.openai.com/api/docs/guides/your-data)。
+
 JSONL、metadata 與匿名 ID 不含原始檔名、relative path、絕對路徑、GPS、EXIF、相簿名稱、人物姓名、API Key 或 Provider Secret。`never_upload` 與 `never_display` 分離；設定 `never_upload` 不刪除既有分析，也不改變原始照片唯讀狀態。Log 只記 Batch／Item／Job ID、數量、狀態與錯誤碼。
 
 ## 成本、Cache 與恢復
+
+新建 Responses Provider 使用該 Provider 的獨立模型、推理強度與已核對的官方價格 catalog，預設 `gpt-6-luna`；管理員自訂模型價格優先。其 Batch endpoint 為 `/v1/responses`，即時模式同樣使用 `store:false`。下列全域 `batch.model`／`batch.reasoning_effort` 與初始化價格只適用於原有 Chat Completions／相容模式。
 
 Provider 頁可設定標準 Input、Cached Input、Output、Batch Multiplier 或 Batch 專用價格；初始化管理值為標準 0.20／0.02／1.20 USD 每百萬 Token、Batch 倍率 0.5；這些不是當期費率或模型可用性保證，提交前必須依實際帳號／模型核對。提交前依估算停止超過 Job Budget 的新分片；實際匯入以每個 Batch Item 的 API Usage 記帳，避免同時記 Batch 聚合與逐張 Usage。
 

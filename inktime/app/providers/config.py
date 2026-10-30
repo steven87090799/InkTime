@@ -41,6 +41,7 @@ OPENROUTER_OPTION_KEYS = set(OPENROUTER_ROUTING_KEYS) | {
     "free_only",
 }
 GENERIC_OPTION_KEYS = {"allow_private_http"}
+OPENAI_OPTION_KEYS = GENERIC_OPTION_KEYS | {"api_mode", "organization_id", "project_id", "reasoning_effort"}
 
 
 @dataclass(frozen=True)
@@ -153,13 +154,24 @@ def normalize_options(kind: str, options: Any, *, base_url: str | None = None) -
         options = {}
     if not isinstance(options, dict):
         raise ValueError("PROVIDER-006 options 必須是 JSON object")
-    allowed = OPENROUTER_OPTION_KEYS if normalized_kind == "openrouter" else GENERIC_OPTION_KEYS
+    allowed = (OPENROUTER_OPTION_KEYS if normalized_kind == "openrouter" else
+               OPENAI_OPTION_KEYS if normalized_kind == "openai" else GENERIC_OPTION_KEYS)
     unknown = sorted(set(options) - allowed)
     if unknown:
         raise ValueError(f"PROVIDER-007 options 含未知欄位：{', '.join(map(str, unknown))}")
     result: dict[str, Any] = {}
     for key, value in options.items():
-        if key in {
+        if key in {"organization_id", "project_id"}:
+            result[key] = _bounded_string(value, key, 200)
+        elif key == "api_mode":
+            if value not in {"responses", "chat_completions"}:
+                raise ValueError("PROVIDER-023 api_mode 必須是 responses 或 chat_completions")
+            result[key] = value
+        elif key == "reasoning_effort":
+            if value not in {"none", "low", "medium", "high", "xhigh", "max"}:
+                raise ValueError("PROVIDER-023 不支援的 reasoning_effort")
+            result[key] = value
+        elif key in {
             "allow_fallbacks",
             "require_parameters",
             "zdr",
@@ -272,6 +284,10 @@ def validate_base_url(
     normalized_options = normalize_options(effective_kind, options)
     if parsed.query or parsed.fragment:
         raise ValueError("PROVIDER-017 base_url 不可包含 query 或 fragment")
+    official_urls = {"https://api.openai.com/v1" + suffix
+                     for suffix in ("", "/chat/completions", "/responses", "/batches")}
+    if effective_kind == "openai" and value not in official_urls:
+        raise ValueError("PROVIDER-023 OpenAI 官方 Provider 只允許 https://api.openai.com/v1")
     if parsed.scheme == "http":
         if not _is_private_host(hostname):
             raise ValueError("PROVIDER-018 HTTP 只允許 literal private/loopback IP；請使用 HTTPS")

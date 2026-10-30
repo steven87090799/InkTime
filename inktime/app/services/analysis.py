@@ -217,6 +217,12 @@ class PhotoAnalysisService:
             or legacy_model_value
             or settings.get("model.low_model", "high-quality-vision")
         )
+        effort = "none"
+        # Only new Responses routes expose an independent effort. Historical
+        # route/plan shapes and the OpenRouter scoring contract remain stable.
+        if provider_route and "reasoning_effort" in provider_route[0]:
+            effort = normalize_reasoning_effort(provider_route[0]["reasoning_effort"])
+            analysis_model = str(provider_route[0].get("model") or analysis_model)
         return build_analysis_plan(
             strategy=strategy,
             provider_route=provider_route,
@@ -232,7 +238,7 @@ class PhotoAnalysisService:
             prefilter=prefilter,
             execution_policy=execution_policy,
             scoring_rules=normalize_scoring_rules(settings.get("analysis.scoring_rules", "")),
-            reasoning_effort="none",
+            reasoning_effort=effort,
             repair_policy={"enabled": False},
         )
 
@@ -1110,7 +1116,7 @@ class PhotoAnalysisService:
                 self.budgets.reserve(
                     "vision:" + operation_id,
                     self.budgets.estimate_reserve(actual_call_provider, model, output_tokens=max_tokens),
-                    job_id=job_id, photo_id=photo_id,
+                    job_id=job_id, photo_id=photo_id, provider_id=getattr(actual_call_provider, "provider_id", None),
                 )
             except Exception:
                 operations.finish(operation_id, not_sent=True)
@@ -1265,6 +1271,14 @@ class PhotoAnalysisService:
             )
             raise
         except Exception as error:
+            rejected_status = (getattr(error, "http_status", None)
+                               or getattr(getattr(error, "call_trace", None), "http_status", None))
+            if (getattr(actual_call_provider, "kind", "") == "openai"
+                    and rejected_status in {400, 401, 402, 403, 404, 413, 422, 429}
+                    and not getattr(error, "ambiguous", False)):
+                operations.finish_rejected(operation_id)
+                if self.budgets:
+                    self.budgets.release("vision:" + operation_id)
             if request_definitely_not_sent(error) and not vision_attempt.vision_started:
                 operations.finish(operation_id, not_sent=True)
                 if self.budgets:

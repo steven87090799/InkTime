@@ -21,6 +21,7 @@
 | 接入 ESP32 或 PhotoPainter | [ESP32 指南](devices/ESP32_GUIDE_ZH_TW.md) → [自動加入](devices/ESP32_AUTOMATIC_PAIRING_ZH_TW.md) → [PhotoPainter](devices/WAVESHARE_PHOTOPAINTER_ZH_TW.md) → [Rev2.0 TG28 實板交接](devices/PHOTOPAINTER_REV2_TG28_HARDWARE_HANDOFF_ZH_TW.md) → [交付模式](devices/PHOTOPAINTER_DELIVERY_MODES_ZH_TW.md) |
 | 使用本機無 AI 模式 | [Local-only 選片與雙照片](guides/LOCAL_ONLY_SELECTION_ZH_TW.md) |
 | 執行 OpenAI Batch 分析 | [OpenAI Batch 照片分析](OPENAI_BATCH_ANALYSIS_ZH_TW.md) |
+| 設定 OpenAI 官方 API 與 Business 額度 | [OpenAI Direct API](OPENAI_DIRECT_API_ZH_TW.md) |
 | 設定 OpenRouter 或查看成本來源 | [OpenRouter Provider](providers/OPENROUTER_ZH_TW.md) → [Token 與成本指南](reference/TOKEN_COST_GUIDE_ZH_TW.md) |
 | 離線比較模型與解析度 | [Model Benchmark](providers/MODEL_BENCHMARK_ZH_TW.md) |
 | 為 ESP32 配置 HTTPS 信任根 | [ESP32 TLS／配網](devices/ESP32_TLS_PROVISIONING_ZH_TW.md) |
@@ -70,6 +71,7 @@
 ### Batch 與交付專項
 
 - [`OPENAI_BATCH_ANALYSIS_ZH_TW.md`](OPENAI_BATCH_ANALYSIS_ZH_TW.md)：Batch 輸入快照、隱私、生命週期、成本與實際人工 smoke 邊界。
+- [`OPENAI_DIRECT_API_ZH_TW.md`](OPENAI_DIRECT_API_ZH_TW.md)：官方 Responses、獨立金鑰／組織／專案、Business 額度、預算及 Batch 操作。
 - [`archive/reports/branch-consolidation-report.md`](archive/reports/branch-consolidation-report.md)：分支整併、Migration 26、CI 與遠端分支清理證據。
 - [`post-merge-hardware-validation.md`](post-merge-hardware-validation.md)：軟體／hosted PASS 與真實 OpenAI、NAS、ESP32 驗收的 NOT RUN 邊界。
 

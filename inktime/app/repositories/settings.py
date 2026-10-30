@@ -220,7 +220,7 @@ SETTING_DEFINITIONS: dict[str, dict[str, Any]] = {
         "type": "integer",
         "description": "歷年同期按需模式：顯示日期前後幾天的照片需要補齊模型資料",
         "risk": "範圍越大，首次分析的照片與費用越多；已有結果不會因模型升級重送",
-        "min": 1,
+        "min": 0,
         "max": 31,
         "restart": False,
     },
@@ -1498,6 +1498,27 @@ def _govern_definition(key: str, definition: dict[str, Any]) -> None:
     )
 
 
+SETTING_DEFINITIONS.update({
+    "analysis.complementary_enabled": {"type": "boolean", "default": False, "description": "啟用 OpenAI 照片庫補齊與 OpenRouter 歷年明天分工"},
+    "analysis.openai_provider_id": {"type": "string", "default": "", "max_length": 200, "description": "照片庫補齊使用的 OpenAI Provider ID（Key 與模型在模型與 API 管理）"},
+    "analysis.daily_openrouter_provider_id": {"type": "string", "default": "", "max_length": 200, "description": "每日歷年明天使用的免費 OpenRouter Provider ID"},
+    "analysis.openai_backfill_enabled": {"type": "boolean", "default": False, "description": "開啟 OpenAI 由舊到新補齊；關閉後保留進度"},
+    "analysis.openai_backfill_concurrency": {"type": "integer", "default": 1, "min": 1, "max": 8, "description": "OpenAI 補齊並行數（也受 Provider 與 Worker 限制）"},
+    "analysis.openai_backfill_mode": {"type": "string", "default": "realtime", "choices": ["realtime", "batch"], "choice_labels": {"realtime": "即時 API", "batch": "Batch API"}, "description": "OpenAI 補齊處理方式；Batch 須另同意 Files 暫存"},
+    "analysis.openai_backfill_chunk": {"type": "integer", "default": 50, "min": 1, "max": 500, "description": "每輪最多照片數；每日任務會在各輪之間優先執行"},
+    "analysis.openai_batch_consent": {"type": "boolean", "default": False, "description": "明確同意自動 Batch 將私人照片縮圖上傳至 Files 並暫存；停用不會取消已送出批次"},
+    "openai_budget.cycle_limit": {"type": "number", "default": 20, "min": 0.01, "max": 100000, "description": "OpenAI 每期預估 API 費用上限（美元，包含即時、Batch 與重試，並非實際付款額）"},
+    "openai_budget.daily_limit": {"type": "number", "default": 0, "min": 0, "max": 100000, "description": "OpenAI 每日預估 API 費用上限（美元；0 不另限制每日）"},
+    "openai_budget.cycle_anchor": {"type": "string", "default": "2026-01-01", "max_length": 10, "description": "OpenAI 預算週期起算日期 YYYY-MM-DD，依一般設定時區午夜重置；請對照實際補發日期"},
+    "openai_budget.cycle_months": {"type": "integer", "default": 1, "min": 1, "max": 12, "description": "OpenAI 每幾個月重置預算（年繳額度可選 12）"},
+    "openai_budget.stop_percent": {"type": "number", "default": 98, "min": 1, "max": 100, "description": "OpenAI 達預算百分之幾時提前暫停，保留在途請求空間"},
+    "openai_budget.warning_percent": {"type": "number", "default": 80, "min": 1, "max": 100, "description": "OpenAI 預算用量提醒百分比，顯示在補齊頁"},
+    "openai_budget.auto_resume": {"type": "boolean", "default": True, "description": "預算暫停後下期自動繼續；遠端額度用完每期最多試一張，手動暫停與待對帳不自動恢復"},
+})
+for _complementary_key in SETTING_DEFINITIONS:
+    if _complementary_key.startswith("openai_budget.") or _complementary_key.startswith(("analysis.complementary_", "analysis.openai_", "analysis.daily_openrouter_")):
+        SETTING_DEFINITIONS[_complementary_key].update(category="雙 Provider 分工", restart=False)
+
 for _setting_key, _setting_definition in SETTING_DEFINITIONS.items():
     _govern_definition(_setting_key, _setting_definition)
 
@@ -1966,6 +1987,17 @@ class SettingsRepository:
     @staticmethod
     def _validate_all(values: dict[str, Any]) -> None:
         SettingsRepository._validate_caption_ranges(values)
+        try:
+            anchor = values["openai_budget.cycle_anchor"]
+            if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", anchor):
+                raise ValueError("invalid date format")
+            datetime.strptime(anchor, "%Y-%m-%d")
+        except ValueError as exc:
+            raise ValueError("OpenAI 週期起算日須為有效的 YYYY-MM-DD 日期") from exc
+        if values["openai_budget.warning_percent"] > values["openai_budget.stop_percent"]:
+            raise ValueError("OpenAI 提醒比例不可高於暫停比例")
+        if values["analysis.openai_backfill_mode"] == "batch" and values["analysis.openai_backfill_enabled"] and not values["analysis.openai_batch_consent"]:
+            raise ValueError("開啟自動 Batch 前須明確同意 Files 暫存私人縮圖")
         # Read-only, unwired warning thresholds must not prevent operators
         # from lowering the enforced daily or monthly spending ceiling.
         if int(values["observability.activity_retention_days"]) < 7:

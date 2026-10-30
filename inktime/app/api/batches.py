@@ -54,7 +54,7 @@ def _photo_ids(payload: dict) -> list[str] | None:
 def _parameters(payload: dict) -> dict:
     reject_unknown_fields(
         payload,
-        {"scope", "sample_count", "photo_ids", "budget_limit"},
+        {"scope", "sample_count", "photo_ids", "budget_limit", "privacy_acknowledged"},
         error_prefix="BATCH-API-001",
     )
     scope = payload.get("scope", "sample")
@@ -80,17 +80,21 @@ def _parameters(payload: dict) -> dict:
         maximum=1_000_000,
         error_prefix="BATCH-API-001",
     )
+    consent = ({"privacy_acknowledged": json_bool(payload, "privacy_acknowledged")}
+               if "privacy_acknowledged" in payload else {})
     return {
         "scope": scope,
         "sample_count": sample_count,
         "photo_ids": _photo_ids(payload),
         "budget_limit": budget_limit,
+        **consent,
     }
 
 
 def _estimate_parameters(payload: dict) -> dict:
     parameters = _parameters(payload)
     parameters.pop("budget_limit", None)
+    parameters.pop("privacy_acknowledged", None)
     return parameters
 
 
@@ -133,6 +137,8 @@ def batches_page_action():
             payload = {
                 "scope": request.form.get("scope", "sample"),
                 "sample_count": int(request.form.get("sample_count", "100")),
+                "privacy_acknowledged": request.form.get("privacy_acknowledged") == "true",
+                "budget_limit": float(request.form["budget_limit"]) if request.form.get("budget_limit") else None,
             }
             if action == "estimate":
                 result = _service().estimate(**_estimate_parameters(payload))

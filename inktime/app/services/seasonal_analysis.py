@@ -10,6 +10,7 @@ from inktime.app.domain.analysis.plan import stored_analysis_fingerprint
 from inktime.app.repositories.analysis_reservations import AnalysisReservationConflict
 from inktime.app.repositories.billable_operations import SeasonalAlreadyProcessedError
 from inktime.app.repositories.seasonal_analysis import utc_now
+from inktime.app.providers.openai_compatible import ProviderHTTPError
 
 
 class SeasonalAnalysisService:
@@ -24,6 +25,8 @@ class SeasonalAnalysisService:
         return datetime.now(ZoneInfo(str(self.settings.get("general.timezone", "Asia/Taipei")))).date()
 
     def window(self) -> int:
+        if self.settings.get("analysis.complementary_enabled", False):
+            return 0
         return int(self.settings.get("analysis.seasonal_window_days", 5))
 
     def enabled(self) -> bool:
@@ -69,7 +72,8 @@ class SeasonalAnalysisService:
     def _plan(self) -> dict:
         if not permits_manual_ai(execution_mode(self.settings)):
             raise ValueError("目前分析執行模式不允許使用模型")
-        route = self.providers.usable_route_snapshot()
+        route = (self.providers.complementary_route("openrouter_daily")
+                 if self.settings.get("analysis.complementary_enabled", False) else self.providers.usable_route_snapshot())
         if not route:
             raise ValueError("尚未設定可用 Vision Provider，請前往模型與 API")
         return self.analysis.build_plan(strategy="single", provider_route=route,
@@ -82,13 +86,14 @@ class SeasonalAnalysisService:
             name=f"{'手動重試' if retry_task else '全部重跑' if force else '歷年同期'}：{target.isoformat()}（{len(rows)} 張）",
             strategy="single", settings={"concurrency": 1, "max_attempts": 1, "force_ai": True,
                 "seasonal_analysis": True, "seasonal_retry_task_id": retry_task,
-                "target_date": target.isoformat(), "source": "seasonal"},
+                "target_date": target.isoformat(), "source": "seasonal",
+                **({"complementary_lane": "openrouter_daily"} if self.settings.get("analysis.complementary_enabled", False) else {})},
             photo_ids=[row["id"] for row in rows], created_by=actor, priority=1,
             analysis_spec=plan, analysis_fingerprint=stored_analysis_fingerprint(plan), force_recompute=force,
             dedupe_key=f"seasonal-rerun:{confirmation[0]}" if confirmation else None,
             commit_hook=self.repository.claim_hook(rows, target, retry_task=retry_task, confirmation=confirmation),
         )
-        self.job_service.start(job_id)
+        self.jobs.transition(job_id, {"pending"}, "running", "started")
         return job_id
 
     def ensure(self, target: date | None = None) -> dict:
@@ -99,6 +104,9 @@ class SeasonalAnalysisService:
             if target is None:
                 return {"waiting": False, "job_id": None, "reason": "waiting_for_morning_delivery_ack"}
         self.photos.reconcile_model_content_holds()
+        if self.settings.get("analysis.complementary_enabled", False):
+            self.repository.retire_old_daily_queue(target)
+            self.repository.release_unstarted_background(target)
         self.repository.refresh()
         missing: list[dict] = []
         waiting = False
@@ -127,7 +135,7 @@ class SeasonalAnalysisService:
             waiting = waiting or bool(active)
             for job in active:
                 if job["status"] == "pending":
-                    self.job_service.start(str(job["id"]))
+                    self.jobs.transition(str(job["id"]), {"pending"}, "running", "started")
             if len(missing) == self.CHUNK_SIZE:
                 break
         job_id = None
@@ -186,6 +194,13 @@ class SeasonalAnalysisService:
         return waiting
 
     def analyze_item(self, *, photo_id: str, job_id: str, **kwargs) -> dict:
+        if self.settings.get("analysis.complementary_enabled", False):
+            job = self.jobs.get(job_id)
+            scope = json.loads(job["settings_json"]) if job else {}
+            if job and job["created_by"] == "system" and (scope.get("complementary_lane") != "openrouter_daily"
+                    or scope.get("target_date") != (self.today() + timedelta(days=1)).isoformat()):
+                raise ProviderHTTPError("每日分析已切換日期；尚未送出的照片保留給補齊", "VLM-005", retry_after=60,
+                                        request_started=False, vision_started=False)
         with self.repository.database.session() as connection:
             task = connection.execute(
                 "SELECT * FROM seasonal_analysis_tasks WHERE job_id=? AND photo_id=?", (job_id, photo_id)

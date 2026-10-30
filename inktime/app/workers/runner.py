@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import argparse
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import json
 import logging
 import signal
@@ -266,6 +266,8 @@ def _execute_job_item(app, item, *, job, settings, provider, provider_error, ana
             int(settings["notification_id"])
         )
     analyze = (
+        app.extensions["inktime_complementary_analysis_service"].analyze_item
+        if settings.get("complementary_lane") == "openai_backfill" else
         app.extensions["inktime_analysis_backfill_service"].analyze_item if settings.get("missing_analysis_backfill") else
         app.extensions["inktime_seasonal_analysis_service"].analyze_item
         if settings.get("seasonal_analysis") else analysis.analyze_photo
@@ -350,7 +352,16 @@ class WorkerRunner:
             backfill = self.app.extensions.get("inktime_analysis_backfill_service")
             if settings.get("missing_analysis_backfill") and backfill is not None and not backfill.can_run(str(job["id"])):
                 continue
+            complementary = self.app.extensions.get("inktime_complementary_analysis_service")
+            if settings.get("complementary_lane") == "openai_backfill" and complementary is not None and not complementary.can_run(str(job["id"])):
+                continue
             seasonal = self.app.extensions.get("inktime_seasonal_analysis_service")
+            if (seasonal is not None and seasonal.settings.get("analysis.complementary_enabled", False)
+                    and settings.get("seasonal_analysis") and job["created_by"] == "system"
+                    and (settings.get("complementary_lane") != "openrouter_daily"
+                         or settings.get("target_date") != (seasonal.today() + timedelta(days=1)).isoformat())):
+                repository.request_pause(str(job["id"]))
+                continue
             if str(job["kind"]) == "render" and seasonal is not None:
                 try:
                     if seasonal.before_render(settings, job_id=str(job["id"])):
@@ -696,6 +707,10 @@ class WorkerRunner:
                     },
                 )
             self.current = None
+            if settings.get("complementary_lane") == "openai_backfill" and complementary is not None:
+                complementary.ensure()
+                processed_jobs += 1
+                break
             if settings.get("missing_analysis_backfill") and backfill is not None:
                 backfill.repository.refresh()
                 backfill.ensure()

@@ -22,7 +22,8 @@ def _state():
         abort(400, description="篩選或分頁不合法")
     service = _service()
     return {**service.repository.status(category=category, offset=(page - 1) * 50),
-            "profile": service.profile(), "page": page, "category": category}
+            "profile": service.profile(), "page": page, "category": category,
+            "complementary": current_app.extensions["inktime_complementary_analysis_service"].state()}
 
 
 @bp.get("/analysis/missing")
@@ -72,3 +73,40 @@ def retry_failed(job_id: str):
     except (ValueError, AnalysisReservationConflict) as exc:
         return {"message": str(exc)}, 409
     return {**result, "detail_url": f"/jobs/{result['job_id']}"}, 201 if result["created"] else 200
+
+
+@bp.post("/api/v1/analysis/complementary/settings")
+@administrator_required
+def complementary_settings():
+    payload = json_object_payload(request, maximum_bytes=8192, error_prefix="BACKFILL-001")
+    try:
+        service = current_app.extensions["inktime_complementary_analysis_service"]
+        service.configure(payload, str(g.user["id"]))
+        return service.state()
+    except (ValueError, RuntimeError) as exc:
+        return {"message": str(exc)}, 409
+
+
+@bp.post("/api/v1/analysis/complementary/resume")
+@administrator_required
+def complementary_resume():
+    try:
+        current_app.extensions["inktime_complementary_analysis_service"].resume(str(g.user["id"]))
+        return {"message": "已恢復未完成項目"}
+    except (ValueError, RuntimeError) as exc:
+        return {"message": str(exc)}, 409
+
+
+@bp.get("/api/v1/analysis/complementary/free-quota")
+@administrator_required
+def complementary_free_quota():
+    service = current_app.extensions["inktime_complementary_analysis_service"]
+    router = None
+    try:
+        router = service.providers.build_router(service.providers.complementary_route("openrouter_daily"))
+        return router.channels[0].provider.free_daily_quota()
+    except (ValueError, RuntimeError):
+        return {"message": "無法確認剩餘免費次數；未呼叫模型，也不會啟用付費接續"}, 409
+    finally:
+        if router is not None:
+            router.close()

@@ -1032,88 +1032,79 @@ def test_adaptive_secondary_risk_controls_the_preview_dither_plan(app, tmp_path,
     assert service._render_plan_image(plan).size == (480, 800)
 
 
-def test_compact_pair_dates_leave_both_sentences_and_districts_visible(app, monkeypatch):
-    from inktime.app.domain.rendering.layout_geometry import resolve_compact_pair_geometry
-    service = app.extensions['inktime_render_service']
-    geometry = resolve_compact_pair_geometry(((900, 1600), (900, 1600)))
-    calls = []
-    original = ImageDraw.ImageDraw.text
-    def capture(draw, xy, text, *args, **kwargs):
-        calls.append((str(text), kwargs['font'].size))
-        return original(draw, xy, text, *args, **kwargs)
-    monkeypatch.setattr(ImageDraw.ImageDraw, 'text', capture)
-    records = ({'photo_id': 'a', 'text': '那天微風也記得我們一起走過的路留在心裡面'},
-               {'photo_id': 'b', 'text': '那些溫柔日常值得好好收藏'})
-    parts = {key: {'date': '2022年8月5日', 'location': '新店區'} for key in ('a', 'b')}
-    with Image.new('RGB', (800, 480), 'white') as canvas:
-        service._draw_compact_pair_captions(canvas, geometry, records, parts)
-    assert sum(text == '2022' for text, _ in calls) == 2
-    assert sum(text == '8/5' for text, _ in calls) == 2
-    assert sum(text == '新店區' for text, _ in calls) == 2
-    assert all(14 <= size <= 18 for text, size in calls if text in {'2022', '8/5'})
-    painted = ''.join(text for text, size in calls if size >= 16 and text not in {'2022', '8/5'})
-    assert records[0]['text'] in painted and records[1]['text'] in painted
-
-
-@pytest.mark.parametrize('place,visible_place', [
-    ('國立故宮博物院南部院區', '國立故宮博物院南部院區'),
-    ('國立臺灣史前文化博物館南科考古館', '國立臺灣史前文化博物館南科考古館'),
-    ('海邊風景文化展示中心', '海邊風景文化展示中心'),
-    ('山水風光' * 10, None),
+@pytest.mark.parametrize('sentence,place', [
+    ('把平凡日子收進光裡讓回憶慢慢發亮', '新店區'),
+    ('那天的風景留在心裡', '國立故宮博物院南部院區'),
+    ('那天微風也記得我們一起走過的路留在心裡面', '新店區'),
+    ('把平凡日子收進光裡讓回憶慢慢發亮', '山水風光' * 10),
+    ('樹影與遠山留住相聚時光' * 6, '臺北市信義區象山親山步道'),
 ])
-def test_compact_pair_long_places_keep_twenty_characters_and_original_metadata(app, monkeypatch, place, visible_place):
+def test_compact_pair_uses_smaller_sentence_readable_vertical_place_and_bottom_date(
+    app, monkeypatch, sentence, place,
+):
     from inktime.app.domain.rendering.layout_geometry import resolve_compact_pair_geometry
 
     service = app.extensions['inktime_render_service']
     geometry = resolve_compact_pair_geometry(((900, 1600), (900, 1600)))
-    text = '那天微風也記得我們一起走過的路留在心裡面'
     calls = []
     original = ImageDraw.ImageDraw.text
 
     def capture(draw, xy, value, *args, **kwargs):
-        calls.append((str(value), kwargs['font'].size))
+        bounds = draw.textbbox(xy, str(value), font=kwargs['font'], anchor=kwargs.get('anchor'))
+        calls.append((str(value), kwargs['font'], bounds))
         return original(draw, xy, value, *args, **kwargs)
 
     monkeypatch.setattr(ImageDraw.ImageDraw, 'text', capture)
-    records = tuple({'photo_id': key, 'text': text} for key in ('a', 'b'))
+    records = tuple({'photo_id': key, 'text': sentence} for key in ('a', 'b'))
     parts = {key: {'date': '2026年12月31日', 'location': place} for key in ('a', 'b')}
     with Image.new('RGB', (800, 480), 'white') as canvas:
         service._draw_compact_pair_captions(canvas, geometry, records, parts)
-    assert ''.join(value for value, size in calls if size >= 16 and value not in {'2026', '12/31'}) == text * 2
-    place_text = ''.join(value for value, size in calls if size < 16 and value not in {'2026', '12/31'})
-    if visible_place is None:
-        assert '…' in place_text
-    else:
-        assert place_text == visible_place * 2
+    for rect in geometry.caption_rects:
+        own = [(text, font, bounds) for text, font, bounds in calls if rect.x <= bounds[0] < rect.right]
+        date_indexes = [index for index, (text, _font, _bounds) in enumerate(own) if text in {'2026', '12/31'}]
+        assert len(date_indexes) == 2
+        upper = own[:date_indexes[0]]
+        lower = own[date_indexes[-1] + 1:]
+        assert upper and lower
+        upper_text, lower_text = ''.join(row[0] for row in upper), ''.join(row[0] for row in lower)
+        assert upper_text == sentence or (upper_text.endswith('…') and sentence.startswith(upper_text[:-1]))
+        assert lower_text == place or (lower_text.endswith('…') and place.startswith(lower_text[:-1]))
+        assert all(len(text) == 1 for text, _font, _bounds in lower)  # Upright individual glyphs, never horizontal place rows.
+        centers = [round((bounds[0] + bounds[2]) / 2, 1) for _text, _font, bounds in lower]
+        assert len(set(centers)) <= 2 and centers[0] >= centers[-1]
+        assert all(17 <= font.size <= 20 for _text, font, _bounds in upper)
+        assert all(16 <= font.size < upper[0][1].size for _text, font, _bounds in lower)
+        assert all(font.path == upper[0][1].path for _text, font, _bounds in lower)
+        assert max(bounds[3] for _text, _font, bounds in upper) < min(bounds[1] for _text, _font, bounds in lower)
+        assert max(bounds[3] for _text, _font, bounds in lower) < own[date_indexes[0]][2][1]
+        assert max(own[index][2][3] for index in date_indexes) >= rect.bottom - 10
+        assert all(rect.x <= bounds[0] <= bounds[2] <= rect.right and rect.y <= bounds[1] <= bounds[3] <= rect.bottom
+                   for _text, _font, bounds in own)
+        for index, (_text, _font, first) in enumerate(own):
+            for _other, _other_font, second in own[index + 1:]:
+                assert min(first[2], second[2]) <= max(first[0], second[0]) or min(first[3], second[3]) <= max(first[1], second[1])
     assert all(part['location'] == place for part in parts.values())
     assert sum(rect.width for rect in geometry.photo_rects) == 704
 
 
-def test_compact_pair_keeps_date_legible_and_unknown_place_name_complete(app):
-    service = app.extensions['inktime_render_service']
-    place = '甲乙丙丁戊己庚辛壬癸子丑寅卯辰巳午未'
-    text = '那天微風也記得我們一起走過的路留在心裡'
-    font_path = service.fonts.resolve(str(service.settings.get('render.font_path', '')))
-    with Image.new('RGB', (44, 480), 'white') as canvas:
-        lines = service._compact_pair_metadata_lines(
-            ImageDraw.Draw(canvas), font_path=font_path, date_lines=['2026', '12/31'],
-            place=place, sentence=text, width=38, height=464,
-        )
-    assert ''.join(value for value, _font, _step in lines[2:]) == place
-    assert 14 <= lines[0][1].size <= 18
+@pytest.mark.parametrize('date_label,place', [('', '新店區'), ('2026年12月31日', ''), ('', '')])
+def test_vertical_pair_caption_missing_metadata_keeps_available_fields(app, monkeypatch, date_label, place):
+    from inktime.app.domain.rendering.layout_geometry import Rect
 
-
-def test_compact_pair_sixteen_character_caption_leaves_room_for_forty_character_landmark(app):
     service = app.extensions['inktime_render_service']
-    place = '山水風光' * 10
-    font_path = service.fonts.resolve(str(service.settings.get('render.font_path', '')))
+    calls = []
+    original = ImageDraw.ImageDraw.text
+    def capture(draw, xy, text, *args, **kwargs):
+        calls.append(str(text))
+        return original(draw, xy, text, *args, **kwargs)
+    monkeypatch.setattr(ImageDraw.ImageDraw, 'text', capture)
     with Image.new('RGB', (44, 480), 'white') as canvas:
-        lines = service._compact_pair_metadata_lines(
-            ImageDraw.Draw(canvas), font_path=font_path, date_lines=['2026', '12/31'],
-            place=place, sentence='把平凡日子收進光裡讓回憶慢慢發亮', width=38, height=464,
-        )
-    assert ''.join(value for value, _font, _step in lines[2:]) == place
-    assert sum(step for _value, _font, step in lines) + 16 * 18 + 8 <= 464
+        service._draw_adaptive_pair_caption(canvas, {'text': '把平凡日子收進光裡', 'capture_place_label': place,
+            'capture_date_label': date_label}, Rect(0, 0, 44, 480), left_side=True)
+    assert ''.join(calls).startswith('把平凡日子收進光裡')
+    assert ('2026' in calls) == bool(date_label)
+    if place:
+        assert ''.join(calls).endswith(place)
 
 
 def test_vertical_caption_centers_short_glyphs_and_compacts_punctuation(app):

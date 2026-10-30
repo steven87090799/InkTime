@@ -210,8 +210,10 @@ def test_prepare_day_recovers_terminal_shortage_and_clears_outcome(custom_device
 
 
 def test_fixed_daily_midday_prepare_authorizes_every_payload_until_target_day_end(
-    client, app, monkeypatch
+    custom_device_schedule, client, app, monkeypatch
 ):
+    # Exercise the four explicit device times on both weekdays and weekends.
+    # The default weekly schedule otherwise expands to eight weekend slots.
     target_day = datetime.now(ZoneInfo("Asia/Taipei")).date()
     target_date = target_day.isoformat()
     device_id, _token = app.extensions["inktime_device_repository"].create(

@@ -30,6 +30,9 @@
         </select>
       </label>
       <label>Sample 數量 <input name="sample_count" type="number" min="1" max="100000" value="100"></label>
+      <label>本批次預算（USD，可留空沿用預設）<input name="budget_limit" type="number" min="0" step="0.01"></label>
+      <label><input name="privacy_acknowledged" type="checkbox" value="true"> 我同意使用 OpenAI Files／Batch 上傳並暫存本次照片縮圖。store=false 不會免除 Batch／Files 的資料保留；遠端檔案在匯入後清理，平台仍有濫用監測保留規則。</label>
+      <p><a href="https://developers.openai.com/api/docs/guides/your-data" target="_blank" rel="noopener noreferrer">OpenAI 資料保留政策</a>；尚未取得 ZDR 核准時不可視為零資料保留。取消遠端 Batch 可能需數分鐘，已完成請求仍可能計費。</p>
       <button name="action" value="estimate" type="submit" {% if not batch_provider_available %}disabled{% endif %}>估算</button>
       <button name="action" value="submit" type="submit" {% if not batch_provider_available %}disabled{% endif %}>提交</button>
       {% if not batch_provider_available %}<p class="notice" role="status">目前沒有已啟用、設定完整且支援 Batch 的 Provider。</p>{% endif %}
@@ -78,7 +81,7 @@ const batchForm=document.getElementById('batch-create-form'),batchStatus=documen
 batchForm?.addEventListener('submit',async event=>{
   event.preventDefault();
   const action=event.submitter?.value||'estimate';let body;
-  try{body=window.inktimeFormJson(batchForm,{sample_count:'integer'});delete body.csrf_token;delete body.action;}
+  try{body=window.inktimeFormJson(batchForm,{sample_count:'integer'});delete body.csrf_token;delete body.action;body.privacy_acknowledged=batchForm.elements.privacy_acknowledged.checked;body.budget_limit=batchForm.elements.budget_limit.value===''?null:Number(batchForm.elements.budget_limit.value);if(action==='submit'&&!body.privacy_acknowledged){window.inktimeSetStatus(batchStatus,'請先勾選同意 Files／Batch 上傳與暫存，才會提交照片。','error');return;}}
   catch(error){window.inktimeSetStatus(batchStatus,error.message,'error');return;}
   const buttons=Array.from(batchForm.querySelectorAll('button[type="submit"]'));
   const disabled=buttons.map(button=>button.disabled);buttons.forEach(button=>button.disabled=true);

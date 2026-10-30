@@ -47,7 +47,7 @@ class AnalysisBackfillRepository:
                   COALESCE(p.screenshot_likelihood,0)>=0.95 THEN 'excluded'
                 WHEN {reserved_analysis_sql()} THEN 'queued'
                 WHEN EXISTS(SELECT 1 FROM analysis_backfill_tasks t WHERE t.content_sha256=p.sha256
-                  AND t.status IN ('failed','unknown')) OR EXISTS(
+                  AND t.status IN ('failed','unknown') AND COALESCE(t.error_code,'')<>'DAILY-DEFERRED') OR EXISTS(
                   SELECT 1 FROM job_items fi JOIN jobs fj ON fj.id=fi.job_id
                   WHERE fi.photo_id=p.id AND fi.status='failed' AND fj.kind IN ('analysis','analysis_batch')) THEN 'failed'
                 WHEN COALESCE(p.sha256,'')='' OR p.local_features_status<>'complete' THEN 'preprocessing'
@@ -215,6 +215,23 @@ class AnalysisBackfillRepository:
         with self.database.transaction() as connection:
             connection.execute("UPDATE analysis_backfill_control SET pause_reason=?,updated_at=? WHERE id=1",
                                (reason[:500], utc_now()))
+
+    def release_for_complementary(self) -> None:
+        """Retain old free-queue evidence without indefinitely holding unpaid photos."""
+        with self.database.transaction() as connection:
+            rows = connection.execute(
+                "SELECT i.id,i.job_id,i.photo_id FROM job_items i JOIN jobs j ON j.id=i.job_id JOIN photos p ON p.id=i.photo_id "
+                "WHERE json_extract(j.settings_json,'$.missing_analysis_backfill')=1 AND i.status IN ('pending','retrying') "
+                "AND j.status IN ('pending','running','retrying','pausing','paused','budget_exceeded') "
+                "AND NOT EXISTS(SELECT 1 FROM billable_operations o WHERE o.content_sha256=p.sha256 AND o.state<>'not_sent') LIMIT 16"
+            ).fetchall()
+            for row in rows:
+                connection.execute("UPDATE job_items SET status='cancelled',error_code='DAILY-DEFERRED',completed_at=? WHERE id=?", (utc_now(), row["id"]))
+                connection.execute("UPDATE analysis_backfill_tasks SET status='failed',error_code='DAILY-DEFERRED',updated_at=? WHERE job_id=? AND photo_id=? AND status IN ('queued','running')",
+                                   (utc_now(), row["job_id"], row["photo_id"]))
+            if rows:
+                connection.execute("UPDATE analysis_backfill_control SET cursor_date='',cursor_id='',inventory_done=0 WHERE id=1")
+                connection.execute("UPDATE openai_backfill_control SET cursor_date='',cursor_id='' WHERE id=1")
 
     def has_uncertain_content(self, sha: str) -> bool:
         with self.database.session() as connection:

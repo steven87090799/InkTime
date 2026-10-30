@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 from inktime.app.domain.analysis.plan import DEFAULT_ANALYSIS_TOKEN_CAP, fingerprint, normalize_analysis_strategy, stored_analysis_fingerprint
 from inktime.app.domain.jobs.failure_policy import NoEligibleCandidatesError
 from inktime.app.domain.jobs.settings import validate_worker_settings
@@ -87,6 +89,10 @@ class JobService:
     def pause(self, job_id: str) -> None:
         if not self.repository.request_pause(job_id):
             raise InvalidJobTransition("目前狀態無法暫停")
+        job = self.repository.get(job_id)
+        if job and json.loads(job["settings_json"]).get("complementary_lane") == "openai_backfill":
+            with self.repository.database.session() as connection:
+                connection.execute("UPDATE openai_backfill_control SET pause_kind='manual',pause_reason='使用者已暫停工作',resume_job_id=NULL WHERE id=1")
 
     def resume(self, job_id: str) -> None:
         if not self.repository.transition(job_id, {"paused", "budget_exceeded"}, "running", "resumed"):

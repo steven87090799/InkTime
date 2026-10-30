@@ -139,7 +139,8 @@ def test_prompt_inspector_matches_wire_without_changing_fixed_schema(tmp_path, k
     image_path = tmp_path / "photo.jpg"
     Image.new("RGB", (20, 20), "white").save(image_path)
     provider = OpenAICompatibleProvider(
-        name="preview", kind=kind, base_url="https://example.test/v1", api_key="",
+        name="preview", kind=kind,
+        base_url="https://api.openai.com/v1" if kind == "openai" else "https://example.test/v1", api_key="",
         scoring_rules="memory_score：互動清楚約 70 分。", supports_json_schema=supports_schema,
     )
     try:

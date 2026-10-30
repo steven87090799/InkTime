@@ -37,7 +37,8 @@ class CaptureProvider(OpenAICompatibleProvider):
 def _provider(kind: str = "openrouter", options: dict | None = None) -> CaptureProvider:
     return CaptureProvider(
         name="contract-provider",
-        base_url="https://openrouter.ai/api/v1" if kind == "openrouter" else "https://api.example.invalid/v1",
+        base_url=("https://openrouter.ai/api/v1" if kind == "openrouter" else
+                  "https://api.openai.com/v1" if kind == "openai" else "https://api.example.invalid/v1"),
         api_key="redacted-test-key",
         kind=kind,
         options=options or {},
