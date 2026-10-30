@@ -1,0 +1,32 @@
+{% set dual = state.complementary %}{% set cfg = dual.settings %}{% set spend = dual.budget %}
+<section class="panel">
+  <h2>OpenAI 主力補齊 · OpenRouter 每日分析</h2>
+  <p>OpenAI 從最早拍攝的未完成照片往後處理。OpenRouter 只補齊明天同月同日、所有歷年的照片；已有有效結果就共用，不重送。</p>
+  <p>OpenAI 本期預估費用 US$<span id="openai-cycle-used">{{ '%.4f'|format(spend.known) }}</span>／自訂 US$<span id="openai-cycle-limit">{{ '%.2f'|format(spend.limit) }}</span> · 在途預留 US$<span id="openai-cycle-reserved">{{ '%.4f'|format(spend.reserved) }}</span> · 待確認 <span id="openai-cycle-unknown">{{ spend.unknown_count }}</span> 次。</p>
+  <p>下期開始：<span id="openai-next-cycle">{{ spend.end|human_datetime }}</span>。<strong id="openai-budget-warning" {% if not spend.warning %}hidden{% endif %}>已接近自訂預算。</strong><span id="openai-lane-status">{{ dual.control.pause_reason or ('補齊已開啟' if cfg['analysis.openai_backfill_enabled'] and cfg['analysis.complementary_enabled'] else '補齊尚未啟用') }}</span></p>
+  <p>補齊游標拍攝日期：{{ dual.control.cursor_date or '尚未開始' }}。<a href="/costs">每張、批次與剩餘成本估算</a></p>
+  <p>明天 <span id="daily-analysis-date">{{ dual.tomorrow }}</span>（涵蓋歷年同月同日）尚無模型資訊 <span id="daily-analysis-missing">{{ dual.tomorrow_missing }}</span> 張；失敗與待對帳項目仍須從原工作處理。</p>
+  <p class="muted">這是 API 標價用量估算，不是付款金額或贈送額度餘額；剩餘贈送額度需至 OpenAI Billing 查詢。週期須對照你的訂閱補發日期；年繳可能一次發整年。應用程式保護仍須搭配 OpenAI 官方支出限制。</p>
+  <form id="complementary-settings" class="form-grid">
+    <label><input type="checkbox" name="analysis.complementary_enabled" {% if cfg['analysis.complementary_enabled'] %}checked{% endif %}>啟用兩個 Provider 分工（每日只分析歷年明天；暫停原本免費全庫補齊）</label>
+    <label>OpenAI 主力<select name="analysis.openai_provider_id"><option value="">請選擇</option>{% for item in dual.providers if item.kind == 'openai' %}<option value="{{ item.id }}" {% if cfg['analysis.openai_provider_id'] == item.id %}selected{% endif %}>{{ item.name }} · {{ item.model }}{% if not item.enabled %}（已停用）{% endif %}</option>{% endfor %}</select></label>
+    <label>OpenRouter 每日免費模型<select name="analysis.daily_openrouter_provider_id"><option value="">請選擇</option>{% for item in dual.providers if item.kind == 'openrouter' %}<option value="{{ item.id }}" {% if cfg['analysis.daily_openrouter_provider_id'] == item.id %}selected{% endif %}>{{ item.name }} · {{ item.model }}{% if not item.enabled %}（已停用）{% endif %}</option>{% endfor %}</select></label>
+    <p class="muted">在<a href="/providers">模型與 API</a>設定各自的 Key、模型、RPM 與並行上限。每日分工會在每次請求前查驗免費價格及剩餘次數，固定最高價格為零，不轉付費模型。</p>
+    <label>OpenAI 每期預算（美元）<input type="number" name="openai_budget.cycle_limit" min="0.01" max="100000" step="0.01" required value="{{ cfg['openai_budget.cycle_limit'] }}"></label>
+    <label>OpenAI 每日上限（美元，0 不另限制）<input type="number" name="openai_budget.daily_limit" min="0" max="100000" step="0.01" required value="{{ cfg['openai_budget.daily_limit'] }}"></label>
+    <label>週期起算日<input type="date" name="openai_budget.cycle_anchor" required value="{{ cfg['openai_budget.cycle_anchor'] }}"></label>
+    <label>每幾個月重置<input type="number" name="openai_budget.cycle_months" min="1" max="12" required value="{{ cfg['openai_budget.cycle_months'] }}"></label>
+    <label>提醒比例（%）<input type="number" name="openai_budget.warning_percent" min="1" max="100" step="0.1" required value="{{ cfg['openai_budget.warning_percent'] }}"></label>
+    <label>提前暫停比例（%）<input type="number" name="openai_budget.stop_percent" min="1" max="100" step="0.1" required value="{{ cfg['openai_budget.stop_percent'] }}"></label>
+    <label>每輪最多照片數<input type="number" name="analysis.openai_backfill_chunk" min="1" max="500" required value="{{ cfg['analysis.openai_backfill_chunk'] }}"></label>
+    <label>即時並行數<input type="number" name="analysis.openai_backfill_concurrency" min="1" max="8" required value="{{ cfg['analysis.openai_backfill_concurrency'] }}"></label>
+    <label>處理方式<select name="analysis.openai_backfill_mode"><option value="realtime" {% if cfg['analysis.openai_backfill_mode'] == 'realtime' %}selected{% endif %}>即時 API</option><option value="batch" {% if cfg['analysis.openai_backfill_mode'] == 'batch' %}selected{% endif %}>Batch API（有資料暫存，通常較便宜）</option></select></label>
+    <label><input type="checkbox" name="analysis.openai_batch_consent" {% if cfg['analysis.openai_batch_consent'] %}checked{% endif %}>明確同意自動 Batch 將私人照片縮圖上傳至 Files 並依官方政策暫存</label>
+    <label><input type="checkbox" name="openai_budget.auto_resume" {% if cfg['openai_budget.auto_resume'] %}checked{% endif %}>預算／額度暫停後於新週期自動續跑（手動暫停、金鑰錯誤與待對帳不自動恢復）</label>
+    <label><input type="checkbox" name="analysis.openai_backfill_enabled" {% if cfg['analysis.openai_backfill_enabled'] %}checked{% endif %}>開啟 OpenAI 全照片庫由舊到新補齊</label>
+    <button type="submit" class="primary">儲存分工與自訂預算</button>
+  </form>
+  <div class="actions"><button type="button" class="secondary" id="pause-openai">暫停 OpenAI 補齊</button><button type="button" class="secondary" id="resume-openai">重新檢查並繼續</button><button type="button" class="secondary" id="check-free-quota">查詢 OpenRouter 今日免費次數</button></div>
+  <p id="complementary-message" role="status" aria-live="polite"></p>
+  {% for job in dual.jobs %}<p><a href="/jobs/{{ job.id }}">OpenAI 工作 {{ job.id[:8] }}</a> · {{ job.status }} · 完成 {{ job.completed_items }}／{{ job.total_items }} · 失敗 {{ job.failed_items }}</p>{% endfor %}
+</section>

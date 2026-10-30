@@ -205,6 +205,7 @@ INTEGRATION_TEST_OWNER_SUITES: dict[str, tuple[str, ...]] = {
     "tests/integration/test_ai_cache_singleflight.py": ("provider_analysis_owner",),
     "tests/integration/test_analysis_pipeline.py": ("provider_analysis_owner",),
     "tests/integration/test_openai_direct.py": ("provider_analysis_owner",),
+    "tests/integration/test_complementary_analysis.py": ("provider_analysis_owner", "runtime_scheduler_owner", "settings_governance_owner", "persistence_owner"),
     "tests/integration/test_audit_remediation.py": ("provider_analysis_owner",),
     "tests/integration/test_budget_calendar.py": (
         "provider_analysis_owner",

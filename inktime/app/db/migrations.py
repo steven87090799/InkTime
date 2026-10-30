@@ -2743,6 +2743,44 @@ MIGRATIONS = (
             "CREATE INDEX idx_quota_scope_lease ON provider_quota_events(scope,lease_until,started_at)",
         ),
     ),
+    Migration(
+        78,
+        "獨立 OpenAI 週期預算與可恢復的照片庫補齊",
+        (
+            "ALTER TABLE budget_reservations ADD COLUMN provider_id TEXT",
+            "ALTER TABLE budget_reservations ADD COLUMN provider_kind TEXT",
+            "CREATE INDEX idx_budget_reservations_provider ON budget_reservations(state,provider_id)",
+            "CREATE TABLE openai_budget_receipts(usage_id INTEGER PRIMARY KEY,provider_id TEXT,"
+            "started_at TEXT NOT NULL,cost REAL,uncertain INTEGER NOT NULL CHECK(uncertain IN (0,1)))",
+            "CREATE INDEX idx_openai_receipts_time ON openai_budget_receipts(started_at)",
+            "INSERT INTO openai_budget_receipts SELECT u.id,u.provider_id,COALESCE(u.completed_at,u.started_at),"
+            "CASE WHEN u.cost_source<>'unknown' THEN COALESCE(u.actual_cost,u.estimated_cost) END,"
+            "CASE WHEN u.cost_source='unknown' THEN 1 ELSE 0 END FROM api_usage u JOIN providers p ON p.id=u.provider_id "
+            "WHERE p.kind='openai' OR p.base_url LIKE 'https://api.openai.com/%'",
+            # Small monetary receipts deliberately survive api_usage retention.
+            # Updates (including reconciliation) replace the original receipt.
+            *tuple(
+                "CREATE TRIGGER openai_budget_receipt_" + event.lower() + " AFTER " + event + " ON api_usage "  # noqa: S608 -- frozen INSERT/UPDATE allowlist only.
+                "WHEN EXISTS(SELECT 1 FROM providers p WHERE p.id=NEW.provider_id AND "
+                "(p.kind='openai' OR p.base_url LIKE 'https://api.openai.com/%')) "
+                "OR EXISTS(SELECT 1 FROM openai_budget_receipts WHERE usage_id=NEW.id) BEGIN "
+                "INSERT INTO openai_budget_receipts(usage_id,provider_id,started_at,cost,uncertain) "
+                "VALUES(NEW.id,NEW.provider_id,COALESCE(NEW.completed_at,NEW.started_at),"
+                "CASE WHEN NEW.cost_source<>'unknown' THEN COALESCE(NEW.actual_cost,NEW.estimated_cost) END,"
+                "CASE WHEN NEW.cost_source='unknown' THEN 1 ELSE 0 END) "
+                "ON CONFLICT(usage_id) DO UPDATE SET cost=excluded.cost,"
+                "started_at=CASE WHEN openai_budget_receipts.uncertain=1 AND excluded.uncertain=0 "
+                "THEN strftime('%Y-%m-%dT%H:%M:%f+00:00','now') ELSE openai_budget_receipts.started_at END,"
+                "uncertain=excluded.uncertain; END"
+                for event in ("INSERT", "UPDATE")
+            ),
+            "CREATE TABLE openai_backfill_control(id INTEGER PRIMARY KEY CHECK(id=1),"
+            "pause_kind TEXT,pause_reason TEXT,pause_cycle TEXT,credit_attempt_cycle TEXT,"
+            "resume_job_id TEXT,cursor_date TEXT NOT NULL DEFAULT '',cursor_id TEXT NOT NULL DEFAULT '',"
+            "last_scan_at TEXT NOT NULL DEFAULT '')",
+            "INSERT INTO openai_backfill_control(id) VALUES(1)",
+        ),
+    ),
 )
 
 

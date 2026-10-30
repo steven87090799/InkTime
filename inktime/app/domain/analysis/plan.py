@@ -144,6 +144,8 @@ def build_analysis_plan(
         }
         if item.get("usage_scope") == "backfill":
             route_item["usage_scope"] = "backfill"
+        if item.get("complementary_lane") in {"openai_backfill", "openrouter_daily"}:
+            route_item["complementary_lane"] = str(item["complementary_lane"])
         configured_model = str(item.get("model") or "").strip()
         # Keep the historical plan shape/fingerprint unchanged when a
         # Provider intentionally uses the global model fallback.

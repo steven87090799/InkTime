@@ -65,14 +65,23 @@ class ProviderService:
             effective_kind = effective_provider_kind(
                 str(config.get("kind") or "openai_compatible"), str(config.get("base_url") or "")
             )
+            options = normalize_options(effective_kind, config.get("options") or {})
+            pricing = self.repository.pricing(config["id"])
+            if snapshot.get("complementary_lane") == "openrouter_daily":
+                if effective_kind != "openrouter":
+                    raise ValueError("每日免費分工僅可使用 OpenRouter")
+                options = {**options, "free_only": True, "daily_free_first": False,
+                           "max_price": {"prompt": 0, "completion": 0, "request": 0, "image": 0}}
+                pricing = {**pricing, str(config["model"]): {"input_per_million": 0, "cached_input_per_million": 0,
+                                                           "output_per_million": 0, "batch_multiplier": 1}}
             provider: Any = create_vision_provider(
                 name=config["name"],
                 base_url=config["base_url"],
                 api_key=config.get("api_key", ""),
                 kind=effective_kind,
                 provider_id=provider_id,
-                options=normalize_options(effective_kind, config.get("options") or {}),
-                pricing=self.repository.pricing(config["id"]),
+                options=options,
+                pricing=pricing,
                 timeout=config["timeout_seconds"],
                 supports_json_schema=bool(config["supports_json_schema"]),
                 scoring_rules=rules,
@@ -84,7 +93,6 @@ class ProviderService:
             )
             provider.provider_id = provider_id
             provider.display_name = str(config["name"])
-            options = config.get("options") or {}
             quota_identity = "|".join((provider.base_url, str(config.get("api_key") or ""),
                                        str(options.get("project_id") or config.get("project_id") or "")))
             if options.get("organization_id"):
@@ -98,12 +106,12 @@ class ProviderService:
                     ),
                     request_token_reserve=max(8000, int(self.settings.get("budget.max_tokens", 8000))) + analysis_output_token_cap(self.settings),
                     priority=int(snapshot.get("priority", config["priority"])),
-                    max_concurrency=(1 if config.get("options", {}).get("daily_free_first")
+                    max_concurrency=(1 if options.get("daily_free_first")
                                      else config["max_concurrency"]),
                     requests_per_minute=(
                         min(int(config["rate_limit_rpm"] or 20), 20)
                         if effective_kind == "openrouter" and (
-                            str(config.get("model") or "").strip() == "openrouter/free"
+                            options.get("free_only") or str(config.get("model") or "").strip() == "openrouter/free"
                             or str(config.get("model") or "").strip().endswith(":free")
                         ) else config["rate_limit_rpm"]
                     ),
@@ -111,7 +119,7 @@ class ProviderService:
                     cooldown_seconds=config["cooldown_seconds"],
                     model=str(config.get("model") or "").strip() or None,
                     analysis_revision=self.config_revision(config),
-                    daily_free_first=bool(config.get("options", {}).get("daily_free_first")),
+                    daily_free_first=bool(options.get("daily_free_first")),
                 )
             )
             # An explicitly selected OpenAI primary owns its billing boundary,
@@ -187,6 +195,20 @@ class ProviderService:
                 continue
             usable_ids.add(str(row["id"]))
         return [item for item in self.route_snapshot() if str(item["provider_id"]) in usable_ids]
+
+    def complementary_route(self, lane: str, provider_id: str | None = None) -> list[dict]:
+        """An explicit single-provider lane never inherits the normal failover route."""
+        key = "analysis.openai_provider_id" if lane == "openai_backfill" else "analysis.daily_openrouter_provider_id"
+        provider_id = str(self.settings.get(key, "")) if provider_id is None else provider_id
+        row = self.repository.get(provider_id) or {}
+        expected = "openai" if lane == "openai_backfill" else "openrouter"
+        kind = effective_provider_kind(str(row.get("kind") or ""), str(row.get("base_url") or "")) if row else ""
+        route = next((item for item in self.usable_route_snapshot() if item["provider_id"] == provider_id), None)
+        if route is None or kind != expected:
+            raise ValueError(f"請先選擇已啟用且有獨立 Key 的 {expected} Vision Provider")
+        if expected == "openai" and row.get("options", {}).get("api_mode") != "responses":
+            raise ValueError("OpenAI 自動補齊須使用 Responses API")
+        return [{**route, "complementary_lane": lane}]
 
     def identity_snapshot(self, provider_id: str) -> dict[str, str]:
         """Return the non-secret identity required for safe Batch cleanup.

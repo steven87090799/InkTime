@@ -1112,7 +1112,7 @@ class BatchAnalysisService:
             reserved_cost = self.budgets.estimate_reserve(
                 provider, str(current["model"]), output_tokens=FULL_ANALYSIS_TOKEN_CAP, batch=True
             ) * len(self.batches.items(batch_id))
-            self.budgets.reserve("batch:" + batch_id, reserved_cost, job_id=str(current["job_id"]) if current["job_id"] else None)
+            self.budgets.reserve("batch:" + batch_id, reserved_cost, job_id=str(current["job_id"]) if current["job_id"] else None, provider_id=str(current["provider_id"]))
             self._assert_submission_allowed(batch_id)
             remote = provider.create_batch(
                 str(current["input_file_id"]),
@@ -1152,6 +1152,20 @@ class BatchAnalysisService:
                 "BATCH-PAID-OPERATION-HOLD",
                 "BATCH-RESERVATION-CONFLICT",
             }
+            parent = self.jobs.get(str(current["job_id"])) if current is not None and current["job_id"] else None
+            automatic = bool(parent and json.loads(parent["settings_json"]).get("complementary_lane") == "openai_backfill")
+            if parent is not None and automatic and not ambiguous and not remote_created and (code == "API_CREDIT_EXHAUSTED" or code.startswith("BUDGET-OPENAI-")):
+                # Only a definitive pre-execution rejection is safe to hold for
+                # renewal. Preserve prepared bytes and the original photo IDs.
+                self.batches.update_batch(batch_id, status="preparing", last_error_code=code,
+                                          last_error_message=str(exc), phase_started_at=utc_now())
+                self.batches.release_side_effect_claim(batch_id, owner)
+                self.jobs.request_pause(str(parent["id"]))
+                self.batches.hold_prepared_for_credit(str(parent["id"]), code)
+                callback = getattr(self, "complementary_pause_callback", None)
+                if callable(callback):
+                    callback(exc, str(parent["id"]))
+                raise
             if code == "BATCH-ALREADY-CLAIMED" or (code == "BATCH-CLAIM-STALE" and not remote_created):
                 # A losing claimant must not overwrite the winner's state.
                 raise
@@ -1210,6 +1224,10 @@ class BatchAnalysisService:
                 self.jobs.add_event(parent_id, "provider_credit_pause",
                                     "OpenAI 額度／支出上限已用盡；未提交分片保留本機，核對 Billing 後手動恢復",
                                     {"batch_id": batch_id, "error_code": code})
+            if automatic and parent is not None:
+                callback = getattr(self, "complementary_pause_callback", None)
+                if callable(callback):
+                    callback(exc, str(parent["id"]))
             raise
         finally:
             close = getattr(provider, "close", None)
@@ -1226,10 +1244,13 @@ class BatchAnalysisService:
         budget_limit: float | None = None,
         privacy_acknowledged: bool = False,
         _retry_authorization: str | None = None,
+        _route: list[dict[str, Any]] | None = None,
+        _job_settings: dict[str, Any] | None = None,
+        _commit_hook=None,
     ) -> dict[str, Any]:
         submit_started = time.monotonic()
         self._assert_ai_submission_allowed()
-        plan, analysis_fp, model = self._plan()
+        plan, analysis_fp, model = self._plan(_route)
         if plan.get("batch_endpoint") == "/v1/responses" and privacy_acknowledged is not True:
             raise BatchLifecycleError("請先明確同意將縮圖以 Files／Batch API 上傳與暫存", "BATCH-PRIVACY-CONSENT")
         provider_id = str(plan["provider_route"][0]["provider_id"])
@@ -1275,13 +1296,15 @@ class BatchAnalysisService:
                 name=f"OpenAI Batch：{scope}",
                 strategy="single",
                 settings={"processing_mode": "batch", "scope": scope, "sample_seed": seed,
-                          "batch_privacy_acknowledged": privacy_acknowledged is True},
+                          "batch_privacy_acknowledged": privacy_acknowledged is True, **(_job_settings or {})},
                 photo_ids=[str(item["photo"]["id"]) for item in candidates],
                 created_by=created_by,
                 budget_limit=budget_limit,
                 selection_mode=scope,
                 analysis_fingerprint=analysis_fp,
                 analysis_spec=plan,
+                priority=6 if _job_settings else 3,
+                commit_hook=_commit_hook,
             )
         except AnalysisReservationConflict as exc:
             raise BatchLifecycleError(str(exc), "BATCH-RESERVATION-CONFLICT") from exc
@@ -1392,7 +1415,7 @@ class BatchAnalysisService:
                     batch_id=current_id,
                     error_code=str(getattr(exc, "code", "BATCH-SUBMIT-001")),
                 )
-                if str(getattr(exc, "code", "")) == "API_CREDIT_EXHAUSTED":
+                if str(getattr(exc, "code", "")) == "API_CREDIT_EXHAUSTED" or str(getattr(exc, "code", "")).startswith("BUDGET-"):
                     break
                 continue
         log_event(
@@ -1594,7 +1617,7 @@ class BatchAnalysisService:
                     continue
                 status = str(current["status"])
                 if status == "preparing":
-                    if current["last_error_code"] == "API_CREDIT_EXHAUSTED" and current["job_id"]:
+                    if (current["last_error_code"] == "API_CREDIT_EXHAUSTED" or str(current["last_error_code"] or "").startswith("BUDGET-OPENAI-")) and current["job_id"]:
                         parent = self.jobs.get(str(current["job_id"]))
                         if parent is not None and parent["status"] in {"running", "retrying"}:
                             # This marker is written only after every local
@@ -1604,6 +1627,8 @@ class BatchAnalysisService:
                             if not isinstance(plan, dict) or plan.get("batch_endpoint") not in {"/v1/responses", self.ENDPOINT}:
                                 raise BatchLifecycleError("Frozen Batch 計畫不相容", "BATCH-POLL-PLAN-001")
                             self.batches.release_side_effect_claim(batch_id, owner)
+                            if current["input_file_id"]:
+                                self.batches.update_batch(batch_id, status="uploaded")
                             self._submit_one(batch_id, plan)
                         continue
                     if self._phase_is_stale(current):

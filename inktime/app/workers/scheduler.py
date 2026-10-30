@@ -257,6 +257,9 @@ class SchedulerRunner:
         if backfill is not None:
             self._safe_step("model_coverage_monthly_audit", lambda: backfill.enqueue_audit(now))
             self._safe_step("missing_analysis_backfill", backfill.ensure)
+        complementary = self.app.extensions.get("inktime_complementary_analysis_service")
+        if complementary is not None:
+            self._safe_step("openai_oldest_first", complementary.ensure)
         if monotonic_now - self.last_release_reconcile_at >= RELEASE_RECONCILE_INTERVAL_SECONDS:
             coordinator = self.app.extensions.get("inktime_release_coordinator")
             if coordinator is not None:

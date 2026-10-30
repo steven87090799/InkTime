@@ -1116,7 +1116,7 @@ class PhotoAnalysisService:
                 self.budgets.reserve(
                     "vision:" + operation_id,
                     self.budgets.estimate_reserve(actual_call_provider, model, output_tokens=max_tokens),
-                    job_id=job_id, photo_id=photo_id,
+                    job_id=job_id, photo_id=photo_id, provider_id=getattr(actual_call_provider, "provider_id", None),
                 )
             except Exception:
                 operations.finish(operation_id, not_sent=True)

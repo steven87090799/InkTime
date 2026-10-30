@@ -30,6 +30,51 @@ class SeasonalAnalysisRepository:
     def __init__(self, database):
         self.database = database
 
+    def release_unstarted_background(self, target):
+        """Give tomorrow priority over unpaid realtime items held by a budget pause.
+
+        Submitted/ambiguous calls and every Batch reservation retain ownership.
+        The original item remains as an auditable handoff, with no photo deletion.
+        """
+        with self.database.transaction() as connection:
+            rows = connection.execute(
+                "SELECT i.id,i.job_id FROM job_items i JOIN jobs j ON j.id=i.job_id JOIN photos p ON p.id=i.photo_id "
+                "WHERE j.kind='analysis' AND json_extract(j.settings_json,'$.complementary_lane')='openai_backfill' "
+                "AND j.status IN ('pending','running','retrying','paused','budget_exceeded') "
+                "AND i.status='pending' AND p.captured_month_day=? "
+                "AND NOT EXISTS(SELECT 1 FROM billable_operations o WHERE o.content_sha256=p.sha256 AND o.state<>'not_sent') "
+                "AND NOT EXISTS(SELECT 1 FROM model_analysis_results c WHERE c.content_sha256=p.sha256) LIMIT 500",
+                (target.strftime("%m-%d"),),
+            ).fetchall()
+            for row in rows:
+                connection.execute("UPDATE job_items SET status='cancelled',error_code='DAILY-HANDOFF',completed_at=? WHERE id=? AND status='pending'", (utc_now(), row["id"]))
+            for job_id in {row["job_id"] for row in rows}:
+                connection.execute("INSERT INTO job_events(job_id,event,message,details_json,created_at) VALUES (?,'daily_handoff',?,'{}',?)",
+                                   (job_id, "未送出的明天照片改交每日免費佇列；原結果與帳務保留", utc_now()))
+            if rows:
+                connection.execute("UPDATE openai_backfill_control SET cursor_date='',cursor_id='' WHERE id=1")
+        return len(rows)
+
+    def retire_old_daily_queue(self, target):
+        """Release only unpaid automatic items outside the new exact-day lane."""
+        with self.database.transaction() as connection:
+            rows = connection.execute(
+                "SELECT i.id,i.job_id,i.photo_id FROM job_items i JOIN jobs j ON j.id=i.job_id JOIN photos p ON p.id=i.photo_id "
+                "WHERE json_extract(j.settings_json,'$.seasonal_analysis')=1 AND j.created_by='system' "
+                "AND j.force_recompute=0 AND i.status IN ('pending','retrying') AND ("
+                "COALESCE(json_extract(j.settings_json,'$.complementary_lane'),'')<>'openrouter_daily' OR "
+                "json_extract(j.settings_json,'$.target_date')<>?) "
+                "AND NOT EXISTS(SELECT 1 FROM billable_operations o WHERE o.content_sha256=p.sha256 AND o.state<>'not_sent') LIMIT 500",
+                (target.isoformat(),),
+            ).fetchall()
+            for row in rows:
+                connection.execute("UPDATE job_items SET status='cancelled',error_code='DAILY-DEFERRED',completed_at=? WHERE id=?", (utc_now(), row["id"]))
+                connection.execute("UPDATE seasonal_analysis_tasks SET status='failed',error_code='DAILY-DEFERRED',updated_at=? WHERE job_id=? AND photo_id=? AND status IN ('queued','running')",
+                                   (utc_now(), row["job_id"], row["photo_id"]))
+            if rows:
+                connection.execute("UPDATE openai_backfill_control SET cursor_date='',cursor_id='' WHERE id=1")
+        return len(rows)
+
     def candidates(self, target: date | None, window: int, *, connection=None) -> list[dict]:
         # Only the explicitly confirmed full-library rerun needs a materialized
         # snapshot. Daily demand and the progress page consume bounded pages.
@@ -62,7 +107,7 @@ class SeasonalAnalysisRepository:
         date_params = (json.dumps(days),) if bounded_date else ()
         return connection.execute(
             f"""SELECT p.id,p.sha256,p.relative_path,p.exif_json,p.screenshot_likelihood,
-                (SELECT t.id FROM seasonal_analysis_tasks t WHERE t.content_sha256=p.sha256
+                (SELECT t.id FROM seasonal_analysis_tasks t WHERE t.content_sha256=p.sha256 AND COALESCE(t.error_code,'')<>'DAILY-DEFERRED'
                  ORDER BY t.id DESC LIMIT 1) AS task_id,
                 (SELECT a.id FROM photo_analysis a JOIN photos source ON source.id=a.photo_id
                  WHERE source.sha256=p.sha256 AND

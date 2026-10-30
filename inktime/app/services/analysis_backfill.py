@@ -106,6 +106,10 @@ class AnalysisBackfillService:
                                         scoring_profile_id=str(self.scoring.current()["id"]))
 
     def ensure(self) -> dict:
+        if self.settings.get("analysis.complementary_enabled", False):
+            self.repository.release_for_complementary()
+            self._pause_jobs()
+            return {"job_id": None, "reason": "free_quota_reserved_for_tomorrow"}
         control = self.repository.control()
         if not control["enabled"] or control["pause_reason"]:
             return {"job_id": None, "reason": control["pause_reason"] or "disabled"}
@@ -156,6 +160,8 @@ class AnalysisBackfillService:
             lock.close()
 
     def can_run(self, job_id: str) -> bool:
+        if self.settings.get("analysis.complementary_enabled", False):
+            return False
         control = self.repository.control()
         if not control["enabled"] or control["pause_reason"]:
             return False
@@ -222,6 +228,9 @@ class AnalysisBackfillService:
         return job_id
 
     def analyze_item(self, *, photo_id: str, job_id: str, **kwargs) -> dict:
+        if self.settings.get("analysis.complementary_enabled", False):
+            raise ProviderHTTPError("免費額度已保留給歷年明天分析", "VLM-005", retry_after=300,
+                                    request_started=False, vision_started=False)
         with self.repository.database.session() as connection:
             task = connection.execute(
                 "SELECT * FROM analysis_backfill_tasks WHERE job_id=? AND photo_id=?", (job_id, photo_id),

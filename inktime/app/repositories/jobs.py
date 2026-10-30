@@ -1136,9 +1136,19 @@ class JobRepository:
                 if job is None or job["status"] not in {"running", "retrying"}:
                     connection.execute("COMMIT")
                     return []
-                backfill = bool(json.loads(job["settings_json"]).get("missing_analysis_backfill"))
-                if backfill:
-                    control = connection.execute("SELECT enabled,pause_reason FROM analysis_backfill_control WHERE id=1").fetchone()
+                job_settings = json.loads(job["settings_json"])
+                backfill = bool(job_settings.get("missing_analysis_backfill"))
+                openai_backfill = job_settings.get("complementary_lane") == "openai_backfill"
+                if backfill or openai_backfill:
+                    if openai_backfill:
+                        enabled = connection.execute("SELECT value_json FROM settings WHERE key='analysis.openai_backfill_enabled'").fetchone()
+                        dual = connection.execute("SELECT value_json FROM settings WHERE key='analysis.complementary_enabled'").fetchone()
+                        pause = connection.execute("SELECT pause_kind FROM openai_backfill_control WHERE id=1").fetchone()
+                        allowed = bool(enabled and dual and enabled[0] == 'true' and dual[0] == 'true' and not pause[0])
+                    else:
+                        control = connection.execute("SELECT enabled,pause_reason FROM analysis_backfill_control WHERE id=1").fetchone()
+                        dual = connection.execute("SELECT value_json FROM settings WHERE key='analysis.complementary_enabled'").fetchone()
+                        allowed = bool(control["enabled"] and not control["pause_reason"] and not (dual and dual[0] == 'true'))
                     urgent = connection.execute(
                         "SELECT 1 FROM jobs j JOIN job_items i ON i.job_id=j.id "
                         # A render may itself be waiting for these bytes; the
@@ -1146,7 +1156,7 @@ class JobRepository:
                         "WHERE j.id<>? AND j.priority<? AND j.kind<>'render' AND j.status IN ('running','retrying') "
                         "AND i.status='pending' AND i.available_at<=? LIMIT 1", (job_id, job["priority"], now),
                     ).fetchone()
-                    if not control["enabled"] or control["pause_reason"] or urgent:
+                    if not allowed or urgent:
                         connection.execute("COMMIT")
                         return []
                 rows = connection.execute(
@@ -1154,10 +1164,11 @@ class JobRepository:
                 SELECT * FROM job_items
                 WHERE job_id=? AND status='pending' AND available_at<=?
                 ORDER BY available_at ASC,
+                  CASE WHEN ? THEN (SELECT COALESCE(p.captured_at,p.created_at) FROM photos p WHERE p.id=job_items.photo_id) ELSE '' END,
                   CASE WHEN ? THEN (SELECT t.id FROM analysis_backfill_tasks t
                       WHERE t.job_id=job_items.job_id AND t.photo_id=job_items.photo_id) ELSE 0 END,id ASC LIMIT ?
                     """,
-                    (job_id, now, int(backfill), limit),
+                    (job_id, now, int(openai_backfill), int(backfill), limit),
                 ).fetchall()
                 ids = [row["id"] for row in rows]
                 if ids:
@@ -1175,6 +1186,8 @@ class JobRepository:
                         f"SELECT * FROM job_items WHERE id IN ({placeholders})",  # noqa: S608 -- ids are bound parameters
                         ids,
                     ).fetchall()
+                    by_id = {row["id"]: row for row in rows}
+                    rows = [by_id[item_id] for item_id in ids]
                 connection.execute("UPDATE jobs SET heartbeat_at=? WHERE id=?", (now, job_id))
                 connection.execute("COMMIT")
                 return rows

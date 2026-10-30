@@ -3,6 +3,7 @@
 {% block content %}
 <div class="page-head"><div><h1>補齊模型資訊</h1><p>按拍攝日期由舊到新，只處理缺少有效模型資訊的照片。</p></div><a href="/analysis/seasonal">歷年同期分析</a></div>
 {% set labels = {'completed':'已完成模型資訊','missing':'尚未處理','queued':'排隊中','running':'處理中','failed':'失敗','unknown':'回應／成本待確認','excluded':'本機排除／禁止上傳','preprocessing':'等待本機預處理'} %}
+{% include 'complementary_analysis.html' %}
 <section class="panel">
   <h2>照片庫進度</h2>
   <p class="muted">統計啟用照片庫內的現存照片；完全相同內容的副本會共用模型資訊。</p>
@@ -15,9 +16,9 @@
   <p class="muted">拍攝日期不明的照片按加入日期排序。地標留空及模型判定排除都算有效完成；不因更換模型、Key 或提示詞重送。待確認項目請查看 <a href="/paid-operations">原始請求</a>，失敗項目請從原工作只重試失敗照片。</p>
 </section>
 <section class="panel">
-  <h2>一鍵補齊</h2>
-  <p id="backfill-state">{% if state.control.pause_reason %}已自動暫停：{{ state.control.pause_reason }}{% elif state.control.enabled %}補齊已開啟；相框及日常工作優先。{% else %}補齊已關閉；維持原本歷年同期前後五天模式。{% endif %}</p>
-  <button type="button" id="enable-backfill" class="primary">{% if state.control.pause_reason %}重新檢查並繼續補齊{% else %}補齊缺少項目{% endif %}</button>
+  <h2>原有免費一鍵補齊</h2>
+  <p id="backfill-state">{% if state.complementary.settings['analysis.complementary_enabled'] %}分工模式已保留免費次數給每日分析；原免費全庫補齊暫停。{% elif state.control.pause_reason %}已自動暫停：{{ state.control.pause_reason }}{% elif state.control.enabled %}補齊已開啟；相框及日常工作優先。{% else %}補齊已關閉；維持一般設定的歷年同期分析範圍。{% endif %}</p>
+  <button type="button" id="enable-backfill" class="primary" {% if state.complementary.settings['analysis.complementary_enabled'] %}disabled{% endif %}>{% if state.control.pause_reason %}重新檢查並繼續補齊{% else %}補齊缺少項目{% endif %}</button>
   <button type="button" id="disable-backfill" class="secondary">關閉補齊</button>
   <p class="muted">每次送出前檢查免費價格與當日剩餘額度；請求的最高價格固定為 US$0。額度用完保留佇列，下個 UTC 日再檢查；模型下架、改收費或成本待確認會自動暫停。沒有每日掃圖張數上限。</p>
   <p class="muted">關閉後停止領取新項目，已送出的請求會安全完成。相框排程與日常模型設定保持原值。</p>
@@ -51,6 +52,32 @@
 <script nonce="{{ csp_nonce }}">
 (() => {
   const message = document.getElementById('backfill-message');
+  const dualMessage = document.getElementById('complementary-message');
+  async function dualChange(button, path, payload) {
+    return window.inktimeRunAction({button, status:dualMessage}, async () => {
+      const response = await window.inktimeFetch(path, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)});
+      const data = await response.json();
+      if (!response.ok) { window.inktimeSetStatus(dualMessage, data.message || '設定未儲存', 'error'); return; }
+      location.reload();
+    });
+  }
+  document.getElementById('complementary-settings').addEventListener('submit', event => {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const payload = {};
+    for (const input of form.elements) {
+      if (!input.name) continue;
+      payload[input.name] = input.type === 'checkbox' ? input.checked : input.type === 'number' ? Number(input.value) : input.value;
+    }
+    dualChange(form.querySelector('button'), '/api/v1/analysis/complementary/settings', payload);
+  });
+  document.getElementById('pause-openai').addEventListener('click', event => dualChange(event.currentTarget, '/api/v1/analysis/complementary/settings', {'analysis.openai_backfill_enabled':false}));
+  document.getElementById('resume-openai').addEventListener('click', event => dualChange(event.currentTarget, '/api/v1/analysis/complementary/resume', {}));
+  document.getElementById('check-free-quota').addEventListener('click', event => window.inktimeRunAction({button:event.currentTarget, status:dualMessage}, async () => {
+    const response = await window.inktimeFetch('/api/v1/analysis/complementary/free-quota');
+    const data = await response.json();
+    window.inktimeSetStatus(dualMessage, response.ok ? `OpenRouter 今日免費：已用 ${data.used}／${data.limit}，剩餘 ${data.remaining} 次（UTC 日重置）` : data.message, response.ok ? 'success' : 'error');
+  }));
   async function change(button, path, payload) {
     return window.inktimeRunAction({button, status: message}, async () => {
       const response = await window.inktimeFetch(path, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)});
@@ -74,10 +101,20 @@
       if (!response.ok) return;
       const data = await response.json();
       for (const key of ['completed','missing','queued','running','failed','unknown','excluded','preprocessing']) document.getElementById('count-' + key).textContent = data[key];
+      const dual = data.complementary, budget = dual.budget;
+      document.getElementById('openai-cycle-used').textContent = budget.known.toFixed(4);
+      document.getElementById('openai-cycle-limit').textContent = budget.limit.toFixed(2);
+      document.getElementById('openai-cycle-reserved').textContent = budget.reserved.toFixed(4);
+      document.getElementById('openai-cycle-unknown').textContent = budget.unknown_count;
+      document.getElementById('openai-budget-warning').hidden = !budget.warning;
+      document.getElementById('openai-next-cycle').textContent = new Date(budget.end).toLocaleString('zh-TW', {timeZone:dual.timezone});
+      document.getElementById('openai-lane-status').textContent = dual.control.pause_reason || (dual.settings['analysis.openai_backfill_enabled'] && dual.settings['analysis.complementary_enabled'] ? '補齊已開啟' : '補齊尚未啟用');
+      document.getElementById('daily-analysis-date').textContent = dual.tomorrow;
+      document.getElementById('daily-analysis-missing').textContent = dual.tomorrow_missing;
       document.getElementById('total').textContent = data.total;
       document.getElementById('percent').textContent = data.percent;
       document.getElementById('coverage-progress').value = data.percent;
-      document.getElementById('backfill-state').textContent = data.control.pause_reason ? '已自動暫停：' + data.control.pause_reason : data.control.enabled ? '補齊已開啟；相框及日常工作優先。' : '補齊已關閉；維持原本歷年同期前後五天模式。';
+      document.getElementById('backfill-state').textContent = data.complementary.settings['analysis.complementary_enabled'] ? '分工模式已保留免費次數給每日分析；原免費全庫補齊暫停。' : data.control.pause_reason ? '已自動暫停：' + data.control.pause_reason : data.control.enabled ? '補齊已開啟；相框及日常工作優先。' : '補齊已關閉；維持一般設定的歷年同期分析範圍。';
       if (data.photos_per_minute) document.getElementById('speed').textContent = `今天約 ${data.photos_per_minute} 張／分鐘；待處理部分約需 ${data.eta_minutes} 分鐘（僅供參考）。`;
     } catch (_) { /* A status read never retries a model request. */ }
     finally { setTimeout(refresh, 10000); }

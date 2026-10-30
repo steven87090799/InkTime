@@ -47,6 +47,8 @@ from inktime.app.services.display_prepare import DisplayPreparationService
 from inktime.app.services.jobs import JobService
 from inktime.app.services.seasonal_analysis import SeasonalAnalysisService
 from inktime.app.services.analysis_backfill import AnalysisBackfillService
+from inktime.app.services.complementary_analysis import ComplementaryAnalysisService
+from inktime.app.repositories.openai_backfill import OpenAIBackfillRepository
 from inktime.app.repositories.analysis_backfill import AnalysisBackfillRepository
 from inktime.app.repositories.seasonal_analysis import SeasonalAnalysisRepository
 from inktime.app.services.notifications import DeviceNotificationService
@@ -401,6 +403,10 @@ def bootstrap_services(
             "inktime_analysis_backfill_service": AnalysisBackfillService(
                 AnalysisBackfillRepository(database), job_repository, job_service, photo_repository,
                 analysis_service, settings_repository, provider_service, scoring_repository,
+            ),
+            "inktime_complementary_analysis_service": ComplementaryAnalysisService(
+                OpenAIBackfillRepository(database), job_repository, job_service, photo_repository,
+                analysis_service, settings_repository, provider_service, scoring_repository, budget_service, batch_analysis_service,
             ),
             "inktime_seasonal_analysis_service": SeasonalAnalysisService(
                 SeasonalAnalysisRepository(database), job_repository, job_service, photo_repository,
