@@ -23,8 +23,8 @@ def remember_model_result(connection, content_sha256: str, snapshot: dict) -> bo
     previous = connection.execute(
         "SELECT analysis_snapshot_json FROM model_analysis_results WHERE content_sha256=?", (content_sha256,),
     ).fetchone()
-    if location:
-        place = json.loads(location[0])
+    place = json.loads(location[0]) if location else {}
+    if place.get("landmark_source") == "vision":
         snapshot["landmark_evidence"] = {key: place.get(key) for key in ("landmark", "landmark_confidence", "landmark_source")}
     elif previous:
         evidence = json.loads(previous[0]).get("landmark_evidence")

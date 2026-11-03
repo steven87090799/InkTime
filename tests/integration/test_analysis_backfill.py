@@ -262,13 +262,41 @@ def test_worker_yields_after_each_batch_to_recheck_frame_priorities(app, monkeyp
     assert active[0]["completed_items"] == 0
 
 
-def test_content_reuse_preserves_named_landmark_evidence(app):
+@pytest.mark.parametrize("has_address", [False, True])
+@pytest.mark.parametrize("remove_source", [False, True])
+def test_content_reuse_preserves_named_landmark_evidence(app, has_address, remove_source):
     service, _ = setup_backfill(app)
     sha = _photo(app, "with-landmark")
     save_result(app, "with-landmark")
     locations = PhotoLocationRepository(service.repository.database)
     locations.save_landmark("with-landmark", sha, None, None, name="臺北一〇一", confidence=0.99)
     _photo(app, "same-with-landmark", same_as="with-landmark")
+    if has_address:
+        from inktime.app.domain.photos.places import PhotoPlace
+        locations.save_address("same-with-landmark", sha, None, None,
+                               PhotoPlace(city="臺北市", district="信義區", source="offline-district-index"))
+    if remove_source:
+        with service.repository.database.transaction() as connection:
+            connection.execute("DELETE FROM photos WHERE id='with-landmark'")
     service.photos.inherit_existing_analysis("same-with-landmark", None, semantic_only=True)
     copied = locations.get(service.photos.get_with_path("same-with-landmark"))
     assert copied.landmark == "臺北一〇一"
+    with service.repository.database.session() as connection:
+        snapshot = json.loads(connection.execute(
+            "SELECT analysis_snapshot_json FROM model_analysis_results WHERE content_sha256=?", (sha,),
+        ).fetchone()[0])
+    assert snapshot["landmark_evidence"]["landmark"] == "臺北一〇一"
+
+
+def test_content_reuse_keeps_explicit_vision_landmark_absence(app):
+    service, _ = setup_backfill(app)
+    sha = _photo(app, "source")
+    save_result(app, "source")
+    locations = PhotoLocationRepository(service.repository.database)
+    locations.save_landmark("source", sha, None, None, name="old name", confidence=.99)
+    locations.save_landmark("source", sha, None, None, name="", confidence=1)
+    _photo(app, "copy", same_as="source")
+    from inktime.app.domain.photos.places import PhotoPlace
+    locations.save_address("copy", sha, None, None, PhotoPlace(city="臺北市"))
+    service.photos.inherit_existing_analysis("copy", None, semantic_only=True)
+    assert locations.get(service.photos.get_with_path("copy")).landmark == ""

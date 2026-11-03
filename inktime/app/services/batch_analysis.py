@@ -1043,6 +1043,55 @@ class BatchAnalysisService:
 
     def _submit_one(self, batch_id: str, plan: dict[str, Any]) -> None:
         batch = self.batches.get(batch_id)
+        parent = self.jobs.get(str(batch["job_id"])) if batch and batch["job_id"] else None
+        if parent is None or json.loads(parent["settings_json"]).get("complementary_lane") != "openai_backfill":
+            return self._submit_one_guarded(batch_id, plan)
+        # Pause commits and external POSTs share a cross-process fence. A pause
+        # waits for the current side effect; after success no new POST can start.
+        from inktime.app.repositories.openai_backfill import OpenAIBackfillRepository
+        with self.database.operation_lock("openai-backfill-submit"):
+            with self.database.session() as connection:
+                allowed = OpenAIBackfillRepository.enabled(connection)
+            if not allowed:
+                self.jobs.request_pause(str(parent["id"]))
+                self.batches.hold_prepared_for_credit(str(parent["id"]), "BATCH-AUTO-PAUSED")
+                raise BatchLifecycleError("OpenAI 補齊已暫停，保留未提交分片", "BATCH-AUTO-PAUSED")
+            self._refresh_renewal_input(batch_id, plan)
+            return self._submit_one_guarded(batch_id, plan)
+
+    def _refresh_renewal_input(self, batch_id: str, plan: dict[str, Any]) -> None:
+        batch = self.batches.get(batch_id)
+        code = str(batch["last_error_code"] or "")
+        if (not batch["input_file_id"] or batch["remote_batch_id"]
+                or batch["status"] not in {"preparing", "uploaded"}
+                or not (code == "API_CREDIT_EXHAUSTED" or code.startswith("BUDGET-OPENAI-"))):
+            return
+        provider = self._provider(str(batch["provider_id"]), plan)
+        try:
+            try:
+                metadata = provider.retrieve_file(str(batch["input_file_id"]))
+                expired = metadata.get("expires_at") is not None and float(metadata["expires_at"]) <= time.time()
+            except Exception as exc:
+                status = (getattr(exc, "http_status", None)
+                          or getattr(getattr(exc, "call_trace", None), "http_status", None))
+                if status != 404 or getattr(exc, "ambiguous", False):
+                    raise
+                expired = True
+            if expired:
+                if not Path(str(batch["local_input_path"] or "")).is_file():
+                    raise BatchLifecycleError("到期分片缺少本機原始檔案，須人工核對", "BATCH-INPUT-002")
+                if not self.batches.reset_expired_input(batch_id, str(batch["input_file_id"])):
+                    raise BatchLifecycleError("Batch 狀態已變更，停止恢復", "BATCH-CLAIM-STALE")
+                self.jobs.add_event(str(batch["job_id"]), "batch_input_expired",
+                                    "原 Batch 明確未建立；到期輸入檔將由原分片重新上傳",
+                                    {"batch_id": batch_id, "expired_input_file_id": batch["input_file_id"]})
+        finally:
+            close = getattr(provider, "close", None)
+            if callable(close):
+                close()
+
+    def _submit_one_guarded(self, batch_id: str, plan: dict[str, Any]) -> None:
+        batch = self.batches.get(batch_id)
         if batch is None:
             raise KeyError(batch_id)
         if plan.get("batch_endpoint") == "/v1/responses" and batch["job_id"]:
@@ -1064,6 +1113,10 @@ class BatchAnalysisService:
             current = self.batches.get(batch_id)
             if current is None:
                 raise KeyError(batch_id)
+            provider = self._provider(str(current["provider_id"]), plan)
+            reserved_cost = self.budgets.estimate_reserve(
+                provider, str(current["model"]), output_tokens=FULL_ANALYSIS_TOKEN_CAP, batch=True
+            ) * len(self.batches.items(batch_id))
             if not current["input_file_id"]:
                 upload_attempt = str(uuid4())
                 upload_lease_until = self._side_effect_lease_until(str(current["provider_id"]))
@@ -1075,8 +1128,10 @@ class BatchAnalysisService:
                 input_path = Path(str(current["local_input_path"] or ""))
                 if not input_path.is_file():
                     raise BatchLifecycleError("找不到待上傳的 JSONL 分片", "BATCH-INPUT-002")
+                self.budgets.reserve("batch:" + batch_id, reserved_cost,
+                                     job_id=str(current["job_id"]) if current["job_id"] else None,
+                                     provider_id=str(current["provider_id"]))
                 input_file_bytes = input_path.stat().st_size
-                provider = self._provider(str(current["provider_id"]), plan)
                 upload_method = provider.upload_batch_file
                 parameters = inspect.signature(upload_method).parameters
                 self._assert_submission_allowed(batch_id)
@@ -1109,10 +1164,9 @@ class BatchAnalysisService:
                 raise BatchLifecycleError("Batch submission 已由其他執行者持有", "BATCH-ALREADY-CLAIMED")
             if provider is None:
                 provider = self._provider(str(current["provider_id"]), plan)
-            reserved_cost = self.budgets.estimate_reserve(
-                provider, str(current["model"]), output_tokens=FULL_ANALYSIS_TOKEN_CAP, batch=True
-            ) * len(self.batches.items(batch_id))
-            self.budgets.reserve("batch:" + batch_id, reserved_cost, job_id=str(current["job_id"]) if current["job_id"] else None, provider_id=str(current["provider_id"]))
+            self.budgets.reserve("batch:" + batch_id, reserved_cost,
+                                 job_id=str(current["job_id"]) if current["job_id"] else None,
+                                 provider_id=str(current["provider_id"]))
             self._assert_submission_allowed(batch_id)
             remote = provider.create_batch(
                 str(current["input_file_id"]),
@@ -1138,6 +1192,9 @@ class BatchAnalysisService:
                 "BATCH-SUBMISSION-UNKNOWN",
                 "BATCH-UPLOAD-UNKNOWN",
             }
+            if code == "BATCH-ALREADY-CLAIMED" or (code == "BATCH-CLAIM-STALE" and not remote_created):
+                # A losing claimant must not release the winner's budget hold.
+                raise
             if not ambiguous and not remote_created:
                 self.budgets.release("batch:" + batch_id)
             upload_unknown = code == "BATCH-UPLOAD-UNKNOWN" or (
@@ -1165,9 +1222,6 @@ class BatchAnalysisService:
                 callback = getattr(self, "complementary_pause_callback", None)
                 if callable(callback):
                     callback(exc, str(parent["id"]))
-                raise
-            if code == "BATCH-ALREADY-CLAIMED" or (code == "BATCH-CLAIM-STALE" and not remote_created):
-                # A losing claimant must not overwrite the winner's state.
                 raise
             if remote_created and submission_attempt:
                 # The remote POST returned, but the local CAS/transaction did
@@ -1617,7 +1671,7 @@ class BatchAnalysisService:
                     continue
                 status = str(current["status"])
                 if status == "preparing":
-                    if (current["last_error_code"] == "API_CREDIT_EXHAUSTED" or str(current["last_error_code"] or "").startswith("BUDGET-OPENAI-")) and current["job_id"]:
+                    if (current["last_error_code"] in {"API_CREDIT_EXHAUSTED", "BATCH-AUTO-PAUSED"} or str(current["last_error_code"] or "").startswith("BUDGET-OPENAI-")) and current["job_id"]:
                         parent = self.jobs.get(str(current["job_id"]))
                         if parent is not None and parent["status"] in {"running", "retrying"}:
                             # This marker is written only after every local

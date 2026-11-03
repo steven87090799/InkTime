@@ -2781,6 +2781,11 @@ MIGRATIONS = (
             "INSERT INTO openai_backfill_control(id) VALUES(1)",
         ),
     ),
+    Migration(
+        79,
+        "索引 OpenAI 費用帳本的時區相容日期範圍",
+        ("CREATE INDEX idx_openai_receipts_julianday ON openai_budget_receipts(julianday(started_at))",),
+    ),
 )
 
 
