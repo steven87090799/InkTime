@@ -170,15 +170,16 @@ def photos_page():
         "minimum_score": request.args.get("score", type=float),
         "duplicate_only": request.args.get("duplicates") == "1",
     }
-    _empty_rows, total = _repository().search(**search_parameters, limit=0, offset=0)
-    total_pages = max(1, math.ceil(total / PHOTO_PAGE_SIZE))
-    page = min(max(1, request.args.get("page", 1, type=int)), total_pages)
-    offset = (page - 1) * PHOTO_PAGE_SIZE
-    rows, _verified_total = _repository().search(
+    requested_page = max(1, request.args.get("page", 1, type=int))
+    rows, total = _repository().search(
         **search_parameters,
         limit=PHOTO_PAGE_SIZE,
-        offset=offset,
+        offset=(requested_page - 1) * PHOTO_PAGE_SIZE,
+        clamp_page=True,
     )
+    total_pages = max(1, math.ceil(total / PHOTO_PAGE_SIZE))
+    page = min(requested_page, total_pages)
+    offset = (page - 1) * PHOTO_PAGE_SIZE
     settings = current_app.extensions["inktime_settings_repository"]
     quality_settings = {
         key: settings.get(key, default)

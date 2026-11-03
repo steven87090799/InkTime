@@ -65,7 +65,7 @@ def test_reuse_ignores_local_scoring_metadata_but_keeps_model_contract():
 def test_repair_policy_is_frozen_bounded_and_legacy_plans_are_upgraded():
     plan = _plan(repair_policy={"model": "repair-a", "max_tokens": 99999})
     assert plan["repair_policy"] == {
-        "enabled": True,
+        "enabled": False,
         "model": "repair-a",
         "max_tokens": 1200,
         "max_attempts": 1,

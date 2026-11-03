@@ -2200,6 +2200,7 @@ class PhotoRepository:
         duplicate_only: bool = False,
         limit: int = 200,
         offset: int = 0,
+        clamp_page: bool = False,
     ):
         clauses = ["1=1"]
         parameters: list = []
@@ -2220,17 +2221,23 @@ class PhotoRepository:
         if duplicate_only:
             clauses.append("p.duplicate_group_id IS NOT NULL")
         where = " AND ".join(clauses)
+        count_join = (
+            "LEFT JOIN photo_analysis a ON a.id=(SELECT display.id FROM photo_analysis display "
+            f"WHERE display.photo_id=p.id ORDER BY {display_analysis_order_sql('display')} LIMIT 1)"
+            if photo_type or minimum_score is not None else ""
+        )
         with self.database.session() as connection:
             total = int(
                 connection.execute(
                     f"""
-                SELECT COUNT(*) FROM photos p
-                LEFT JOIN photo_analysis a ON a.id=(SELECT display.id FROM photo_analysis display WHERE display.photo_id=p.id ORDER BY {display_analysis_order_sql('display')} LIMIT 1)
+                SELECT COUNT(*) FROM photos p {count_join}
                 WHERE {where}
                 """,
                     parameters,
                 ).fetchone()[0]
             )
+            if clamp_page and limit > 0:
+                offset = min(max(0, offset), max(0, (total - 1) // limit) * limit)
             rows = connection.execute(
                 f"""
                 SELECT p.*,l.name AS library_name,a.caption,a.types_json,a.memory_score,

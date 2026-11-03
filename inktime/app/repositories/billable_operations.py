@@ -1,3 +1,4 @@
+from contextlib import nullcontext
 from dataclasses import asdict
 from datetime import datetime, timezone
 import json
@@ -114,24 +115,30 @@ class BillableOperationRepository:
             row = connection.execute("SELECT state FROM billable_operations WHERE id=?", (operation_id,)).fetchone()
         return row is not None and row["state"] == "completed"
 
-    def finish(self, operation_id: str, *, not_sent: bool = False) -> None:
-        with self.database.transaction() as connection:
+    def finish(self, operation_id: str, *, not_sent: bool = False, connection=None) -> None:
+        context = self.database.transaction() if connection is None else nullcontext(connection)
+        with context as connection:
             connection.execute(
                 "UPDATE billable_operations SET state=?,updated_at=? WHERE id=?",
                 ("not_sent" if not_sent else "completed", datetime.now(timezone.utc).isoformat(), operation_id),
             )
 
-    def finish_rejected(self, operation_id: str) -> None:
+    def finish_rejected(self, operation_id: str, error: Exception | None = None) -> None:
         """Close a definite OpenAI 4xx rejection, retaining sent-request evidence.
 
         The legacy not_sent state also releases a call the provider explicitly
         refused to execute. It must never be used for a timeout or generic 5xx.
         """
+        status = (getattr(error, "http_status", None)
+                  or getattr(getattr(error, "call_trace", None), "http_status", None))
+        note = "OpenAI definitive HTTP rejection; model execution was not accepted"
+        if error is not None:
+            note += f"; HTTP {status}; code={str(getattr(error, 'code', type(error).__name__))[:80]}"
         with self.database.transaction() as connection:
             connection.execute(
                 "UPDATE billable_operations SET state='not_sent',resolution_note=?,updated_at=? "
                 "WHERE id=? AND state='started'",
-                ("OpenAI definitive HTTP rejection; model execution was not accepted",
+                (note,
                  datetime.now(timezone.utc).isoformat(), operation_id),
             )
 

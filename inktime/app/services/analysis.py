@@ -6,6 +6,7 @@ import json
 import logging
 from pathlib import Path
 import time
+import threading
 from uuid import uuid4
 from typing import Any, Callable
 
@@ -46,7 +47,7 @@ from inktime.app.domain.photos.quality_policy import (
     local_candidate_score,
 )
 from inktime.app.providers.base import ProviderResponse, Usage, VisionAttemptState, VisionProvider, request_definitely_not_sent
-from inktime.app.providers.base import assert_complete_response, provider_process_timeout
+from inktime.app.providers.base import assert_complete_response, provider_process_timeout, openai_request_rejected
 from inktime.app.repositories.photos import PhotoRepository
 from inktime.app.repositories.settings import SettingsRepository
 from inktime.app.repositories.usage import UsageRepository
@@ -106,6 +107,8 @@ class PhotoAnalysisService:
         self.process_boundary = process_boundary
         self.ai_traces = ai_traces
         self.location_enrichment = location_enrichment
+        self._candidate_sets: dict[tuple[str, int], frozenset[str]] = {}
+        self._candidate_lock = threading.Lock()
 
     def _trace_write(self, method: str, *args, **kwargs):
         """Trace persistence is never allowed to alter production control flow."""
@@ -419,7 +422,7 @@ class PhotoAnalysisService:
         return str(self.settings.get("analysis.ai_mode", "top_candidates")) if self.settings else "legacy"
 
     def _allow_ai_for_photo(
-        self, photo_id: str, *, force_ai: bool, execution_policy: dict | None = None
+        self, photo_id: str, *, force_ai: bool, execution_policy: dict | None = None, job_id: str | None = None
     ) -> bool:
         execution = str(
             (execution_policy or {}).get("execution_mode")
@@ -436,7 +439,15 @@ class PhotoAnalysisService:
             return False
         if mode == "top_candidates":
             limit = int((execution_policy or {}).get("top_n", 50))
-            return self.photos.is_top_candidate(photo_id, limit)
+            if job_id is None:
+                return self.photos.is_top_candidate(photo_id, limit)
+            key = (job_id, max(1, min(limit, 10_000)))
+            with self._candidate_lock:
+                if key not in self._candidate_sets:
+                    if len(self._candidate_sets) >= 8:
+                        self._candidate_sets.pop(next(iter(self._candidate_sets)))
+                    self._candidate_sets[key] = frozenset(self.photos.eligible_photo_ids(limit=key[1]))
+                return photo_id in self._candidate_sets[key]
         return mode in {"eligible", "full_library", "legacy"}
 
     def _photo_limits_reached(self, execution_policy: dict | None = None) -> bool:
@@ -1144,13 +1155,14 @@ class PhotoAnalysisService:
             else:
                 from inktime.app.core.model_upload_guard import assert_upload_allowed
                 from inktime.app.repositories.model_evidence import save_model_request
-                save_model_request(self.photos.database, operation_id, {
-                    "image_path": Path(image), "model": model, "detail": detail, "stage": stage,
-                    "max_tokens": max_tokens, "reasoning_effort": reasoning_effort,
-                    "caption_controls": caption_controls, "prompt_version": prompt_version,
-                    "content_sha256": content_sha256,
-                    "vision_request_fingerprint": vision_request_fingerprint,
-                })
+                if not getattr(actual_call_provider, "archives_model_evidence", False):
+                    save_model_request(self.photos.database, operation_id, {
+                        "image_path": Path(image), "model": model, "detail": detail, "stage": stage,
+                        "max_tokens": max_tokens, "reasoning_effort": reasoning_effort,
+                        "caption_controls": caption_controls, "prompt_version": prompt_version,
+                        "content_sha256": content_sha256,
+                        "vision_request_fingerprint": vision_request_fingerprint,
+                    })
                 guard = {"database_path": str(self.photos.database.path), "photo_id": photo_id,
                          "job_id": job_id, "operation_id": operation_id,
                          "expected_content_sha256": content_sha256}
@@ -1271,12 +1283,8 @@ class PhotoAnalysisService:
             )
             raise
         except Exception as error:
-            rejected_status = (getattr(error, "http_status", None)
-                               or getattr(getattr(error, "call_trace", None), "http_status", None))
-            if (getattr(actual_call_provider, "kind", "") == "openai"
-                    and rejected_status in {400, 401, 402, 403, 404, 413, 422, 429}
-                    and not getattr(error, "ambiguous", False)):
-                operations.finish_rejected(operation_id)
+            if openai_request_rejected(actual_call_provider, error):
+                operations.finish_rejected(operation_id, error)
                 if self.budgets:
                     self.budgets.release("vision:" + operation_id)
             if request_definitely_not_sent(error) and not vision_attempt.vision_started:
@@ -1398,27 +1406,29 @@ class PhotoAnalysisService:
                 completed_at=datetime.now(timezone.utc).isoformat(),
             )
             raise
-        self.photos.put_ai_cache(
-            content_sha256=content_sha256,
-            provider=cache_provider_identity,
-            model_name=model,
-            prompt_version=prompt_version,
-            # The frozen plan owns the cache identity; accepted legacy
-            # payloads retain their original schema for compatibility.
-            # Legacy plans retain the result's historical schema version.
-            schema_version=int(cache_schema_version or result["schema_version"]),
-            schema_kind=cache_schema_kind,
-            result=result,
-            raw_json=raw,
-            input_tokens=total_input_tokens,
-            output_tokens=total_output_tokens,
-            cached_tokens=total_cached_tokens,
-            estimated_cost=total_cost,
-            latency_ms=int((time.perf_counter() - started_perf) * 1000),
-            vision_request_fingerprint=vision_request_fingerprint,
-            vision_input_spec_json=vision_input_spec_json,
-        )
-        operations.finish(operation_id)
+        with self.photos.database.transaction(operation="analysis_cache_checkpoint") as connection:
+            self.photos.put_ai_cache(
+                content_sha256=content_sha256,
+                provider=cache_provider_identity,
+                model_name=model,
+                prompt_version=prompt_version,
+                # The frozen plan owns the cache identity; accepted legacy
+                # payloads retain their original schema for compatibility.
+                # Legacy plans retain the result's historical schema version.
+                schema_version=int(cache_schema_version or result["schema_version"]),
+                schema_kind=cache_schema_kind,
+                result=result,
+                raw_json=raw,
+                input_tokens=total_input_tokens,
+                output_tokens=total_output_tokens,
+                cached_tokens=total_cached_tokens,
+                estimated_cost=total_cost,
+                latency_ms=int((time.perf_counter() - started_perf) * 1000),
+                vision_request_fingerprint=vision_request_fingerprint,
+                vision_input_spec_json=vision_input_spec_json,
+                connection=connection,
+            )
+            operations.finish(operation_id, connection=connection)
         latency = int((time.perf_counter() - started_perf) * 1000)
         return (
             result,
@@ -1459,7 +1469,7 @@ class PhotoAnalysisService:
         source = safe_join(Path(photo["root_path"]), str(photo["relative_path"]), decode_url=False)
         if not source.is_file():
             raise FileNotFoundError("SCAN-001 找不到照片檔案")
-        assert_source_content(source, photo["sha256"])
+        source_verification = assert_source_content(source, photo["sha256"])
         if self.location_enrichment is not None:
             self.location_enrichment.enrich(photo)
         photo = self._ensure_e6_suitability(photo_id, photo, source)
@@ -1560,8 +1570,6 @@ class PhotoAnalysisService:
             },
         )
         if inherited is not None:
-            if job_id is None:
-                self.photos.refresh_library_ranking(str(photo["library_id"]))
             return {"analysis": inherited, "stage": "inherited", "_actual_cost": 0}
         if strategy == "local":
             result = validate_analysis_result(self._local_result(photo, schema_version=plan_schema_version))
@@ -1637,7 +1645,7 @@ class PhotoAnalysisService:
             )
             return {"analysis": result, "stage": "prefilter", "_actual_cost": 0}
 
-        if not self._allow_ai_for_photo(photo_id, force_ai=force_ai, execution_policy=execution_policy) or (
+        if not self._allow_ai_for_photo(photo_id, force_ai=force_ai, execution_policy=execution_policy, job_id=job_id) or (
             not force_ai and self._photo_limits_reached(execution_policy)
         ):
             result = validate_analysis_result(self._local_result(photo, schema_version=plan_schema_version))
@@ -1690,7 +1698,9 @@ class PhotoAnalysisService:
             ai_trace_id,
         ) = self._model_call(
             provider=provider,
-            image_factory=lambda: self.thumbnails.acquire_for_use(source, sha, image_max_side, verify_source=True),
+            image_factory=lambda: self.thumbnails.acquire_for_use(
+                source, sha, image_max_side, verify_source=True, source_verification=source_verification,
+            ),
             model=model,
             detail=str(vision_input.get("detail", "high")),
             stage="single",
@@ -1736,8 +1746,6 @@ class PhotoAnalysisService:
             )
             raise
         persisted_at = datetime.now(timezone.utc).isoformat()
-        if job_id is None:
-            self.photos.refresh_library_ranking(str(photo["library_id"]))
         self._trace_write(
             "complete_run",
             ai_trace_id,

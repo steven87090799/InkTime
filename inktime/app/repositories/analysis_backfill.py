@@ -30,9 +30,11 @@ class AnalysisBackfillRepository:
                    WHERE bi.content_sha256=p.sha256 AND (bi.status IN ('upload_unknown','submission_unknown')
                    OR b.status IN ('upload_unknown','submission_unknown')))"""
 
-    def _population_sql(self, *, after: bool = False) -> str:
+    def _population_sql(self, *, after: bool = False, selected: bool = False, materialized: bool = False) -> str:
         cursor = "AND (COALESCE(p.captured_at,p.created_at),p.id)>(?,?)" if after else ""
-        return f"""WITH population AS (
+        scope = "AND p.id IN (SELECT value FROM json_each(?))" if selected else ""
+        materialization = "MATERIALIZED" if materialized else ""
+        return f"""WITH population AS {materialization} (
             SELECT p.id,p.sha256,p.relative_path,p.captured_at,p.created_at,
               COALESCE((SELECT t.job_id FROM analysis_backfill_tasks t WHERE t.content_sha256=p.sha256 ORDER BY t.id DESC LIMIT 1),
                 (SELECT ji.job_id FROM job_items ji WHERE ji.photo_id=p.id ORDER BY ji.available_at DESC,ji.id DESC LIMIT 1)) AS last_job_id,
@@ -53,20 +55,28 @@ class AnalysisBackfillRepository:
                 WHEN COALESCE(p.sha256,'')='' OR p.local_features_status<>'complete' THEN 'preprocessing'
                 ELSE 'missing' END AS coverage_status
             FROM photos p JOIN libraries l ON l.id=p.library_id
-            WHERE p.lifecycle_status='active' AND l.enabled=1 {cursor})
+            WHERE p.lifecycle_status='active' AND l.enabled=1 {cursor} {scope})
         """  # noqa: S608 -- fixed repository-owned SQL fragments.
 
     def status(self, *, category: str = "", offset: int = 0) -> dict:
-        query = self._population_sql()
+        query = self._population_sql(materialized=True)
         with self.database.session() as connection:
-            counts = {str(row["coverage_status"]): int(row["n"]) for row in connection.execute(
-                query + " SELECT coverage_status,COUNT(*) n FROM population GROUP BY coverage_status"  # noqa: S608 -- repository-owned CTE.
-            )}
-            rows = connection.execute(
-                query + " SELECT * FROM population WHERE (?='' OR coverage_status=?) "  # noqa: S608 -- repository-owned CTE; filter stays bound.
-                "ORDER BY COALESCE(captured_at,created_at),id LIMIT 50 OFFSET ?",
+            # One evaluation of coverage, shared by counts and the bounded page.
+            result = connection.execute(
+                query + ", summary AS (SELECT json_group_object(coverage_status,n) AS counts FROM "
+                "(SELECT coverage_status,COUNT(*) n FROM population GROUP BY coverage_status)), "
+                "local_captions AS (SELECT COUNT(*) n FROM population p WHERE coverage_status<>'completed' "
+                "AND EXISTS(SELECT 1 FROM photo_analysis a WHERE a.photo_id=p.id "
+                "AND a.score_kind='local_quality' AND length(trim(a.side_caption))>0)), "
+                "page AS (SELECT * FROM population WHERE (?='' OR coverage_status=?) "
+                "ORDER BY COALESCE(captured_at,created_at),id LIMIT 50 OFFSET ?) "
+                "SELECT summary.counts,local_captions.n AS local_caption_only,page.* "
+                "FROM summary CROSS JOIN local_captions LEFT JOIN page ON 1=1",  # noqa: S608 -- fixed CTE, bound filters.
                 (category, category, max(0, offset)),
             ).fetchall()
+            counts = json.loads(result[0]["counts"] or "{}")
+            rows = [{key: row[key] for key in row.keys() if key not in {"counts", "local_caption_only"}}
+                    for row in result if row["id"] is not None]
             timing = connection.execute(
                 "SELECT COUNT(*) n,MIN(i.started_at) first_at,MAX(i.completed_at) last_at "
                 "FROM analysis_backfill_tasks t JOIN job_items i ON i.job_id=t.job_id AND i.photo_id=t.photo_id "
@@ -96,6 +106,7 @@ class AnalysisBackfillRepository:
                 rate = round(int(timing["n"]) * 60 / elapsed, 2)
         return {**values, "total": total, "unprocessed": total - values["completed"] - values["excluded"],
                 "percent": round(100 * values["completed"] / total, 1) if total else 100.0,
+                "local_caption_only": int(result[0]["local_caption_only"]),
                 "photos_per_minute": rate,
                 "eta_minutes": round(values["missing"] / rate, 1) if rate else None,
                 "items": [dict(row) for row in rows], "active_jobs": active_jobs, "failed_jobs": failed_jobs,
@@ -124,14 +135,14 @@ class AnalysisBackfillRepository:
             control = connection.execute("SELECT * FROM analysis_backfill_control WHERE id=1").fetchone()
             if not control["enabled"] or control["pause_reason"] or control["provider_id"] != provider_id:
                 raise AnalysisReservationConflict("補齊設定已暫停或變更，保留照片待處理")
+            eligible = connection.execute(
+                self._population_sql(selected=True) +
+                " SELECT id,sha256 FROM population WHERE coverage_status='queued'",  # noqa: S608 -- repository-owned CTE.
+                (json.dumps([row["id"] for row in rows]),),
+            ).fetchall()
+            if {(row["id"], row["sha256"]) for row in eligible} != {(row["id"], row["sha256"]) for row in rows}:
+                raise AnalysisReservationConflict("照片內容或模型資訊已變更，重新核對後再領取")
             for row in rows:
-                eligible = connection.execute(
-                    self._population_sql() + " SELECT 1 FROM population WHERE id=? AND sha256=? "  # noqa: S608 -- fixed CTE and bound content identity.
-                    # The new job already owns these items in this same transaction.
-                    "AND coverage_status='queued'", (row["id"], row["sha256"]),
-                ).fetchone()
-                if eligible is None:
-                    raise AnalysisReservationConflict("照片內容或模型資訊已變更，重新核對後再領取")
                 connection.execute(
                     "INSERT INTO analysis_backfill_tasks(content_sha256,photo_id,job_id,status,created_at,updated_at) "
                     "VALUES (?,?,?,'queued',?,?)", (row["sha256"], row["id"], job_id, utc_now(), utc_now()),

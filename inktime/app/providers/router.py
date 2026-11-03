@@ -344,7 +344,7 @@ class FailoverVisionProvider(VisionProvider):
             getattr(self._local, "request_slots", {}).pop(id(channel), None)
             channel.semaphore.release()
 
-    def _execute(self, method: str, **kwargs) -> ProviderResponse:
+    def _execute(self, method: str, *, before_attempt=None, **kwargs) -> ProviderResponse:
         last_error: Exception | None = None
         _log_debug(
             "Provider route started",
@@ -359,6 +359,8 @@ class FailoverVisionProvider(VisionProvider):
                 continue
             self._local.channel = channel
             try:
+                if before_attempt is not None:
+                    before_attempt(channel.provider, self._effective_model(channel, kwargs))
                 response = getattr(channel.provider, method)(
                     **self._call_kwargs(channel, method, kwargs)
                 )

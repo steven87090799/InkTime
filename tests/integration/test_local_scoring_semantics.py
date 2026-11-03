@@ -321,6 +321,39 @@ def test_semantic_selection_survives_newer_local_history(app, tmp_path):
     assert app.extensions["inktime_photo_repository"].score_population() == [78.0]
 
 
+def test_seasonal_high_score_fallback_filters_before_candidate_limit(app, tmp_path):
+    root = tmp_path / "large-fallback"
+    _insert_photo(app, root, "low", local_score=50)
+    _save_semantic(app, "low", 50)
+    _insert_photo(app, root, "high", local_score=90)
+    _save_semantic(app, "high", 90)
+    database = app.extensions["inktime_database"]
+    with database.transaction() as connection:
+        connection.execute("UPDATE photos SET display_count=1,e6_score=80,crop_focus_x=.5,crop_focus_y=.5 WHERE id='high'")
+        photo = dict(connection.execute("SELECT * FROM photos WHERE id='low'").fetchone())
+        analysis = dict(connection.execute("SELECT * FROM photo_analysis WHERE photo_id='low'").fetchone())
+        analysis.pop("id")
+        for index in range(501):
+            identifier = f"low-{index:04d}"
+            copy = {**photo, "id": identifier, "relative_path": identifier + ".jpg"}
+            connection.execute(
+                f"INSERT INTO photos ({','.join(copy)}) VALUES ({','.join('?' for _ in copy)})",  # noqa: S608 -- columns come from the fixture schema.
+                tuple(copy.values()),
+            )
+            copy_analysis = {**analysis, "photo_id": identifier}
+            connection.execute(
+                f"INSERT INTO photo_analysis ({','.join(copy_analysis)}) VALUES ({','.join('?' for _ in copy_analysis)})",  # noqa: S608 -- columns come from the fixture schema.
+                tuple(copy_analysis.values()),
+            )
+    service = app.extensions["inktime_render_service"]
+    service.settings.update("analysis.execution_mode", "seasonal_ai", changed_by="test", source_ip="test")
+    rows = service._select_candidates_for_score_kind(
+        target=date(2026, 8, 30), limit=1, candidate_years=None, score_kind=SEMANTIC_SCORE_KIND,
+    )
+    assert [row["id"] for row in rows] == ["high"]
+    assert rows[0]["match_type"] == "ranked_fallback"
+
+
 def test_local_detail_does_not_render_compatibility_values_as_ai_scores(client, app, tmp_path):
     photo_id = _scan_one(app, tmp_path / "detail")
     app.extensions["inktime_analysis_service"].analyze_photo(
@@ -622,3 +655,44 @@ def test_bounded_ai_queue_advances_past_completed_photos(app, tmp_path):
     assert photos.eligible_photo_ids(limit=1) == ["b-pending"]
     assert photos.is_top_candidate("b-pending", 1)
     assert "c-unscanned" not in photos.eligible_photo_ids()
+
+
+
+def test_job_candidate_snapshot_is_bounded_and_next_job_sees_new_photos(app, monkeypatch):
+    service = app.extensions["inktime_analysis_service"]
+    candidates = ["first", "second"]
+    calls = []
+    def eligible(*, limit):
+        calls.append(limit)
+        return candidates[:limit]
+    monkeypatch.setattr(service.photos, "eligible_photo_ids", eligible)
+    policy = {"ai_mode": "top_candidates", "top_n": 2, "execution_mode": "automatic_ai"}
+    assert service._allow_ai_for_photo("first", force_ai=False, execution_policy=policy, job_id="job-a")
+    candidates[:] = ["new", "second"]
+    assert service._allow_ai_for_photo("second", force_ai=False, execution_policy=policy, job_id="job-a")
+    assert not service._allow_ai_for_photo("new", force_ai=False, execution_policy=policy, job_id="job-a")
+    assert service._allow_ai_for_photo("new", force_ai=False, execution_policy=policy, job_id="job-b")
+    assert calls == [2, 2]
+
+
+def test_unfiltered_search_counts_without_analysis_join_and_clamps_last_page(app, tmp_path, monkeypatch):
+    from contextlib import contextmanager
+    root = tmp_path / "count-pruning"
+    for photo_id in ("first", "second", "third"):
+        _insert_photo(app, root, photo_id, local_score=80)
+    photos = app.extensions["inktime_photo_repository"]
+    original = photos.database.session
+    statements = []
+    @contextmanager
+    def traced():
+        with original() as connection:
+            connection.set_trace_callback(statements.append)
+            try:
+                yield connection
+            finally:
+                connection.set_trace_callback(None)
+    monkeypatch.setattr(photos.database, "session", traced)
+    rows, total = photos.search(limit=2, offset=999, clamp_page=True)
+    counts = [statement for statement in statements if "SELECT COUNT(*) FROM photos p" in statement]
+    assert len(counts) == 1 and "photo_analysis" not in counts[0]
+    assert total == 3 and len(rows) == 1

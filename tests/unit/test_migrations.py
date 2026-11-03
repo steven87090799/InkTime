@@ -30,7 +30,7 @@ def test_output_limit_upgrade_keeps_effective_default_and_admin_choice(tmp_path,
             "VALUES ('budget.full_analysis_max_tokens','成本設定','1200','integer',0,'2026-10-28',?)", (actor,),
         )
     monkeypatch.setattr(migrations_module, "MIGRATIONS", MIGRATIONS)
-    assert migrate(database) == [77, 78]
+    assert migrate(database) == [77, 78, 79]
     with database.session() as connection:
         row = connection.execute("SELECT value_json,updated_by FROM settings WHERE key='budget.full_analysis_max_tokens'").fetchone()
         assert tuple(row) == (expected, actor)
@@ -56,7 +56,7 @@ def test_both_draft_schemas_upgrade_without_losing_records(tmp_path, monkeypatch
             )
     monkeypatch.setattr(migrations_module, "MIGRATIONS", MIGRATIONS)
     backups = tmp_path / "backups"
-    assert migrate(database, backups) == ([72, 73, 75, 76, 77, 78] if source == "seasonal" else [74, 75, 76, 77, 78])
+    assert migrate(database, backups) == ([72, 73, 75, 76, 77, 78, 79] if source == "seasonal" else [74, 75, 76, 77, 78, 79])
     assert any(backups.iterdir())
     assert migrate(database) == []
     with database.session() as connection:
@@ -106,7 +106,7 @@ def test_display_counter_upgrade_preserves_unconfirmed_history_and_webhook_state
         )
         connection.execute("DELETE FROM device_notifications WHERE id=100")
     monkeypatch.setattr(migrations_module, "MIGRATIONS", MIGRATIONS)
-    assert migrate(database) == [72, 73, 74, 75, 76, 77, 78]
+    assert migrate(database) == [72, 73, 74, 75, 76, 77, 78, 79]
     with database.session() as connection:
         photo = connection.execute("SELECT * FROM photos WHERE id='p'").fetchone()
         assert photo["display_count"] == 1
@@ -138,8 +138,31 @@ def _run_capture_date_backfill(database_path: str, start, results) -> None:
         results.put({"error": type(exc).__name__})
 
 
+def test_receipt_expression_index_upgrade_preserves_offset_time_accounting(tmp_path, monkeypatch):
+    monkeypatch.setattr(migrations_module, "MIGRATIONS", MIGRATIONS[:78])
+    database = Database(tmp_path / "receipt-upgrade.db")
+    migrate(database)
+    with database.transaction() as connection:
+        connection.executemany(
+            "INSERT INTO openai_budget_receipts(usage_id,started_at,cost,uncertain) VALUES (?,?,?,0)",
+            [(1, "2026-11-03T00:00:00+08:00", 1.25),
+             (2, "2026-11-02T16:30:00Z", 2.5),
+             (3, "2026-11-03T16:00:00+00:00", 10)],
+        )
+    monkeypatch.setattr(migrations_module, "MIGRATIONS", MIGRATIONS)
+    assert migrate(database) == [79]
+    query = ("SELECT SUM(cost) FROM openai_budget_receipts "
+             "WHERE julianday(started_at)>=julianday(?) AND julianday(started_at)<julianday(?)")
+    bounds = ("2026-11-02T16:00:00+00:00", "2026-11-03T16:00:00+00:00")
+    with database.session() as connection:
+        assert connection.execute(query, bounds).fetchone()[0] == 3.75
+        plan = connection.execute("EXPLAIN QUERY PLAN " + query, bounds).fetchall()
+        assert any("USING INDEX idx_openai_receipts_julianday" in row[3] for row in plan)
+        assert connection.execute("SELECT COUNT(*) FROM openai_budget_receipts").fetchone()[0] == 3
+
+
 def test_fresh_database_is_migrated(tmp_path):
-    assert CURRENT_SCHEMA_VERSION == 78
+    assert CURRENT_SCHEMA_VERSION == 79
     database = Database(tmp_path / "inktime.db")
     assert migrate(database) == list(range(1, CURRENT_SCHEMA_VERSION + 1))
     assert database.integrity_check() == "ok"

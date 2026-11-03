@@ -22,6 +22,15 @@ def request_definitely_not_sent(error: Exception) -> bool:
 MAX_BATCH_RESULT_BYTES = 256 * 1024 * 1024
 
 
+def openai_request_rejected(provider, error: Exception) -> bool:
+    """A definite refusal permits retry; a timeout/unknown response never does."""
+    status = (getattr(error, "http_status", None)
+              or getattr(getattr(error, "call_trace", None), "http_status", None))
+    return (getattr(provider, "kind", "") == "openai"
+            and status in {400, 401, 402, 403, 404, 413, 422, 429}
+            and not getattr(error, "ambiguous", False))
+
+
 def provider_process_timeout(provider) -> float:
     """Allow connection setup and child startup beyond the HTTP read timeout."""
     timeout = float(getattr(provider, "timeout", 120))

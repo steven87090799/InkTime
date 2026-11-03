@@ -2751,6 +2751,7 @@ class RenderService:
         score_kind: str = SEMANTIC_SCORE_KIND,
         date_priorities: dict[str, int] | None = None,
         priority_min_score: float = 0,
+        minimum_score: float | None = None,
     ) -> list[dict[str, Any]]:
         if score_kind not in {SEMANTIC_SCORE_KIND, LOCAL_QUALITY_SCORE_KIND}:
             raise ValueError("RENDER-005 不支援的選片評分來源")
@@ -2824,7 +2825,8 @@ class RenderService:
                           IN (SELECT value FROM json_each(?)))
                     )
                     SELECT * FROM ranked_candidates
-                    WHERE (? IS NULL OR exposure_count>? OR (exposure_count=? AND
+                    WHERE (? IS NULL OR selection_score>=?)
+                      AND (? IS NULL OR exposure_count>? OR (exposure_count=? AND
                         (date_priority>? OR (date_priority=? AND
                         (combined_score<? OR (combined_score=? AND id>?))))))
                     ORDER BY exposure_count ASC,date_priority ASC,combined_score DESC,id LIMIT 250
@@ -2839,6 +2841,8 @@ class RenderService:
                         target.year,
                         int(bool(candidate_years)),
                         json.dumps(candidate_years or []),
+                        minimum_score,
+                        minimum_score,
                         last_score,
                         last_count,
                         last_count,
@@ -2993,9 +2997,9 @@ class RenderService:
                 outside = self._candidate_query(
                     target=target, month_days=None, older_only=False,
                     limit=max(500, limit), candidate_years=candidate_years, score_kind=score_kind,
+                    minimum_score=minimum,
                 )
-                append([row for row in outside if float(row.get("selection_score") or 0) >= minimum],
-                       "ranked_fallback")
+                append(outside, "ranked_fallback")
         elif mode == "top_ranked":
             append(self._candidate_query(
                 target=target,

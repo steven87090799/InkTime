@@ -159,6 +159,7 @@ class OfflineScheduleRepository:
         sync_time: str | None = None,
         minimum_gap_minutes: int = MINIMUM_SCHEDULE_GAP_MINUTES,
         maximum_slots: int = MAX_PREPARED_SLOTS,
+        tomorrow_schedule_times: Sequence[str] | None = None,
     ) -> RetryAfterDetails:
         """Choose a bounded retry without skipping a remaining local slot."""
 
@@ -233,7 +234,12 @@ class OfflineScheduleRepository:
         # retry move to tomorrow's first prepare point.  Preserve the legacy
         # null next_slot_epoch for this normal cross-day transition.
         tomorrow = today + timedelta(days=1)
-        tomorrow_slots = [epoch(slot_at(tomorrow, slot)) for slot in slots]
+        tomorrow_times = slots if tomorrow_schedule_times is None else validate_offline_schedule(
+            tomorrow_schedule_times,
+            maximum=resolve_offline_schedule_max_slots({"offline_schedule_max_slots": maximum_slots}),
+            minimum_gap_minutes=minimum_gap_minutes,
+        )
+        tomorrow_slots = [epoch(slot_at(tomorrow, slot)) for slot in tomorrow_times]
         if strategy == "fixed_daily":
             assert normalized_sync_time is not None
             tomorrow_prepare = epoch(local_slot_datetime(tomorrow, normalized_sync_time, zone))

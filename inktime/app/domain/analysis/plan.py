@@ -204,7 +204,7 @@ def build_analysis_plan(
         "ai_execution_policy": dict(execution_policy or {}),
         "reasoning_effort": normalized_effort,
         "repair_policy": {
-            "enabled": bool(configured_repair.get("enabled", True)),
+            "enabled": False,
             "model": repair_model,
             "max_tokens": repair_max_tokens,
             "max_attempts": 1,
