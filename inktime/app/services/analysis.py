@@ -46,7 +46,7 @@ from inktime.app.domain.photos.quality_policy import (
     local_candidate_score,
 )
 from inktime.app.providers.base import ProviderResponse, Usage, VisionAttemptState, VisionProvider, request_definitely_not_sent
-from inktime.app.providers.base import assert_complete_response, provider_process_timeout
+from inktime.app.providers.base import assert_complete_response, provider_process_timeout, openai_request_rejected
 from inktime.app.repositories.photos import PhotoRepository
 from inktime.app.repositories.settings import SettingsRepository
 from inktime.app.repositories.usage import UsageRepository
@@ -1271,12 +1271,8 @@ class PhotoAnalysisService:
             )
             raise
         except Exception as error:
-            rejected_status = (getattr(error, "http_status", None)
-                               or getattr(getattr(error, "call_trace", None), "http_status", None))
-            if (getattr(actual_call_provider, "kind", "") == "openai"
-                    and rejected_status in {400, 401, 402, 403, 404, 413, 422, 429}
-                    and not getattr(error, "ambiguous", False)):
-                operations.finish_rejected(operation_id)
+            if openai_request_rejected(actual_call_provider, error):
+                operations.finish_rejected(operation_id, error)
                 if self.budgets:
                     self.budgets.release("vision:" + operation_id)
             if request_definitely_not_sent(error) and not vision_attempt.vision_started:

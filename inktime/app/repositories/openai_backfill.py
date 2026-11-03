@@ -35,6 +35,8 @@ class OpenAIBackfillRepository(AnalysisBackfillRepository):
 
     def claim_hook(self, rows, provider_id):
         def claim(connection, job_id):
+            if not self.enabled(connection):
+                raise AnalysisReservationConflict("OpenAI 補齊已暫停，重新領取未送出")
             accepted = {row[0] for row in connection.execute("SELECT photo_id FROM job_items WHERE job_id=?", (job_id,))}
             for row in rows:
                 if row["id"] not in accepted:
@@ -48,6 +50,15 @@ class OpenAIBackfillRepository(AnalysisBackfillRepository):
             self.advance(connection, rows)
         return claim
 
+    @staticmethod
+    def enabled(connection):
+        return connection.execute(
+            "SELECT COUNT(*) FROM settings WHERE key IN "
+            "('analysis.complementary_enabled','analysis.openai_backfill_enabled') AND value_json='true'"
+        ).fetchone()[0] == 2 and connection.execute(
+            "SELECT 1 FROM openai_backfill_control WHERE id=1 AND pause_kind IS NULL"
+        ).fetchone() is not None
+
     def active_jobs(self):
         with self.database.session() as connection:
             return [dict(row) for row in connection.execute(
@@ -57,7 +68,7 @@ class OpenAIBackfillRepository(AnalysisBackfillRepository):
 
     def pause(self, kind, reason, cycle, job_id=None):
         with self.database.transaction() as connection:
-            connection.execute("UPDATE openai_backfill_control SET pause_kind=?,pause_reason=?,pause_cycle=?,resume_job_id=? WHERE id=1",
+            connection.execute("UPDATE openai_backfill_control SET pause_kind=?,pause_reason=?,pause_cycle=?,resume_job_id=COALESCE(?,resume_job_id) WHERE id=1 AND pause_kind IS NOT 'manual'",
                                (kind, reason, cycle, job_id))
 
     def clear_pause(self):

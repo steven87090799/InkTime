@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
+import pytest
 
 from inktime.app.repositories.offline_schedules import OfflineScheduleRepository
 
@@ -14,6 +15,19 @@ def _retry(now_local: datetime, schedule: list[str]):
         prefetch_lead_minutes=5,
         server_margin_minutes=15,
     )
+
+
+@pytest.mark.parametrize("day,tomorrow_times,expected", [
+    ("2026-10-30", ["09:00", "11:00"], "2026-10-31 08:40"),
+    ("2026-11-01", ["07:00", "18:00"], "2026-11-02 06:40"),
+])
+def test_cross_day_retry_uses_the_next_days_own_schedule(day, tomorrow_times, expected):
+    now = datetime.fromisoformat(day + "T22:30:00+08:00")
+    details = OfflineScheduleRepository.retry_after_details(
+        now=now, timezone_name="Asia/Taipei", schedule_times=["08:00", "22:00"],
+        tomorrow_schedule_times=tomorrow_times, prefetch_lead_minutes=5, server_margin_minutes=15,
+    )
+    assert datetime.fromtimestamp(details.retry_after_epoch, ZoneInfo("Asia/Taipei")).strftime("%Y-%m-%d %H:%M") == expected
 
 
 def test_retry_before_first_prepare_point_is_today_first_prepare_point():

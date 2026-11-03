@@ -698,6 +698,27 @@ def test_offline_schedule_snapshot_does_not_follow_live_device_config(custom_dev
     ).status_code == 404
 
 
+@pytest.mark.parametrize("day,next_hour,slot_count", [("2026-11-02", 18, 4), ("2026-10-31", 10, 8)])
+def test_missing_schedule_uses_effective_weekly_times_for_retry_and_config(client, app, monkeypatch, day, next_hour, slot_count):
+    import inktime.app.api.devices as devices_module
+    fixed = datetime.fromisoformat(day + "T08:01:00+08:00")
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return fixed.astimezone(tz or timezone.utc)
+    monkeypatch.setattr(devices_module, "datetime", Clock)
+    _, token = app.extensions["inktime_device_repository"].create(
+        "有效週排程", delivery_mode="inktime_offline_schedule", offline_prefetch_allowed=True,
+        schedule_times=["08:00"], prefetch_lead_minutes=5,
+    )
+    response = client.get("/api/device/v1/offline-schedule", headers={"Authorization": f"Bearer {token}"})
+    body = response.get_json()
+    assert response.status_code == 404
+    assert body["retry_after_epoch"] == int((fixed + timedelta(minutes=15)).timestamp())
+    assert datetime.fromtimestamp(body["next_slot_epoch"], ZoneInfo("Asia/Taipei")).hour == next_hour
+    assert len(body["device_config"]["schedule_times"]) == slot_count
+
+
 def test_missing_today_schedule_returns_bounded_server_retry_epoch(client, app):
     today, tomorrow = _device_dates()
     _device_id, token = app.extensions["inktime_device_repository"].create(
@@ -736,7 +757,7 @@ def test_missing_today_schedule_returns_bounded_server_retry_epoch(client, app):
 
 
 @pytest.mark.parametrize("target", ["current", "next"])
-def test_empty_offline_schedule_delivers_updated_config_and_accepts_image_independent_ack(client, app, target):
+def test_empty_offline_schedule_delivers_updated_config_and_accepts_image_independent_ack(custom_device_schedule, client, app, target):
     repository = app.extensions["inktime_device_repository"]
     device_id, token = repository.create(
         "空庫設定同步", delivery_mode="inktime_offline_schedule",

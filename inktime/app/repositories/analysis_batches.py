@@ -482,6 +482,19 @@ class AnalysisBatchRepository:
             )
         return bool(cursor.rowcount)
 
+    def reset_expired_input(self, batch_id: str, input_file_id: str) -> bool:
+        with self.database.transaction() as connection:
+            cursor = connection.execute(
+                "UPDATE analysis_batches SET input_file_id=NULL,input_file_deleted=0,"
+                "status='preparing',side_effect_version=side_effect_version+1,updated_at=? "
+                "WHERE id=? AND input_file_id=? AND remote_batch_id IS NULL "
+                "AND status IN ('preparing','uploaded') "
+                "AND (last_error_code='API_CREDIT_EXHAUSTED' OR last_error_code LIKE 'BUDGET-OPENAI-%') "
+                "AND (side_effect_lease_until IS NULL OR side_effect_lease_until<=?)",
+                (utc_now(), batch_id, input_file_id, utc_now()),
+            )
+        return bool(cursor.rowcount)
+
     def claim_upload(self, batch_id: str, owner: str, attempt_id: str, lease_until: str) -> bool:
         now = utc_now()
         with self.database.transaction() as connection:

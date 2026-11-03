@@ -321,6 +321,39 @@ def test_semantic_selection_survives_newer_local_history(app, tmp_path):
     assert app.extensions["inktime_photo_repository"].score_population() == [78.0]
 
 
+def test_seasonal_high_score_fallback_filters_before_candidate_limit(app, tmp_path):
+    root = tmp_path / "large-fallback"
+    _insert_photo(app, root, "low", local_score=50)
+    _save_semantic(app, "low", 50)
+    _insert_photo(app, root, "high", local_score=90)
+    _save_semantic(app, "high", 90)
+    database = app.extensions["inktime_database"]
+    with database.transaction() as connection:
+        connection.execute("UPDATE photos SET display_count=1,e6_score=80,crop_focus_x=.5,crop_focus_y=.5 WHERE id='high'")
+        photo = dict(connection.execute("SELECT * FROM photos WHERE id='low'").fetchone())
+        analysis = dict(connection.execute("SELECT * FROM photo_analysis WHERE photo_id='low'").fetchone())
+        analysis.pop("id")
+        for index in range(501):
+            identifier = f"low-{index:04d}"
+            copy = {**photo, "id": identifier, "relative_path": identifier + ".jpg"}
+            connection.execute(
+                f"INSERT INTO photos ({','.join(copy)}) VALUES ({','.join('?' for _ in copy)})",  # noqa: S608 -- columns come from the fixture schema.
+                tuple(copy.values()),
+            )
+            copy_analysis = {**analysis, "photo_id": identifier}
+            connection.execute(
+                f"INSERT INTO photo_analysis ({','.join(copy_analysis)}) VALUES ({','.join('?' for _ in copy_analysis)})",  # noqa: S608 -- columns come from the fixture schema.
+                tuple(copy_analysis.values()),
+            )
+    service = app.extensions["inktime_render_service"]
+    service.settings.update("analysis.execution_mode", "seasonal_ai", changed_by="test", source_ip="test")
+    rows = service._select_candidates_for_score_kind(
+        target=date(2026, 8, 30), limit=1, candidate_years=None, score_kind=SEMANTIC_SCORE_KIND,
+    )
+    assert [row["id"] for row in rows] == ["high"]
+    assert rows[0]["match_type"] == "ranked_fallback"
+
+
 def test_local_detail_does_not_render_compatibility_values_as_ai_scores(client, app, tmp_path):
     photo_id = _scan_one(app, tmp_path / "detail")
     app.extensions["inktime_analysis_service"].analyze_photo(
