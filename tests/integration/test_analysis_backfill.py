@@ -300,3 +300,37 @@ def test_content_reuse_keeps_explicit_vision_landmark_absence(app):
     locations.save_address("copy", sha, None, None, PhotoPlace(city="臺北市"))
     service.photos.inherit_existing_analysis("copy", None, semantic_only=True)
     assert locations.get(service.photos.get_with_path("copy")).landmark == ""
+
+
+
+def test_coverage_page_counts_and_empty_filter_share_one_population(app):
+    service, _ = setup_backfill(app)
+    for index in range(55):
+        _photo(app, f"coverage-{index:02}")
+    save_result(app, "coverage-00")
+    local = valid_result()
+    app.extensions["inktime_photo_repository"].save_analysis(
+        "coverage-01", None, "local_fallback", "local", "local", local, json.dumps(local),
+        score_kind="local_quality", schema_kind="full",
+    )
+    first = service.repository.status()
+    assert first["local_caption_only"] == 1
+    assert (first["total"], first["completed"], first["missing"], len(first["items"])) == (55, 1, 54, 50)
+    second = service.repository.status(category="missing", offset=50)
+    assert second["total"] == 55 and len(second["items"]) == 4
+    absent = service.repository.status(category="unknown")
+    assert absent["items"] == [] and absent["total"] == 55
+
+
+def test_bounded_claim_query_uses_photo_id_index(app):
+    service, _ = setup_backfill(app)
+    _photo(app, "bounded-claim")
+    with service.repository.database.session() as connection:
+        plan = connection.execute(
+            "EXPLAIN QUERY PLAN " + service.repository._population_sql(selected=True) +
+            " SELECT id,sha256 FROM population WHERE coverage_status='queued'",
+            (json.dumps(["bounded-claim"]),),
+        ).fetchall()
+    details = [str(row["detail"]) for row in plan]
+    assert any("SEARCH p USING INDEX" in detail and "(id=?)" in detail for detail in details)
+    assert not any(detail == "SCAN p" for detail in details)

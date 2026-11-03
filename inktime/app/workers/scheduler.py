@@ -45,6 +45,7 @@ class SchedulerRunner:
         self.last_notification_enqueue_at = 0.0
         self.last_batch_poll_at = 0.0
         self.last_seasonal_scan_at = 0.0
+        self.last_missing_backfill_at = -300.0
         self.last_backup_date: str | None = None
         self.last_observability_heartbeat_at: float = -OBSERVABILITY_HEARTBEAT_INTERVAL_SECONDS
         self.last_observability_tick_at: float = -OBSERVABILITY_TICK_INTERVAL_SECONDS
@@ -256,7 +257,9 @@ class SchedulerRunner:
         backfill = self.app.extensions.get("inktime_analysis_backfill_service")
         if backfill is not None:
             self._safe_step("model_coverage_monthly_audit", lambda: backfill.enqueue_audit(now))
-            self._safe_step("missing_analysis_backfill", backfill.ensure)
+            if time.monotonic() - self.last_missing_backfill_at >= 300:
+                self._safe_step("missing_analysis_backfill", backfill.ensure)
+                self.last_missing_backfill_at = time.monotonic()
         complementary = self.app.extensions.get("inktime_complementary_analysis_service")
         if complementary is not None:
             self._safe_step("openai_oldest_first", complementary.ensure)

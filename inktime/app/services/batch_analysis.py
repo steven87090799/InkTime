@@ -25,6 +25,7 @@ from uuid import uuid4
 
 from inktime.app.core.paths import safe_join
 from inktime.app.core.logging import log_event
+from inktime.app.domain.analysis.json_repair import extract_json_value
 from inktime.app.domain.analysis import (
     AnalysisValidationError,
     canonical_json,
@@ -2493,7 +2494,7 @@ class BatchAnalysisService:
             return "schema_invalid"
         try:
             result = validate_model_response(
-                raw_content, caption_controls=plan.get("caption_controls"),
+                extract_json_value(raw_content) or raw_content, caption_controls=plan.get("caption_controls"),
                 schema_version=int(plan["schema_version"]),
             )
         except (ValueError, TypeError, json.JSONDecodeError, AnalysisValidationError) as exc:

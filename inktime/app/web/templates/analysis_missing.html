@@ -12,6 +12,7 @@
   <div class="metrics">
     {% for key,label in labels.items() %}<article><a href="?status={{ key }}"><span>{{ label }}</span><strong id="count-{{ key }}">{{ state[key] }}</strong></a></article>{% endfor %}
   </div>
+  <p class="muted">其中 <strong id="local-caption-only">{{ state.local_caption_only }}</strong> 張僅有本機短句，尚未取得模型短句，不列入模型完成數。失敗、待確認及預算／人工暫停不會為了達到 100% 而自動重送。</p>
   <p id="speed">{% if state.photos_per_minute %}今天約 {{ state.photos_per_minute }} 張／分鐘；待處理部分約需 {{ state.eta_minutes }} 分鐘（額度、暫停與排程優先權會影響時間）。{% else %}累積實際補齊結果後顯示處理速度與粗略剩餘時間。{% endif %}</p>
   <p class="muted">拍攝日期不明的照片按加入日期排序。地標留空及模型判定排除都算有效完成；不因更換模型、Key 或提示詞重送。待確認項目請查看 <a href="/paid-operations">原始請求</a>，失敗項目請從原工作只重試失敗照片。</p>
 </section>
@@ -20,7 +21,7 @@
   <p id="backfill-state">{% if state.complementary.settings['analysis.complementary_enabled'] %}分工模式已保留免費次數給每日分析；原免費全庫補齊暫停。{% elif state.control.pause_reason %}已自動暫停：{{ state.control.pause_reason }}{% elif state.control.enabled %}補齊已開啟；相框及日常工作優先。{% else %}補齊已關閉；維持一般設定的歷年同期分析範圍。{% endif %}</p>
   <button type="button" id="enable-backfill" class="primary" {% if state.complementary.settings['analysis.complementary_enabled'] %}disabled{% endif %}>{% if state.control.pause_reason %}重新檢查並繼續補齊{% else %}補齊缺少項目{% endif %}</button>
   <button type="button" id="disable-backfill" class="secondary">關閉補齊</button>
-  <p class="muted">每次送出前檢查免費價格與當日剩餘額度；請求的最高價格固定為 US$0。額度用完保留佇列，下個 UTC 日再檢查；模型下架、改收費或成本待確認會自動暫停。沒有每日掃圖張數上限。</p>
+  <p class="muted">定期查驗免費模型與當日剩餘額度；送出請求的最高價格固定為 US$0。額度用完保留佇列，下個 UTC 日再檢查；模型下架、改收費或成本待確認會自動暫停。沒有每日掃圖張數上限。</p>
   <p class="muted">關閉後停止領取新項目，已送出的請求會安全完成。相框排程與日常模型設定保持原值。</p>
   <div id="backfill-message" role="status" aria-live="polite"></div>
 </section>
@@ -112,6 +113,7 @@
       document.getElementById('daily-analysis-date').textContent = dual.tomorrow;
       document.getElementById('daily-analysis-missing').textContent = dual.tomorrow_missing;
       document.getElementById('total').textContent = data.total;
+      document.getElementById('local-caption-only').textContent = data.local_caption_only;
       document.getElementById('percent').textContent = data.percent;
       document.getElementById('coverage-progress').value = data.percent;
       document.getElementById('backfill-state').textContent = data.complementary.settings['analysis.complementary_enabled'] ? '分工模式已保留免費次數給每日分析；原免費全庫補齊暫停。' : data.control.pause_reason ? '已自動暫停：' + data.control.pause_reason : data.control.enabled ? '補齊已開啟；相框及日常工作優先。' : '補齊已關閉；維持一般設定的歷年同期分析範圍。';

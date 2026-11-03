@@ -1,3 +1,4 @@
+from contextlib import nullcontext
 from dataclasses import asdict
 from datetime import datetime, timezone
 import json
@@ -114,8 +115,9 @@ class BillableOperationRepository:
             row = connection.execute("SELECT state FROM billable_operations WHERE id=?", (operation_id,)).fetchone()
         return row is not None and row["state"] == "completed"
 
-    def finish(self, operation_id: str, *, not_sent: bool = False) -> None:
-        with self.database.transaction() as connection:
+    def finish(self, operation_id: str, *, not_sent: bool = False, connection=None) -> None:
+        context = self.database.transaction() if connection is None else nullcontext(connection)
+        with context as connection:
             connection.execute(
                 "UPDATE billable_operations SET state=?,updated_at=? WHERE id=?",
                 ("not_sent" if not_sent else "completed", datetime.now(timezone.utc).isoformat(), operation_id),

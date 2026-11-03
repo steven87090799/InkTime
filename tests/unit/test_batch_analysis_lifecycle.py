@@ -3078,3 +3078,25 @@ def test_failed_item_authorization_cannot_override_other_paid_or_unknown_operati
         assert result["batch_ids"] == []
         assert service.batches.get(result["prepared_batch_ids"][0])["last_error_code"] == "BATCH-PAID-OPERATION-HOLD"
     assert fake.batch_counter == 1
+
+
+
+def test_batch_accepts_same_fenced_json_as_realtime_without_new_request(app, tmp_path, monkeypatch):
+    _prepare_photos(app, tmp_path, count=1)
+    fake = FakeBatchProvider()
+    service = _wire_fake(app, fake)
+    submitted = service.submit(scope="sample", sample_count=1)
+    batch_id = submitted["batch_ids"][0]
+    download = fake.download_file_content
+    def fenced(file_id, destination):
+        path = download(file_id, destination)
+        lines = [json.loads(line) for line in path.read_text().splitlines()]
+        for line in lines:
+            message = line["response"]["body"]["choices"][0]["message"]
+            message["content"] = "```json\n" + message["content"] + "\n```"
+        path.write_text("\n".join(json.dumps(line) for line in lines) + "\n")
+        return path
+    monkeypatch.setattr(fake, "download_file_content", fenced)
+    service.poll_due(limit=10)
+    assert service.import_batch(batch_id)["success"] == 1
+    assert fake.batch_counter == 1

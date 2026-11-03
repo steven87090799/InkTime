@@ -655,3 +655,44 @@ def test_bounded_ai_queue_advances_past_completed_photos(app, tmp_path):
     assert photos.eligible_photo_ids(limit=1) == ["b-pending"]
     assert photos.is_top_candidate("b-pending", 1)
     assert "c-unscanned" not in photos.eligible_photo_ids()
+
+
+
+def test_job_candidate_snapshot_is_bounded_and_next_job_sees_new_photos(app, monkeypatch):
+    service = app.extensions["inktime_analysis_service"]
+    candidates = ["first", "second"]
+    calls = []
+    def eligible(*, limit):
+        calls.append(limit)
+        return candidates[:limit]
+    monkeypatch.setattr(service.photos, "eligible_photo_ids", eligible)
+    policy = {"ai_mode": "top_candidates", "top_n": 2, "execution_mode": "automatic_ai"}
+    assert service._allow_ai_for_photo("first", force_ai=False, execution_policy=policy, job_id="job-a")
+    candidates[:] = ["new", "second"]
+    assert service._allow_ai_for_photo("second", force_ai=False, execution_policy=policy, job_id="job-a")
+    assert not service._allow_ai_for_photo("new", force_ai=False, execution_policy=policy, job_id="job-a")
+    assert service._allow_ai_for_photo("new", force_ai=False, execution_policy=policy, job_id="job-b")
+    assert calls == [2, 2]
+
+
+def test_unfiltered_search_counts_without_analysis_join_and_clamps_last_page(app, tmp_path, monkeypatch):
+    from contextlib import contextmanager
+    root = tmp_path / "count-pruning"
+    for photo_id in ("first", "second", "third"):
+        _insert_photo(app, root, photo_id, local_score=80)
+    photos = app.extensions["inktime_photo_repository"]
+    original = photos.database.session
+    statements = []
+    @contextmanager
+    def traced():
+        with original() as connection:
+            connection.set_trace_callback(statements.append)
+            try:
+                yield connection
+            finally:
+                connection.set_trace_callback(None)
+    monkeypatch.setattr(photos.database, "session", traced)
+    rows, total = photos.search(limit=2, offset=999, clamp_page=True)
+    counts = [statement for statement in statements if "SELECT COUNT(*) FROM photos p" in statement]
+    assert len(counts) == 1 and "photo_analysis" not in counts[0]
+    assert total == 3 and len(rows) == 1

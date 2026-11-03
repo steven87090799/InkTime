@@ -12,6 +12,13 @@ from tests.unit.test_provider_router import StubProvider
 from inktime.app.providers.config import normalize_options
 
 
+@pytest.fixture(autouse=True)
+def isolate_metadata_cache(monkeypatch):
+    from collections import OrderedDict
+    from inktime.app.providers import openai_compatible
+    monkeypatch.setattr(openai_compatible, "_FREE_METADATA_CACHE", OrderedDict())
+
+
 @pytest.mark.parametrize("pricing,available,vision,accepted", [
     ({"prompt": "0", "completion": "0", "image": "0"}, True, True, True),
     ({"prompt": "0.0001", "completion": "0", "image": "0"}, True, True, False),
@@ -237,3 +244,57 @@ def test_enabling_free_first_preserves_existing_analysis_cache_identity(app):
                "options": {"daily_free_first": True}}, user_id="test")
     assert service.route_snapshot() == original_route
     assert service.operational_revision(repo.get(identifier)) != original_operations
+
+
+
+def test_metadata_cache_reuses_routes_debits_quota_and_expires_fail_closed(monkeypatch):
+    from inktime.app.providers import openai_compatible as transport
+    clock = [1000.0]
+    monkeypatch.setattr(transport.time, "monotonic", lambda: clock[0])
+    calls = []
+    available = [True]
+
+    def send(_self, method, path, **kwargs):
+        calls.append((method, path))
+        if not available[0]:
+            raise OSError("offline")
+        data = ([{"id": "test/free", "pricing": {"prompt": "0", "completion": "0"},
+                  "architecture": {"input_modalities": ["image"]}}] if path == "/models" else
+                {"free_model_daily_requests": {"used": 0, "limit": 10, "remaining": 10}})
+        return SimpleNamespace(status_code=200, json=lambda: {"data": data})
+
+    monkeypatch.setattr(OpenAICompatibleProvider, "_send", send)
+    def provider(key="isolated-key"):
+        return OpenAICompatibleProvider(name="cache", kind="openrouter",
+                                        base_url="https://openrouter.ai/api/v1", api_key=key)
+    first, recreated = provider(), provider()
+    first.assert_free_model("test/free")
+    recreated.assert_free_model("test/free")
+    assert first.free_daily_quota()["remaining"] == 10
+    assert recreated.free_daily_quota()["remaining"] == 9
+    assert calls == [("GET", "/models"), ("GET", "/key")]
+    # Rotating the key cannot reuse the previous account's proof.
+    provider("rotated-key").assert_free_model("test/free")
+    assert len(calls) == 3
+    clock[0] += 31
+    assert first.free_daily_quota()["remaining"] == 10
+    assert len(calls) == 4
+    available[0] = False
+    clock[0] += 301
+    with pytest.raises(ProviderHTTPError, match="模型下架"):
+        recreated.assert_free_model("test/free")
+    with pytest.raises(ProviderHTTPError, match="每日免費額度"):
+        recreated.free_daily_quota()
+
+
+def test_zero_quota_is_revalidated_before_paid_handoff(monkeypatch):
+    provider = OpenAICompatibleProvider(name="zero", kind="openrouter",
+                                        base_url="https://openrouter.ai/api/v1", api_key="zero-key")
+    calls = []
+    def read():
+        calls.append(True)
+        return {"used": 10, "limit": 10, "remaining": 0}
+    monkeypatch.setattr(provider, "_read_free_daily_quota", read)
+    assert provider.free_daily_quota()["remaining"] == 0
+    assert provider.free_daily_quota()["remaining"] == 0
+    assert len(calls) == 2

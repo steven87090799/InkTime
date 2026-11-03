@@ -236,3 +236,29 @@ def test_candidate_error_names_the_actual_photo(app, tmp_path):
             assert photo_id in str(exc)
         else:
             raise AssertionError("ineligible candidate must fail")
+
+
+
+@pytest.mark.parametrize("local", [False, True])
+def test_candidate_batch_keeps_order_and_rejects_ineligible_members(app, tmp_path, monkeypatch, local):
+    from contextlib import contextmanager
+    from inktime.app.repositories.render_candidates import IneligiblePhotoError
+    root = tmp_path / "batch-candidates"
+    root.mkdir()
+    for photo_id in ("first", "second", "excluded"):
+        _candidate(app, root, photo_id, eligible=0 if photo_id == "excluded" else 1)
+    candidates = app.extensions["inktime_render_candidate_repository"]
+    original = candidates.database.session
+    sessions = []
+    @contextmanager
+    def counted():
+        sessions.append(True)
+        with original() as connection:
+            yield connection
+    monkeypatch.setattr(candidates.database, "session", counted)
+    require = candidates.require_local if local else candidates.require
+    rows = require(["second", "first", "second"])
+    assert [row["id"] for row in rows] == ["second", "first"]
+    assert len(sessions) == 1
+    with pytest.raises(IneligiblePhotoError, match="excluded"):
+        require(["second", "excluded", "first"])

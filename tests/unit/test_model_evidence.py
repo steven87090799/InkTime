@@ -76,3 +76,17 @@ def test_completed_paid_checkpoint_survives_cache_loss_and_restart(tmp_path):
     restarted = BillableOperationRepository(Database(database.path))
     assert restarted.check_retry("photo-sha", "vision-plan", reuse_completed=True)
     assert restarted.begin("photo-sha", "vision-plan", reuse_completed=True) == (operation, response)
+
+
+
+def test_checkpoint_finish_participates_in_callers_atomic_transaction(tmp_path):
+    database = Database(tmp_path / "atomic-checkpoint.db")
+    migrate(database)
+    operations = BillableOperationRepository(database)
+    operation, _ = operations.begin("atomic-photo", "atomic-plan")
+    with pytest.raises(ValueError, match="rollback cache"):
+        with database.transaction() as connection:
+            operations.finish(operation, connection=connection)
+            raise ValueError("rollback cache")
+    with database.session() as connection:
+        assert connection.execute("SELECT state FROM billable_operations WHERE id=?", (operation,)).fetchone()[0] == "started"

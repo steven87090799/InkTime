@@ -96,26 +96,28 @@ class RenderCandidateRepository:
         except (ValueError, TypeError, KeyError, json.JSONDecodeError):
             return False
 
-    def get(self, photo_id: str) -> dict[str, Any] | None:
+    def get_many(self, photo_ids: Iterable[str], *, local: bool = False) -> dict[str, dict[str, Any]]:
+        ids = list(dict.fromkeys(str(value) for value in photo_ids))
+        if not ids:
+            return {}
+        predicate = self.LOCAL_SQL_PREDICATE if local else self.SQL_PREDICATE
         with self.database.session() as connection:
-            row = connection.execute(
-                f"""
-                SELECT p.*,l.root_path,l.enabled AS library_enabled,a.id AS latest_analysis_id,
-                       a.score_kind,a.ranking_score,a.local_score,a.final_ranking_score,a.raw_json
-                FROM photos p
-                JOIN libraries l ON l.id=p.library_id
+            rows = connection.execute(
+                f"""SELECT p.*,l.root_path,l.enabled AS library_enabled,a.id AS latest_analysis_id,
+                       a.score_kind,a.ranking_score,a.local_score,a.final_ranking_score,a.schema_version,a.raw_json
+                FROM photos p JOIN libraries l ON l.id=p.library_id
                 LEFT JOIN photo_analysis a ON a.id=(
-                    SELECT latest.id FROM photo_analysis latest
-                    WHERE latest.photo_id=p.id
+                    SELECT latest.id FROM photo_analysis latest WHERE latest.photo_id=p.id
                     ORDER BY {preferred_analysis_order_sql('latest')} LIMIT 1
-                )
-                WHERE p.id=? AND {self.SQL_PREDICATE}
-                """,  # noqa: S608 -- predicate is a fixed class constant
-                (photo_id,),
-            ).fetchone()
-        if row is None or not self.available(row) or not self.safety_passed(row):
-            return None
-        return dict(row)
+                ) WHERE p.id IN (SELECT value FROM json_each(?)) AND {predicate}
+                """,  # noqa: S608 -- fixed predicates, IDs bound as JSON.
+                (json.dumps(ids),),
+            ).fetchall()
+        safety = self.local_safety_passed if local else self.safety_passed
+        return {str(row["id"]): dict(row) for row in rows if self.available(row) and safety(row)}
+
+    def get(self, photo_id: str) -> dict[str, Any] | None:
+        return self.get_many([photo_id]).get(photo_id)
 
     def has_semantic_candidates(self) -> bool:
         """Return whether the current library has at least one AI-ranked row."""
@@ -137,40 +139,18 @@ class RenderCandidateRepository:
         return row is not None
 
     def require(self, photo_ids: Iterable[str]) -> list[dict[str, Any]]:
-        rows: list[dict[str, Any]] = []
-        seen: set[str] = set()
-        for raw_id in photo_ids:
-            photo_id = str(raw_id).strip()
-            if not photo_id or photo_id in seen:
-                continue
-            seen.add(photo_id)
-            row = self.get(photo_id)
-            if row is None:
+        ids = list(dict.fromkeys(str(value).strip() for value in photo_ids if str(value).strip()))
+        candidates = self.get_many(ids)
+        for photo_id in ids:
+            if photo_id not in candidates:
                 raise IneligiblePhotoError(
-                    photo_id,
-                    "照片可能已排除、Missing、刪除、缺少最新分析，或原始檔已不存在",
+                    photo_id, "照片可能已排除、Missing、刪除、缺少最新分析，或原始檔已不存在",
                 )
-            rows.append(row)
-        return rows
+        return [candidates[photo_id] for photo_id in ids]
 
     def get_local(self, photo_id: str) -> dict[str, Any] | None:
         """Photo-only delivery does not wait for a model, but honors its holds."""
-        with self.database.session() as connection:
-            row = connection.execute(
-                f"""
-                SELECT p.*,l.root_path,l.enabled AS library_enabled,a.id AS latest_analysis_id,
-                       a.score_kind,a.ranking_score,a.local_score,a.schema_version,a.raw_json
-                FROM photos p JOIN libraries l ON l.id=p.library_id
-                LEFT JOIN photo_analysis a ON a.id=(
-                    SELECT latest.id FROM photo_analysis latest WHERE latest.photo_id=p.id
-                    ORDER BY {preferred_analysis_order_sql('latest')} LIMIT 1
-                ) WHERE p.id=? AND {self.LOCAL_SQL_PREDICATE}
-                """,  # noqa: S608 -- fixed repository predicate
-                (photo_id,),
-            ).fetchone()
-        if row is None or not self.available(row) or not self.local_safety_passed(row):
-            return None
-        return dict(row)
+        return self.get_many([photo_id], local=True).get(photo_id)
 
     @classmethod
     def local_safety_passed(cls, row: Any) -> bool:
@@ -185,13 +165,12 @@ class RenderCandidateRepository:
         return True
 
     def require_local(self, photo_ids: Iterable[str]) -> list[dict[str, Any]]:
-        rows: list[dict[str, Any]] = []
-        for photo_id in dict.fromkeys(str(value) for value in photo_ids if str(value)):
-            row = self.get_local(photo_id)
-            if row is None:
+        ids = list(dict.fromkeys(str(value) for value in photo_ids if str(value)))
+        candidates = self.get_many(ids, local=True)
+        for photo_id in ids:
+            if photo_id not in candidates:
                 raise IneligiblePhotoError(photo_id, "照片未完成本機特徵、已排除或原始檔不存在")
-            rows.append(row)
-        return rows
+        return [candidates[photo_id] for photo_id in ids]
 
     def require_for_execution_mode(
         self,

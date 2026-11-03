@@ -335,7 +335,6 @@ class WorkerRunner:
         # Stale lease recovery has one owner: SchedulerRunner.  A Worker only
         # claims work that Scheduler has made runnable, avoiding two processes
         # racing to requeue the same expired item.
-        recovered = 0
         processed_jobs = 0
         for job in repository.iter_runnable():
             if self.stop.is_set() or job["status"] not in {"running", "retrying"}:
@@ -678,7 +677,6 @@ class WorkerRunner:
                 "開始處理工作",
                 event="job_started",
                 job_id=job["id"],
-                details={"recovered_items": recovered},
             )
             try:
                 self.current.run_job(job["id"])

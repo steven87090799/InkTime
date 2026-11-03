@@ -125,3 +125,15 @@ def test_side_caption_bounds_are_clamped_to_one_through_twenty():
         "minLength": 1,
         "maxLength": 20,
     }
+
+
+
+def test_custom_caption_limits_have_one_consistent_prompt_and_schema():
+    for upper in (6, 16, 20):
+        controls = _controls(side_caption_max_chars=upper)
+        prompt = analysis_system_prompt("評分參考", controls)
+        schema = json_schema_for_stage("single", caption_controls=controls)["schema"]
+        assert f"不超過 {upper} 字" in prompt
+        assert schema["properties"]["side_caption"]["maxLength"] == upper
+        if upper != 20:
+            assert "不超過 20 字" not in prompt
