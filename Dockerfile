@@ -32,6 +32,9 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 ARG DEBIAN_SNAPSHOT=20261012T000000Z
 ARG DEBIAN_RUNTIME_SNAPSHOT=20261012T000000Z
 ARG DEBIAN_SECURITY_SNAPSHOT=20261012T000000Z
+# Keep the other reviewed package families on their original snapshot. Only
+# SQLite comes from this signed sid snapshot containing the upstream FTS5 fix.
+ARG DEBIAN_SQLITE_SNAPSHOT=20261103T023120Z
 RUN set -eux; \
     rm -f /etc/apt/sources.list.d/debian.sources; \
     printf '%s\n' \
@@ -41,6 +44,8 @@ RUN set -eux; \
         > /etc/apt/sources.list; \
     printf '%s\n' "deb [check-valid-until=no] https://snapshot.debian.org/archive/debian/${DEBIAN_SNAPSHOT}/ forky main" \
         > /etc/apt/sources.list.d/inktime-runtime-fixes.list; \
+    printf '%s\n' "deb [check-valid-until=no] https://snapshot.debian.org/archive/debian/${DEBIAN_SQLITE_SNAPSHOT}/ sid main" \
+        > /etc/apt/sources.list.d/inktime-sqlite-fix.list; \
     printf '%s\n' \
         'Package: *' \
         'Pin: release n=forky' \
@@ -49,6 +54,14 @@ RUN set -eux; \
         'Package: libsqlite3-0 bsdutils libblkid1 liblastlog2-2 libmount1 libsmartcols1 libuuid1 login mount util-linux libacl1 ncurses-base ncurses-bin libncurses6 libncursesw6 libtinfo6 perl-base libc6 libc-bin libc-gconv-modules-extra libsystemd0 libudev1' \
         'Pin: release n=forky' \
         'Pin-Priority: 1001' \
+        '' \
+        'Package: *' \
+        'Pin: release n=sid' \
+        'Pin-Priority: 50' \
+        '' \
+        'Package: libsqlite3-0' \
+        'Pin: release n=sid' \
+        'Pin-Priority: 1002' \
         > /etc/apt/preferences.d/inktime-runtime-fixes; \
     apt-get update; \
     DEBIAN_FRONTEND=noninteractive apt-get install --no-install-recommends -y \
@@ -63,7 +76,7 @@ RUN set -eux; \
         libncursesw6 \
         libpcre2-8-0 \
         libssl3t64 \
-        libsqlite3-0 \
+        libsqlite3-0=3.54.1-1 \
         libsmartcols1 \
         libsystemd0 \
         libtinfo6 \
@@ -108,7 +121,8 @@ RUN set -eux; \
         dpkg --compare-versions "${openssl_version}" ge '3.5.7-1~deb13u3'; \
     done; \
     sqlite_version="$(dpkg-query -W -f='${Version}' libsqlite3-0)"; \
-    dpkg --compare-versions "${sqlite_version}" ge '3.53.2-1'; \
+    dpkg --compare-versions "${sqlite_version}" eq '3.54.1-1'; \
+    python -c "import sqlite3; assert sqlite3.sqlite_version_info == (3,54,1); c=sqlite3.connect(':memory:'); c.execute('CREATE VIRTUAL TABLE documents USING fts5(text, detail=none)'); c.executemany('INSERT INTO documents(rowid,text) VALUES (?,?)', [(i,'ab') for i in range(1,56)]+[(-9223372036854775808,'abc')]); assert c.execute(\"SELECT count(*) FROM documents WHERE documents MATCH 'a*'\").fetchone() == (56,); c.close()"; \
     apt-get check; \
     mount --version; \
     nsenter --version; \

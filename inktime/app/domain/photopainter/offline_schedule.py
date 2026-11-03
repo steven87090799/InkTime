@@ -172,7 +172,7 @@ def offline_prepare_plan(
     minimum_gap_minutes: int = MINIMUM_SCHEDULE_GAP_MINUTES,
     maximum_slots: int = MAX_OFFLINE_SLOTS,
     skip_target_dates: Sequence[str] = (),
-    dated_schedule_times: dict[str, Sequence[str]] | None = None,
+    dated_schedule_times: Mapping[str, Sequence[str]] | None = None,
 ) -> OfflinePreparePlan:
     """Resolve due local dates and the next persisted deadline once.
 

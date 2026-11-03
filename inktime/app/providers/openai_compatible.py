@@ -766,7 +766,10 @@ class OpenAICompatibleProvider(VisionProvider):
                     chunks = []
                     size = 0
                     try:
-                        for chunk in response.iter_content(chunk_size=64 * 1024):
+                        buffered = response._content
+                        response_chunks = ((buffered,) if isinstance(buffered, bytes)
+                                           else response.iter_content(chunk_size=64 * 1024))
+                        for chunk in response_chunks:
                             size += len(chunk)
                             if size > 16 * 1024 * 1024:
                                 raise ProviderHTTPError("Provider 回應超過解析上限", "VLM-RESPONSE-SIZE",
@@ -775,7 +778,8 @@ class OpenAICompatibleProvider(VisionProvider):
                                                         request_id=self._provider_request_id(response) or None)
                             chunks.append(chunk)
                         response._content = b"".join(chunks)
-                        response._content_consumed = True
+                        # requests' public stubs omit its internal consumed flag.
+                        cast(Any, response)._content_consumed = True
                     finally:
                         response.close()
             except requests.Timeout as exc:

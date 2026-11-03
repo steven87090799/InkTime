@@ -625,11 +625,14 @@ jobs:
           chmod 777 .ci-data
           openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
             -subj '/CN=InkTime CI Test CA' \
+            -addext 'basicConstraints=critical,CA:TRUE,pathlen:0' \
+            -addext 'keyUsage=critical,keyCertSign,cRLSign' \
+            -addext 'subjectKeyIdentifier=hash' \
             -keyout .ci-tls/ca.key -out .ci-tls/ca.crt
           openssl req -newkey rsa:2048 -nodes \
             -subj '/CN=inktime-ci.acme.dev' \
             -keyout .ci-tls/server.key -out .ci-tls/server.csr
-          printf 'subjectAltName=DNS:inktime-ci.acme.dev\nextendedKeyUsage=serverAuth\n' > .ci-tls/server.ext
+          printf 'subjectKeyIdentifier=hash\nauthorityKeyIdentifier=keyid,issuer\nbasicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature,keyEncipherment\nsubjectAltName=DNS:inktime-ci.acme.dev\nextendedKeyUsage=serverAuth\n' > .ci-tls/server.ext
           openssl x509 -req -days 1 -sha256 \
             -in .ci-tls/server.csr -CA .ci-tls/ca.crt -CAkey .ci-tls/ca.key \
             -CAcreateserial -extfile .ci-tls/server.ext -out .ci-tls/server.crt

@@ -239,7 +239,7 @@ class SeasonalAnalysisService:
             raise ValueError("只有失敗或結果不明的照片可手動重試")
         if not accept_possible_charge:
             raise ValueError("請確認手動重試可能再次計費")
-        rows = next(self.repository.candidate_pages(None, 0, content_sha256=str(task["content_sha256"])), [])
+        rows: list[dict] = next(self.repository.candidate_pages(None, 0, content_sha256=str(task["content_sha256"])), [])
         if not rows:
             raise ValueError("照片已變更、被排除或無法處理，請先檢查照片庫")
         original_job = self.jobs.get(str(task["job_id"])) if task["job_id"] else None

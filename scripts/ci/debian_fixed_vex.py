@@ -34,6 +34,10 @@ FIXES = {
     }),
     "CVE-2026-9538": ("perl", "5.42.3-1", {"perl-base": "5.42.3-1"}),
     "CVE-2026-16742": ("systemd", "262-1", {"libsystemd0": "262-1", "libudev1": "262-1"}),
+    # The Debian tracker still says unfixed. This independent upstream-fixed
+    # claim is limited to the exact reviewed Debian source/binary version.
+    # See debian_sqlite_evidence.json; old 3.53.4 and future builds stay visible.
+    "CVE-2026-119373": ("sqlite3", "3.54.1-1", {"libsqlite3-0": "3.54.1-1"}),
 }
 
 
@@ -93,6 +97,12 @@ def build_vex(report: dict, image_id: str) -> dict:
         "products": [{"@id": purl} for purl in sorted(purls)],
         "status": "fixed",
         "status_notes": (
+            f"Exact Debian 20261103T023120Z sqlite3 3.54.1-1 source/binary; image {image_id}. "
+            "Upstream FTS5 allocation/cast fix verified in the Debian source archive; "
+            "Debian tracker still lists unfixed and is not the basis of this statement. "
+            "Evidence: scripts/ci/debian_sqlite_evidence.json; upstream "
+            "https://github.com/sqlite/sqlite/commit/e1c9934f9f11a499029abb020ea715a08970da80"
+            if code == "CVE-2026-119373" else
             f"Exact signed Debian 20261012 snapshot binary/source versions; image {image_id}. "
             f"Vendor evidence: https://security-tracker.debian.org/tracker/{code}"
         ),

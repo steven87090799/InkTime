@@ -144,7 +144,7 @@ def assert_source_content(path: Path, expected_sha256: str | None) -> SourceVeri
     """
     expected = str(expected_sha256 or "").casefold()
     if len(expected) != 64 or any(character not in "0123456789abcdef" for character in expected):
-        return
+        return None
     before = validate_source_file(path)
     descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
     with os.fdopen(descriptor, "rb") as stream:

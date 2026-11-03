@@ -2649,7 +2649,7 @@ class RenderService:
     ) -> None:
         if self.resilience is None:
             return
-        candidates = []
+        candidates: list[dict[str, Any]] = []
         total_candidates = 0
         methods = {}
         run_ids = list(dict.fromkeys(selection_run_ids or []))

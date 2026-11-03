@@ -131,7 +131,7 @@ class OpenAIResponsesProvider(OpenAICompatibleProvider):
         return super()._post_completion(body, **kwargs)
 
     def _apply_provider_request_policy(
-        self, body: dict[str, Any], *, model: str, stage: str, prompt_identity: str,
+        self, body: dict[str, Any], *, model: str, stage: str,
         reasoning_effort: str | None, provider_request_context_id: str | None,
         allow_reasoning: bool,
     ) -> dict[str, Any]:

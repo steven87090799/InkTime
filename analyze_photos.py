@@ -11,7 +11,7 @@ from inktime.app.core.runtime_config import resolve_runtime_config
 from inktime.app.workers.runner import WorkerRunner
 
 
-def main() -> None:
+def main() -> int:
     parser = argparse.ArgumentParser(description="建立 InkTime 照片掃描／分析背景工作")
     parser.add_argument("--scan", type=Path, help="先掃描指定照片資料夾")
     parser.add_argument("--library-name", default="主要照片庫")
@@ -62,7 +62,8 @@ def main() -> None:
         print(f"狀態：{job['status']}；完成 {job['completed_items']}；失敗 {job['failed_items']}")
     finally:
         container.close()
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

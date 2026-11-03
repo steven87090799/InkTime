@@ -435,3 +435,13 @@ def test_real_response_is_bounded_before_json_parsing_and_not_retried():
     assert len(calls) == 1
     assert len(chunks_read) == 17
     assert closed == [True]
+
+
+def test_buffered_response_preserves_body_without_reading_missing_transport():
+    response = requests.Response()
+    response.status_code = 200
+    response._content = b'{"id":"already-buffered"}'
+    session = FakeSession()
+    session.post = lambda *_args, **_kwargs: response
+    provider = OpenAICompatibleProvider(name="test", base_url="https://example.com/v1", api_key="test", session=session)
+    assert provider._send("POST", "/models").json() == {"id": "already-buffered"}

@@ -9,7 +9,7 @@ from pathlib import Path
 import hashlib
 import json
 import re
-from typing import Any, Sequence
+from typing import Any, Mapping, Sequence
 from urllib.parse import quote
 from uuid import uuid4
 from zoneinfo import ZoneInfo
@@ -103,7 +103,7 @@ class OfflineScheduleRepository:
         minimum_gap_minutes: int = MINIMUM_SCHEDULE_GAP_MINUTES,
         maximum_slots: int = MAX_PREPARED_SLOTS,
         skip_target_dates: Sequence[str] = (),
-        dated_schedule_times: dict[str, Sequence[str]] | None = None,
+        dated_schedule_times: Mapping[str, Sequence[str]] | None = None,
     ) -> str:
         """Return the canonical domain policy's next persisted deadline."""
 
