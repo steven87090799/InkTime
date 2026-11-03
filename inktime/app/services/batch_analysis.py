@@ -2641,6 +2641,7 @@ class BatchAnalysisService:
         is_error: bool,
         records,
     ) -> None:
+        batch = dict(batch)
         if path is None or not path.is_file():
             return
         if path.stat().st_size > MAX_BATCH_RESULT_BYTES:

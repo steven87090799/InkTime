@@ -965,9 +965,9 @@ class RenderWorkloadService:
                 raise ValueError("DEVICE-006 找不到可用測試裝置")
             if profile_key != str(current["panel_profile"]):
                 raise ValueError("DEVICE-006 測試色盤與裝置面板 Profile 不相容")
-            if not stock_direct and str(current.get("delivery_mode") or "") == "inktime_offline_schedule":
+            if not stock_direct and str(current["delivery_mode"] or "") == "inktime_offline_schedule":
                 raise ValueError("DEVICE-008 離線排程裝置尚不支援一次性 Custom 測試")
-            if stock_direct and str(current.get("delivery_mode") or "") != "stock_compat":
+            if stock_direct and str(current["delivery_mode"] or "") != "stock_compat":
                 raise ValueError("DEVICE-008 Stock 測試只能選擇 Stock 相容裝置")
             return dict(current)
 

@@ -577,6 +577,7 @@ def test_retention_uses_local_month_and_keeps_unreconciled_usage(tmp_path, monke
 
 def test_unimplemented_shadow_preview_cannot_be_enabled(app):
     repository = ResilienceRepository(app.extensions["inktime_database"])
+    before = repository.shadow_config()
     with pytest.raises(ValueError, match="尚未支援"):
         repository.update_shadow_config({"generate_preview": True}, user_id="test")
-    assert repository.shadow_config()["generate_preview"] is False
+    assert repository.shadow_config() == before
