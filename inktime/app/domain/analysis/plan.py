@@ -313,3 +313,27 @@ def normalize_analysis_plan(plan: Mapping[str, Any]) -> dict[str, Any]:
         "text_only": True,
     }
     return raw
+
+
+
+def effective_provider_contract(plan: Mapping[str, Any], provider_id: str, model: str) -> str | None:
+    """Compare frozen semantics for the actual provider, independently of route order."""
+    route = plan.get("provider_route")
+    if not isinstance(route, list):
+        return None
+    selected = next((item for item in route if isinstance(item, dict)
+                     and str(item.get("provider_id") or item.get("id") or "") == provider_id), None)
+    if selected is None or not selected.get("config_revision"):
+        return None
+    actual_model = str(selected.get("model") or plan.get("model") or plan.get("high_model") or "")
+    if actual_model != model:
+        return None
+    return fingerprint({
+        "provider_id": provider_id, "revision": selected["config_revision"], "model": model,
+        "prompt_version": plan.get("prompt_version"), "schema_version": plan.get("schema_version"),
+        "schema_kind": plan.get("schema_kind"), "scoring_rules_sha256": plan.get("scoring_rules_sha256"),
+        "caption_controls": plan.get("caption_controls") or {},
+        "reasoning_effort": plan.get("reasoning_effort"),
+        "vision_input": plan.get("vision_input") or plan.get("high_vision_input") or {},
+        "provider_prompt_contract_version": plan.get("provider_prompt_contract_version"),
+    })

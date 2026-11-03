@@ -279,7 +279,7 @@ class DevicePairingService:
             raise DevicePairingError("frame_orientation 不合法", error_code="PAIR-004")
         layout_mode = cls._validate_text(source.get("layout_mode"), "layout_mode", 64)
         if layout_mode and layout_mode not in {
-            "adaptive_memory", "full", "postcard", "photo_info", "photo_pair", "calendar", "weather_sensor"
+            "adaptive_memory", "auto_photo", "full", "postcard", "photo_info", "photo_pair", "photo_pair_caption", "calendar", "weather_sensor"
         }:
             raise DevicePairingError("layout_mode 不合法", error_code="PAIR-004")
         fit_mode = cls._validate_text(source.get("fit_mode"), "fit_mode", 32)
@@ -1002,44 +1002,21 @@ class DevicePairingService:
             return
         if str(device["auth_mode"] or "legacy_token") != "automatic" or str(device["delivery_mode"] or "legacy_online") == "stock_compat":
             raise DevicePairingError("Legacy 與 Stock 裝置不可使用自動 credential", status_code=409, error_code="PAIR-003")
+        # The administrator's current configuration and enabled state are
+        # authoritative. Refresh only credentials and observed capabilities.
         maximum_slots = self._envelope_max_slots(envelope)
-        config = self._normalize_config(
-            dict(envelope.get("config") or {}),
-            fallback_name=f"InkTime 相框 {device_id[-6:]}",
-            offline_schedule_max_slots=maximum_slots,
-        )
-        delivery_mode = str(config["delivery_mode"])
-        schedule_json = json.dumps(config["schedule_times"], ensure_ascii=False, separators=(",", ":"))
         connection.execute(
-            """
-            UPDATE devices SET name=?,enabled=1,timezone=?,schedule=?,rotation=?,panel_profile=?,
-                frame_orientation=?,layout_mode=?,fit_mode=?,delivery_mode=?,offline_prefetch_allowed=?,
-                offline_schedule_json=?,offline_schedule_version=offline_schedule_version+1,
-                schedule_times_json=?,prefetch_lead_minutes=?,button_wake_action=?,minimum_schedule_gap_minutes=?,
-                sync_strategy=?,sync_time=?,stock_endpoint_host=NULL,
-                auth_mode='automatic',pairing_state='paired',credential_version=?,device_secret_hash=?,
-                paired_at=?,last_auth_at=NULL,auth_revoked_at=NULL,repair_allowed_until=NULL,
+            """UPDATE devices SET auth_mode='automatic',pairing_state='paired',credential_version=?,
+                device_secret_hash=?,paired_at=?,last_auth_at=NULL,auth_revoked_at=NULL,repair_allowed_until=NULL,
                 previous_device_secret_hash=NULL,previous_credential_version=NULL,previous_credential_expires_at=NULL,
                 pairing_code_hash=NULL,pairing_expires_at=NULL,pairing_attempts=0,pairing_claim_attempts=0,
                 pairing_requested_at=NULL,firmware_version=COALESCE(NULLIF(?,''),firmware_version),
                 firmware_identity=COALESCE(NULLIF(?,''),firmware_identity),offline_schedule_max_slots=?,
-                offline_schedule_capability_state=?,next_offline_prepare_at=CASE WHEN ?=1 THEN ? ELSE NULL END,
-                config_version=config_version+1,updated_at=?
-            WHERE id=?
-            """,
-            (
-                config["name"], config["timezone"], config["schedule"], config["rotation"], config["panel_profile"],
-                config["frame_orientation"], config["layout_mode"], config["fit_mode"], delivery_mode,
-                int(delivery_mode == "inktime_offline_schedule"), schedule_json, schedule_json,
-                config["prefetch_lead_minutes"], config["button_wake_action"],
-                config["minimum_schedule_gap_minutes"], config["sync_strategy"], config["sync_time"],
-                int(envelope["credential_version"]),
-                hash_device_secret(str(envelope["device_secret"]), self.pepper), self._iso(now),
-                str(envelope.get("firmware_version") or ""), str(envelope.get("firmware_identity") or ""),
-                maximum_slots, offline_schedule_capability_state(maximum_slots),
-                int(delivery_mode == "inktime_offline_schedule"), OFFLINE_PREPARE_BOOTSTRAP_AT,
-                self._iso(now), device_id,
-            ),
+                offline_schedule_capability_state=?,config_version=config_version+1,updated_at=? WHERE id=?""",
+            (int(envelope["credential_version"]), hash_device_secret(str(envelope["device_secret"]), self.pepper),
+             self._iso(now), str(envelope.get("firmware_version") or ""),
+             str(envelope.get("firmware_identity") or ""), maximum_slots,
+             offline_schedule_capability_state(maximum_slots), self._iso(now), device_id),
         )
 
     def confirm(

@@ -182,9 +182,14 @@ class ThumbnailCache:
     def clear(self) -> int:
         removed = 0
         for path in self.root.glob("*.jpg"):
-            if path.is_file():
-                path.unlink()
-                removed += 1
+            with self._generation_lock(path.stem, blocking=False) as acquired:
+                if not acquired:
+                    continue
+                try:
+                    path.unlink()
+                    removed += 1
+                except FileNotFoundError:
+                    continue
         return removed
 
     def inventory(self, *, limit: int | None = None) -> list[tuple[Path, int, float, int, str]]:

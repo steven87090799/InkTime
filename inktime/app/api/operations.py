@@ -448,6 +448,7 @@ def backups_page():
     return render_template(
         "backups.html",
         backups=backups,
+        restore_failure=current_app.extensions["inktime_backup_service"].last_restore_failure(),
         backup_schedule_enabled=bool(settings.get("backup.schedule_enabled", True)),
         backup_hour=int(settings.get("backup.hour", 3)),
         backup_retention=int(settings.get("backup.retention", 14)),
@@ -457,8 +458,12 @@ def backups_page():
 @bp.post("/api/v1/backups")
 @administrator_required
 def create_backup():
-    path = current_app.extensions["inktime_backup_service"].create()
-    return {"name": path.name}, 201
+    jobs = current_app.extensions["inktime_job_repository"]
+    with jobs.database.operation_lock("manual-backup-enqueue"):
+        job_id = jobs.create_maintenance(kind="backup", name="手動備份", settings={"source": "manual-backup", "max_attempts": 1},
+                                         created_by=str(g.user["id"]), dedupe_key="manual-backup")
+        jobs.transition(job_id, {"pending"}, "running", "manual_backup_started")
+    return {"job_id": job_id, "detail_url": f"/jobs/{job_id}"}, 202
 
 
 @bp.get("/api/v1/backups/<name>")

@@ -90,3 +90,20 @@ def test_checkpoint_finish_participates_in_callers_atomic_transaction(tmp_path):
             raise ValueError("rollback cache")
     with database.session() as connection:
         assert connection.execute("SELECT state FROM billable_operations WHERE id=?", (operation,)).fetchone()[0] == "started"
+
+
+def test_live_transport_fence_prevents_operator_resend_approval(tmp_path):
+    from inktime.app.repositories.billable_operations import paid_operation_lock_name
+
+    database = Database(tmp_path / "inktime.db")
+    migrate(database)
+    operations = BillableOperationRepository(database)
+    operation, _ = operations.begin("frozen-content", "plan")
+    with database.operation_lock(paid_operation_lock_name("frozen-content")):
+        with pytest.raises(ValueError, match="處理中"):
+            operations.approve_resend(operation, reason="operator checked")
+    operations.approve_resend(operation, reason="operator checked after transport ended")
+    with database.session() as connection:
+        row = connection.execute("SELECT state,resolution_note FROM billable_operations WHERE id=?", (operation,)).fetchone()
+    assert row["state"] == "approved"
+    assert "after transport ended" in row["resolution_note"]

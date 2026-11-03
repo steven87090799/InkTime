@@ -267,9 +267,14 @@ class AnalysisBatchRepository:
             parent = connection.execute("SELECT * FROM analysis_batches WHERE id=?", (parent_id,)).fetchone()
             if parent is None:
                 raise KeyError(parent_id)
+            job = connection.execute("SELECT status FROM jobs WHERE id=?", (parent["job_id"],)).fetchone()
+            if parent["status"] != "preparing" or (job is not None and job["status"] in {
+                "cancelled", "pausing", "paused", "failed", "budget_exceeded",
+            }):
+                raise ValueError("Batch 準備已停止，不可再移轉照片建立子片")
             placeholders = ",".join("?" for _ in selected)
             rows = connection.execute(
-                f"SELECT id FROM analysis_batch_items WHERE batch_id=? AND id IN ({placeholders})",  # noqa: S608
+                f"SELECT id FROM analysis_batch_items WHERE batch_id=? AND status='pending' AND id IN ({placeholders})",  # noqa: S608
                 (parent_id, *selected),
             ).fetchall()
             if len(rows) != len(selected):
@@ -336,17 +341,22 @@ class AnalysisBatchRepository:
         with self.database.session() as connection:
             return connection.execute("SELECT * FROM analysis_batches WHERE id=?", (batch_id,)).fetchone()
 
-    def list(self, *, statuses: set[str] | None = None, limit: int = 100) -> List[dict]:
+    def list(self, *, statuses: set[str] | None = None, limit: int = 100,
+             owner_id: str | None = None, offset: int = 0) -> List[dict]:
         params: list[Any] = []
-        where = ""
+        clauses = []
         if statuses:
             values = sorted(statuses)
-            where = f"WHERE status IN ({','.join('?' for _ in values)})"
+            clauses.append(f"status IN ({','.join('?' for _ in values)})")
             params.extend(values)
-        params.append(max(1, min(int(limit), 500)))
+        if owner_id is not None:
+            clauses.append("EXISTS(SELECT 1 FROM jobs j WHERE j.id=analysis_batches.job_id AND j.created_by=?)")
+            params.append(owner_id)
+        where = "WHERE " + " AND ".join(clauses) if clauses else ""
+        params.extend([max(1, min(int(limit), 500)), max(0, int(offset))])
         with self.database.session() as connection:
             rows = connection.execute(
-                f"SELECT * FROM analysis_batches {where} ORDER BY created_at DESC,id DESC LIMIT ?",  # noqa: S608
+                f"SELECT * FROM analysis_batches {where} ORDER BY created_at DESC,id DESC LIMIT ? OFFSET ?",  # noqa: S608
                 params,
             ).fetchall()
         return [dict(row) for row in rows]
@@ -375,10 +385,10 @@ class AnalysisBatchRepository:
             ).fetchall()
         return [dict(row) for row in rows]
 
-    def list_operator_holds(self, *, limit: int = 100) -> List[dict]:
+    def list_operator_holds(self, *, limit: int = 100, owner_id: str | None = None, offset: int = 0) -> List[dict]:
         """List ambiguous side effects without mixing them into poll work."""
 
-        return self.list(statuses={"upload_unknown", "submission_unknown"}, limit=limit)
+        return self.list(statuses={"upload_unknown", "submission_unknown"}, limit=limit, owner_id=owner_id, offset=offset)
 
     def list_for_job(self, job_id: str, *, limit: int = 500) -> List[dict]:
         with self.database.session() as connection:

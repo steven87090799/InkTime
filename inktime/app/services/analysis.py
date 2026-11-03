@@ -51,7 +51,7 @@ from inktime.app.providers.base import assert_complete_response, provider_proces
 from inktime.app.repositories.photos import PhotoRepository
 from inktime.app.repositories.settings import SettingsRepository
 from inktime.app.repositories.usage import UsageRepository
-from inktime.app.repositories.billable_operations import BillableOperationRepository
+from inktime.app.repositories.billable_operations import BillableOperationRepository, paid_operation_lock_name
 from inktime.app.services.budgets import BudgetService
 from inktime.app.services.usage_tracking import record_failed_unknown_usage
 from inktime.app.services.usage_periods import usage_periods
@@ -755,6 +755,7 @@ class PhotoAnalysisService:
         vision_input: dict,
         analysis_fingerprint: str | None = None,
         provider_prompt_contract_sha256: str | None = None,
+        analysis_spec: dict | None = None,
         force_recompute: bool = False,
         _excluded_providers: set[str] | None = None,
         _trace_id: str | None = None,
@@ -813,6 +814,8 @@ class PhotoAnalysisService:
                 prompt_version=prompt_version, schema_version=schema_version,
                 schema_kind=cache_schema_kind, vision_request_fingerprint=request_fingerprint,
             )
+            if cached is None and analysis_spec is not None and not force_recompute:
+                cached = self.photos.equivalent_provider_result(content_sha256, actual_provider, model, analysis_spec)
             if cached is not None:
                 try:
                     validate_analysis_result(cached["result"])
@@ -1045,6 +1048,7 @@ class PhotoAnalysisService:
                     analysis_fingerprint=analysis_fingerprint,
                     vision_input=vision_input,
                     provider_prompt_contract_sha256=provider_prompt_contract_sha256,
+                    analysis_spec=analysis_spec,
                     force_recompute=force_recompute,
                     _excluded_providers=excluded,
                     _trace_id=trace_id,
@@ -1078,7 +1082,11 @@ class PhotoAnalysisService:
             trace_id,
         )
 
-    def _perform_uncached_model_call(
+    def _perform_uncached_model_call(self, **kwargs):
+        with self.photos.database.operation_lock(paid_operation_lock_name(kwargs["content_sha256"])):
+            return self._perform_uncached_model_call_locked(**kwargs)
+
+    def _perform_uncached_model_call_locked(
         self,
         *,
         provider: VisionProvider,
@@ -1714,6 +1722,7 @@ class PhotoAnalysisService:
             analysis_fingerprint=analysis_fingerprint,
             vision_input=vision_input,
             provider_prompt_contract_sha256=str(analysis_spec.get("provider_prompt_contract_sha256") or "") or None,
+            analysis_spec=analysis_spec,
             force_recompute=force_recompute,
         )
         total_cost = cost

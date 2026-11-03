@@ -245,10 +245,11 @@ def _execute_job_item(app, item, *, job, settings, provider, provider_error, ana
                     "outcome_code": "NO_ELIGIBLE_CANDIDATES", "message": str(exc)}
         return {"scan": scan, "release": release}
     if job["kind"] == "backup":
-        path = app.extensions["inktime_backup_service"].create()
+        automatic = settings.get("source") != "manual-backup"
+        path = app.extensions["inktime_backup_service"].create(automatic=automatic)
         removed = app.extensions["inktime_backup_service"].enforce_retention(
             max(0, int(settings.get("retention_days", 14)))
-        )
+        ) if automatic else 0
         return {"backup": path.name, "removed": removed}
     if job["kind"] == "cleanup":
         cache = app.extensions["inktime_thumbnail_cache"]
@@ -679,6 +680,7 @@ class WorkerRunner:
                 job_id=job["id"],
             )
             try:
+                self.current.max_items_per_run = max(16, self.current.concurrency * 2)
                 self.current.run_job(job["id"])
             finally:
                 close_provider = getattr(provider, "close", None)

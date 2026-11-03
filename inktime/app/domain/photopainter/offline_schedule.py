@@ -172,6 +172,7 @@ def offline_prepare_plan(
     minimum_gap_minutes: int = MINIMUM_SCHEDULE_GAP_MINUTES,
     maximum_slots: int = MAX_OFFLINE_SLOTS,
     skip_target_dates: Sequence[str] = (),
+    dated_schedule_times: dict[str, Sequence[str]] | None = None,
 ) -> OfflinePreparePlan:
     """Resolve due local dates and the next persisted deadline once.
 
@@ -204,22 +205,31 @@ def offline_prepare_plan(
     skipped = {str(value) for value in skip_target_dates}
     lead_and_margin = timedelta(minutes=prefetch_lead_minutes + server_margin_minutes)
 
+    resolved_schedules: dict[date, list[str]] = {}
+    def slots_for(target: date) -> list[str]:
+        if target not in resolved_schedules:
+            values = (dated_schedule_times or {}).get(target.isoformat(), slots)
+            resolved_schedules[target] = validate_offline_schedule(list(values), maximum=maximum_slots,
+                                                                  minimum_gap_minutes=minimum_gap_minutes)
+        return resolved_schedules[target]
+
     def slot_at(target: date, slot: str) -> datetime:
-        return resolved_slot_datetimes(target, slots, zone, minimum_gap_minutes=minimum_gap_minutes,
-                                       maximum_slots=maximum_slots)[slots.index(slot)]
+        target_slots = slots_for(target)
+        return resolved_slot_datetimes(target, target_slots, zone, minimum_gap_minutes=minimum_gap_minutes,
+                                       maximum_slots=maximum_slots)[target_slots.index(slot)]
 
     def technical_deadline(target: date) -> datetime:
         if strategy == "fixed_daily":
             assert normalized_sync_time is not None
             return local_slot_datetime(target, normalized_sync_time, zone).astimezone(timezone.utc)
-        return slot_at(target, slots[0]) - lead_and_margin
+        return slot_at(target, slots_for(target)[0]) - lead_and_margin
 
     today = current.astimezone(zone).date()
     due: list[date] = []
     if today.isoformat() not in skipped:
         today_technical = technical_deadline(today)
         if local_now >= today_technical and any(
-            slot_at(today, slot) > local_now for slot in slots
+            slot_at(today, slot) > local_now for slot in slots_for(today)
         ):
             due.append(today)
     tomorrow = today + timedelta(days=1)
@@ -238,7 +248,7 @@ def offline_prepare_plan(
             if local_now < technical:
                 next_deadline = technical
                 break
-            if any(slot_at(target, slot) > local_now for slot in slots):
+            if any(slot_at(target, slot) > local_now for slot in slots_for(target)):
                 next_deadline = local_now
                 break
             continue

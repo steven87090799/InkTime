@@ -2,6 +2,7 @@ from contextlib import nullcontext
 from dataclasses import asdict
 from datetime import datetime, timezone
 import json
+import hashlib
 from uuid import uuid4
 
 from inktime.app.db import Database
@@ -17,6 +18,10 @@ class UnreconciledOperationError(RuntimeError):
 class SeasonalAlreadyProcessedError(RuntimeError):
     code = "SEASONAL-ALREADY-PROCESSED"
     not_sent = True
+
+
+def paid_operation_lock_name(content_sha256: str) -> str:
+    return "paid-operation-" + hashlib.sha256(content_sha256.encode()).hexdigest()[:3]
 
 
 class BillableOperationRepository:
@@ -146,11 +151,21 @@ class BillableOperationRepository:
         """Explicit operator decision; retain unknown billing and the original evidence."""
         if not reason.strip():
             raise ValueError("重送批准必須記錄原因")
-        with self.database.transaction() as connection:
-            cursor = connection.execute(
-                "UPDATE billable_operations SET state='approved',resolution_note=COALESCE(resolution_note || char(10),'') || ?,updated_at=? "
-                "WHERE id=? AND state IN ('started','response')",
-                (reason.strip()[:2000], datetime.now(timezone.utc).isoformat(), operation_id),
-            )
-            if cursor.rowcount != 1:
-                raise ValueError("找不到待對帳或回應待處理操作，或該操作已處理")
+        with self.database.session() as connection:
+            operation = connection.execute("SELECT content_sha256 FROM billable_operations WHERE id=?", (operation_id,)).fetchone()
+        if operation is None:
+            raise ValueError("找不到付費操作")
+        lock = self.database.try_acquire_operation_lock(paid_operation_lock_name(str(operation[0])))
+        if lock is None:
+            raise ValueError("模型請求仍由執行者處理中，不可批准重送")
+        try:
+            with self.database.transaction() as connection:
+                cursor = connection.execute(
+                    "UPDATE billable_operations SET state='approved',resolution_note=COALESCE(resolution_note || char(10),'') || ?,updated_at=? "
+                    "WHERE id=? AND state IN ('started','response')",
+                    (reason.strip()[:2000], datetime.now(timezone.utc).isoformat(), operation_id),
+                )
+                if cursor.rowcount != 1:
+                    raise ValueError("找不到待對帳或回應待處理操作，或該操作已處理")
+        finally:
+            lock.close()

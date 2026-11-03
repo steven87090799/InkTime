@@ -327,10 +327,24 @@ def test_bounded_claim_query_uses_photo_id_index(app):
     _photo(app, "bounded-claim")
     with service.repository.database.session() as connection:
         plan = connection.execute(
-            "EXPLAIN QUERY PLAN " + service.repository._population_sql(selected=True) +
+            "EXPLAIN QUERY PLAN " + service.repository._population_sql(selected=True) +  # noqa: S608 -- internal population predicate.
             " SELECT id,sha256 FROM population WHERE coverage_status='queued'",
             (json.dumps(["bounded-claim"]),),
         ).fetchall()
     details = [str(row["detail"]) for row in plan]
     assert any("SEARCH p USING INDEX" in detail and "(id=?)" in detail for detail in details)
     assert not any(detail == "SCAN p" for detail in details)
+
+
+def test_scheduler_audit_resumes_pending_checkpoint_without_duplicate_job(app):
+    service = app.extensions["inktime_analysis_backfill_service"]
+    now = datetime(2026, 11, 3, tzinfo=timezone.utc)
+    key = "model-coverage-audit:2026-11"
+    job_id = service.jobs.create_maintenance(kind="analysis_coverage_audit", name="crash checkpoint", priority=5,
+        settings={"month": "2026-11", "max_attempts": 1}, created_by=None, dedupe_key=key)
+    assert service.jobs.get(job_id)["status"] == "pending"
+    assert service.enqueue_audit(now) == job_id
+    assert service.jobs.get(job_id)["status"] == "running"
+    assert service.enqueue_audit(now) == job_id
+    with service.repository.database.session() as connection:
+        assert connection.execute("SELECT COUNT(*) FROM jobs WHERE dedupe_key=?", (key,)).fetchone()[0] == 1

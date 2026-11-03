@@ -1,6 +1,6 @@
 # InkTime · Photo analysis and e-ink memory frames
 
-> Branch documentation updated on 2026-10-30 against the current checkout. SQLite Migration 79, AI Schema v6, firmware 2.8.10 (HTTP JSON reception fix; not flashed), Config Store v5 and NAS deployment contract 3 are separate versions. Missing-only model backfill defaults to off and uses a separate free-only OpenRouter profile; valid results follow image content across model changes and rescans. The [GPS/landmark experiment](docs/experiments/GPS_LOCATION_20261022.md) requires explicit invocation. Check the deployed Git revision in Diagnostics; see the [source baseline](docs/reference/CURRENT_STATE_ZH_TW.md).
+> Branch documentation updated on 2026-11-03 against the current checkout. SQLite Migration 80, AI Schema v6, firmware 2.8.10 (HTTP JSON reception fix; not flashed), Config Store v5 and NAS deployment contract 3 are separate versions. Missing-only model backfill defaults to off and uses a separate free-only OpenRouter profile; valid results follow image content across model changes and rescans. The [GPS/landmark experiment](docs/experiments/GPS_LOCATION_20261022.md) requires explicit invocation. Check the deployed Git revision in Diagnostics; see the [source baseline](docs/reference/CURRENT_STATE_ZH_TW.md).
 
 [繁體中文](README.md) · [Documentation map](docs/README.md) · [HTML manual](USER_MANUAL.html) · [Quick start](docs/getting-started/QUICK_START_ZH_TW.md)
 
@@ -41,7 +41,7 @@ Configure `analysis.execution_mode` in Settings. Adding a Provider or API key do
 | Mode | Ordinary processing | Explicit manual photo AI | Data and cost |
 |---|---|---|---|
 | `disabled` | Reject new analysis | Disabled | Existing photos/releases remain readable |
-| `local_only` (default) | Local features and selection | Disabled | Normal photo processing does not read a Provider or use model tokens; no photos qualify for formal delivery |
+| `seasonal_ai` (default) | Seasonal analysis on demand | Allowed by policy | Requires a usable Provider and budget; formal delivery requires v6 safety and orientation checks |
 | `local_with_manual_ai` | Local features and selection | Allowed | A deliberate manual action can upload an image and incur cost |
 | `automatic_ai` | AI jobs allowed by policy | Allowed | Provider, scope, photo limits and budgets still apply |
 

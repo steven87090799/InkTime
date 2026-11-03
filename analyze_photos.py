@@ -39,6 +39,11 @@ def main() -> None:
             )
             service.start(scan_id)
             WorkerRunner(container).run_once()
+            scan = repository.get(scan_id)
+            if scan is None or scan["status"] != "completed":
+                state = scan["status"] if scan else "missing"
+                print(f"掃描工作尚未成功（{state}）：{scan_id}；已停止建立後續分析。")
+                return 1
             print(f"掃描工作完成：{scan_id}")
 
         strategy = args.strategy or container.settings_repository.get("analysis.strategy")

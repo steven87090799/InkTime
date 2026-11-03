@@ -262,3 +262,30 @@ def test_candidate_batch_keeps_order_and_rejects_ineligible_members(app, tmp_pat
     assert len(sessions) == 1
     with pytest.raises(IneligiblePhotoError, match="excluded"):
         require(["second", "excluded", "first"])
+
+
+def test_global_temporary_skip_is_applied_before_candidate_limit_and_expires(app, tmp_path):
+    from datetime import date
+    _candidate(app, tmp_path, "skip-photo")
+    _candidate(app, tmp_path, "keep-photo")
+    database = app.extensions["inktime_database"]
+    service = app.extensions["inktime_render_service"]
+    with database.transaction() as connection:
+        connection.execute("INSERT INTO photo_feedback(photo_id,feedback_type,value,expires_at,created_at,updated_at) VALUES (?,'SKIP_TEMPORARILY',1,?,?,?)",
+            ("skip-photo", "2099-01-01T00:00:00+00:00", "2026-11-03T00:00:00+00:00", "2026-11-03T00:00:00+00:00"))
+    rows = service._candidate_query(target=date(2026, 11, 3), month_days=None, older_only=False, limit=1)
+    assert [row["id"] for row in rows] == ["keep-photo"]
+    with database.transaction() as connection:
+        connection.execute("UPDATE photo_feedback SET expires_at='2000-01-01T00:00:00+00:00' WHERE photo_id='skip-photo'")
+    rows = service._candidate_query(target=date(2026, 11, 3), month_days=None, older_only=False, limit=2)
+    assert {row["id"] for row in rows} == {"keep-photo", "skip-photo"}
+
+
+def test_device_selection_scope_is_nested_and_restored_after_error(app):
+    service = app.extensions["inktime_render_service"]
+    assert service._selection_devices.get() == ()
+    with pytest.raises(ValueError), service._device_selection_scope(["frame-a"]):
+        with service._device_selection_scope(None):
+            assert service._selection_devices.get() == ("frame-a",)
+        raise ValueError("selection failed")
+    assert service._selection_devices.get() == ()

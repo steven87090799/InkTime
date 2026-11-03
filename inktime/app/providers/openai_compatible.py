@@ -750,13 +750,34 @@ class OpenAICompatibleProvider(VisionProvider):
             if retry_policy == NO_RETRY_SIDE_EFFECT
             else "Batch 建立回應未知，未自動重送"
         )
+        streaming_download = bool(kwargs.get("stream", False))
         for attempt in range(attempts):
             try:
                 sender = getattr(self.session, method.lower())
                 kwargs.setdefault("allow_redirects", False)
+                kwargs.setdefault("stream", True)
                 if request_started_callback is not None:
                     request_started_callback()
                 response = sender(self._url(path), **kwargs)
+                if isinstance(response, requests.Response) and (not streaming_download or response.status_code >= 400):
+                    # Count decompressed bytes before .text/.json can materialize
+                    # unbounded remote content. Successful file downloads keep
+                    # their separate streaming 256 MiB contract.
+                    chunks = []
+                    size = 0
+                    try:
+                        for chunk in response.iter_content(chunk_size=64 * 1024):
+                            size += len(chunk)
+                            if size > 16 * 1024 * 1024:
+                                raise ProviderHTTPError("Provider 回應超過解析上限", "VLM-RESPONSE-SIZE",
+                                                        ambiguous=ambiguous, request_started=ambiguous,
+                                                        vision_started=ambiguous,
+                                                        request_id=self._provider_request_id(response) or None)
+                            chunks.append(chunk)
+                        response._content = b"".join(chunks)
+                        response._content_consumed = True
+                    finally:
+                        response.close()
             except requests.Timeout as exc:
                 request_sent = not self._transport_failed_before_send(exc)
                 if ambiguous and request_sent:

@@ -213,19 +213,20 @@ class AnalysisBackfillService:
         return {"job_id": job_id, "created": True, "affected": len(rows), "blocked": blocked}
 
     def enqueue_audit(self, now: datetime, *, after_scan: bool = False) -> str | None:
-        month = now.strftime("%Y-%m")
-        control = self.repository.control()
-        if not after_scan and control["last_monthly_audit"] == month:
-            return None
-        key = f"model-coverage-audit:{'scan' if after_scan else month}"
-        if self.jobs.has_active_dedupe(key):
-            return None
-        job_id = self.jobs.create_maintenance(
-            kind="analysis_coverage_audit", name="模型資訊完整安全核對", priority=5,
-            settings={"month": month, "max_attempts": 1}, created_by=None, dedupe_key=key,
-        )
-        self.job_service.start(job_id)
-        return job_id
+        with self.repository.database.operation_lock("model-coverage-enqueue"):
+            month = now.strftime("%Y-%m")
+            control = self.repository.control()
+            if not after_scan and control["last_monthly_audit"] == month:
+                return None
+            key = f"model-coverage-audit:{'scan' if after_scan else month}"
+            job_id = self.jobs.create_maintenance(
+                kind="analysis_coverage_audit", name="模型資訊完整安全核對", priority=5,
+                settings={"month": month, "max_attempts": 1}, created_by=None, dedupe_key=key,
+            )
+            # An existing pending scheduler-owned job is a crash checkpoint,
+            # while an already running one needs no second start transition.
+            self.jobs.transition(job_id, {"pending"}, "running", "audit_started")
+            return job_id
 
     def analyze_item(self, *, photo_id: str, job_id: str, **kwargs) -> dict:
         if self.settings.get("analysis.complementary_enabled", False):
@@ -245,6 +246,8 @@ class AnalysisBackfillService:
             raise UnreconciledOperationError("先前請求的回應或成本不確定，請先確認原紀錄")
         if self.repository.covered(sha):
             inherited = self.photos.inherit_existing_analysis(photo_id, job_id, include_self=True, semantic_only=True)
+            if inherited is None:
+                raise UnreconciledOperationError("已存在付費模型證據但無法恢復有效分析，請先核對，不會自動重送")
             return {"analysis": inherited, "stage": "inherited", "_actual_cost": 0}
         try:
             result = self.analysis.analyze_photo(photo_id=photo_id, job_id=job_id,

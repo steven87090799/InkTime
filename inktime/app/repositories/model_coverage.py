@@ -23,11 +23,18 @@ def remember_model_result(connection, content_sha256: str, snapshot: dict) -> bo
     previous = connection.execute(
         "SELECT analysis_snapshot_json FROM model_analysis_results WHERE content_sha256=?", (content_sha256,),
     ).fetchone()
-    place = json.loads(location[0]) if location else {}
+    def optional_object(raw):
+        try:
+            value = json.loads(raw)
+            return value if isinstance(value, dict) else {}
+        except (TypeError, ValueError):
+            return {}
+
+    place = optional_object(location[0]) if location else {}
     if place.get("landmark_source") == "vision":
         snapshot["landmark_evidence"] = {key: place.get(key) for key in ("landmark", "landmark_confidence", "landmark_source")}
     elif previous:
-        evidence = json.loads(previous[0]).get("landmark_evidence")
+        evidence = optional_object(previous[0]).get("landmark_evidence")
         if evidence is not None:
             snapshot["landmark_evidence"] = evidence
     # Landmark absence and a model's exclusion verdict are both valid answers.
@@ -36,7 +43,8 @@ def remember_model_result(connection, content_sha256: str, snapshot: dict) -> bo
         "VALUES (?,?,?,?) ON CONFLICT(content_sha256) DO UPDATE SET "
         "analysis_snapshot_json=excluded.analysis_snapshot_json,schema_version=excluded.schema_version,"
         "updated_at=excluded.updated_at WHERE model_analysis_results.analysis_snapshot_json<>excluded.analysis_snapshot_json "
-        "AND COALESCE(json_extract(model_analysis_results.analysis_snapshot_json,'$.created_at'),'')"
+        "AND CASE WHEN json_valid(model_analysis_results.analysis_snapshot_json) "
+        "THEN COALESCE(json_extract(model_analysis_results.analysis_snapshot_json,'$.created_at'),'') ELSE '' END"
         "<=COALESCE(json_extract(excluded.analysis_snapshot_json,'$.created_at'),'')",
         (content_sha256, json.dumps(snapshot, ensure_ascii=False), result["schema_version"],
          datetime.now(timezone.utc).isoformat()),

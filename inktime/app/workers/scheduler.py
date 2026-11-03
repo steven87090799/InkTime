@@ -164,7 +164,7 @@ class SchedulerRunner:
             self.last_notification_scan_at = time.monotonic()
         # Scheduler 只做有界 Claim；實際 HTTP 由既有 Job Queue 處理，慢端點
         # 不會卡住排程掃描與備份。
-        if time.monotonic() - self.last_notification_enqueue_at >= scan_seconds:
+        if time.monotonic() - self.last_notification_enqueue_at >= min(scan_seconds, 60):
             self._safe_step(
                 "notification_enqueue",
                 lambda: notification_service.enqueue_pending(
@@ -366,6 +366,7 @@ class SchedulerRunner:
         sync_time: str | None = None,
         minimum_gap_minutes: int = MINIMUM_SCHEDULE_GAP_MINUTES,
         maximum_slots: int = MAX_OFFLINE_SLOTS,
+        dated_schedule_times: dict[str, list[str]] | None = None,
     ) -> list[date]:
         """Return independent today/tomorrow targets from one domain policy."""
 
@@ -384,6 +385,7 @@ class SchedulerRunner:
                 sync_time=sync_time,
                 minimum_gap_minutes=minimum_gap_minutes,
                 maximum_slots=maximum_slots,
+                dated_schedule_times=dated_schedule_times,
             ).due_target_dates
         )
 
@@ -413,6 +415,7 @@ class SchedulerRunner:
             device_id = str(device.get("id", ""))
             timezone_name = str(device.get("timezone") or "UTC")
             schedule: list[str] | None = None
+            dated_schedule_times: dict[str, list[str]] = {}
             retry_deadline: datetime | None = None
             skip_target_dates: set[str] = set()
             keep_deadline_due = False
@@ -427,6 +430,11 @@ class SchedulerRunner:
                         device["minimum_schedule_gap_minutes"] or MINIMUM_SCHEDULE_GAP_MINUTES
                     ),
                 )
+                dated_schedule_times = {
+                    (local_now.date() + timedelta(days=offset)).isoformat():
+                    offline_schedules.times_for_date(local_now.date() + timedelta(days=offset), schedule)
+                    for offset in range(3)
+                }
                 targets = self._offline_prefetch_target_dates(
                     local_now,
                     schedule,
@@ -439,6 +447,7 @@ class SchedulerRunner:
                     resolve_offline_schedule_max_slots(
                         {"offline_schedule_max_slots": device["offline_schedule_max_slots"]}
                     ),
+                    dated_schedule_times=dated_schedule_times,
                 )
                 for target_date in targets[:2]:
                     target_iso = target_date.isoformat()
@@ -658,6 +667,7 @@ class SchedulerRunner:
                                 {"offline_schedule_max_slots": device["offline_schedule_max_slots"]}
                             ),
                             skip_target_dates=tuple(skip_target_dates),
+                            dated_schedule_times=dated_schedule_times,
                         )
                     )
                 if retry_deadline.tzinfo is None:
@@ -784,7 +794,7 @@ class SchedulerRunner:
                 created_by="system",
                 budget_limit=None,
                 priority=3,
-                dedupe_key=dedupe_key,
+                dedupe_key=f"{dedupe_key}:{task['next_run']}" if is_scheduled else None,
             )
         else:
             job_id = repository.create_maintenance(

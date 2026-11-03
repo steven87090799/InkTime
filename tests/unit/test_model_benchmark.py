@@ -464,3 +464,13 @@ def test_golden_manifest_flat_orientation_is_loaded_as_canonical_fields(tmp_path
     records = _load_golden_records(path)
     canonical = records[0]["expected"]
     assert canonical["visual_orientation"] == {"rotation_cw": 0, "ambiguous": False}
+
+
+@pytest.mark.parametrize("types", [None, "人物", [], ["人物", "人物"], ["unknown"], ["人物", "家庭", "旅行", "風景"], [{}]])
+def test_golden_types_require_nonempty_unique_bounded_legal_values(types):
+    from inktime.app.services.model_benchmark import _validate_manifest_expected
+    expected = {"memory_score": 50, "visual_score": 50, "special_level": 0,
+                "types": types, "should_keep": True,
+                "visual_orientation": {"rotation_cw": 0, "ambiguous": False}}
+    with pytest.raises(BenchmarkError, match="expected.types"):
+        _validate_manifest_expected(expected)

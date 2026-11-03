@@ -63,7 +63,7 @@ class AnalysisBackfillRepository:
         with self.database.session() as connection:
             # One evaluation of coverage, shared by counts and the bounded page.
             result = connection.execute(
-                query + ", summary AS (SELECT json_group_object(coverage_status,n) AS counts FROM "
+                query + ", summary AS (SELECT json_group_object(coverage_status,n) AS counts FROM "  # noqa: S608 -- fixed internal CTE; user values are bound.
                 "(SELECT coverage_status,COUNT(*) n FROM population GROUP BY coverage_status)), "
                 "local_captions AS (SELECT COUNT(*) n FROM population p WHERE coverage_status<>'completed' "
                 "AND EXISTS(SELECT 1 FROM photo_analysis a WHERE a.photo_id=p.id "
@@ -136,7 +136,7 @@ class AnalysisBackfillRepository:
             if not control["enabled"] or control["pause_reason"] or control["provider_id"] != provider_id:
                 raise AnalysisReservationConflict("補齊設定已暫停或變更，保留照片待處理")
             eligible = connection.execute(
-                self._population_sql(selected=True) +
+                self._population_sql(selected=True) +  # noqa: S608 -- fixed repository CTE.
                 " SELECT id,sha256 FROM population WHERE coverage_status='queued'",  # noqa: S608 -- repository-owned CTE.
                 (json.dumps([row["id"] for row in rows]),),
             ).fetchall()

@@ -1,6 +1,6 @@
 # InkTime｜照片分析與電子紙回憶管理平台
 
-> 本分支文件更新 2026-10-30；原始碼基準以目前 checkout 為準；部署中的版本請從 Web「診斷」頁確認 Git revision。SQLite Migration 79、AI Schema v6、ESP32 2.8.10（HTTP JSON 接收修復；尚未刷機）；新增預設關閉的「補齊模型資訊」，使用專用免費模型設定並沿用相同照片內容的有效結果。[GPS／地標原型與成本研究](docs/experiments/GPS_LOCATION_20261022.md) 仍需手動啟用。詳細版本、預設值與驗收邊界見[現行基線](docs/reference/CURRENT_STATE_ZH_TW.md)。
+> 本分支文件更新 2026-11-03；原始碼基準以目前 checkout 為準；部署中的版本請從 Web「診斷」頁確認 Git revision。SQLite Migration 80、AI Schema v6、ESP32 2.8.10（HTTP JSON 接收修復；尚未刷機）；新增預設關閉的「補齊模型資訊」，使用專用免費模型設定並沿用相同照片內容的有效結果。[GPS／地標原型與成本研究](docs/experiments/GPS_LOCATION_20261022.md) 仍需手動啟用。詳細版本、預設值與驗收邊界見[現行基線](docs/reference/CURRENT_STATE_ZH_TW.md)。
 
 [English README](README.en.md) · [HTML 手冊與文件入口](USER_MANUAL.html) · [完整 Markdown 文件地圖](docs/README.md) · [完整程式流程圖](#完整程式流程圖從啟動照片分析到電子紙顯示) · [快速開始](docs/getting-started/QUICK_START_ZH_TW.md) · [電子紙模擬器](docs/guides/EPAPER_SIMULATOR_ZH_TW.md) · [N100 Docker 部署規格](docs/operations/DOCKER_GUIDE_ZH_TW.md) · [完整上線指南](docs/operations/PRODUCTION_DEPLOYMENT_GUIDE_ZH_TW.md) · [NAS Tag 更新](docs/operations/NAS_TAG_DEPLOYMENT_ZH_TW.md) · [ESP32／電子紙指南](docs/devices/ESP32_GUIDE_ZH_TW.md) · [ESP32 自動配對與憑證](docs/devices/ESP32_AUTOMATIC_PAIRING_ZH_TW.md) · [Waveshare PhotoPainter](docs/devices/WAVESHARE_PHOTOPAINTER_ZH_TW.md) · [ESP32 TLS／配網信任根](docs/devices/ESP32_TLS_PROVISIONING_ZH_TW.md) · [OpenRouter Provider](docs/providers/OPENROUTER_ZH_TW.md) · [模型 Benchmark](docs/providers/MODEL_BENCHMARK_ZH_TW.md) · [資源與低功耗](docs/operations/N100_RESOURCE_GUIDE_ZH_TW.md) · [Log 指南](docs/operations/LOGGING_GUIDE_ZH_TW.md)
 
@@ -27,7 +27,7 @@ InkTime 會在本地掃描相簿、擷取 EXIF 與品質特徵，先辨識重複
 | 模式 | 一般背景分析 | 手動照片 AI | 費用與資料 |
 |---|---|---|---|
 | `disabled` | 不建立新的分析工作 | 不允許 | 既有照片與 Release 仍可讀 |
-| `local_only`（預設） | 本機 EXIF、品質與選片 | 不允許 | 正常照片流程不讀 Provider、不產生模型 Token；沒有可正式發布的照片 |
+| `seasonal_ai`（預設） | 按顯示日期補齊同期 AI | 依需求允許 | 需可用 Provider 與預算；正式發布仍經 v6 安全與方向守門 |
 | `local_with_manual_ai` | 本機分析與選片 | 明確操作時允許 | 手動送出時才可能傳圖片與產生費用 |
 | `automatic_ai` | 依設定允許 AI 工作 | 允許 | 受 Provider、篩選、照片數與預算限制 |
 

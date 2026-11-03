@@ -2,7 +2,7 @@
 
 在設定選擇 `analysis.execution_mode=seasonal_ai`，並設定可用 Vision Provider。
 `analysis.seasonal_window_days` 預設前後 5 天，可改為 10 天，最多 31 天。
-新安裝預設仍為 `local_only`；設定 API Key 不會自行啟用付費分析。
+新安裝預設為 `seasonal_ai`，按顯示日期準備同期照片。可用 Provider、待處理內容與預算均滿足時才會呼叫；若只做本機特徵，請明確選 `local_only`。
 
 Scheduler 每五分鐘核對今天的同期範圍，初次啟用及掃描到新照片後均可補齊。
 發布 Worker 也會先核對所需顯示日期（包含離線預備日期），等待同期工作結束才選片。

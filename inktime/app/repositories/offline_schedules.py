@@ -103,6 +103,7 @@ class OfflineScheduleRepository:
         minimum_gap_minutes: int = MINIMUM_SCHEDULE_GAP_MINUTES,
         maximum_slots: int = MAX_PREPARED_SLOTS,
         skip_target_dates: Sequence[str] = (),
+        dated_schedule_times: dict[str, Sequence[str]] | None = None,
     ) -> str:
         """Return the canonical domain policy's next persisted deadline."""
 
@@ -118,6 +119,7 @@ class OfflineScheduleRepository:
             minimum_gap_minutes=minimum_gap_minutes,
             maximum_slots=maximum_slots,
             skip_target_dates=skip_target_dates,
+            dated_schedule_times=dated_schedule_times,
         ).next_deadline.isoformat()
 
     @staticmethod

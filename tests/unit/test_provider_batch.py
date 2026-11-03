@@ -405,3 +405,33 @@ def test_batch_download_stops_at_total_limit_and_discards_partial(tmp_path, monk
     assert response.closed
     assert not destination.exists()
     assert not destination.with_name("results.jsonl.part").exists()
+
+
+def test_real_response_is_bounded_before_json_parsing_and_not_retried():
+    from inktime.app.providers.openai_compatible import AMBIGUOUS_VISION_ANALYSIS
+
+    response = requests.Response()
+    response.status_code = 200
+    response.headers["x-request-id"] = "large-response"
+    chunks_read = []
+    def chunks(**_kwargs):
+        for index in range(40):
+            chunks_read.append(index)
+            yield b"x" * (1024 * 1024)
+    response.iter_content = chunks
+    closed = []
+    response.close = lambda: closed.append(True)
+    session = FakeSession()
+    calls = []
+    def post(*_args, **_kwargs):
+        calls.append(True)
+        return response
+    session.post = post
+    provider = OpenAICompatibleProvider(name="test", base_url="https://example.com/v1", api_key="test", session=session)
+    with pytest.raises(ProviderHTTPError) as error:
+        provider._send("POST", "/chat/completions", retry_policy=AMBIGUOUS_VISION_ANALYSIS)
+    assert error.value.code == "VLM-RESPONSE-SIZE"
+    assert error.value.ambiguous
+    assert len(calls) == 1
+    assert len(chunks_read) == 17
+    assert closed == [True]

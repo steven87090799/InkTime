@@ -545,6 +545,9 @@ class BatchAnalysisService:
                     **vision_input,
                 }
             )
+            held = bool(photo["paid_single_held"] or photo["paid_batch_held"])
+            if held:
+                paid_operation_held += 1
             cached = self.photos.get_ai_cache(
                 content_sha256=content_sha,
                 provider=provider_id,
@@ -568,8 +571,7 @@ class BatchAnalysisService:
                         )
                     cache_hits += 1
                     continue
-            if photo["paid_single_held"] or photo["paid_batch_held"]:
-                paid_operation_held += 1
+            if held:
                 continue
             if content_sha in seen_sha:
                 sha_duplicates += 1
@@ -668,8 +670,12 @@ class BatchAnalysisService:
                 if skipped.get("paid_operation_held") else None
             ),
             "submitted_count": len(candidates),
-            "estimated_jsonl_bytes": min(MAX_OPENAI_BYTES, len(candidates) * 350_000),
-            "estimated_shard_count": max(0, (len(candidates) + max_items - 1) // max_items),
+            "estimated_jsonl_bytes": len(candidates) * 350_000,
+            "estimated_shard_count": max(
+                (len(candidates) + max_items - 1) // max_items,
+                (len(candidates) + max(1, max_bytes // 350_000) - 1) // max(1, max_bytes // 350_000),
+            ),
+            "estimate_scope_note": "僅估算已掃描範圍；最多掃描100000筆，抽樣先選窗口再套用排除與快取；每筆350000 bytes為近似值，正式分片以實際大小為準。",
             "estimated_input_tokens": estimated_input_tokens,
             "estimated_output_tokens": estimated_output_tokens,
             "estimated_cost": round(estimated_cost, 6) if estimated_cost is not None else None,
@@ -1519,7 +1525,7 @@ class BatchAnalysisService:
 
     def _phase_is_stale(self, batch: dict[str, Any]) -> bool:
         batch = dict(batch)
-        raw = str(batch.get("phase_started_at") or batch.get("updated_at") or "")
+        raw = str(batch.get("phase_started_at") or batch.get("created_at") or batch.get("updated_at") or "")
         try:
             started = datetime.fromisoformat(raw).timestamp()
         except (TypeError, ValueError, OverflowError):
@@ -1645,6 +1651,7 @@ class BatchAnalysisService:
         return job_id
 
     def poll_due(self, *, limit: int = 20) -> dict[str, int]:
+        self._housekeep_local(limit=max(1, min(int(limit), 100)))
         rows = self.batches.list_pollable_due(limit=limit)
         poll_started = time.monotonic()
         log_event(
@@ -1960,12 +1967,8 @@ class BatchAnalysisService:
         if str(batch["status"]) not in {
             "upload_unknown",
             "submission_unknown",
-            "submitting",
-            "uploading",
-            "uploaded",
-            "validating",
         }:
-            raise BatchLifecycleError("目前 Batch 不在可 Abandon 階段", "BATCH-ABANDON-002")
+            raise BatchLifecycleError("只能 Abandon 已失效並待對帳的請求；執行中請先等待", "BATCH-ABANDON-002")
         if str(batch["status"]) == "upload_unknown":
             if remote_file_id:
                 file_id = str(remote_file_id).strip()
@@ -2436,7 +2439,10 @@ class BatchAnalysisService:
                 item, "BATCH-PHOTO-MISSING", "照片已不存在", "stale", job_id=str(batch["job_id"])
             )
             return "stale"
-        current_sha = (self._current_content_sha(photo) or "").casefold()
+        verified_sha = self._current_content_sha(photo)
+        if verified_sha is None:
+            raise BatchLifecycleError("照片目前無法核對，保留已付費結果等待重新匯入", "BATCH-IMPORT-DEFERRED")
+        current_sha = verified_sha.casefold()
         vision_input = json.loads(str(item["vision_input_spec_json"] or "{}"))
         current_fp = fingerprint(
             {
@@ -2450,7 +2456,8 @@ class BatchAnalysisService:
                 **vision_input,
             }
         )
-        if current_sha != str(item["content_sha256"]).casefold() or current_fp != str(
+        if (str(photo["sha256"] or "").casefold() != str(item["content_sha256"]).casefold()
+                or current_sha != str(item["content_sha256"]).casefold()) or current_fp != str(
             item["vision_request_fingerprint"]
         ):
             self._mark_item_error(
@@ -2471,7 +2478,13 @@ class BatchAnalysisService:
                 self._mark_item_error(item, "BATCH-RESPONSE-BODY", type(exc).__name__, "schema_invalid",
                                       job_id=str(batch["job_id"]))
                 return "schema_invalid"
-        choice = (body.get("choices") or [{}])[0]
+        choices = body.get("choices")
+        if (not isinstance(choices, list) or not choices or not isinstance(choices[0], dict)
+                or not isinstance(choices[0].get("message"), dict)):
+            self._mark_item_error(item, "BATCH-RESPONSE-BODY", "模型 choices/message 格式無效", "schema_invalid",
+                                  job_id=str(batch["job_id"]))
+            return "schema_invalid"
+        choice = choices[0]
         if choice.get("finish_reason") in {"length", "content_filter", "max_tokens"} or (choice.get("message") or {}).get("refusal"):
             self._mark_item_error(
                 item, "VLM-INCOMPLETE", "Provider 拒答、過濾或截斷", "schema_invalid",
@@ -2529,7 +2542,7 @@ class BatchAnalysisService:
                 model=str(batch["model"]),
                 result=result,
                 raw=raw_content,
-                photo=photo,
+                photo={**dict(photo), "sha256": str(item["content_sha256"])},
                 scoring_version_id=str(plan.get("scoring_profile_id") or "") or None,
                 schema_kind="full",
                 prompt_version=str(plan["prompt_version"]),
@@ -2638,7 +2651,8 @@ class BatchAnalysisService:
                 if len(raw_line) > max_line_bytes:
                     raise BatchLifecycleError("結果 JSONL 單行超過解析上限", "BATCH-OUTPUT-LINE-001")
                 if isinstance(records, BatchResultStore):
-                    records.save_raw(raw_line)
+                    source_file = str(batch.get("error_file_id" if is_error else "output_file_id") or path.name)
+                    records.save_raw(raw_line, source_file=source_file, line_number=line_number)
                 try:
                     record = json.loads(raw_line)
                 except (ValueError, json.JSONDecodeError):
@@ -2685,6 +2699,24 @@ class BatchAnalysisService:
                     continue
                 records[custom_id] = ("success", record, body)
 
+    def _housekeep_local(self, *, limit: int = 20) -> None:
+        days = max(0, int(self.settings.get("batch.local_retention_days", 0)))
+        if days == 0:
+            return
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+        with self.database.session() as connection:
+            rows = connection.execute(
+                "SELECT * FROM analysis_batches WHERE status IN ('completed','completed_with_errors','failed','cancelled','expired') "
+                "AND completed_at IS NOT NULL AND julianday(completed_at)<=julianday(?) "
+                "AND (local_input_path IS NOT NULL OR local_output_path IS NOT NULL OR local_error_path IS NOT NULL) "
+                "ORDER BY updated_at,id LIMIT ?", (cutoff, limit),
+            ).fetchall()
+        for row in rows:
+            self._cleanup_local(dict(row))
+            # Rotate failed paths so one inaccessible file cannot starve the page.
+            with self.database.transaction() as connection:
+                connection.execute("UPDATE analysis_batches SET updated_at=? WHERE id=?", (utc_now(), row["id"]))
+
     def _cleanup_local(self, batch: dict[str, Any], *, immediate: bool = False) -> None:
         batch = dict(batch)
         configured_days = max(0, int(self.settings.get("batch.local_retention_days", 0)))
@@ -2702,9 +2734,18 @@ class BatchAnalysisService:
             try:
                 if path.is_file() and (retention_days == 0 or path.stat().st_mtime <= cutoff):
                     path.unlink()
-            except OSError:
-                # Remote cleanup is already complete; retain the path for the next
-                # local housekeeping pass rather than changing the analysis result.
+                if not path.exists():
+                    # Retain byte counts and SQL raw receipts; clear only a path
+                    # whose file removal/absence has been confirmed.
+                    with self.database.transaction() as connection:
+                        connection.execute(
+                            f"UPDATE analysis_batches SET {key}=NULL WHERE id=? AND {key}=?",  # noqa: S608 -- key is from the fixed three-column tuple above.
+                            (batch["id"], raw_path),
+                        )
+            except OSError as exc:
+                log_event(LOGGER, logging.WARNING, "Batch local evidence cleanup deferred",
+                          event="batch_local_cleanup", operation="batch_local_cleanup",
+                          details={"batch_id": batch.get("id"), "column": key, "error_type": type(exc).__name__})
                 continue
         if immediate:
             batch_id = str(batch.get("id") or "")
@@ -3154,8 +3195,8 @@ class BatchAnalysisService:
             }
             try:
                 _current_plan, current_analysis_fingerprint, _current_model = self._plan()
-            except Exception:
-                current_analysis_fingerprint = None
+            except Exception as exc:
+                raise BatchLifecycleError("目前分析計畫無法核對，保留結果等待重新匯入", "BATCH-IMPORT-DEFERRED") from exc
             unknown = set(records) - set(expected)
             if unknown:
                 self.batches.update_batch(
@@ -3181,7 +3222,8 @@ class BatchAnalysisService:
                     )
                     errors.add(custom_id)
                 elif kind == "error":
-                    error = record.get("error") or {}
+                    raw_error = record.get("error")
+                    error = raw_error if isinstance(raw_error, dict) else {"message": str(raw_error or "遠端 Batch 項目失敗")}
                     self._mark_item_error(
                         expected_item,
                         str(error.get("code") or "BATCH-HTTP-ERROR"),

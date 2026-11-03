@@ -481,6 +481,7 @@ class RenderWorkloadService:
         self.jobs = job_repository
         self._files = FcntlLockProvider()
         self._files_lock = self.root / ".maintenance.lock"
+        self._staging_owners: dict[str, Any] = {}
         self.retention = timedelta(days=2)
         self.max_result_entries = 128
         self.max_result_bytes = 256 * 1024 * 1024
@@ -517,17 +518,30 @@ class RenderWorkloadService:
 
     def _reserve_input(self, token: str, maximum_bytes: int) -> None:
         self.cleanup()
-        with self._files.exclusive(self._files_lock):
-            with self.jobs.database.session() as connection:
-                leases = connection.execute("SELECT token,size_bytes FROM render_input_leases").fetchall()
-            leased = {str(row[0]) for row in leases}
-            extra = [path for path in self.input_root.iterdir() if path.is_file() and self._input_file_token(path) not in leased]
-            total = sum(int(row[1]) for row in leases) + sum(path.stat().st_size for path in extra)
-            if len(leases) + len(extra) >= 128 or total + maximum_bytes > self.max_result_bytes:
-                raise ValueError("RENDER-009 輸入容量已滿；保留可續行／尚未落帳的輸入，請完成或取消既有工作")
-            with self.jobs.database.transaction(operation="render_input_reserve") as connection:
-                connection.execute("INSERT INTO render_input_leases(token,size_bytes,created_at) VALUES (?,?,?)",
-                                   (token, maximum_bytes, datetime.now(timezone.utc).isoformat()))
+        owner = self.jobs.database.try_acquire_operation_lock("render-staging-" + token[:3])
+        if owner is None:
+            raise ValueError("RENDER-009 上傳準備忙碌，請稍後再試")
+        try:
+            with self._files.exclusive(self._files_lock):
+                with self.jobs.database.session() as connection:
+                    leases = connection.execute("SELECT token,size_bytes FROM render_input_leases").fetchall()
+                leased = {str(row[0]) for row in leases}
+                extra = [path for path in self.input_root.iterdir() if path.is_file() and self._input_file_token(path) not in leased]
+                total = sum(int(row[1]) for row in leases) + sum(path.stat().st_size for path in extra)
+                if len(leases) + len(extra) >= 128 or total + maximum_bytes > self.max_result_bytes:
+                    raise ValueError("RENDER-009 輸入容量已滿；保留可續行／尚未落帳的輸入，請完成或取消既有工作")
+                with self.jobs.database.transaction(operation="render_input_reserve") as connection:
+                    connection.execute("INSERT INTO render_input_leases(token,size_bytes,created_at) VALUES (?,?,?)",
+                                       (token, maximum_bytes, datetime.now(timezone.utc).isoformat()))
+            self._staging_owners[token] = owner
+        except Exception:
+            owner.close()
+            raise
+
+    def _release_staging_owner(self, token: str) -> None:
+        owner = self._staging_owners.pop(token, None)
+        if owner is not None:
+            owner.close()
 
     def _record_input_size(self, token: str, size: int) -> None:
         with self.jobs.database.transaction(operation="render_input_size") as connection:
@@ -542,6 +556,7 @@ class RenderWorkloadService:
             cursor = connection.execute("UPDATE render_input_leases SET job_id=?,staged=0 WHERE token=? AND staged=1", (job_id, token))
             if cursor.rowcount != 1:
                 raise ValueError("RENDER-008 缺少上傳 reservation")
+        self._release_staging_owner(token)
 
     def save_upload(self, stream: BinaryIO, *, suffix: str, max_bytes: int) -> tuple[str, str]:
         if suffix not in SUPPORTED_IMAGE_EXTENSIONS:
@@ -596,6 +611,7 @@ class RenderWorkloadService:
             self.input_path(token, suffix=suffix).unlink(missing_ok=True)
             with self.jobs.database.transaction(operation="render_input_delete") as connection:
                 connection.execute("DELETE FROM render_input_leases WHERE token=?", (token,))
+            self._release_staging_owner(token)
 
     def _open_input(self, token: str) -> Image.Image:
         path = self.input_root / f"{self._validate_token(token)}.png"
@@ -646,7 +662,7 @@ class RenderWorkloadService:
         """Prepare in a spawn child; commit cache/result only for the lease owner."""
 
         context = dict(commit_context)
-        fingerprint = dict(settings["fingerprint"])
+        fingerprint = {**dict(settings["fingerprint"]), "preview_quantized": bool(settings["arguments"].get("quantized"))}
 
         def cancelled() -> bool:
             return not self.jobs.can_commit_item(
@@ -949,6 +965,8 @@ class RenderWorkloadService:
                 raise ValueError("DEVICE-006 找不到可用測試裝置")
             if profile_key != str(current["panel_profile"]):
                 raise ValueError("DEVICE-006 測試色盤與裝置面板 Profile 不相容")
+            if not stock_direct and str(current.get("delivery_mode") or "") == "inktime_offline_schedule":
+                raise ValueError("DEVICE-008 離線排程裝置尚不支援一次性 Custom 測試")
             if stock_direct and str(current.get("delivery_mode") or "") != "stock_compat":
                 raise ValueError("DEVICE-008 Stock 測試只能選擇 Stock 相容裝置")
             return dict(current)
@@ -1148,6 +1166,40 @@ class RenderWorkloadService:
         # Serialize input reservations/publications with a filesystem lock,
         # not SQLite's sole writer. NAS stat/unlink can take a long time.
         with self._files.exclusive(self._files_lock):
+            # A dead process releases its shard fence. Only old, unbound
+            # staging with no live job reference can be reclaimed.
+            cutoff = (datetime.now(timezone.utc) - self.retention).isoformat()
+            with self.jobs.database.session() as connection:
+                expired = connection.execute(
+                    "SELECT token FROM render_input_leases WHERE staged=1 AND job_id IS NULL AND created_at<? LIMIT 128",
+                    (cutoff,),
+                ).fetchall()
+            orphan_files_removed = 0
+            for row in expired:
+                token = str(row[0])
+                try:
+                    self._validate_token(token)
+                except ValueError:
+                    continue
+                owner = self.jobs.database.try_acquire_operation_lock("render-staging-" + token[:3])
+                if owner is None:
+                    continue
+                try:
+                    with self.jobs.database.transaction(operation="render_staging_recovery") as connection:
+                        removed = connection.execute(
+                            "DELETE FROM render_input_leases WHERE token=? AND staged=1 AND job_id IS NULL AND created_at<? "
+                            "AND NOT EXISTS(SELECT 1 FROM jobs WHERE status NOT IN ('completed','completed_with_errors','failed','cancelled') "
+                            "AND json_valid(settings_json) AND json_extract(settings_json,'$.input_token')=?)",
+                            (token, cutoff, token),
+                        ).rowcount
+                    if removed:
+                        for suffix in SUPPORTED_IMAGE_EXTENSIONS:
+                            path = self.input_root / f"{token}{suffix}"
+                            if path.is_file():
+                                path.unlink(missing_ok=True)
+                                orphan_files_removed += 1
+                finally:
+                    owner.close()
             with self.jobs.database.session() as connection:
                 terminal = "('completed','completed_with_errors','failed','cancelled')"
                 invalid = connection.execute(
@@ -1166,7 +1218,7 @@ class RenderWorkloadService:
             if unused:
                 with self.jobs.database.transaction(operation="render_input_cleanup") as connection:
                     connection.executemany("DELETE FROM render_input_leases WHERE token=? AND staged=0", unused)
-            return removed
+            return removed + orphan_files_removed
 
     def _cleanup_locked(self, protected: set[str]) -> int:
         cutoff = datetime.now(timezone.utc) - self.retention

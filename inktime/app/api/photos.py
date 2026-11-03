@@ -317,11 +317,17 @@ def excluded_photos_page():
         "kind": request.args.get("kind", "").strip(),
         "origin": request.args.get("origin", "").strip(),
     }
-    rows = [dict(row) for row in _repository().search_exclusions(**filters)]
+    try:
+        page = max(1, min(int(request.args.get("page", 1)), 100000))
+    except ValueError:
+        page = 1
+    rows = [dict(row) for row in _repository().search_exclusions(**filters, limit=201, offset=(page - 1) * 200)]
+    has_next = len(rows) > 200
+    rows = rows[:200]
     for row in rows:
         row["ai_blocked"] = is_confirmed_screenshot(row)
     reasons = sorted({str(row["reject_reason"]) for row in rows if row["reject_reason"]})
-    return render_template("excluded_photos.html", photos=rows, filters=filters, reasons=reasons)
+    return render_template("excluded_photos.html", photos=rows, filters=filters, reasons=reasons, page=page, has_next=has_next)
 
 
 @bp.post("/api/v1/photos/<photo_id>/exclusion")
@@ -381,6 +387,7 @@ def change_exclusions_batch():
     except JsonScalarError as exc:
         abort(400, description=str(exc))
     changed = 0
+    rejected = []
     for photo_id in dict.fromkeys(photo_ids):
         try:
             _repository().set_exclusion(
@@ -391,8 +398,10 @@ def change_exclusions_batch():
             )
             changed += 1
         except KeyError:
-            continue
-    return {"status": "ok", "changed": changed}
+            rejected.append({"photo_id": photo_id, "reason": "照片不存在"})
+        except ValueError as exc:
+            rejected.append({"photo_id": photo_id, "reason": str(exc)})
+    return {"status": "partial" if rejected else "ok", "changed": changed, "rejected": rejected}
 
 
 @bp.post("/api/v1/photos/<photo_id>/ai")
@@ -556,7 +565,7 @@ def queue_ai_mode_run():
                 heartbeat.start()
                 try:
                     batches = _repository().eligible_photo_batches(
-                        group_by=group_by, limit=daily_limit, include_all_active=False
+                        group_by=group_by, limit=limit, include_all_active=False
                     )
                     snapshot = {
                         "analysis_fingerprint": analysis_fingerprint,
@@ -620,7 +629,7 @@ def queue_ai_mode_run():
                 return _ai_job_error(exc), 409
 
         batches = _repository().eligible_photo_batches(
-            group_by=group_by, limit=daily_limit, include_all_active=False
+            group_by=group_by, limit=limit, include_all_active=False
         )
         try:
             request_key = request.headers.get("Idempotency-Key")

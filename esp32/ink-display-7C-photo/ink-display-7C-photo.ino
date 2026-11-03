@@ -440,6 +440,22 @@ static void applyFixedTimezoneWithoutNtp(int32_t offsetMinutes) {
   tzset();
 }
 
+static DeserializationError readDeviceHttpJson(
+    HTTPClient &http, JsonDocument &document, size_t maximumBytes) {
+  const int expected = http.getSize();
+  if (expected <= 0 || static_cast<size_t>(expected) > maximumBytes) {
+    return DeserializationError(DeserializationError::InvalidInput);
+  }
+  // TLS headers and body can arrive separately. HTTPClient's body reader
+  // retries transient empty reads; parsing its raw stream can report EmptyInput.
+  // Bound allocation first and reject truncated bodies before parsing any JSON.
+  const String body = http.getString();
+  if (body.length() != static_cast<size_t>(expected)) {
+    return DeserializationError(DeserializationError::IncompleteInput);
+  }
+  return deserializeJson(document, body);
+}
+
 #if INKTIME_PHOTOPAINTER_ENABLED
 const uint16_t DEFAULT_PREFETCH_LEAD_MINUTES = 5;
 
@@ -487,21 +503,6 @@ static bool validSyncStrategy(const String &strategy, const String &syncTime) {
   return !syncTime.isEmpty() && validSyncTime(syncTime);
 }
 
-static DeserializationError readDeviceHttpJson(
-    HTTPClient &http, JsonDocument &document, size_t maximumBytes) {
-  const int expected = http.getSize();
-  if (expected <= 0 || static_cast<size_t>(expected) > maximumBytes) {
-    return DeserializationError(DeserializationError::InvalidInput);
-  }
-  // TLS headers and body can arrive separately. HTTPClient's body reader
-  // retries transient empty reads; parsing its raw stream can report EmptyInput.
-  // Bound allocation first and reject truncated bodies before parsing any JSON.
-  const String body = http.getString();
-  if (body.length() != static_cast<size_t>(expected)) {
-    return DeserializationError(DeserializationError::IncompleteInput);
-  }
-  return deserializeJson(document, body);
-}
 
 static bool applyRemoteSchedule(JsonObject remoteConfig, int schemaVersion, Config &candidate) {
   if (schemaVersion < 3) {
@@ -1434,6 +1435,8 @@ static uint32_t ackJournalSnapshotContentCrc(
   return crc ^ 0xFFFFFFFFU;
 }
 
+static bool legacyAckJournalPresent(Preferences &journal);
+
 class AckJournalPreferencesStorage final : public inktime::ackjournal::Storage {
  public:
   explicit AckJournalPreferencesStorage(Preferences &journal) : journal_(journal) {}
@@ -1612,6 +1615,37 @@ class AckJournalPreferencesStorage final : public inktime::ackjournal::Storage {
     if (validH) {
       snapshot = candidateH;
       return true;
+    }
+    // Only the first transaction can have records without either bank's
+    // metadata, pointer or legacy predecessor. Preserve CRC-valid contiguous
+    // G records; arbitrary damaged journals must still fail closed.
+    if (!presentG && !presentH && !journal_.isKey("active") && !legacyAckJournalPresent(journal_)) {
+      inktime::ackjournal::Snapshot orphan;
+      orphan.bank = 'G';
+      orphan.generation = 1U;
+      bool gap = false;
+      for (uint8_t index = 0U; index < inktime::kMaxAckJournalEntries; ++index) {
+        if (journal_.isKey(ackJournalBankKey('H', index).c_str())) return false;
+        const String key = ackJournalBankKey('G', index);
+        if (!journal_.isKey(key.c_str())) { gap = true; continue; }
+        if (gap) return false;
+        std::string record;
+        AckJournalBlob blob = {};
+        PendingQueueAck pending = {};
+        if (!readAckJournalBytes(journal_, key, record, sizeof(blob)) || record.size() != sizeof(blob)) return false;
+        memcpy(&blob, record.data(), sizeof(blob));
+        if (!decodeAckJournalBlob(blob, pending) || !pending.valid) return false;
+        orphan.records.push_back(record);
+      }
+      if (!orphan.records.empty()
+          && writeSnapshotMetadata(orphan.bank, orphan.generation, orphan.records)
+          && writeActivePointer(orphan.bank, orphan.generation, static_cast<uint8_t>(orphan.records.size()))
+          && verifyActiveSnapshot(orphan)) {
+        snapshot = orphan;
+        lastDeviceWarningCode = "DEVICE-QUEUE-ACK-RECOVERY";
+        lastDeviceWarningMessage = "已恢復首次 ACK snapshot，保留至少一次事件補送";
+        return true;
+      }
     }
     return false;
   }
@@ -1928,15 +1962,7 @@ static bool removePendingQueueAck(const PendingQueueAck &pending) {
   return true;
 }
 
-static PendingQueueAck loadPendingQueueAck() {
-  PendingQueueAck entries[inktime::kMaxAckJournalEntries] = {};
-  const uint8_t count = loadAckJournalEntries(
-    entries, inktime::kMaxAckJournalEntries);
-  if (count == UINT8_MAX) return {};
-  if (count > 0U) return entries[0];
-
-  // Migrate the pre-journal single pending record without losing an event
-  // after an upgrade from the previous firmware.
+static bool migrateLegacySinglePendingQueueAck() {
   prefs.begin("dashcfg", true);
   PendingQueueAck legacy = {
     prefs.getString("ack_item", ""),
@@ -1950,17 +1976,21 @@ static PendingQueueAck loadPendingQueueAck() {
     false,
   };
   prefs.end();
-  if (validPendingQueueAck(legacy)) {
-    const bool canonicalCommitted = persistPendingQueueAck(legacy);
-    if (inktime::ackjournal::legacyCleanupAllowed(canonicalCommitted)) {
-      if (!removeLegacyPendingQueueAck()) {
-        lastDeviceWarningCode = "DEVICE-QUEUE-ACK-CLEANUP";
-        lastDeviceWarningMessage = "legacy single ACK cleanup 失敗；canonical snapshot 已保留";
-      }
-    }
-    return legacy;
+  if (legacy.queueItemId.isEmpty()) return true;
+  if (!validPendingQueueAck(legacy)) return false;
+  if (!persistPendingQueueAck(legacy)) return false;
+  if (!removeLegacyPendingQueueAck()) {
+    lastDeviceWarningCode = "DEVICE-QUEUE-ACK-CLEANUP";
+    lastDeviceWarningMessage = "legacy single ACK cleanup 失敗；canonical snapshot 已保留";
   }
-  return legacy;
+  return true;
+}
+
+static PendingQueueAck loadPendingQueueAck() {
+  if (!migrateLegacySinglePendingQueueAck()) return {};
+  PendingQueueAck entries[inktime::kMaxAckJournalEntries] = {};
+  const uint8_t count = loadAckJournalEntries(entries, inktime::kMaxAckJournalEntries);
+  return count != UINT8_MAX && count > 0U ? entries[0] : PendingQueueAck{};
 }
 
 static void clearPendingQueueAck() {
@@ -4068,17 +4098,14 @@ static bool postQueueAckBatch(
       break;
     }
     if (status >= 400 && status < 500 && status != HTTP_CODE_CONFLICT) {
-      queueAckPermanentReject = true;
-      for (uint8_t index = 0U; index < count; ++index) {
-        const bool removed = removePendingQueueAck(pending[index]);
-        if (inktime::ackjournal::retainDuplicateEvidence(true, removed)) {
-          lastDeviceWarningCode = "DEVICE-QUEUE-ACK-CLEANUP";
-          lastDeviceWarningMessage = "permanent HTTP ACK cleanup 失敗；保留 duplicate-safe evidence";
-        }
-      }
-      lastDeviceErrorCode = "DEVICE-QUEUE-ACK-PERMANENT";
-      lastDeviceErrorMessage = "Queue ACK HTTP 4xx 已永久拒絕；事件已 quarantine，本輪繼續後續工作";
-      return true;
+      // An HTTP/router error is not an authoritative per-event rejection.
+      // Keep all event identities until a verified JSON result acknowledges them.
+      const bool retained = persistQueueAckBatch(pending, count);
+      lastDeviceErrorCode = "DEVICE-QUEUE-ACK-RETRY";
+      lastDeviceErrorMessage = retained
+        ? "ACK HTTP 回應無權威逐項結果；pending事件已保留等待查核"
+        : "ACK HTTP 回應無權威逐項結果，且pending事件無法保存";
+      return false;
     }
     if (decision != inktime::AckDecision::Retry) break;
     delay(250U * (attempt + 1U));
@@ -4143,6 +4170,11 @@ static bool sendQueueEvent(
 }
 
 static bool resumePendingQueueAck(Config &cfg) {
+  if (!migrateLegacySinglePendingQueueAck()) {
+    lastDeviceErrorCode = "DEVICE-QUEUE-ACK-JOURNAL";
+    lastDeviceErrorMessage = "舊 pending ACK 無法安全遷移，原始事件已保留";
+    return false;
+  }
   PendingQueueAck pending[inktime::kMaxAckJournalEntries] = {};
   const uint8_t count = loadAckJournalEntries(
     pending, inktime::kMaxAckJournalEntries);
@@ -5283,6 +5315,19 @@ static bool reconcilePendingScheduleConfigTransaction(Config &cfg) {
     recordNvsWrite();
     return true;
   }
+  if (journal.phase == inktime::configstore::JournalPhase::Prepared && targetScheduleActive) {
+    const bool preparedPointer = activePresent && activeSlot == journal.prepared_slot
+      && activeGeneration == journal.prepared_generation;
+    if (!previousPointer && !preparedPointer && !(journal.previous_active_slot == 0 && !activePresent)) {
+      return failOfflineScheduleTransaction("離線排程 recovery Config 身分不一致");
+    }
+    journal.phase = inktime::configstore::JournalPhase::SchedulePromoted;
+    String promotedError;
+    if (!configStore.writeJournal(journal, promotedError)) {
+      return failOfflineScheduleTransaction("離線排程 recovery promotion 無法保存");
+    }
+    recordNvsWrite();
+  }
   if (journal.phase != inktime::configstore::JournalPhase::SchedulePromoted) {
     return failOfflineScheduleTransaction("離線排程 transaction 未完成 promotion，已 fail-closed");
   }
@@ -6267,9 +6312,10 @@ bool downloadDailyPhotoBin(Config &cfg) {
         if (latest) currentDisplaySkipped = shouldSkipCurrentDisplay(cfg);
         return latest;
       }
-      if (prefetched && displayAtThisWake && !stageTomorrow) {
+      const time_t afterPrefetchEpoch = time(nullptr);
+      if (prefetched && activeHasDueFormalSlot(afterPrefetchEpoch)) {
         currentPrefetchOnly = false;
-        return loadOfflineScheduledLocalFrame(cfg, time(nullptr), false);
+        return loadOfflineScheduledLocalFrame(cfg, afterPrefetchEpoch, false);
       }
       return prefetched;
     }

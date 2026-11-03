@@ -2786,6 +2786,29 @@ MIGRATIONS = (
         "索引 OpenAI 費用帳本的時區相容日期範圍",
         ("CREATE INDEX idx_openai_receipts_julianday ON openai_budget_receipts(julianday(started_at))",),
     ),
+    Migration(
+        80,
+        "保留人工日期與批次原始行序並呈現舊付費證據",
+        (
+            "CREATE TABLE photo_manual_dates(photo_id TEXT PRIMARY KEY REFERENCES photos(id) ON DELETE CASCADE,"
+            "content_sha256 TEXT NOT NULL,captured_at TEXT,updated_at TEXT NOT NULL)",
+            "CREATE TABLE batch_result_occurrences(batch_id TEXT NOT NULL REFERENCES analysis_batches(id) ON DELETE CASCADE,"
+            "source_file TEXT NOT NULL,line_number INTEGER NOT NULL,line_sha256 TEXT NOT NULL,"
+            "PRIMARY KEY(batch_id,source_file,line_number))",
+            "CREATE VIEW legacy_paid_evidence AS SELECT o.id,o.photo_id,o.job_id,o.provider,o.model,"
+            "o.request_fingerprint,o.created_at,b.state AS migrated_state "
+            "FROM analysis_request_outcomes o LEFT JOIN billable_operations b ON b.id='legacy-' || o.id "
+            "WHERE o.requires_manual_confirmation=1 AND (b.state IS NULL OR b.state IN ('started','response'))",
+            "DROP TRIGGER confirmed_photo_display_insert",
+            """CREATE TRIGGER confirmed_photo_display_insert AFTER INSERT ON display_history
+            WHEN NEW.selection_method='device_queue_ack' AND json_valid(NEW.metadata_json) BEGIN
+                UPDATE photos SET display_count=display_count+1,
+                last_displayed_at=CASE WHEN last_displayed_at IS NULL OR NEW.displayed_at>last_displayed_at
+                    THEN NEW.displayed_at ELSE last_displayed_at END
+                WHERE id=NEW.photo_id AND sha256 IS json_extract(NEW.metadata_json,'$.content_sha256');
+            END""",
+        ),
+    ),
 )
 
 
@@ -3184,7 +3207,7 @@ def _apply_migration_53_data_fixes(connection: sqlite3.Connection) -> None:
 
     rows = connection.execute(
         "SELECT id,caption,side_caption,reason,types_json,raw_json,semantic_json FROM photo_analysis"
-    ).fetchall()
+    )
     for row in rows:
         updates: dict[str, object] = {}
         for column in ("caption", "side_caption", "reason"):
@@ -3212,7 +3235,7 @@ def _apply_migration_53_data_fixes(connection: sqlite3.Connection) -> None:
         ("ai_trace_attempts", "id", ("response_parsed_json",)),
     ):
         selected = ",".join((id_column, *json_columns))
-        rows = connection.execute(f"SELECT {selected} FROM {table}").fetchall()  # noqa: S608
+        rows = connection.execute(f"SELECT {selected} FROM {table}")  # noqa: S608
         for row in rows:
             updates = {}
             for column in json_columns:
