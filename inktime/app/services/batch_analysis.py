@@ -1044,8 +1044,7 @@ class BatchAnalysisService:
     def _submit_one(self, batch_id: str, plan: dict[str, Any]) -> None:
         batch = self.batches.get(batch_id)
         parent = self.jobs.get(str(batch["job_id"])) if batch and batch["job_id"] else None
-        automatic = bool(parent and json.loads(parent["settings_json"]).get("complementary_lane") == "openai_backfill")
-        if not automatic:
+        if parent is None or json.loads(parent["settings_json"]).get("complementary_lane") != "openai_backfill":
             return self._submit_one_guarded(batch_id, plan)
         # Pause commits and external POSTs share a cross-process fence. A pause
         # waits for the current side effect; after success no new POST can start.
