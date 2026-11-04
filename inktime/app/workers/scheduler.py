@@ -495,6 +495,33 @@ class SchedulerRunner:
                                 )
                                 keep_deadline_due = True
                         continue
+                    finalizer_failure = job_repository.latest_finalizer_failure(dedupe_key)
+                    if finalizer_failure is not None:
+                        try:
+                            failure_at = datetime.fromisoformat(
+                                str(
+                                    finalizer_failure.get("last_seen_at")
+                                    or finalizer_failure.get("completed_at")
+                                )
+                            )
+                            if failure_at.tzinfo is None:
+                                failure_at = failure_at.replace(tzinfo=timezone.utc)
+                        except (TypeError, ValueError):
+                            failure_at = authoritative_now
+                        finalizer_retry_deadline = failure_at.astimezone(timezone.utc) + timedelta(
+                            seconds=OFFLINE_PREPARE_RETRY_INTERVAL_SECONDS
+                        )
+                        if authoritative_now < finalizer_retry_deadline:
+                            # A failed finalizer rolls its callback writes back to the savepoint.
+                            # Keep the scheduler from immediately recreating the same offline job
+                            # when that rollback also removed its transient-recovery checkpoint.
+                            skip_target_dates.add(target_iso)
+                            retry_deadline = (
+                                min(retry_deadline, finalizer_retry_deadline)
+                                if retry_deadline
+                                else finalizer_retry_deadline
+                            )
+                            continue
                     transient_state = offline_schedules.transient_recovery_for_device(
                         device_id=str(device["id"]),
                         target_date=target_iso,
