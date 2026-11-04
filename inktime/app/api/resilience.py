@@ -621,6 +621,10 @@ def paid_operations_page():
             "WHERE o.state IN ('started','response') ORDER BY o.created_at DESC,o.id DESC LIMIT 101 OFFSET ?",
             ((page - 1) * 100,),
         ).fetchall()
+    with database.session() as connection:
+        legacy_evidence = [dict(row) for row in connection.execute(
+            "SELECT * FROM legacy_paid_evidence ORDER BY created_at DESC,id DESC LIMIT 101 OFFSET ?", ((page-1)*100,),
+        )]
     import json
     operations = []
     for row in rows[:100]:
@@ -631,6 +635,9 @@ def paid_operations_page():
             context = {}
         if not isinstance(context, dict):
             context = {}
+        item["photo_id"] = context.get("photo_id") if isinstance(context.get("photo_id"), str) else None
+        item["job_id"] = context.get("job_id") if isinstance(context.get("job_id"), str) else None
+        item["legacy_usage_id"] = context.get("legacy_usage_id")
         item["provider"] = item["provider"] or context.get("provider") or "舊操作，請參考 AI Trace"
         item["model"] = item["model"] or context.get("model") or "未知"
         if item["response_json"]:
@@ -639,7 +646,8 @@ def paid_operations_page():
             if item["cost"] is None:
                 item["cost"] = (saved.get("usage") or {}).get("provider_reported_cost")
         operations.append(item)
-    return render_template("paid_operations.html", operations=operations, page=page, has_more=len(rows)>100,
+    return render_template("paid_operations.html", operations=operations, legacy_evidence=legacy_evidence[:100],
+                           page=page, has_more=len(rows)>100 or len(legacy_evidence)>100,
                            restore_guard=database.path.with_suffix(database.path.suffix + ".paid-reconciliation-required").exists())
 
 

@@ -230,6 +230,94 @@ class FailingScoringProvider(LabProvider):
         raise AssertionError("測試 Provider 未設定 repair response")
 
 
+@pytest.mark.parametrize("kind", ["cycle", "daily"])
+@pytest.mark.parametrize("failover", [False, True])
+def test_scoring_checks_actual_provider_budget_before_any_image(app, tmp_path, monkeypatch, kind, failover):
+    from inktime.app.providers.router import FailoverVisionProvider, ProviderChannel
+    from inktime.app.services.openai_budget import OpenAIBudgetExceeded
+    from tests.integration.test_complementary_analysis import setup_dual, record_cost
+
+    setup_dual(app, **{"openai_budget.cycle_limit": 20 if kind == "daily" else 1,
+                       "openai_budget.daily_limit": 1 if kind == "daily" else 0})
+    record_cost(app, 1)
+    calls = []
+    class Paid(LabProvider):
+        provider_id = "direct-test"
+        kind = "openai"
+        def analyze(self, **kwargs):
+            calls.append(kwargs)
+            return super().analyze(**kwargs)
+    paid = Paid()
+    provider = paid
+    if failover:
+        class NotSent(LabProvider):
+            provider_id = "daily-free"
+            def analyze(self, **kwargs):
+                raise ProviderHTTPError("not sent", "VLM-005", request_started=False, vision_started=False)
+        provider = FailoverVisionProvider([ProviderChannel(NotSent(), priority=1), ProviderChannel(paid, priority=2)])
+    service = app.extensions["inktime_scoring_lab_service"]
+    monkeypatch.setattr(service.providers, "build_router", lambda *a, **k: provider)
+    image = tmp_path / "paid.jpg"
+    Image.new("RGB", (64, 64), "orange").save(image)
+    with pytest.raises(OpenAIBudgetExceeded) as error:
+        service.analyze(image)
+    assert error.value.pause_kind == kind and calls == []
+    with service.usage.database.session() as connection:
+        assert connection.execute("SELECT COUNT(*) FROM budget_reservations WHERE state='active'").fetchone()[0] == 0
+
+
+def test_scoring_free_router_does_not_use_native_budget(app, tmp_path, monkeypatch):
+    from tests.integration.test_complementary_analysis import setup_dual, record_cost
+    setup_dual(app, **{"openai_budget.cycle_limit": 1})
+    record_cost(app, 1)
+    provider = LabProvider()
+    provider.provider_id = "daily-free"
+    service = app.extensions["inktime_scoring_lab_service"]
+    monkeypatch.setattr(service.providers, "build_router", lambda *a, **k: provider)
+    image = tmp_path / "free.jpg"
+    Image.new("RGB", (64, 64), "orange").save(image)
+    assert service.analyze(image)["usage"]["provider_id"] == "daily-free"
+
+
+def test_scoring_api_reports_native_budget_refusal_as_conflict(app, client, monkeypatch):
+    from io import BytesIO
+    from inktime.app.services.openai_budget import OpenAIBudgetExceeded
+    create_admin(app)
+    login(client)
+    def refuse(*a, **k):
+        raise OpenAIBudgetExceeded("daily", "daily cap")
+    monkeypatch.setattr(app.extensions["inktime_scoring_lab_service"], "analyze", refuse)
+    image = BytesIO()
+    Image.new("RGB", (64, 64), "orange").save(image, format="JPEG")
+    image.seek(0)
+    response = client.post("/api/v1/scoring/test", data={"photo": (image, "photo.jpg")},
+                           headers={"X-CSRF-Token": csrf(client)})
+    assert response.status_code == 409
+    assert "BUDGET-OPENAI-DAILY" in response.get_data(as_text=True)
+
+
+@pytest.mark.parametrize("status", [401, 403, 429])
+def test_scoring_definite_rejection_releases_budget_and_allows_retry(app, tmp_path, monkeypatch, status):
+    from tests.integration.test_openai_direct import save_direct
+    save_direct(app)
+    provider = FailingScoringProvider(vision_error=ProviderHTTPError(
+        "refused", "API_CREDIT_EXHAUSTED", http_status=status, request_started=True, vision_started=False))
+    provider.kind, provider.provider_id = "openai", "direct-test"
+    service = app.extensions["inktime_scoring_lab_service"]
+    monkeypatch.setattr(service.providers, "build_router", lambda *a, **k: provider)
+    image = tmp_path / "rejected.jpg"
+    Image.new("RGB", (64, 64), "orange").save(image)
+    with pytest.raises(ProviderHTTPError):
+        service.analyze(image, idempotency_key="rejected")
+    with service.usage.database.session() as connection:
+        assert connection.execute("SELECT state FROM billable_operations").fetchone()[0] == "not_sent"
+        assert connection.execute("SELECT COUNT(*) FROM api_usage").fetchone()[0] == 0
+        assert connection.execute("SELECT COUNT(*) FROM budget_reservations WHERE state='active'").fetchone()[0] == 0
+    provider.vision_error = None
+    monkeypatch.setattr(provider, "analyze", LabProvider().analyze)
+    assert service.analyze(image, idempotency_key="rejected")["usage"]["cost_source"] != "unknown"
+
+
 def test_scoring_lab_records_usage_and_uses_current_profile(app, tmp_path, monkeypatch):
     service = app.extensions["inktime_scoring_lab_service"]
     monkeypatch.setattr(service.providers, "build_router", lambda *args, **kwargs: LabProvider())

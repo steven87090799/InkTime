@@ -169,8 +169,9 @@ class DeviceNotificationService:
                     """
                     SELECT * FROM devices
                     WHERE offline_alert_active=1
-                      AND COALESCE(last_status_at,last_seen_at,'') > COALESCE(last_offline_alert_at,'')
-                    """
+                      AND MAX(COALESCE(last_status_at,''),COALESCE(last_seen_at,''),COALESCE(created_at,'')) > COALESCE(last_offline_alert_at,'')
+                      AND MAX(COALESCE(last_status_at,''),COALESCE(last_seen_at,''),COALESCE(created_at,'')) >= ?
+                    """, (cutoff,),
                 ).fetchall()
                 for device in recovered:
                     connection.execute(
@@ -211,7 +212,7 @@ class DeviceNotificationService:
                         """
                         SELECT * FROM devices
                         WHERE enabled=1
-                          AND COALESCE(last_status_at,last_seen_at,created_at) < ?
+                          AND MAX(COALESCE(last_status_at,''),COALESCE(last_seen_at,''),COALESCE(created_at,'')) < ?
                           AND (
                             offline_alert_active=0
                             OR (?=1 AND COALESCE(last_offline_alert_at,'') < ?)
@@ -223,7 +224,7 @@ class DeviceNotificationService:
                         reminder = bool(device["offline_alert_active"])
                         kind = "offline_reminder" if reminder else "offline"
                         last_contact = (
-                            device["last_status_at"] or device["last_seen_at"] or device["created_at"]
+                            max(value for value in (device["last_status_at"], device["last_seen_at"], device["created_at"]) if value)
                         )
                         message = (
                             f"{device['name']} 已超過 {threshold:g} 小時未連線；最後活動：{last_contact}。"

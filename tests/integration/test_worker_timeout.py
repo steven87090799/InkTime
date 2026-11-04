@@ -100,3 +100,22 @@ def test_timed_out_future_is_tracked_to_completion_without_retry_or_double_charg
     assert events == 1
     assert float(job["spent"]) == 0.25
     assert job["status"] == "completed_with_errors"
+
+
+def test_late_transport_failure_is_not_put_back_on_retry_queue(app):
+    repository = app.extensions["inktime_job_repository"]
+    job_id = repository.create_maintenance(kind="cleanup", name="late-failure", settings={}, created_by="test")
+    app.extensions["inktime_job_service"].start(job_id)
+    calls = []
+    def late_failure(_item):
+        calls.append(True)
+        time.sleep(1.2)
+        raise TimeoutError("response lost after request may have arrived")
+    worker = BoundedJobWorker(repository, late_failure, concurrency=1, queue_multiplier=1, timeout_seconds=1)
+    worker.run_job(job_id)
+    with app.extensions["inktime_database"].session() as connection:
+        row = connection.execute("SELECT status,attempts,error_code FROM job_items WHERE job_id=?", (job_id,)).fetchone()
+    assert len(calls) == 1
+    assert row["status"] == "failed"
+    assert row["attempts"] == 1
+    assert row["error_code"] == "JOB-SHUTDOWN-AMBIGUOUS"

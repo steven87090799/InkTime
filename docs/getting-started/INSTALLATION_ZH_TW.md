@@ -2,7 +2,7 @@
 
 ## 支援環境
 
-- Docker Engine 24+／Compose v2（建議）；或 Python 3.10+、Linux／macOS。
+- Docker Engine 24+／Compose v2（建議）；或 Python 3.12（專案要求 >=3.12,<3.13）、Linux／macOS。
 - SQLite 資料目錄需可寫；照片目錄建議唯讀掛載。
 - Intel N100 4C/4T 可正式部署；主機至少 4 GiB RAM，建議 8 GiB。N100 預設 Worker 並行 1、Web 1 worker × 2 threads。
 

@@ -25,7 +25,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     outputs:
-      digest: ${{ steps.push.outputs.digest }}
+      digest: ${{ steps.push.outputs.digest || steps.existing.outputs.digest }}
       commit: ${{ steps.release.outputs.commit }}
       stable: ${{ steps.release.outputs.stable }}
       publish_latest: ${{ steps.alias.outputs.publish_latest }}
@@ -111,10 +111,14 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Refuse to overwrite an existing version tag
+      - id: existing
+        name: Verify immutable version tag or resume the same source
         shell: bash
         env:
           RELEASE_TAG: ${{ steps.release.outputs.tag }}
+          RELEASE_COMMIT: ${{ steps.release.outputs.commit }}
+          SOURCE_URL: ${{ github.server_url }}/${{ github.repository }}
+          DEPLOYMENT_CONTRACT: ${{ steps.release.outputs.deployment_contract }}
         run: |
           set -euo pipefail
           set +e
@@ -122,8 +126,12 @@ jobs:
           inspect_status=$?
           set -e
           if [ "${inspect_status}" -eq 0 ]; then
-            echo "Container tag ${IMAGE_NAME}:${RELEASE_TAG} already exists and is immutable." >&2
-            exit 1
+            docker buildx imagetools inspect "${IMAGE_NAME}:${RELEASE_TAG}" --format '{{json .Manifest}}' > "${RUNNER_TEMP}/existing-release.json"
+            python scripts/ci/verify_existing_release.py \
+              --manifest "${RUNNER_TEMP}/existing-release.json" --image "${IMAGE_NAME}" \
+              --revision "${RELEASE_COMMIT}" --tag "${RELEASE_TAG}" --source "${SOURCE_URL}" \
+              --contract "${DEPLOYMENT_CONTRACT}" --output "${GITHUB_OUTPUT}"
+            exit 0
           fi
           if ! grep -Eqi 'manifest unknown|not found' <<<"${inspect_output}"; then
             echo "Unable to verify release-tag immutability against GHCR." >&2
@@ -149,6 +157,7 @@ jobs:
             io.inktime.nas-deployment-contract=${{ steps.release.outputs.deployment_contract }}
 
       - id: push
+        if: steps.existing.outputs.reuse != 'true'
         name: Build and push linux/amd64 and linux/arm64 images
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
@@ -169,7 +178,7 @@ jobs:
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-name: ${{ env.IMAGE_NAME }}
-          subject-digest: ${{ steps.push.outputs.digest }}
+          subject-digest: ${{ steps.push.outputs.digest || steps.existing.outputs.digest }}
           push-to-registry: true
 
       - id: alias
@@ -191,14 +200,14 @@ jobs:
       - name: Promote verified digest to stable latest
         if: steps.alias.outputs.publish_latest == 'true'
         env:
-          IMAGE_DIGEST: ${{ steps.push.outputs.digest }}
+          IMAGE_DIGEST: ${{ steps.push.outputs.digest || steps.existing.outputs.digest }}
         run: docker buildx imagetools create --tag "${IMAGE_NAME}:latest" "${IMAGE_NAME}@${IMAGE_DIGEST}"
 
       - name: Write release summary
         env:
           RELEASE_TAG: ${{ steps.release.outputs.tag }}
           RELEASE_COMMIT: ${{ steps.release.outputs.commit }}
-          IMAGE_DIGEST: ${{ steps.push.outputs.digest }}
+          IMAGE_DIGEST: ${{ steps.push.outputs.digest || steps.existing.outputs.digest }}
           STABLE_RELEASE: ${{ steps.release.outputs.stable }}
         run: |
           {

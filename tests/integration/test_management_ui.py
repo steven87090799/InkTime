@@ -1185,6 +1185,10 @@ def test_photo_manual_edit_is_audited(client, app):
     create_admin(app)
     login(client)
     photo_id = add_photos(app, 1)[0]
+    result = valid_result()
+    app.extensions["inktime_photo_repository"].save_analysis(
+        photo_id, None, "single", "fixture", "fixture", result, json.dumps(result),
+    )
     response = client.patch(
         f"/api/v1/photos/{photo_id}",
         json={
@@ -1200,7 +1204,7 @@ def test_photo_manual_edit_is_audited(client, app):
         photo = connection.execute(
             "SELECT favorite,captured_at FROM photos WHERE id=?", (photo_id,)
         ).fetchone()
-        event = connection.execute("SELECT event FROM photo_events WHERE photo_id=?", (photo_id,)).fetchone()
+        event = connection.execute("SELECT event FROM photo_events WHERE photo_id=? AND event='manual_update'", (photo_id,)).fetchone()
     assert tuple(photo) == (1, "2026-07-17T10:00:00")
     assert event["event"] == "manual_update"
 
@@ -1308,7 +1312,7 @@ def test_photo_detail_shows_only_two_latest_analyses_and_compact_type_picker(cli
 
     assert body.count('class="analysis-card"') == 2
     assert "顯示優先結果與最近記錄，共 2 / 3 筆" in body
-    assert "有效 AI 模型分析（Schema v4 / v5）" in body
+    assert "有效 v6 安全與方向分析（v4 / v5 歷史仍可查閱）" in body
     assert "歷史模型結果保留供查閱" in body
     assert 'class="photo-orientation-actions"' in body
     assert 'class="secondary orientation-set orientation-clear"' in body
@@ -1772,3 +1776,17 @@ def test_prompt_permissions_and_csrf(client, app):
                        headers={"X-CSRF-Token": csrf(client)}).status_code == 403
     assert client.post("/api/v1/scoring/profiles", json={"name": "拒絕", **payload},
                        headers={"X-CSRF-Token": csrf(client)}).status_code == 403
+
+
+def test_manual_caption_without_analysis_is_rejected_atomically(client, app):
+    create_admin(app)
+    login(client)
+    photo_id = add_photos(app, 1)[0]
+    response = client.patch(f"/api/v1/photos/{photo_id}",
+        json={"favorite": True, "captured_at": "2026-07-17T10:00:00", "types": ["家庭"],
+              "side_caption": "值得收藏的一天"},
+        headers={"X-CSRF-Token": csrf(client)})
+    assert response.status_code == 400
+    with app.extensions["inktime_database"].session() as connection:
+        assert connection.execute("SELECT favorite FROM photos WHERE id=?", (photo_id,)).fetchone()[0] == 0
+        assert connection.execute("SELECT COUNT(*) FROM photo_manual_dates WHERE photo_id=?", (photo_id,)).fetchone()[0] == 0

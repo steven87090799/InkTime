@@ -236,3 +236,40 @@ def test_provider_rechecks_consent_after_durable_input_archive(app, tmp_path, mo
             ).fetchone()[0] == 1
     finally:
         provider.close()
+
+
+
+@pytest.mark.parametrize("transport_callback", [True, False])
+def test_exact_transport_evidence_is_saved_once_with_callback_fallback(app, tmp_path, monkeypatch, transport_callback):
+    from types import SimpleNamespace
+    from inktime.app.providers.openai_compatible import OpenAICompatibleProvider
+    from inktime.app.repositories import model_evidence
+    database = app.extensions["inktime_database"]
+    photo_id = add_photos(app, 1)[0]
+    operation, _ = BillableOperationRepository(database).begin("evidence-photo", "evidence-plan")
+    payload = {"choices": [{"message": {"content": "{}"}}], "usage": {}}
+    response = SimpleNamespace(status_code=200, headers={}, text=json.dumps(payload), json=lambda: payload)
+    session = SimpleNamespace(post=lambda *args, **kwargs: response)
+    provider = OpenAICompatibleProvider(name="evidence", base_url="https://provider.invalid/v1",
+                                        api_key="fixture", session=session)
+    monkeypatch.setattr(provider, "build_analysis_request_body", lambda **kwargs: {"model": "fixture", "messages": []})
+    if not transport_callback:
+        monkeypatch.setattr(provider, "_send", lambda *args, **kwargs: response)
+    calls = {"request": 0, "response": 0}
+    save_request, save_response = model_evidence.save_model_request, model_evidence.save_model_transport_response
+    def request(*args, **kwargs):
+        calls["request"] += 1
+        return save_request(*args, **kwargs)
+    def archive(*args, **kwargs):
+        calls["response"] += 1
+        return save_response(*args, **kwargs)
+    monkeypatch.setattr(model_evidence, "save_model_request", request)
+    monkeypatch.setattr(model_evidence, "save_model_transport_response", archive)
+    provider.analyze(image_path=tmp_path / "unused.jpg", model="fixture", detail="high", stage="single",
+                     upload_guard={"database_path": str(database.path), "photo_id": photo_id, "operation_id": operation})
+    assert calls == {"request": 1, "response": 1}
+    with database.session() as connection:
+        row = connection.execute("SELECT request_json,response_json FROM model_request_evidence WHERE operation_id=?",
+                                 (operation,)).fetchone()
+    assert json.loads(row["request_json"]) == {"model": "fixture", "messages": []}
+    assert row["response_json"] == response.text

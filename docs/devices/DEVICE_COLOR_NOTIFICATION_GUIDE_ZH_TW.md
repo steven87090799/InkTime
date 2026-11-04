@@ -71,7 +71,7 @@ Webhook delivery 採 **at-least-once** 語意。每個通知事件會持久化�
 1. Web「設定」→「裝置通知」填完整 `https://` URL 並啟用 Webhook。
 2. 若接收端需要 Bearer Token，在同頁「Webhook 認證 Token」輸入；它以平台主密鑰加密保存在 `secrets`，不進一般設定歷史或 Log。
 3. 按「傳送測試通知」。HTTP 2xx 視為成功。
-4. 失敗會在 60 秒、再 300 秒後重試；第三次仍失敗後標記 `failed`，不無限重送。
+4. 最多五次總嘗試（含第一次）；可重試失敗採帶隨機抖動的指數退避，並尊重有效的 `Retry-After`。不可重試錯誤可提早標記 `failed`；不無限重送。
 
 Payload 範例：
 
@@ -97,7 +97,7 @@ Webhook URL 是 administrator 級設定，但預設仍拒絕內網、Loopback、
 - GxEPD2 仍使用分頁顯示 buffer；畫面刷新時韌體逐 pixel 解碼，完整刷新時間主要由面板 waveform 決定。
 - 五張七色發布檔約 0.92 MiB，另加五張 PNG 預覽；三 Profile 全發布時約為這個量的三倍加預覽。請把 `/data/releases` 納入磁碟監控與備份容量估算。
 - Worker 發布是低頻 CPU 工作；若 N100 同時在做模型分析，可先暫停分析工作或改用 `bayer8`，避免兩個 CPU 密集工作同時競爭。
-- Scheduler 每 5 分鐘只做索引式 SQLite 查詢；沒有轉態時不送網路、不建立通知、不輸出事件 Log。
+- 裝置狀態每 5 分鐘掃描；待發通知至多每 60 秒有界入列10筆，沒有轉態時不送網路、不建立通知、不輸出事件 Log。
 
 ## 7. 升級與回滾順序
 

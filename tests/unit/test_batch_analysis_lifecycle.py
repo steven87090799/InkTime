@@ -3078,3 +3078,73 @@ def test_failed_item_authorization_cannot_override_other_paid_or_unknown_operati
         assert result["batch_ids"] == []
         assert service.batches.get(result["prepared_batch_ids"][0])["last_error_code"] == "BATCH-PAID-OPERATION-HOLD"
     assert fake.batch_counter == 1
+
+
+
+def test_batch_accepts_same_fenced_json_as_realtime_without_new_request(app, tmp_path, monkeypatch):
+    _prepare_photos(app, tmp_path, count=1)
+    fake = FakeBatchProvider()
+    service = _wire_fake(app, fake)
+    submitted = service.submit(scope="sample", sample_count=1)
+    batch_id = submitted["batch_ids"][0]
+    download = fake.download_file_content
+    def fenced(file_id, destination):
+        path = download(file_id, destination)
+        lines = [json.loads(line) for line in path.read_text().splitlines()]
+        for line in lines:
+            message = line["response"]["body"]["choices"][0]["message"]
+            message["content"] = "```json\n" + message["content"] + "\n```"
+        path.write_text("\n".join(json.dumps(line) for line in lines) + "\n")
+        return path
+    monkeypatch.setattr(fake, "download_file_content", fenced)
+    service.poll_due(limit=10)
+    assert service.import_batch(batch_id)["success"] == 1
+    assert fake.batch_counter == 1
+
+
+def test_legacy_null_phase_lease_cannot_be_extended_by_poll_heartbeat(app):
+    service = app.extensions["inktime_batch_analysis_service"]
+    assert service._phase_is_stale({"phase_started_at": None,
+        "created_at": (datetime.now(timezone.utc) - timedelta(days=2)).isoformat(),
+        "updated_at": datetime.now(timezone.utc).isoformat()})
+
+
+def test_cancelled_parent_job_cannot_split_another_shard(app, tmp_path):
+    _prepare_photos(app, tmp_path, count=1)
+    service = _wire_fake(app, FakeBatchProvider())
+    batch_id = service.submit(scope="sample", sample_count=1, created_by="tester")["batch_ids"][0]
+    batch = service.batches.get(batch_id)
+    with service.database.transaction() as connection:
+        connection.execute("UPDATE analysis_batches SET status='preparing' WHERE id=?", (batch_id,))
+        connection.execute("UPDATE jobs SET status='cancelled' WHERE id=?", (batch["job_id"],))
+        item = connection.execute("SELECT id FROM analysis_batch_items WHERE batch_id=? LIMIT 1", (batch_id,)).fetchone()[0]
+    with pytest.raises(ValueError, match="準備已停止"):
+        service.batches.create_child_batch(batch_id, "must-not-exist", [item], local_input_path="unused", total_items=1)
+    assert service.batches.get("must-not-exist") is None
+
+
+def test_identical_batch_lines_preserve_each_file_occurrence(app, tmp_path):
+    from inktime.app.repositories.batch_result_staging import BatchResultStore
+    _prepare_photos(app, tmp_path, count=1)
+    service = _wire_fake(app, FakeBatchProvider())
+    batch_id = service.submit(scope="sample", sample_count=1, created_by="tester")["batch_ids"][0]
+    with BatchResultStore(service.database, batch_id) as store:
+        store.save_raw(b'{"custom_id":"same"}', source_file="file-a", line_number=1)
+        store.save_raw(b'{"custom_id":"same"}', source_file="file-a", line_number=2)
+        store.save_raw(b'{"custom_id":"same"}', source_file="file-a", line_number=2)
+    with service.database.session() as connection:
+        assert connection.execute("SELECT COUNT(*) FROM batch_result_raw WHERE batch_id=?", (batch_id,)).fetchone()[0] == 1
+        assert connection.execute("SELECT COUNT(*) FROM batch_result_occurrences WHERE batch_id=?", (batch_id,)).fetchone()[0] == 2
+
+
+def test_batch_estimate_counts_byte_bound_and_reports_sampling_limits(app):
+    service = app.extensions["inktime_batch_analysis_service"]
+    # No filesystem or provider activity is needed to check the estimate contract.
+    from unittest.mock import patch
+    with patch.object(service, "_batch_limits", return_value=(500, 700000)):
+        estimate = service._estimate_candidates(
+            candidates=[{}] * 5, skipped={"cache_hits": 0, "sha_duplicates": 0, "never_upload_excluded": 0},
+            scope="sample", sample_seed="seed", model="model", analysis_fingerprint="fp", provider_id="missing")
+    assert estimate["estimated_jsonl_bytes"] == 1750000
+    assert estimate["estimated_shard_count"] == 3
+    assert "100000" in estimate["estimate_scope_note"]

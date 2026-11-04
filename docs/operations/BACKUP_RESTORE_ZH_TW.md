@@ -11,14 +11,14 @@ Web「備份與還原」建立的 ZIP 使用 SQLite online backup API 取得一�
 - `settings.json`：可讀的一般設定匯出，不含 Secret。
 - `manifest.json`：備份格式、應用程式版本、Database Schema Version、每個檔案 SHA-256／大小及重要資料表筆數。
 
-預設不包含 API Key、Webhook Token、原始照片、縮圖快取、已渲染的 Release 檔案或 Log。Secret 會從備份用的 SQLite 副本刪除並執行 secure delete／`VACUUM INTO`；還原後請在 Provider／通知設定重新輸入。原始照片與 `/data/releases` 仍須使用 NAS snapshot 或其他檔案備份制度；SQLite 內的顯示／發布歷史紀錄會保留，但沒有對應 Release 檔案時不能直接回滾到該輸出。
+預設不包含 API Key、Webhook Token、原始照片、縮圖快取、已渲染的 Release payload、韌體映像、model-inputs 原始模型輸入、Batch JSONL／下載檔或 Log；需另備份完整資料目錄與原圖。SQLite 仍是完整資料表快照（Secret 依選項排除），包含已持久化的付費回應與歷史證據。Secret 會從備份用的 SQLite 副本刪除並執行 secure delete／`VACUUM INTO`；還原後請在 Provider／通知設定重新輸入。原始照片與 `/data/releases` 仍須使用 NAS snapshot 或其他檔案備份制度；SQLite 內的顯示／發布歷史紀錄會保留，但沒有對應 Release 檔案時不能直接回滾到該輸出。
 
 Manifest 的 `backup_scope` 明確區分 Metadata database、Release payload 與原始照片。平台啟動 reconciliation 會把 DB 有紀錄但檔案缺失標記 `payload_missing`、把檔案存在但 DB 無紀錄標記 orphan，並將失效 latest pointer 回復到同 Profile 最新的完整 published Release；未知 Release 不會自動刪除。`display_history` 是歷史事實，即使 Payload 已不存在也保留。
 
 ## 建立與驗證
 
 1. 以 administrator 登入 Web，進入「備份與還原」。
-2. 按「立即備份」，完成後下載 `inktime-backup-*.zip`。
+2. 按「立即備份」，進入背景工作頁；完成後下載 `inktime-backup-*.zip`。
 3. 應用在建立時已驗證 ZIP 成員、SHA-256 與 SQLite `PRAGMA integrity_check`；仍建議把下載檔複製到另一個實體儲存位置。
 
 不要手動修改 ZIP 內任何檔案；manifest 雜湊不符時還原工具會在碰觸現有資料庫前拒絕。
@@ -45,7 +45,7 @@ docker compose up -d
 3. 用 SQLite backup API 建立目前資料庫的 `inktime-pre-restore-*.sqlite3` 安全副本。
 4. 必要時只在暫存資料庫執行舊版 Schema Migration，再 checkpoint WAL。
 5. 原子替換正式資料庫，重新執行完整性檢查；只有未向前 Migration 時才直接比對原 Manifest 筆數，避免把升級新增／修復資料誤判為還原失敗。
-6. 任一還原後檢查失敗時，自動以安全副本回復原資料庫；安全副本會保留供人工查核。
+6. 任一還原後檢查失敗時，嘗試以安全副本回復原資料庫；安全副本會保留供人工查核。還原開始後的 paid-reconciliation-required 暫停保護不自動移除，即使已回復原 DB 仍須查核外部付費狀態，不能靠重試還原恢復自動送圖。
 
 啟動後依序確認：
 

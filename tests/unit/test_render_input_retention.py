@@ -116,3 +116,21 @@ def test_compare_cache_read_never_deletes_partial_publication(app):
     path.write_bytes(b"in-flight")
     assert workload._cached_compare(token) is None
     assert path.read_bytes() == b"in-flight"
+
+
+def test_dead_uploader_staging_is_reclaimed_without_deleting_live_upload(app):
+    workload = app.extensions["inktime_render_workload_service"]
+    token, _ = workload.save_upload(BytesIO(b"orphan-input"), suffix=".jpg", max_bytes=128)
+    path = workload.input_path(token, suffix=".jpg")
+    _old(path)
+    old = (datetime.now(timezone.utc) - timedelta(days=3)).isoformat()
+    with workload.jobs.database.transaction() as connection:
+        connection.execute("UPDATE render_input_leases SET created_at=? WHERE token=?", (old, token))
+    assert workload.cleanup() == 0
+    assert path.exists()
+    # Simulate process exit releasing its cross-process uploader fence.
+    workload._release_staging_owner(token)
+    workload.cleanup()
+    assert not path.exists()
+    with workload.jobs.database.session() as connection:
+        assert connection.execute("SELECT 1 FROM render_input_leases WHERE token=?", (token,)).fetchone() is None

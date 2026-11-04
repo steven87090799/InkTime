@@ -564,16 +564,16 @@ jobs:
         run: |
           docker compose --env-file .ci-lan.env start inktime-web
           docker compose --env-file .ci-lan.env exec -T inktime-web sh -c '
-            test "$(id -u)" = 10001
-            test -w /data
-            ! touch /app/.ci-write-test
-            ! python -m pip --version
-            test ! -e /app/tests
-            test ! -e /app/.github
-            test ! -e /app/docs
-            test ! -e /app/.env
-            test ! -e /app/esp32
-            test ! -e /app/.gunicorn
+            test "$(id -u)" = 10001 || exit 1
+            test -w /data || exit 1
+            if touch /app/.ci-write-test; then exit 1; fi
+            if python -m pip --version; then exit 1; fi
+            test ! -e /app/tests || exit 1
+            test ! -e /app/.github || exit 1
+            test ! -e /app/docs || exit 1
+            test ! -e /app/.env || exit 1
+            test ! -e /app/esp32 || exit 1
+            test ! -e /app/.gunicorn || exit 1
           '
           docker compose --env-file .ci-lan.env logs --no-color inktime-web > .ci-web-runtime.log
           if grep -E 'Errno 30|Control server error' .ci-web-runtime.log; then
@@ -625,11 +625,14 @@ jobs:
           chmod 777 .ci-data
           openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
             -subj '/CN=InkTime CI Test CA' \
+            -addext 'basicConstraints=critical,CA:TRUE,pathlen:0' \
+            -addext 'keyUsage=critical,keyCertSign,cRLSign' \
+            -addext 'subjectKeyIdentifier=hash' \
             -keyout .ci-tls/ca.key -out .ci-tls/ca.crt
           openssl req -newkey rsa:2048 -nodes \
             -subj '/CN=inktime-ci.acme.dev' \
             -keyout .ci-tls/server.key -out .ci-tls/server.csr
-          printf 'subjectAltName=DNS:inktime-ci.acme.dev\nextendedKeyUsage=serverAuth\n' > .ci-tls/server.ext
+          printf 'subjectKeyIdentifier=hash\nauthorityKeyIdentifier=keyid,issuer\nbasicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature,keyEncipherment\nsubjectAltName=DNS:inktime-ci.acme.dev\nextendedKeyUsage=serverAuth\n' > .ci-tls/server.ext
           openssl x509 -req -days 1 -sha256 \
             -in .ci-tls/server.csr -CA .ci-tls/ca.crt -CAkey .ci-tls/ca.key \
             -CAcreateserial -extfile .ci-tls/server.ext -out .ci-tls/server.crt

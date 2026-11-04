@@ -1,6 +1,9 @@
 # ruff: noqa: S608  # SQL fragments below are built only from server-controlled predicates.
 from __future__ import annotations
 
+from contextlib import contextmanager
+from contextvars import ContextVar
+
 import calendar
 from datetime import date, datetime, timedelta, timezone
 import hashlib
@@ -200,6 +203,7 @@ class RenderService:
         self.release_coordinator = release_coordinator
         self.locations = locations
         self.weather = weather
+        self._selection_devices: ContextVar[tuple[str, ...]] = ContextVar("selection_devices", default=())
         self.observability = observability
         self.resilience = resilience
 
@@ -257,6 +261,7 @@ class RenderService:
         secondary_caption: dict[str, Any] | None = None,
         device_config: dict[str, Any] | None = None,
         selection_target_date: date | None = None,
+        display_date: date | None = None,
     ) -> dict[str, Any]:
         """Resolve every data-dependent render choice before fingerprinting."""
         primary = self.photos.get_with_path(photo_id)
@@ -349,7 +354,7 @@ class RenderService:
         dither_plan = self.resolve_effective_dither(
             primary, secondary, requested=dither, device_config=device
         )
-        display_date = self._today()
+        display_date = display_date or self._today()
         caption_records = self._caption_records(
             [photo for photo in (primary, secondary) if photo is not None], display_date
         )
@@ -750,6 +755,7 @@ class RenderService:
             }
         location_text = self.location_name(photo)
         return {
+            "preview_quantized": False,
             "render_plan": plan,
             "primary_photo": photo_version(photo, x=crop_x, y=crop_y),
             "secondary_photo": photo_version(secondary),
@@ -1834,7 +1840,8 @@ class RenderService:
         ):
             layout_key = "photo_info"
             secondary_photo_id = None
-        caption = "" if layout_key in {"photo_pair", "photo_pair_caption"} else self._caption(photo_id)
+        caption = ("" if layout_key in {"photo_pair", "photo_pair_caption"} else
+                   str(primary_caption["text"]) if primary_caption is not None else self._caption(photo_id))
         adaptive_requested = layout_key == "adaptive_memory"
         orientation_key = orientation or str(
             device_config.get("frame_orientation")
@@ -2338,6 +2345,7 @@ class RenderService:
         assign_device_releases: bool = True,
         selection_run_ids: list[str] | None = None,
         target_date: date | None = None,
+        display_date: date | None = None,
     ) -> dict:
         publish_started = time.monotonic()
         selection_run_ids = list(selection_run_ids or [])
@@ -2444,7 +2452,7 @@ class RenderService:
                 else:
                     composition_plans = [
                         self.resolve_render_plan(photo_id, layout=effective_layout, device_config=device,
-                                                 profile=profile_key, selection_target_date=selection_target)
+                                                 profile=profile_key, selection_target_date=selection_target, display_date=display_date)
                         for photo_id in selected[:quantity]
                     ]
                 for plan in composition_plans:
@@ -2522,7 +2530,7 @@ class RenderService:
                 activate_pointers=activate_pointers,
                 selection_run_ids=selection_run_ids,
             )
-            self._record_production_trace(list(dict.fromkeys(release_photo_ids)), published, layout_key)
+            self._record_production_trace(list(dict.fromkeys(release_photo_ids)), published, layout_key, selection_run_ids=selection_run_ids)
             log_event(
                 LOGGER,
                 logging.INFO,
@@ -2549,7 +2557,7 @@ class RenderService:
                     )
                 )
         else:
-            plans = [self.resolve_render_plan(photo_id, selection_target_date=selection_target) for photo_id in selected]
+            plans = [self.resolve_render_plan(photo_id, selection_target_date=selection_target, display_date=display_date) for photo_id in selected]
         for plan in plans:
             plan["primary_eligibility_source"] = eligibility_sources.get(str(plan["primary_photo_id"]))
             plan["secondary_eligibility_source"] = (
@@ -2617,7 +2625,7 @@ class RenderService:
             history=history,
             selection_run_ids=selection_run_ids,
         )
-        self._record_production_trace(release_photo_ids, published, layout_key)
+        self._record_production_trace(release_photo_ids, published, layout_key, selection_run_ids=selection_run_ids)
         log_event(
             LOGGER,
             logging.INFO,
@@ -2629,14 +2637,35 @@ class RenderService:
         )
         return published[0] if len(published) == 1 else {"releases": published}
 
-    def _record_production_trace(
-        self, photo_ids: list[str], releases: list[dict[str, Any]], layout: str
+    def _record_production_trace(self, photo_ids, releases, layout, *, selection_run_ids=None) -> None:
+        try:
+            self._record_production_trace_detail(photo_ids, releases, layout, selection_run_ids=selection_run_ids)
+        except Exception as exc:
+            LOGGER.warning("Release 已發布，附加 trace 待補：%s", type(exc).__name__)
+            for release in releases:
+                release["trace_status"] = "pending"
+
+    def _record_production_trace_detail(
+        self, photo_ids: list[str], releases: list[dict[str, Any]], layout: str, *, selection_run_ids=None
     ) -> None:
         if self.resilience is None:
             return
-        candidates = [
-            {"photo_id": value, "selected": True, "combined_score": 0.0} for value in photo_ids[:50]
-        ]
+        candidates: list[dict[str, Any]] = []
+        total_candidates = 0
+        methods = {}
+        run_ids = list(dict.fromkeys(selection_run_ids or []))
+        history = DisplayHistoryRepository(self.database)
+        for run_id in run_ids:
+            detail = history.detail(run_id)
+            if detail is None:
+                continue
+            methods[run_id] = detail["method"]
+            total_candidates += int(detail["candidate_count"])
+            if len(candidates) < 50:
+                candidates.extend({"photo_id": row["photo_id"], "selected": bool(row["selected"]),
+                                   "combined_score": row["score"], "base_score": row["score"],
+                                   "adjusted_score": row["score"], "score_components": row["snapshot"]}
+                                  for row in detail["candidates"][:50-len(candidates)])
         algorithm = self.resilience.algorithm_version(
             name="render_selection",
             version="v1",
@@ -2657,8 +2686,11 @@ class RenderService:
             ),
             layout_mode=layout,
             candidates=candidates,
-            candidate_count=len(photo_ids),
-            eligible_count=len(photo_ids),
+            candidate_count=total_candidates,
+            eligible_count=total_candidates,
+            context={"selection_run_ids": run_ids, "selection_methods": methods,
+                     "release_ids": [str(row.get("release_id") or row.get("id") or "") for row in releases],
+                     "candidate_source": "photo_selection_history"},
         )
         if releases:
             self.resilience.attach_release(
@@ -2751,6 +2783,7 @@ class RenderService:
         score_kind: str = SEMANTIC_SCORE_KIND,
         date_priorities: dict[str, int] | None = None,
         priority_min_score: float = 0,
+        minimum_score: float | None = None,
     ) -> list[dict[str, Any]]:
         if score_kind not in {SEMANTIC_SCORE_KIND, LOCAL_QUALITY_SCORE_KIND}:
             raise ValueError("RENDER-005 不支援的選片評分來源")
@@ -2815,6 +2848,10 @@ class RenderService:
                         ORDER BY {preferred_analysis_order_sql('latest')} LIMIT 1
                     )
                     WHERE {predicate}
+                      AND NOT EXISTS(SELECT 1 FROM photo_feedback f WHERE f.photo_id=p.id
+                          AND f.feedback_type='SKIP_TEMPORARILY'
+                          AND (f.expires_at IS NULL OR julianday(f.expires_at)>julianday(?))
+                          AND (f.device_id IS NULL OR f.device_id IN (SELECT value FROM json_each(?))))
                       AND (?=0 OR p.captured_month_day IN (SELECT value FROM json_each(?)))
                       AND (?=0 OR (
                           p.captured_date IS NOT NULL
@@ -2824,7 +2861,8 @@ class RenderService:
                           IN (SELECT value FROM json_each(?)))
                     )
                     SELECT * FROM ranked_candidates
-                    WHERE (? IS NULL OR exposure_count>? OR (exposure_count=? AND
+                    WHERE (? IS NULL OR selection_score>=?)
+                      AND (? IS NULL OR exposure_count>? OR (exposure_count=? AND
                         (date_priority>? OR (date_priority=? AND
                         (combined_score<? OR (combined_score=? AND id>?))))))
                     ORDER BY exposure_count ASC,date_priority ASC,combined_score DESC,id LIMIT 250
@@ -2833,12 +2871,16 @@ class RenderService:
                         int(date_priorities is not None),
                         priority_min_score,
                         json.dumps(date_priorities or {}),
+                        datetime.now(timezone.utc).isoformat(),
+                        json.dumps(self._selection_devices.get()),
                         int(month_days is not None),
                         json.dumps(month_days or []),
                         int(older_only),
                         target.year,
                         int(bool(candidate_years)),
                         json.dumps(candidate_years or []),
+                        minimum_score,
+                        minimum_score,
                         last_score,
                         last_count,
                         last_count,
@@ -2861,6 +2903,7 @@ class RenderService:
                             continue
                         seen_contents.add(content)
                     candidate = dict(stored)
+                    candidate["day_distance"] = self._month_day_distance(target, candidate.get("captured_month_day")) or 0
                     candidate.pop("raw_json", None)
                     candidate.pop("exif_json", None)
                     result.append(candidate)
@@ -2993,9 +3036,9 @@ class RenderService:
                 outside = self._candidate_query(
                     target=target, month_days=None, older_only=False,
                     limit=max(500, limit), candidate_years=candidate_years, score_kind=score_kind,
+                    minimum_score=minimum,
                 )
-                append([row for row in outside if float(row.get("selection_score") or 0) >= minimum],
-                       "ranked_fallback")
+                append(outside, "ranked_fallback")
         elif mode == "top_ranked":
             append(self._candidate_query(
                 target=target,
@@ -3074,7 +3117,11 @@ class RenderService:
             result.append(photo)
         return result
 
-    def select_auto_photo_candidates(
+    def select_auto_photo_candidates(self, *args, device_ids=None, **kwargs):
+        with self._device_selection_scope(device_ids):
+            return self._select_auto_photo_candidates_scoped(*args, **kwargs)
+
+    def _select_auto_photo_candidates_scoped(
         self, quantity: int, *, frame_orientation: str, target_date: date | None = None, record_history: bool = False,
     ) -> list[dict[str, Any]]:
         # The configured pool bounds memory/work. Output quantity bounds frames,
@@ -3103,7 +3150,22 @@ class RenderService:
                 row["selection_run_id"] = run_id
         return selected
 
-    def select_candidates_details(
+    @contextmanager
+    def _device_selection_scope(self, device_ids):
+        if device_ids is None:
+            yield
+            return
+        token = self._selection_devices.set(tuple(dict.fromkeys(str(value) for value in device_ids)))
+        try:
+            yield
+        finally:
+            self._selection_devices.reset(token)
+
+    def select_candidates_details(self, quantity=None, *, device_ids=None, **kwargs):
+        with self._device_selection_scope(device_ids):
+            return self._select_candidates_details_scoped(quantity, **kwargs)
+
+    def _select_candidates_details_scoped(
         self,
         quantity: int | None = None,
         *,

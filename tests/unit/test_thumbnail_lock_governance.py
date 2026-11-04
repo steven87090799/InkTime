@@ -183,3 +183,32 @@ def test_retained_preview_survives_expiry_and_capacity_until_record_removed(tmp_
     cache.cleanup(max_bytes=0, retention_days=1, active_hashes=set())
     with cache.acquire_existing(digest, 1600) as retained:
         assert retained is None
+
+
+
+def test_analysis_verification_reuses_hash_but_detects_preserved_mtime_replacement(tmp_path, monkeypatch):
+    import pytest
+    from inktime.app.domain.photos.formats import assert_source_content, ImageSourceError
+    source, digest = _source(tmp_path)
+    cache = ThumbnailCache(tmp_path / "verified-cache")
+    cache.get_or_create(source, digest, 512)
+    verification = assert_source_content(source, digest)
+    calls = []
+    original_hash = cache._content_sha256
+    def counted(path):
+        calls.append(path)
+        return original_hash(path)
+    monkeypatch.setattr(cache, "_content_sha256", counted)
+    with cache.acquire_for_use(source, digest, 512, verify_source=True, source_verification=verification):
+        pass
+    assert calls == []
+    info = source.stat()
+    payload = bytearray(source.read_bytes())
+    payload[100] ^= 1
+    source.write_bytes(payload)
+    os.utime(source, ns=(info.st_atime_ns, info.st_mtime_ns))
+    assert source.stat().st_size == info.st_size
+    with pytest.raises(ImageSourceError, match="THUMB-004|內容已變更"):
+        with cache.acquire_for_use(source, digest, 512, verify_source=True, source_verification=verification):
+            raise AssertionError("stale content must not be uploaded")
+    assert len(calls) == 1

@@ -54,7 +54,7 @@
   <p class="prompt-equation">AI 選片分 = AI 回憶價值 × 0.67 ＋ 視覺 × 0.33 ＋ 特殊加分，限制在 0～100。</p>
   <p>有效特殊等級 = AI special_level ＋ 最愛提升 {{ prompt_preview.favorite_special_level_boost }} 級，最高 4 級。等級 0／1／2／3／4 分別加 {{ prompt_preview.special_bonuses|join('／') }} 分。不再依照片庫稀有度加級，也不再轉換百分位；同一份模型結果不會因照片庫大小改變分數。</p>
   <p><strong>例：</strong>回憶 80、視覺 60 → 基礎 {{ prompt_preview.example.base_ranking_score }} 分；特殊等級 2 加 {{ prompt_preview.example.special_bonus }} → AI 選片分 {{ prompt_preview.example.raw_ranking_score }} 分（未加最愛）。</p>
-  <p>自動顯示只接受本機與 AI 都已完成的照片；不足時只使用已完成候選，沒有候選則保留既有畫面，不用尚未完成 AI 的照片補位。內容排除依分類與信心門檻處理，高分與最愛不能繞過 AI 內容排除，人工恢復可覆寫。</p>
+  <p>自動顯示只接受本機與 AI 都已完成的照片；不足時只使用已完成候選，沒有候選則保留既有畫面，不用尚未完成 AI 的照片補位。內容排除依分類與信心門檻處理，高分、最愛與本機人工覆寫均不能跳過正式 v6 安全與方向守門；photo_only 本機測試另有其用途限制。</p>
   <p>E6 顯示適合度保留供參考，不混入 AI 排序，也不單憑 E6 分數排除。歷年同日模式先限定日期範圍，範圍內按 AI 分數排序；多樣性只在 AI 同分時作選擇，不加入日期或播放次數加減分。</p>
 </section>
 
@@ -135,7 +135,7 @@
     result.hidden = true;
     result.replaceChildren();
     try {
-      testRequestKey ||= crypto.randomUUID();
+      testRequestKey ||= window.inktimeNewOperationKey();
       const response = await window.inktimeFetch('/api/v1/scoring/test', {
         method: 'POST', headers: {'Idempotency-Key': testRequestKey}, body: new FormData(testForm)
       });
