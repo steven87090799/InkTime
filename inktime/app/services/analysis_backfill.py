@@ -219,6 +219,9 @@ class AnalysisBackfillService:
             if not after_scan and control["last_monthly_audit"] == month:
                 return None
             key = f"model-coverage-audit:{'scan' if after_scan else month}"
+            existing = self.jobs.active_dedupe_job(key)
+            if existing is not None and existing["status"] != "pending":
+                return None
             job_id = self.jobs.create_maintenance(
                 kind="analysis_coverage_audit", name="模型資訊完整安全核對", priority=5,
                 settings={"month": month, "max_attempts": 1}, created_by=None, dedupe_key=key,

@@ -1061,7 +1061,9 @@ def test_offline_transient_finalize_crash_isolated_and_terminal(app):
         [
             job
             for job in repository.list()
-            if '"offline_prepare"' in str(job["settings_json"]) and device_id in str(job["settings_json"])
+            if '"offline_prepare"' in str(job["settings_json"])
+            and device_id in str(job["settings_json"])
+            and json.loads(job["settings_json"])["offline_prepare"]["target_date"] == "2026-08-03"
         ]
     ) == 1
 

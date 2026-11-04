@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import logging
+
+import pytest
 from uuid import uuid4
 
 from inktime.app.core import logging as logging_core
@@ -17,6 +19,22 @@ from inktime.app.core.logging import (
     should_log_sample,
 )
 from inktime.app.core.security import redact, redact_text, register_secret
+
+
+@pytest.fixture(autouse=True)
+def isolated_registered_credentials():
+    # Registrations belong to the process under test. Credentials from other
+    # tests (often dummy words) must not make log tests order-dependent.
+    from inktime.app.core import security
+    with security._SECRET_LOCK:
+        previous = security._REGISTERED_SECRETS.copy()
+        security._REGISTERED_SECRETS.clear()
+    try:
+        yield
+    finally:
+        with security._SECRET_LOCK:
+            security._REGISTERED_SECRETS.clear()
+            security._REGISTERED_SECRETS.update(previous)
 
 
 def test_structured_log_redacts_secrets():
@@ -226,3 +244,25 @@ def test_logging_failure_does_not_escape_to_production_caller():
 def test_redact_text_preserves_correlation_identifiers():
     value = "job_id=job-1 release_id=rel-2 device_id=dev-3 request_id=req-4"
     assert redact_text(value) == value
+
+
+def test_registered_url_credentials_are_masked_without_breaking_safe_metadata():
+    register_secret("private-value")
+    result = redact_text("https://private-value:private-value@example.test/path?token=private-value&view=summary")
+    assert "private-value" not in result
+    assert "example.test" in result and "view=summary" in result
+
+
+def test_registered_dummy_word_cannot_rename_sensitive_diagnostic_labels():
+    register_secret("secret")
+    record = logging.LogRecord("runtime", logging.INFO, "", 0, "diagnostics", (), None)
+    record.details = {"device_secret": "private-value", "queue_depth": 2}
+    details = json.loads(JsonFormatter().format(record))["details"]
+    assert details == {"device_secret": "[已遮蔽]", "queue_depth": 2}
+
+
+def test_registered_credential_inside_url_host_is_still_redacted():
+    register_secret("private-value")
+    result = redact_text("https://private-value.example.test/path?view=summary")
+    assert "private-value" not in result
+    assert "example.test" in result and "view=summary" in result

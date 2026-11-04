@@ -9,7 +9,7 @@ import secrets
 import threading
 from collections import OrderedDict
 from typing import Any
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, quote, urlencode, urlsplit, urlunsplit
 
 from werkzeug.security import check_password_hash, generate_password_hash
 
@@ -50,36 +50,43 @@ def register_secret(value: str) -> None:
 
 
 def redact_text(value: str) -> str:
-    result = str(value)
     with _SECRET_LOCK:
         registered = sorted(_REGISTERED_SECRETS, key=len, reverse=True)
-    for secret in registered:
-        result = result.replace(secret, "[已遮蔽]")
-    result = SENSITIVE_TEXT.sub(
-        lambda match: f"{match.group(1)}[已遮蔽]" if match.group(1) else "[已遮蔽]",
-        result,
-    )
 
-    def redact_url(match: re.Match[str]) -> str:
-        candidate = match.group(0)
+    def plain(text: str) -> str:
+        for secret in registered:
+            text = text.replace(secret, "[已遮蔽]")
+        return SENSITIVE_TEXT.sub(
+            lambda match: f"{match.group(1)}[已遮蔽]" if match.group(1) else "[已遮蔽]", text,
+        )
+
+    def redact_url(candidate: str) -> str:
+        # Parse before masking: brackets introduced by a masked credential in
+        # userinfo/hostname would otherwise destroy the URL and its diagnostics.
         try:
             parts = urlsplit(candidate)
-            netloc = parts.netloc
-            if parts.username is not None or parts.password is not None:
-                hostname = parts.hostname
-                if not hostname:
-                    return "[已遮蔽 URL]"
-                safe_host = f"[{hostname}]" if ":" in hostname else hostname
-                netloc = f"{safe_host}:{parts.port}" if parts.port is not None else safe_host
+            hostname = parts.hostname
+            if not hostname:
+                return "[已遮蔽 URL]"
+            redacted_host = quote(plain(hostname), safe=":.")
+            safe_host = f"[{redacted_host}]" if ":" in hostname else redacted_host
+            netloc = f"{safe_host}:{parts.port}" if parts.port is not None else safe_host
             query = [
-                (key, "[已遮蔽]" if SENSITIVE_QUERY_KEY.fullmatch(key) else item)
+                (plain(key), "[已遮蔽]" if SENSITIVE_QUERY_KEY.fullmatch(key) or SENSITIVE_KEY.search(key) else plain(item))
                 for key, item in parse_qsl(parts.query, keep_blank_values=True)
             ]
-            return urlunsplit((parts.scheme, netloc, parts.path, urlencode(query), parts.fragment))
+            return urlunsplit((parts.scheme, netloc, plain(parts.path), urlencode(query), plain(parts.fragment)))
         except (TypeError, ValueError):
             return "[已遮蔽 URL]"
 
-    result = re.sub(r"https?://[^\s<>'\"]+", redact_url, result)
+    source = str(value)
+    chunks: list[str] = []
+    previous = 0
+    for match in re.finditer(r"https?://[^\s<>'\"]+", source):
+        chunks.extend((plain(source[previous:match.start()]), redact_url(match.group(0))))
+        previous = match.end()
+    chunks.append(plain(source[previous:]))
+    result = "".join(chunks)
     return BASE64.sub("[已遮蔽圖片資料]", GPS.sub("[已遮蔽 GPS]", PRIVATE_PATH.sub("[已遮蔽路徑]", result)))
 
 

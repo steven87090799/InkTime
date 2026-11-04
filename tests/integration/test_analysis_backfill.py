@@ -345,6 +345,6 @@ def test_scheduler_audit_resumes_pending_checkpoint_without_duplicate_job(app):
     assert service.jobs.get(job_id)["status"] == "pending"
     assert service.enqueue_audit(now) == job_id
     assert service.jobs.get(job_id)["status"] == "running"
-    assert service.enqueue_audit(now) == job_id
+    assert service.enqueue_audit(now) is None
     with service.repository.database.session() as connection:
         assert connection.execute("SELECT COUNT(*) FROM jobs WHERE dedupe_key=?", (key,)).fetchone()[0] == 1

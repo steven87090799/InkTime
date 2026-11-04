@@ -256,6 +256,9 @@ def test_candidate_batch_keeps_order_and_rejects_ineligible_members(app, tmp_pat
         with original() as connection:
             yield connection
     monkeypatch.setattr(candidates.database, "session", counted)
+    if local:
+        with original() as connection:
+            connection.execute("UPDATE photos SET local_candidate_score=80 WHERE id IN ('first','second','excluded')")
     require = candidates.require_local if local else candidates.require
     rows = require(["second", "first", "second"])
     assert [row["id"] for row in rows] == ["second", "first"]

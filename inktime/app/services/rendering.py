@@ -755,6 +755,7 @@ class RenderService:
             }
         location_text = self.location_name(photo)
         return {
+            "preview_quantized": False,
             "render_plan": plan,
             "primary_photo": photo_version(photo, x=crop_x, y=crop_y),
             "secondary_photo": photo_version(secondary),

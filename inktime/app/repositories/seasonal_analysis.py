@@ -87,7 +87,9 @@ class SeasonalAnalysisRepository:
         while True:
             context = self.database.session() if connection is None else nullcontext(connection)
             with context as active:
-                rows = self._candidate_page(active, days, target is not None, after, content_sha256=content_sha256)
+                rows = (self._candidate_page(active, days, target is not None, after)
+                        if content_sha256 is None else
+                        self._candidate_page(active, days, target is not None, after, content_sha256=content_sha256))
             if not rows:
                 break
             page = []
