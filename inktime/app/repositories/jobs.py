@@ -665,7 +665,7 @@ class JobRepository:
                         if str(dedupe_key).startswith("idempotency:")
                         else (
                         "status NOT IN ('failed','cancelled')"
-                        if kind == "backup"
+                        if kind == "backup" and dedupe_key != "manual-backup"
                         else "status IN ('pending','preparing','running','pausing','retrying')"
                         )
                     )

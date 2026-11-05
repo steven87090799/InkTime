@@ -460,10 +460,11 @@ def backups_page():
 def create_backup():
     jobs = current_app.extensions["inktime_job_repository"]
     with jobs.database.operation_lock("manual-backup-enqueue"):
+        reused = jobs.active_dedupe_job("manual-backup") is not None
         job_id = jobs.create_maintenance(kind="backup", name="手動備份", settings={"source": "manual-backup", "max_attempts": 1},
                                          created_by=str(g.user["id"]), dedupe_key="manual-backup")
         jobs.transition(job_id, {"pending"}, "running", "manual_backup_started")
-    return {"job_id": job_id, "detail_url": f"/jobs/{job_id}"}, 202
+    return {"job_id": job_id, "detail_url": f"/jobs/{job_id}", "reused": reused}, 202
 
 
 @bp.get("/api/v1/backups/<name>")

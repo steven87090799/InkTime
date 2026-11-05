@@ -51,10 +51,10 @@ class BudgetService:
         return (datetime.now(timezone.utc) - timedelta(seconds=window)).isoformat()
 
     def expire_stale_reservations(self) -> int:
-        """Recover old Vision reservations only with durable settlement evidence.
+        """Recover operation reservations only with durable settlement evidence.
 
         Batch reservations belong to the importer, which knows when every item
-        is accounted. Unidentified/diagnostic and ambiguous reservations remain
+        is accounted. Unidentified and ambiguous reservations remain
         reserved; absence of usage is never evidence of zero cost.
         """
         cutoff = self._reservation_cutoff()
@@ -62,9 +62,11 @@ class BudgetService:
             return int(
                 connection.execute(
                     """UPDATE budget_reservations SET state='released'
-                    WHERE state='active' AND created_at<? AND id LIKE 'vision:%' AND EXISTS (
+                    WHERE state='active' AND created_at<? AND EXISTS (
                         SELECT 1 FROM billable_operations o
-                        WHERE o.id=substr(budget_reservations.id,8)
+                        WHERE o.id IN (budget_reservations.id,
+                            CASE WHEN substr(budget_reservations.id,1,7)='vision:'
+                                 THEN substr(budget_reservations.id,8) END)
                           AND (o.state='not_sent' OR (
                               o.state IN ('response','completed','approved') AND EXISTS (
                                   SELECT 1 FROM api_usage u WHERE u.operation_id=o.id
@@ -218,6 +220,8 @@ class BudgetService:
 
     def call(self, provider, method: str, **kwargs):
         """Shared paid-call gate for diagnostics and live benchmark subrequests."""
+        if getattr(provider, "kind", None) == "openai" and not self.openai.is_openai(getattr(provider, "provider_id", None)):
+            raise BudgetExceeded("原生 OpenAI 請求缺少有效的 Provider 帳戶 ID，未送出請求")
         function = getattr(provider, method)
         if not callable(function):
             raise ValueError("diagnostic provider method must be callable")

@@ -620,7 +620,7 @@ class DeviceRepository:
                         selected_fit,
                         selected_auth_mode,
                         selected_pairing_state,
-                        int(remote_changed),
+                        int(remote_changed or str(current["name"]) != name.strip()),
                         now,
                         device_id,
                     ),

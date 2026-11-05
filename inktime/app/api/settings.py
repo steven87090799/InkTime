@@ -47,7 +47,7 @@ from inktime.app.domain.rendering.system_presets import SYSTEM_PRESETS
 from inktime.app.services.provider_contracts import run_provider_contract
 from inktime.app.core.idempotency import scoped_idempotency_key, request_fingerprint
 from inktime.app.providers.base import ProviderResponse, Usage
-from inktime.app.repositories.billable_operations import BillableOperationRepository, UnreconciledOperationError
+from inktime.app.repositories.billable_operations import BillableOperationRepository, UnreconciledOperationError, paid_operation_lock_name
 
 
 bp = Blueprint("settings", __name__)
@@ -798,17 +798,18 @@ def test_provider(provider_id: str):
                                      request.headers.get("Idempotency-Key") or str(uuid4()))
         resource = request_fingerprint({"provider_id": provider_id, "level": level,
                                         "model": model, "revision": config["updated_at"]})
-        operation_id, checkpoint = operations.begin("diagnostic:" + resource, str(key), reuse_completed=True,
-                                                    context={"provider": provider.name, "model": model, "level": level})
-        if checkpoint is not None:
-            result = json.loads(checkpoint.content)
-        else:
-            result = run_provider_contract(
-                provider, level=level, model=model, budgets=current_app.extensions["inktime_budget_service"]
-            )
-            operations.save_response(operation_id, ProviderResponse(json.dumps(result), Usage(tokens_reported=False)))
-            if result["ok"]:
-                operations.finish(operation_id)
+        with operations.database.operation_lock(paid_operation_lock_name("diagnostic:" + resource)):
+            operation_id, checkpoint = operations.begin("diagnostic:" + resource, str(key), reuse_completed=True,
+                                                        context={"provider": provider.name, "model": model, "level": level})
+            if checkpoint is not None:
+                result = json.loads(checkpoint.content)
+            else:
+                result = run_provider_contract(
+                    provider, level=level, model=model, budgets=current_app.extensions["inktime_budget_service"]
+                )
+                operations.save_response(operation_id, ProviderResponse(json.dumps(result), Usage(tokens_reported=False)))
+                if result["ok"]:
+                    operations.finish(operation_id)
     except UnreconciledOperationError as exc:
         return {"message": str(exc), "error_code": exc.code}, 409
     except (ValueError, KeyError) as exc:

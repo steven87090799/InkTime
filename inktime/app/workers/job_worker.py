@@ -375,13 +375,24 @@ class BoundedJobWorker:
         # must reach the queue before another photo starts a model request.
         dispatch_capacity = min(self.queue_size, self.concurrency)
         timed_out: set[Future] = set()
+        finished_at: dict[str, float] = {}
+        finished_lock = threading.Lock()
         claimed_count = 0
         timeout_triggered = False
         last_lease_renewal = time.monotonic()
         executor = ThreadPoolExecutor(max_workers=self.concurrency, thread_name_prefix="inktime")
         forced_shutdown = False
 
+        def process_timed(item):
+            try:
+                return self._process(item)
+            finally:
+                with finished_lock:
+                    finished_at[str(item["id"])] = time.monotonic()
+
         def consume(future: Future, item_id: str) -> None:
+            with finished_lock:
+                finished_at.pop(item_id, None)
             try:
                 completed_id, result, cost = future.result()
             except Exception as exc:
@@ -444,8 +455,9 @@ class BoundedJobWorker:
                     claimed = self.repository.claim(job_id, self.worker_id, capacity)
                     claimed_count += len(claimed)
                     for item in claimed:
-                        future = executor.submit(self._process, item)
-                        futures[future] = (str(item["id"]), time.monotonic())
+                        started = time.monotonic()
+                        future = executor.submit(process_timed, item)
+                        futures[future] = (str(item["id"]), started)
                     self.max_observed_futures = max(self.max_observed_futures, len(futures))
 
                 if not futures:
@@ -459,11 +471,13 @@ class BoundedJobWorker:
                     wait_timeout = min(wait_timeout, max(0.0, self.shutdown_deadline - time.monotonic()))
                 done, _ = wait(futures, timeout=wait_timeout, return_when=FIRST_COMPLETED)
                 if self.timeout_seconds:
-                    expired = [
-                        future
-                        for future, (_item_id, started) in futures.items()
-                        if time.monotonic() - started >= self.timeout_seconds
-                    ]
+                    with finished_lock:
+                        observed_at = time.monotonic()
+                        expired = [
+                            future
+                            for future, (item_id, started) in futures.items()
+                            if finished_at.get(item_id, observed_at) - started >= self.timeout_seconds
+                        ]
                     for future in expired:
                         timed_out.add(future)
                         timeout_triggered = True

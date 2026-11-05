@@ -284,6 +284,32 @@ def test_global_temporary_skip_is_applied_before_candidate_limit_and_expires(app
     assert {row["id"] for row in rows} == {"keep-photo", "skip-photo"}
 
 
+@pytest.mark.parametrize("multiple_devices", [False, True])
+def test_direct_publish_applies_target_device_skips_to_manual_and_automatic_selection(app, tmp_path, monkeypatch, multiple_devices):
+    _candidate(app, tmp_path, "target-skip")
+    _candidate(app, tmp_path, "target-keep")
+    devices = app.extensions["inktime_device_repository"]
+    first, _ = devices.create("skip-target", layout_mode="calendar")
+    second, _ = devices.create("other-target", layout_mode="calendar")
+    targets = [first, second] if multiple_devices else [first]
+    database = app.extensions["inktime_database"]
+    with database.transaction() as connection:
+        connection.execute(
+            "INSERT INTO photo_feedback(photo_id,device_id,feedback_type,value,expires_at,created_at,updated_at) "
+            "VALUES ('target-skip',?,'SKIP_TEMPORARILY',1,'2099-01-01','2026-11-05','2026-11-05')", (first,))
+    service = app.extensions["inktime_render_service"]
+    with pytest.raises(ValueError, match="暫時略過"):
+        service.publish(["target-skip"], "test", device_ids=targets, quantity_override=1)
+    require = service.candidates.require_for_execution_mode
+    def inspect_selection(photo_ids, *args, **kwargs):
+        assert list(photo_ids) == ["target-keep"]
+        require(photo_ids, *args, **kwargs)
+        raise RuntimeError("selection verified before rendering")
+    monkeypatch.setattr(service.candidates, "require_for_execution_mode", inspect_selection)
+    with pytest.raises(RuntimeError, match="selection verified"):
+        service.publish([], "test", device_ids=targets, quantity_override=1)
+
+
 def test_device_selection_scope_is_nested_and_restored_after_error(app):
     service = app.extensions["inktime_render_service"]
     assert service._selection_devices.get() == ()

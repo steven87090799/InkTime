@@ -560,6 +560,7 @@ bool enhancedNetworkWakeRequested = false;
 bool currentPayloadIntegrityTrusted = false;
 bool deviceAuthInvalid = false;
 bool offlineDeliveryModeMismatchDetected = false;
+bool offlineScheduleTransientFailure = false;
 #if !INKTIME_PHOTOPAINTER_ENABLED
 static bool displayPairingCode(const Config &cfg, const String &pairingCode);
 #endif
@@ -1820,7 +1821,7 @@ static uint8_t loadAckJournalEntries(
 ) {
   if (entries == nullptr || capacity < inktime::kMaxAckJournalEntries) return UINT8_MAX;
   Preferences journal;
-  if (!journal.begin("acklog", true)) {
+  if (!inktime::ackjournal::beginRecovery(journal)) {
     nvs_handle_t handle;
     const esp_err_t result = nvs_open("acklog", NVS_READONLY, &handle);
     if (result == ESP_OK) nvs_close(handle);
@@ -4764,6 +4765,7 @@ static bool commitActiveScheduleAndConfig(
 }
 
 static bool downloadOfflineScheduleAndFrames(Config &cfg, bool targetNext = false) {
+  offlineScheduleTransientFailure = false;
   if (offlineScheduleTxnBlocked) {
     return failOfflineScheduleTransaction("離線排程 transaction 尚未完成 recovery");
   }
@@ -4794,6 +4796,7 @@ static bool downloadOfflineScheduleAndFrames(Config &cfg, bool targetNext = fals
     return false;
   }
   const int status = countedHttpGet(scheduleHttp);
+  offlineScheduleTransientFailure = inktime::transientOfflineHttpFailure(status);
   if (handleDeviceAuthStatus(cfg, status)) {
     scheduleHttp.end();
     return false;
@@ -4856,7 +4859,7 @@ static bool downloadOfflineScheduleAndFrames(Config &cfg, bool targetNext = fals
             || (!targetNext && (notReadyTarget.length() == 0U || notReadyTarget == "current")))) {
       // Only a fully parsed, recognized no-content contract can change settings.
       // Old servers omit device_config and continue through bounded retry below.
-      if (!notReadyError && !notReady.overflowed() && nextSlotFieldValid
+      if (!targetNext && !notReadyError && !notReady.overflowed() && nextSlotFieldValid
           && !notReady["device_config"].isNull()) {
         JsonObject remoteConfig = notReady["device_config"].as<JsonObject>();
         const JsonVariantConst noContent = notReady["no_content"];
@@ -6282,6 +6285,7 @@ bool downloadDailyPhotoBin(Config &cfg) {
       // A button check may replace the active schedule, but a missing or
       // unavailable remote schedule must leave the cached formal day usable.
       const bool downloaded = downloadOfflineScheduleAndFrames(cfg);
+      if (deviceAuthInvalid || offlineScheduleTxnBlocked) return false;
       const String downloadErrorCode = lastDeviceErrorCode;
       const String downloadErrorMessage = lastDeviceErrorMessage;
       if (offlineDeliveryModeMismatchDetected) {
@@ -6313,7 +6317,10 @@ bool downloadDailyPhotoBin(Config &cfg) {
         return latest;
       }
       const time_t afterPrefetchEpoch = time(nullptr);
-      if (prefetched && activeHasDueFormalSlot(afterPrefetchEpoch)) {
+      const bool cachedFallback = inktime::allowOfflineCachedFormalFrame(
+        offlineScheduleTransientFailure, activeHasDueFormalSlot(afterPrefetchEpoch),
+        deviceAuthInvalid, offlineScheduleTxnBlocked);
+      if ((prefetched || cachedFallback) && activeHasDueFormalSlot(afterPrefetchEpoch)) {
         currentPrefetchOnly = false;
         return loadOfflineScheduledLocalFrame(cfg, afterPrefetchEpoch, false);
       }

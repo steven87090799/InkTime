@@ -499,7 +499,6 @@ class AnalysisBatchRepository:
                 "status='preparing',side_effect_version=side_effect_version+1,updated_at=? "
                 "WHERE id=? AND input_file_id=? AND remote_batch_id IS NULL "
                 "AND status IN ('preparing','uploaded') "
-                "AND (last_error_code='API_CREDIT_EXHAUSTED' OR last_error_code LIKE 'BUDGET-OPENAI-%') "
                 "AND (side_effect_lease_until IS NULL OR side_effect_lease_until<=?)",
                 (utc_now(), batch_id, input_file_id, utc_now()),
             )

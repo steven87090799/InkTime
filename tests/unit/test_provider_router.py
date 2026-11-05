@@ -46,6 +46,27 @@ class StubProvider(VisionProvider):
         return True, "ok"
 
 
+@pytest.mark.parametrize("kind,ambiguous,should_failover", [
+    ("openai", False, True), ("openai", True, False), ("openai_compatible", False, False),
+])
+def test_only_definite_native_rejection_permits_failover(kind, ambiguous, should_failover):
+    class Rejected(StubProvider):
+        def analyze(self, **kwargs):
+            raise ProviderHTTPError("rate limited", "VLM-007", http_status=429,
+                                    request_started=True, vision_started=True, ambiguous=ambiguous)
+    first = Rejected("first")
+    first.kind = kind
+    second = StubProvider("second")
+    router = FailoverVisionProvider([ProviderChannel(first, priority=1), ProviderChannel(second, priority=2)])
+    if should_failover:
+        assert router.analyze(image_path=Path("photo.jpg"), model="vision", detail="high", stage="single")
+        assert second.calls == 1
+    else:
+        with pytest.raises(ProviderHTTPError):
+            router.analyze(image_path=Path("photo.jpg"), model="vision", detail="high", stage="single")
+        assert second.calls == 0
+
+
 def test_provider_channel_model_overrides_global_model_for_vision_and_repair():
     provider = StubProvider("openrouter")
     router = FailoverVisionProvider([ProviderChannel(provider, model="openrouter/free")])

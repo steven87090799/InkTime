@@ -957,6 +957,30 @@ def test_fake_batch_imports_unordered_results_once(app, tmp_path):
     assert usage_count == len(photo_ids)
 
 
+def test_one_unreadable_source_defers_only_that_paid_result(app, tmp_path, monkeypatch):
+    photo_ids = _prepare_photos(app, tmp_path, count=4)
+    fake = FakeBatchProvider()
+    service = _wire_fake(app, fake)
+    batch_id = service.submit(scope="sample", sample_count=4, created_by="tester")["batch_ids"][0]
+    service.poll_due()
+    current_sha = service._current_content_sha
+    monkeypatch.setattr(service, "_current_content_sha",
+                        lambda photo: None if photo["id"] == photo_ids[0] else current_sha(photo))
+    result = service.import_batch(batch_id)
+    assert result["success"] == 3 and result["deferred"] == 1
+    assert fake.deleted == []
+    assert service.batches.get(batch_id)["status"] == "import_pending"
+    held = next(item for item in service.batches.items(batch_id) if item["photo_id"] == photo_ids[0])
+    assert held["error_code"] == "BATCH-IMPORT-DEFERRED"
+    monkeypatch.setattr(service, "_current_content_sha", current_sha)
+    service.import_batch(batch_id)
+    service.import_batch(batch_id)
+    assert service.get_detail(batch_id)["imported_items"] == 4
+    assert fake.batch_counter == 1
+    with service.database.session() as connection:
+        assert connection.execute("SELECT COUNT(*) FROM api_usage WHERE batch_id=?", (batch_id,)).fetchone()[0] == 4
+
+
 def test_import_failure_cleans_staging_but_preserves_receipt_and_incremental_cost(app, tmp_path, monkeypatch):
     _prepare_photos(app, tmp_path, count=1)
     service = _wire_fake(app, FakeBatchProvider())

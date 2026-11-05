@@ -346,7 +346,8 @@ def test_budget_pause_reclassification_preserves_original_job(app, monkeypatch, 
 
 
 @pytest.mark.parametrize("remote_file", ["expired", "missing", "valid", "unknown"])
-def test_batch_renewal_refreshes_only_definitely_unsubmitted_expired_input(app, tmp_path, monkeypatch, remote_file):
+@pytest.mark.parametrize("intervening_timeout", [False, True])
+def test_batch_renewal_refreshes_only_definitely_unsubmitted_expired_input(app, tmp_path, monkeypatch, remote_file, intervening_timeout):
     service, actor = setup_dual(app)
     _prepare_photos(app, tmp_path, 1)
     service.configure({"analysis.openai_backfill_mode": "batch", "analysis.openai_batch_consent": True}, actor)
@@ -377,9 +378,67 @@ def test_batch_renewal_refreshes_only_definitely_unsubmitted_expired_input(app, 
     snapshot = service.budgets.openai.snapshot
     monkeypatch.setattr(service.budgets.openai, "snapshot", lambda: {**snapshot(), "start": "next-cycle"})
     assert service.ensure()["job_id"] == job_id
+    if intervening_timeout:
+        def metadata_timeout(_file_id):
+            raise ProviderHTTPError("metadata timeout", "FILE-TIMEOUT", ambiguous=True)
+        monkeypatch.setattr(fake, "retrieve_file", metadata_timeout)
+        service.batch.poll_due()
+        assert submissions == []
+        monkeypatch.setattr(fake, "retrieve_file", retrieve)
     service.batch.poll_due()
     assert len(uploads) == (2 if remote_file in {"expired", "missing"} else 1)
     assert submissions == ([] if remote_file == "unknown" else ["file-2" if len(uploads) == 2 else "file-1"])
+
+
+def test_automatic_batch_import_rebuilds_the_frozen_lane_and_never_resubmits(app, tmp_path, monkeypatch):
+    service, actor = setup_dual(app)
+    _prepare_photos(app, tmp_path, 2)
+    fake = ResponsesBatch()
+    monkeypatch.setattr(service.batch, "_provider", lambda *args, **kwargs: fake)
+    service.configure({"analysis.openai_backfill_mode": "batch", "analysis.openai_batch_consent": True}, actor)
+    job_id = service.ensure()["job_id"]
+    batch_id = service.batch.batches.list()[0]["id"]
+    frozen = json.loads(service.jobs.get(job_id)["analysis_spec_json"])
+    assert frozen["provider_route"][0]["complementary_lane"] == "openai_backfill"
+    service.batch.poll_due()
+    assert service.batch.import_batch(batch_id)["success"] == 2
+    service.batch.import_batch(batch_id)
+    assert service.batch.batches.get(batch_id)["status"] == "completed"
+    assert fake.batch_counter == 1
+
+
+def test_openai_enqueue_rechecks_all_accepted_photos_in_one_population_query(app, monkeypatch):
+    from contextlib import contextmanager
+    service, _ = setup_dual(app)
+    _photo(app, "bounded-openai-first")
+    _photo(app, "bounded-openai-second")
+    database = service.repository.database
+    original_session = database.session
+    statements = []
+    @contextmanager
+    def traced_session(*args, **kwargs):
+        with original_session(*args, **kwargs) as connection:
+            connection.set_trace_callback(statements.append)
+            yield connection
+    monkeypatch.setattr(database, "session", traced_session)
+    job_id = service.ensure()["job_id"]
+    assert service.jobs.get(job_id)["total_items"] == 2
+    population_queries = [sql for sql in statements if sql.lstrip().startswith("WITH population AS")]
+    assert len(population_queries) == 2  # One candidate page, one transactional batch recheck.
+
+
+@pytest.mark.parametrize("pause_kind", ["manual", "cycle"])
+def test_generic_resume_explains_lane_control_without_false_success(app, pause_kind):
+    service, _ = setup_dual(app)
+    _photo(app, "resume-lane")
+    job_id = service.ensure()["job_id"]
+    app.extensions["inktime_job_service"].pause(job_id)
+    with service.repository.database.transaction() as connection:
+        connection.execute("UPDATE openai_backfill_control SET pause_kind=? WHERE id=1", (pause_kind,))
+    with pytest.raises(ValueError, match="雙 Provider 分工"):
+        app.extensions["inktime_job_service"].resume(job_id)
+    assert service.jobs.get(job_id)["status"] == "paused"
+    assert service.repository.control()["pause_kind"] == pause_kind
 
 
 def test_saved_settings_report_budget_activation_pause_in_success_response(app, client):

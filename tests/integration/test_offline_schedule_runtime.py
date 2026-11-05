@@ -719,6 +719,28 @@ def test_missing_schedule_uses_effective_weekly_times_for_retry_and_config(clien
     assert len(body["device_config"]["schedule_times"]) == slot_count
 
 
+@pytest.mark.parametrize("moment", ["2026-11-06T00:10:00+08:00", "2026-11-06T22:30:00+08:00"])
+def test_tomorrow_404_keeps_current_local_day_configuration(client, app, monkeypatch, moment):
+    import inktime.app.api.devices as devices_module
+    fixed = datetime.fromisoformat(moment)
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return fixed.astimezone(tz or timezone.utc)
+    monkeypatch.setattr(devices_module, "datetime", Clock)
+    app.extensions["inktime_settings_repository"].update_many(
+        {"display.weekday_times": "00:30,23:00", "display.weekend_times": "10:00"},
+        changed_by="test", source_ip="test")
+    _, token = app.extensions["inktime_device_repository"].create(
+        "tomorrow", delivery_mode="inktime_offline_schedule", offline_prefetch_allowed=True)
+    response = client.get("/api/device/v1/offline-schedule?target=next",
+                          headers={"Authorization": f"Bearer {token}"})
+    assert response.status_code == 404
+    body = response.get_json()
+    assert body["target_date"] == "2026-11-07"
+    assert body["device_config"]["schedule_times"] == ["00:30", "23:00"]
+
+
 def test_missing_today_schedule_returns_bounded_server_retry_epoch(client, app):
     today, tomorrow = _device_dates()
     _device_id, token = app.extensions["inktime_device_repository"].create(

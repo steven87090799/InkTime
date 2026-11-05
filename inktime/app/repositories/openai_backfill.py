@@ -1,4 +1,6 @@
 """Reuse shared content coverage; keep paid-lane control separate from free backfill."""
+import json
+
 from inktime.app.repositories.analysis_backfill import AnalysisBackfillRepository
 from inktime.app.repositories.analysis_reservations import AnalysisReservationConflict
 
@@ -38,14 +40,16 @@ class OpenAIBackfillRepository(AnalysisBackfillRepository):
             if not self.enabled(connection):
                 raise AnalysisReservationConflict("OpenAI 補齊已暫停，重新領取未送出")
             accepted = {row[0] for row in connection.execute("SELECT photo_id FROM job_items WHERE job_id=?", (job_id,))}
-            for row in rows:
-                if row["id"] not in accepted:
-                    continue  # Shared Batch may exclude local prefilter/cache hits.
-                exists = connection.execute(
-                    self._population_sql() + " SELECT 1 FROM population WHERE id=? AND sha256=? AND coverage_status='queued'",  # noqa: S608 -- fixed shared CTE, bound identity.
-                    (row["id"], row["sha256"]),
-                ).fetchone()
-                if exists is None:
+            # Shared Batch can omit prefilter/cache hits. Recheck only the
+            # accepted photos together, inside the bounded base-table scope.
+            requested = {(row["id"], row["sha256"]) for row in rows if row["id"] in accepted}
+            if requested:
+                eligible = connection.execute(
+                    self._population_sql(selected=True) +  # noqa: S608 -- fixed shared CTE, bound identities.
+                    " SELECT id,sha256 FROM population WHERE coverage_status='queued'",  # noqa: S608
+                    (json.dumps(sorted(identifier for identifier, _sha in requested)),),
+                ).fetchall()
+                if {(row["id"], row["sha256"]) for row in eligible} != requested:
                     raise AnalysisReservationConflict("照片已完成或內容已改變，重新核對後再領取")
             self.advance(connection, rows)
         return claim

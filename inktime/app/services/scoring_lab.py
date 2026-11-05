@@ -19,7 +19,7 @@ from inktime.app.domain.photos.quality_policy import evaluate_local_quality, loc
 from inktime.app.repositories.scoring import ScoringProfileRepository
 from inktime.app.repositories.settings import SettingsRepository
 from inktime.app.repositories.usage import UsageRepository
-from inktime.app.repositories.billable_operations import BillableOperationRepository
+from inktime.app.repositories.billable_operations import BillableOperationRepository, paid_operation_lock_name
 from inktime.app.providers.base import VisionAttemptState, IncompleteProviderResponse, assert_complete_response, openai_request_rejected
 from inktime.app.providers.router import FailoverVisionProvider
 from inktime.app.services.budgets import BudgetService
@@ -75,12 +75,20 @@ class ScoringLabService:
     def _analyze_with_provider(
         self, image_path: Path, provider, *, plan: dict | None = None, idempotency_key: str | None = None,
     ) -> dict:
+        with image_path.open("rb") as source:
+            content_sha256 = file_digest(source, "sha256").hexdigest()
+        with self.usage.database.operation_lock(paid_operation_lock_name(content_sha256)):
+            return self._analyze_guarded(image_path, provider, plan=plan, idempotency_key=idempotency_key,
+                                         content_sha256=content_sha256)
+
+    def _analyze_guarded(
+        self, image_path: Path, provider, *, plan: dict | None, idempotency_key: str | None,
+        content_sha256: str,
+    ) -> dict:
         profile = self.profiles.current()
         plan = plan or self._plan()
         model = str(plan["model"])
         max_tokens = analysis_output_token_cap(self.settings)
-        with image_path.open("rb") as source:
-            content_sha256 = file_digest(source, "sha256").hexdigest()
         operations = BillableOperationRepository(self.usage.database)
         operation_id, checkpoint = operations.begin(
             content_sha256, idempotency_key or f"scoring-test:{uuid4()}", reuse_completed=True,

@@ -1012,11 +1012,13 @@ class DevicePairingService:
                 pairing_code_hash=NULL,pairing_expires_at=NULL,pairing_attempts=0,pairing_claim_attempts=0,
                 pairing_requested_at=NULL,firmware_version=COALESCE(NULLIF(?,''),firmware_version),
                 firmware_identity=COALESCE(NULLIF(?,''),firmware_identity),offline_schedule_max_slots=?,
-                offline_schedule_capability_state=?,config_version=config_version+1,updated_at=? WHERE id=?""",
+                offline_schedule_capability_state=?,config_version=config_version+1,
+                next_offline_prepare_at=CASE WHEN enabled=1 AND delivery_mode='inktime_offline_schedule'
+                    THEN ? ELSE NULL END,updated_at=? WHERE id=?""",
             (int(envelope["credential_version"]), hash_device_secret(str(envelope["device_secret"]), self.pepper),
              self._iso(now), str(envelope.get("firmware_version") or ""),
              str(envelope.get("firmware_identity") or ""), maximum_slots,
-             offline_schedule_capability_state(maximum_slots), self._iso(now), device_id),
+             offline_schedule_capability_state(maximum_slots), OFFLINE_PREPARE_BOOTSTRAP_AT, self._iso(now), device_id),
         )
 
     def confirm(

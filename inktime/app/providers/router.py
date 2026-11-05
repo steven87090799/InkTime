@@ -9,7 +9,7 @@ import time
 from typing import Any
 
 from inktime.app.core.logging import log_event, should_log_rate_limited
-from .base import ProviderResponse, Usage, VisionProvider, provider_process_timeout
+from .base import ProviderResponse, Usage, VisionProvider, provider_process_timeout, openai_request_rejected
 from .openai_compatible import ProviderHTTPError
 
 
@@ -367,9 +367,9 @@ class FailoverVisionProvider(VisionProvider):
             except Exception as exc:
                 last_error = exc
                 self.release_channel(channel, error=exc)
-                if bool(getattr(exc, "vision_started", False)) or bool(
-                    getattr(exc, "request_started", False)
-                ) or bool(getattr(exc, "ambiguous", False)):
+                side_effect_unknown = any(bool(getattr(exc, field, False))
+                                          for field in ("vision_started", "request_started", "ambiguous"))
+                if side_effect_unknown and not openai_request_rejected(channel.provider, exc):
                     raise
                 if should_log_rate_limited(
                     f"provider-failover:{channel.provider.name}:{method}",

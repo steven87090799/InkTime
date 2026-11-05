@@ -912,7 +912,7 @@ def device_offline_schedule():
         # offering a configuration that the frame could incorrectly acknowledge.
         try:
             device_config = _device_configuration(
-                device, str(device["panel_profile"] or DEFAULT_DEVICE_PANEL_PROFILE), schedule_day=target_day,
+                device, str(device["panel_profile"] or DEFAULT_DEVICE_PANEL_PROFILE), schedule_day=current_day,
             )
         except (TypeError, ValueError, KeyError, OverflowError):
             device_config = None

@@ -92,6 +92,17 @@ static void testContentNoticeOverlay() {
 }
 
 int main() {
+  for (const int status : {-1, 408, 429, 500, 503, 599}) {
+    assert(transientOfflineHttpFailure(status));
+    assert(allowOfflineCachedFormalFrame(transientOfflineHttpFailure(status), true, false, false));
+  }
+  for (const int status : {200, 400, 401, 403, 404, 409}) {
+    assert(!transientOfflineHttpFailure(status));
+    assert(!allowOfflineCachedFormalFrame(transientOfflineHttpFailure(status), true, false, false));
+  }
+  assert(!allowOfflineCachedFormalFrame(true, false, false, false));
+  assert(!allowOfflineCachedFormalFrame(true, true, true, false));
+  assert(!allowOfflineCachedFormalFrame(true, true, false, true));
   testContentNoticeOverlay();
   testUnusedSensorSleep();
   uint8_t powerAttempt = 0U;

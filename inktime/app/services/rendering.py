@@ -2369,6 +2369,7 @@ class RenderService:
             quantity = quantity_override
         layout_key = str(self.settings.get("render.layout", "auto_photo"))
         unique_device_ids = list(dict.fromkeys(str(value) for value in (device_ids or []) if str(value)))
+        selection_devices = unique_device_ids if device_ids is not None else list(self._selection_devices.get())
         effective_devices: dict[str, dict[str, Any]] = {}
         if unique_device_ids:
             placeholders = ",".join("?" for _ in unique_device_ids)
@@ -2403,10 +2404,12 @@ class RenderService:
                     for orientation in sorted(auto_orientations)
                     for row in self.select_auto_photo_candidates(
                         quantity, frame_orientation=orientation, target_date=selection_target, record_history=True,
+                        device_ids=selection_devices,
                     )
                 ]
             else:
-                proposed = self.select_candidates_details(source_limit, target_date=selection_target, record_history=True)
+                proposed = self.select_candidates_details(source_limit, target_date=selection_target,
+                                                          record_history=True, device_ids=selection_devices)
             selected = list(dict.fromkeys(str(row["id"]) for row in proposed))
             selection_run_ids.extend(str(row["selection_run_id"]) for row in proposed if row.get("selection_run_id"))
         # 明確指定與自動選片都必須在發布前重新驗證；不得使用過期候選或遺失來源契約。
@@ -2416,6 +2419,15 @@ class RenderService:
             content_mode=content_mode(self.settings),
         )
         selected = [str(row["id"]) for row in required]
+        with self.database.session() as connection:
+            skipped = connection.execute(
+                "SELECT 1 FROM photo_feedback WHERE photo_id IN (SELECT value FROM json_each(?)) "
+                "AND feedback_type='SKIP_TEMPORARILY' AND (expires_at IS NULL OR julianday(expires_at)>julianday(?)) "
+                "AND (device_id IS NULL OR device_id IN (SELECT value FROM json_each(?))) LIMIT 1",
+                (json.dumps(selected), datetime.now(timezone.utc).isoformat(), json.dumps(selection_devices)),
+            ).fetchone()
+        if skipped:
+            raise ValueError("RENDER-001 發布照片包含目標裝置暫時略過的照片，請重新選圖")
         eligibility_sources = {str(row["id"]): str(row["eligibility_source"]) for row in required}
         if not selection_run_ids:
             selection_run_ids = [DisplayHistoryRepository(self.database).record_selection(

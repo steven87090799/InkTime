@@ -10,6 +10,13 @@ namespace ackjournal {
 
 constexpr uint8_t kMaximumEntries = 32U;
 
+// Loading can promote a CRC-verified orphan left by the first interrupted
+// transaction, so its Preferences handle must permit recovery writes.
+template <typename PreferencesLike>
+inline bool beginRecovery(PreferencesLike& journal) {
+  return journal.begin("acklog", false);
+}
+
 // Mutate only the RAM replacement; durable state changes through commitSnapshot.
 // Shared with host tests so appending to a non-empty journal cannot drop entries.
 template <typename Entry>

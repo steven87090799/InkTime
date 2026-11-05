@@ -99,6 +99,9 @@ class JobService:
             raise InvalidJobTransition("目前狀態無法暫停")
 
     def resume(self, job_id: str) -> None:
+        job = self.repository.get(job_id)
+        if job and json.loads(job["settings_json"]).get("complementary_lane") == "openai_backfill":
+            raise InvalidJobTransition("OpenAI 補齊請使用「雙 Provider 分工」的恢復操作，以重新核對預算及人工暫停狀態")
         if not self.repository.transition(job_id, {"paused", "budget_exceeded"}, "running", "resumed"):
             raise InvalidJobTransition("目前狀態無法繼續")
 

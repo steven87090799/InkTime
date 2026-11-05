@@ -41,7 +41,7 @@ from inktime.app.domain.analysis.scoring import (
 from inktime.app.services.analysis import FULL_ANALYSIS_TOKEN_CAP
 from inktime.app.services.benchmark_metrics import calculate_benchmark_metrics
 from inktime.app.providers.base import ProviderResponse, VisionAttemptState, IncompleteProviderResponse, assert_complete_response
-from inktime.app.providers.config import normalize_options
+from inktime.app.providers.config import effective_provider_kind, normalize_options
 from inktime.app.providers.openai_compatible import OpenAICompatibleProvider, ProviderHTTPError
 
 
@@ -547,12 +547,20 @@ def _contract_metrics_snapshot(metrics: Mapping[str, Any]) -> dict[str, Any]:
 class ModelBenchmarkService:
     """Run a benchmark without mutating production domain repositories."""
 
-    def __init__(self, *, provider_factory=OpenAICompatibleProvider, budgets=None) -> None:
+    def __init__(self, *, provider_factory=OpenAICompatibleProvider, budgets=None, provider_id: str | None = None) -> None:
         self.provider_factory = provider_factory
         self.budgets = budgets
+        self.provider_id = provider_id
 
     def _paid_call(self, provider, method, **kwargs):
         if self.budgets is not None:
+            if self.provider_factory is OpenAICompatibleProvider:
+                with self.budgets.database.session() as connection:
+                    account = connection.execute("SELECT kind,base_url FROM providers WHERE id=? AND enabled=1",
+                                                 (self.provider_id,)).fetchone()
+                if (account is None or effective_provider_kind(str(account["kind"]), str(account["base_url"])) != provider.kind
+                        or str(account["base_url"]).rstrip("/") != str(provider.base_url).rstrip("/")):
+                    raise BenchmarkError("live benchmark 必須指定相符且已啟用的 Provider 帳戶 UUID")
             return self.budgets.call(provider, method, **kwargs)
         if self.provider_factory is OpenAICompatibleProvider:
             raise BenchmarkError("live benchmark requires the installation budget ledger")
@@ -604,7 +612,7 @@ class ModelBenchmarkService:
             base_url=base_url,
             api_key=api_key,
             kind=kind,
-            provider_id=axis.provider,
+            provider_id=self.provider_id or axis.provider,
             options=options,
             timeout=120,
             supports_json_schema=True,

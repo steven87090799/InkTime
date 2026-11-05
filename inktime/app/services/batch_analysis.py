@@ -1068,10 +1068,8 @@ class BatchAnalysisService:
 
     def _refresh_renewal_input(self, batch_id: str, plan: dict[str, Any]) -> None:
         batch = self.batches.get(batch_id)
-        code = str(batch["last_error_code"] or "")
         if (not batch["input_file_id"] or batch["remote_batch_id"]
-                or batch["status"] not in {"preparing", "uploaded"}
-                or not (code == "API_CREDIT_EXHAUSTED" or code.startswith("BUDGET-OPENAI-"))):
+                or batch["status"] not in {"preparing", "uploaded"}):
             return
         provider = self._provider(str(batch["provider_id"]), plan)
         try:
@@ -2610,6 +2608,8 @@ class BatchAnalysisService:
                 str(item["id"]),
                 connection=connection,
                 status="imported",
+                error_code=None,
+                error_message=None,
                 request_id=str(request_id) if request_id else None,
                 http_status=int(response.get("status_code", 200) or 200),
                 input_tokens=usage.input_tokens,
@@ -3195,7 +3195,9 @@ class BatchAnalysisService:
                 str(item["custom_id"]): item for item in self.batches.items(batch_id)
             }
             try:
-                _current_plan, current_analysis_fingerprint, _current_model = self._plan()
+                lane = plan["provider_route"][0].get("complementary_lane")
+                route = self.provider_service.complementary_route(lane) if lane == "openai_backfill" else None
+                _current_plan, current_analysis_fingerprint, _current_model = self._plan(route)
             except Exception as exc:
                 raise BatchLifecycleError("目前分析計畫無法核對，保留結果等待重新匯入", "BATCH-IMPORT-DEFERRED") from exc
             unknown = set(records) - set(expected)
@@ -3205,6 +3207,7 @@ class BatchAnalysisService:
                     reconciliation_error_code="unexpected_custom_id",
                     reconciliation_error_message=f"結果檔含 {len(unknown)} 個未預期 custom_id",
                 )
+            deferred: set[str] = set()
             for custom_id, (kind, record, body) in records.items():
                 expected_item: dict[str, Any] | None = expected.get(custom_id)
                 if expected_item is None:
@@ -3243,15 +3246,20 @@ class BatchAnalysisService:
                     )
                     errors.add(custom_id)
                 elif kind == "success" and body is not None:
-                    outcome = self._import_success(
-                        batch,
-                        expected_item,
-                        record,
-                        body,
-                        plan,
-                        provider,
-                        current_analysis_fingerprint,
-                    )
+                    try:
+                        outcome = self._import_success(
+                            batch, expected_item, record, body, plan, provider,
+                            current_analysis_fingerprint,
+                        )
+                    except BatchLifecycleError as exc:
+                        if exc.code != "BATCH-IMPORT-DEFERRED":
+                            raise
+                        # Keep this item nonterminal and its paid result files
+                        # intact. The importer retries it without a new POST.
+                        self.batches.update_item(str(expected_item["id"]),
+                                                 error_code=exc.code, error_message=str(exc))
+                        deferred.add(custom_id)
+                        continue
                     if outcome in {"imported", "already_imported"}:
                         successes.add(custom_id)
                     elif outcome not in {"pending", "submitted", "retry_pending"}:
@@ -3281,7 +3289,15 @@ class BatchAnalysisService:
                         "missing_result",
                         "Output/Error File 未包含此 custom_id",
                     )
+            if deferred:
+                self.batches.update_batch(batch_id, status="import_pending",
+                                          last_error_code="BATCH-IMPORT-DEFERRED",
+                                          last_error_message=f"{len(deferred)} 筆來源暫時無法核對，保留結果等待重試")
+                return {"batch_id": batch_id, "success": len(successes), "errors": len(errors),
+                        "missing": len(set(expected) - seen), "deferred": len(deferred)}
             current = self.batches.get(batch_id)
+            if current is not None and current["last_error_code"] == "BATCH-IMPORT-DEFERRED":
+                self.batches.update_batch(batch_id, last_error_code=None, last_error_message=None)
             if current is not None:
                 self._cleanup_remote(current, plan)
             current = self.batches.get(batch_id)
