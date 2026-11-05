@@ -3197,7 +3197,9 @@ class BatchAnalysisService:
             try:
                 lane = plan["provider_route"][0].get("complementary_lane")
                 route = self.provider_service.complementary_route(lane) if lane == "openai_backfill" else None
-                _current_plan, current_analysis_fingerprint, _current_model = self._plan(route)
+                _current_plan, current_analysis_fingerprint, _current_model = (
+                    self._plan(route) if route is not None else self._plan()
+                )
             except Exception as exc:
                 raise BatchLifecycleError("目前分析計畫無法核對，保留結果等待重新匯入", "BATCH-IMPORT-DEFERRED") from exc
             unknown = set(records) - set(expected)
