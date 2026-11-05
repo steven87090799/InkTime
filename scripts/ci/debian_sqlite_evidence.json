@@ -1,0 +1,34 @@
+{
+  "reviewed_at": "2026-11-03",
+  "cve": "CVE-2026-119373",
+  "debian_snapshot": "20261103T023120Z",
+  "source_package": "sqlite3",
+  "source_version": "3.54.1-1",
+  "debian_tracker": "https://security-tracker.debian.org/tracker/CVE-2026-119373",
+  "tracker_state_at_review": "unfixed; this tracker is not used as fixed-version evidence",
+  "upstream_fix": "https://github.com/sqlite/sqlite/commit/e1c9934f9f11a499029abb020ea715a08970da80",
+  "upstream_release": "https://sqlite.org/releaselog/3_54_1.html",
+  "source_archive": {
+    "url": "https://snapshot.debian.org/file/c49acf244fe87e12aa11698a792dd6090c1b4eb9",
+    "sha256": "faeff7682200b3dd58c8f0f229892a7271c73c1fdabc86e7315eb31eb7cb6e83",
+    "dsc_sha256": "d3b2efbeb509dfac38a0653112a400d48eaa86f14432c255a6fea8569df407f1",
+    "debian_patch_archive_sha256": "3f05602b0f4e1441b88f92e9afb2980e148659842565b1f1e27012988433a1d9",
+    "fix_verified": [
+      "fts5MergeRowidLists allocation includes p1->n + p2->n + 9",
+      "rowid1 delta casts both values to u64",
+      "rowid2 delta casts both values to u64"
+    ],
+    "debian_patches": "Reviewed patch series does not revert or modify ext/fts5/fts5_index.c"
+  },
+  "binaries": {
+    "amd64": {
+      "version": "3.54.1-1",
+      "sha256": "b0a75f339051dbb643c8f803508ba1e245ac532ae8d9e9940f0f8c63df3a82a5"
+    },
+    "arm64": {
+      "version": "3.54.1-1",
+      "sha256": "de87fc97bf17e6251616777eab7cd51439ad9cee98bed32a2cdee5bff38ccb51"
+    }
+  },
+  "acceptance": "APT must verify archive signatures and package hashes during hosted build; exact package and linked SQLite version plus negative-rowid FTS5 regression are build assertions. No local Docker build or binary execution was performed."
+}

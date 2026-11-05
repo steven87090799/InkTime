@@ -137,7 +137,7 @@ def test_backup_retention_continues_after_one_unremovable_file(app, tmp_path, mo
     from pathlib import Path
 
     service = app.extensions["inktime_backup_service"]
-    keep, blocked, expired = [tmp_path / name for name in ("keep.zip", "blocked.zip", "expired.zip")]
+    keep, blocked, expired = [tmp_path / name for name in ("inktime-backup-auto-keep.zip", "inktime-backup-auto-blocked.zip", "inktime-backup-auto-expired.zip")]
     for path in (keep, blocked, expired):
         path.write_bytes(b"synthetic")
     monkeypatch.setattr(service, "list", lambda: [keep, blocked, expired])

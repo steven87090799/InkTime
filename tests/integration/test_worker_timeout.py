@@ -8,6 +8,35 @@ from pathlib import Path
 from inktime.app.workers.job_worker import BoundedJobWorker
 
 
+def test_on_time_futures_remain_successful_when_supervisor_observes_them_late(app, monkeypatch):
+    from concurrent.futures import ALL_COMPLETED, wait as real_wait
+    from types import SimpleNamespace
+    import inktime.app.workers.job_worker as worker_module
+    from tests.integration.test_jobs import add_photos
+
+    repository = app.extensions["inktime_job_repository"]
+    job_id = repository.create(name="delayed bookkeeping", strategy="local", settings={},
+                               photo_ids=add_photos(app, 2), created_by="test")
+    app.extensions["inktime_job_service"].start(job_id)
+    clock = [0.0]
+    monkeypatch.setattr(worker_module, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+    def observe_after_deadline(futures, **_kwargs):
+        done, pending = real_wait(futures, timeout=5, return_when=ALL_COMPLETED)
+        assert len(done) == 2 and not pending
+        clock[0] = 2.0
+        return done, pending
+    monkeypatch.setattr(worker_module, "wait", observe_after_deadline)
+    worker = BoundedJobWorker(repository, lambda item: {"photo_id": item["photo_id"]},
+                              concurrency=2, queue_multiplier=1, timeout_seconds=1)
+    worker.run_job(job_id)
+    assert repository.get(job_id)["status"] == "completed"
+    with repository.database.session() as connection:
+        assert connection.execute("SELECT COUNT(*) FROM job_items WHERE job_id=? AND status='completed'",
+                                  (job_id,)).fetchone()[0] == 2
+        assert connection.execute("SELECT COUNT(*) FROM job_items WHERE job_id=? AND dead_lettered_at IS NOT NULL",
+                                  (job_id,)).fetchone()[0] == 0
+
+
 def _blocked_file_read(*, path, marker):
     Path(marker).write_text("started")
     with open(path, "rb") as stream:
@@ -100,3 +129,22 @@ def test_timed_out_future_is_tracked_to_completion_without_retry_or_double_charg
     assert events == 1
     assert float(job["spent"]) == 0.25
     assert job["status"] == "completed_with_errors"
+
+
+def test_late_transport_failure_is_not_put_back_on_retry_queue(app):
+    repository = app.extensions["inktime_job_repository"]
+    job_id = repository.create_maintenance(kind="cleanup", name="late-failure", settings={}, created_by="test")
+    app.extensions["inktime_job_service"].start(job_id)
+    calls = []
+    def late_failure(_item):
+        calls.append(True)
+        time.sleep(1.2)
+        raise TimeoutError("response lost after request may have arrived")
+    worker = BoundedJobWorker(repository, late_failure, concurrency=1, queue_multiplier=1, timeout_seconds=1)
+    worker.run_job(job_id)
+    with app.extensions["inktime_database"].session() as connection:
+        row = connection.execute("SELECT status,attempts,error_code FROM job_items WHERE job_id=?", (job_id,)).fetchone()
+    assert len(calls) == 1
+    assert row["status"] == "failed"
+    assert row["attempts"] == 1
+    assert row["error_code"] == "JOB-SHUTDOWN-AMBIGUOUS"

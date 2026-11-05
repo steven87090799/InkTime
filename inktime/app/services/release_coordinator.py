@@ -412,6 +412,10 @@ class ReleaseCoordinator:
         deleted = 0
         skipped = 0
         test_assignments = DeviceTestReleaseStore(self.publisher.root)
+        with test_assignments.reference_snapshot() as (assignment_ids, complete, _examined):
+            if not complete:
+                return {"deleted": 0, "skipped": 1}
+            protected_ids = pointer_ids | set(assignment_ids)
         # A previous maintenance run may have committed the payload state but
         # failed while purging the quarantine directory.  Reconcile those
         # entries before selecting new candidates; rows not marked pruned are
@@ -437,6 +441,7 @@ class ReleaseCoordinator:
                 WHERE r.status IN ('published','superseded','staged_failed')
                   AND r.reconciliation_status!='payload_pruned'
                   AND r.created_at<?
+                  AND r.id NOT IN (SELECT value FROM json_each(?))
                   AND NOT EXISTS (SELECT 1 FROM device_render_releases drr WHERE drr.release_id=r.id)
                   AND NOT EXISTS (SELECT 1 FROM device_content_queue_items qi WHERE qi.release_id=r.id)
                   AND NOT EXISTS (SELECT 1 FROM device_offline_schedule_slots os WHERE os.release_id=r.id)
@@ -449,12 +454,11 @@ class ReleaseCoordinator:
                       SELECT 1 FROM rollout_campaigns rc
                       WHERE rc.release_id=r.id OR rc.previous_release_id=r.id
                   )
-                  AND NOT EXISTS (SELECT 1 FROM selection_decision_traces sdt WHERE sdt.release_id=r.id)
                   AND NOT EXISTS (SELECT 1 FROM rollout_targets rt WHERE rt.rollback_release_id=r.id)
                 ORDER BY r.created_at,r.id
                 LIMIT ?
                 """,
-                (cutoff, limit),
+                (cutoff, json.dumps(sorted(protected_ids)), limit),
             ).fetchall()
 
         for row in candidates:
@@ -505,7 +509,6 @@ class ReleaseCoordinator:
                                           SELECT 1 FROM rollout_campaigns rc
                                           WHERE rc.release_id=r.id OR rc.previous_release_id=r.id
                                       )
-                                      AND NOT EXISTS (SELECT 1 FROM selection_decision_traces sdt WHERE sdt.release_id=r.id)
                                       AND NOT EXISTS (SELECT 1 FROM rollout_targets rt WHERE rt.rollback_release_id=r.id)
                                     """,
                                     (release_id, cutoff),

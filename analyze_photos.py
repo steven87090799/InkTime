@@ -11,7 +11,7 @@ from inktime.app.core.runtime_config import resolve_runtime_config
 from inktime.app.workers.runner import WorkerRunner
 
 
-def main() -> None:
+def main() -> int:
     parser = argparse.ArgumentParser(description="建立 InkTime 照片掃描／分析背景工作")
     parser.add_argument("--scan", type=Path, help="先掃描指定照片資料夾")
     parser.add_argument("--library-name", default="主要照片庫")
@@ -39,6 +39,11 @@ def main() -> None:
             )
             service.start(scan_id)
             WorkerRunner(container).run_once()
+            scan = repository.get(scan_id)
+            if scan is None or scan["status"] != "completed":
+                state = scan["status"] if scan else "missing"
+                print(f"掃描工作尚未成功（{state}）：{scan_id}；已停止建立後續分析。")
+                return 1
             print(f"掃描工作完成：{scan_id}")
 
         strategy = args.strategy or container.settings_repository.get("analysis.strategy")
@@ -57,7 +62,8 @@ def main() -> None:
         print(f"狀態：{job['status']}；完成 {job['completed_items']}；失敗 {job['failed_items']}")
     finally:
         container.close()
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

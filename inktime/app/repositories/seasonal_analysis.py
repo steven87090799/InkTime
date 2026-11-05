@@ -80,14 +80,16 @@ class SeasonalAnalysisRepository:
         # snapshot. Daily demand and the progress page consume bounded pages.
         return [row for page in self.candidate_pages(target, window, connection=connection) for row in page]
 
-    def candidate_pages(self, target: date | None, window: int, *, connection=None):
+    def candidate_pages(self, target: date | None, window: int, *, connection=None, content_sha256: str | None = None):
         days = seasonal_month_days(target, window) if target is not None else []
         after = ("", "")
         accepted_sha = None
         while True:
             context = self.database.session() if connection is None else nullcontext(connection)
             with context as active:
-                rows = self._candidate_page(active, days, target is not None, after)
+                rows = (self._candidate_page(active, days, target is not None, after)
+                        if content_sha256 is None else
+                        self._candidate_page(active, days, target is not None, after, content_sha256=content_sha256))
             if not rows:
                 break
             page = []
@@ -102,9 +104,11 @@ class SeasonalAnalysisRepository:
             if len(rows) < self.PAGE_SIZE:
                 break
 
-    def _candidate_page(self, connection, days, bounded_date, after):
+    def _candidate_page(self, connection, days, bounded_date, after, *, content_sha256=None):
         date_clause = "AND p.captured_month_day IN (SELECT value FROM json_each(?))" if bounded_date else ""
         date_params = (json.dumps(days),) if bounded_date else ()
+        content_clause = "AND p.sha256=?" if content_sha256 is not None else ""
+        content_params = (content_sha256,) if content_sha256 is not None else ()
         return connection.execute(
             f"""SELECT p.id,p.sha256,p.relative_path,p.exif_json,p.screenshot_likelihood,
                 (SELECT t.id FROM seasonal_analysis_tasks t WHERE t.content_sha256=p.sha256 AND COALESCE(t.error_code,'')<>'DAILY-DEFERRED'
@@ -119,10 +123,10 @@ class SeasonalAnalysisRepository:
                  AND o.state NOT IN ('not_sent','approved') ORDER BY o.created_at DESC LIMIT 1) AS paid_state
                 FROM photos p JOIN libraries l ON l.id=p.library_id
                 WHERE {self.ELIGIBLE}
-                  {date_clause}
+                  {date_clause} {content_clause}
                   AND (p.sha256,p.id)>(?,?)
                 ORDER BY p.sha256,p.id LIMIT ?""",  # noqa: S608 -- fixed repository predicates only.
-            (*date_params, *after, self.PAGE_SIZE),
+            (*date_params, *content_params, *after, self.PAGE_SIZE),
         ).fetchall()
 
     @staticmethod

@@ -11,6 +11,22 @@ IMAGE = "sha256:" + "a" * 64
 PURL = "pkg:deb/debian/libmount1@2.42.4-1?arch=amd64&distro=debian-13.6"
 
 
+@pytest.mark.parametrize("arch", ["amd64", "arm64"])
+@pytest.mark.parametrize("release,accepted", [("3", False), ("4", True), ("5", False)])
+def test_zlib_requires_exact_vendor_fixed_source_and_binary(arch, release, accepted):
+    version = "1.3.dfsg+really1.3.2"
+    package = {"ID": "zlib-fixed", "Name": "zlib1g", "Version": version, "Release": release, "Epoch": 1,
+               "SrcName": "zlib", "SrcVersion": version, "SrcRelease": release, "SrcEpoch": 1, "Arch": arch}
+    finding = {"VulnerabilityID": "CVE-2026-76844", "PkgID": "zlib-fixed", "PkgName": "zlib1g",
+               "InstalledVersion": f"1:{version}-{release}",
+               "PkgIdentifier": {"PURL": f"pkg:deb/debian/zlib1g@{version}-{release}?arch={arch}&distro=debian-13.6&epoch=1"}}
+    report = {"Metadata": {"ImageID": IMAGE, "OS": {"Family": "debian", "Name": "13.6"}},
+              "Results": [{"Class": "os-pkgs", "Type": "debian", "Packages": [package], "Vulnerabilities": [finding]}]}
+    assert bool(build_vex(report, IMAGE)["statements"]) is accepted
+    package["SrcRelease"] = "3"
+    assert build_vex(report, IMAGE)["statements"] == []
+
+
 def _report():
     return {"SchemaVersion": 2, "Metadata": {"ImageID": IMAGE, "OS": {"Family": "debian", "Name": "13.6"}},
             "Results": [{"Class": "os-pkgs", "Type": "debian", "Packages": [{
@@ -100,3 +116,24 @@ def test_reviewed_independent_architecture_and_systemd_packages_have_exact_fixed
     assert len(build_vex(report, IMAGE)["statements"]) == 1
     package["Version"] = "unreviewed"
     assert build_vex(report, IMAGE)["statements"] == []
+
+
+@pytest.mark.parametrize("architecture", ["amd64", "arm64"])
+@pytest.mark.parametrize("version,accepted", [("3.53.4", False), ("3.54.1", True), ("3.99.0", False)])
+def test_sqlite_upstream_fix_attestation_is_exact_and_never_hides_old_or_future_builds(architecture, version, accepted):
+    report = _report()
+    binary = version + "-1"
+    purl = f"pkg:deb/debian/libsqlite3-0@{binary}?arch={architecture}&distro=debian-13.6"
+    package = report["Results"][0]["Packages"][0]
+    package.update(ID="libsqlite3-0@" + binary, Name="libsqlite3-0", Version=version, Release="1",
+                   SrcName="sqlite3", SrcVersion=version, SrcRelease="1", Arch=architecture)
+    finding = report["Results"][0]["Vulnerabilities"][0]
+    finding.update(VulnerabilityID="CVE-2026-119373", PkgID=package["ID"], PkgName="libsqlite3-0",
+                   InstalledVersion=binary, PkgIdentifier={"PURL": purl})
+    statements = build_vex(report, IMAGE)["statements"]
+    assert bool(statements) == accepted
+    if accepted:
+        assert "Debian tracker still lists unfixed" in statements[0]["status_notes"]
+        assert "e1c9934f9f11a499029abb020ea715a08970da80" in statements[0]["status_notes"]
+        package["SrcVersion"] = "3.53.4"
+        assert build_vex(report, IMAGE)["statements"] == []

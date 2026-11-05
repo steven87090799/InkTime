@@ -267,8 +267,11 @@ class ObservabilityService:
             ).fetchall()
             known_ids = [
                 str(row[0])
-                for row in c.execute("SELECT id FROM releases ORDER BY created_at DESC LIMIT 1000").fetchall()
+                for row in c.execute("SELECT id FROM releases WHERE status IN ('published','superseded') "
+                    "AND reconciliation_status IN ('ok','applied','skipped','payload_pruned') "
+                    "AND COALESCE(failure_reason,'')='' ORDER BY created_at DESC LIMIT 1000").fetchall()
             ]
+        known_ids = list(dict.fromkeys([*known_ids, *(str(row["id"]) for row in rows)]))
         active: set[tuple[str, str]] = set()
         for row in rows:
             release_id, status = str(row["id"]), str(row["status"])

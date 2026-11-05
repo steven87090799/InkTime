@@ -35,6 +35,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="InkTime bounded model benchmark")
     parser.add_argument("--live", action="store_true", help="explicitly permit external Provider calls")
     parser.add_argument("--provider", default="offline-synthetic")
+    parser.add_argument("--provider-id", help="live 模式的既存 Provider 帳戶 UUID")
     parser.add_argument("--models", default="offline/synthetic")
     parser.add_argument("--sample-count", type=int, default=3)
     parser.add_argument("--seed", default="inktime-benchmark-v1")
@@ -60,11 +61,13 @@ def main() -> int:
         variants = [item == "on" for item in _csv(args.variants)]
         budgets = None
         if args.live:
+            if not args.provider_id:
+                parser.error("live 模式必須指定既存的 --provider-id 帳戶 UUID")
             if args.database is None or not args.database.is_file():
                 parser.error("live 模式必須指定既存的 --database，才能套用共用預算")
             database = Database(args.database)
             budgets = BudgetService(database, SettingsRepository(database))
-        service = ModelBenchmarkService(budgets=budgets)
+        service = ModelBenchmarkService(budgets=budgets, provider_id=args.provider_id)
         axes = service.build_axes(
             provider=args.provider,
             models=_csv(args.models),

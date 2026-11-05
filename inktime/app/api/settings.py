@@ -47,7 +47,7 @@ from inktime.app.domain.rendering.system_presets import SYSTEM_PRESETS
 from inktime.app.services.provider_contracts import run_provider_contract
 from inktime.app.core.idempotency import scoped_idempotency_key, request_fingerprint
 from inktime.app.providers.base import ProviderResponse, Usage
-from inktime.app.repositories.billable_operations import BillableOperationRepository, UnreconciledOperationError
+from inktime.app.repositories.billable_operations import BillableOperationRepository, UnreconciledOperationError, paid_operation_lock_name
 
 
 bp = Blueprint("settings", __name__)
@@ -798,17 +798,18 @@ def test_provider(provider_id: str):
                                      request.headers.get("Idempotency-Key") or str(uuid4()))
         resource = request_fingerprint({"provider_id": provider_id, "level": level,
                                         "model": model, "revision": config["updated_at"]})
-        operation_id, checkpoint = operations.begin("diagnostic:" + resource, str(key), reuse_completed=True,
-                                                    context={"provider": provider.name, "model": model, "level": level})
-        if checkpoint is not None:
-            result = json.loads(checkpoint.content)
-        else:
-            result = run_provider_contract(
-                provider, level=level, model=model, budgets=current_app.extensions["inktime_budget_service"]
-            )
-            operations.save_response(operation_id, ProviderResponse(json.dumps(result), Usage(tokens_reported=False)))
-            if result["ok"]:
-                operations.finish(operation_id)
+        with operations.database.operation_lock(paid_operation_lock_name("diagnostic:" + resource)):
+            operation_id, checkpoint = operations.begin("diagnostic:" + resource, str(key), reuse_completed=True,
+                                                        context={"provider": provider.name, "model": model, "level": level})
+            if checkpoint is not None:
+                result = json.loads(checkpoint.content)
+            else:
+                result = run_provider_contract(
+                    provider, level=level, model=model, budgets=current_app.extensions["inktime_budget_service"]
+                )
+                operations.save_response(operation_id, ProviderResponse(json.dumps(result), Usage(tokens_reported=False)))
+                if result["ok"]:
+                    operations.finish(operation_id)
     except UnreconciledOperationError as exc:
         return {"message": str(exc), "error_code": exc.code}, 409
     except (ValueError, KeyError) as exc:
@@ -903,41 +904,28 @@ def costs_page():
     periods = usage_periods(
         str(current_app.extensions["inktime_settings_repository"].get("general.timezone", "Asia/Taipei"))
     )
+    from inktime.app.services.budgets import BudgetService
+    evidence = BudgetService._billable_evidence_sql()
     database = current_app.extensions["inktime_database"]
     with database.session() as connection:
         summary = connection.execute(
-            """
+            f"""
             SELECT COALESCE(SUM(CASE WHEN cost_source<>'unknown' AND started_at >= :day_start AND started_at < :day_end THEN COALESCE(actual_cost,estimated_cost) ELSE 0 END),0) today,
                    COALESCE(SUM(CASE WHEN cost_source<>'unknown' AND started_at >= :week_start AND started_at <= :now THEN COALESCE(actual_cost,estimated_cost) ELSE 0 END),0) week,
                    COALESCE(SUM(CASE WHEN cost_source<>'unknown' AND started_at >= :month_start AND started_at < :month_end THEN COALESCE(actual_cost,estimated_cost) ELSE 0 END),0) month,
-                   COALESCE(SUM(CASE WHEN cost_source='unknown' AND (
-                       COALESCE(input_tokens,0)>0 OR COALESCE(output_tokens,0)>0 OR COALESCE(cached_tokens,0)>0
-                       OR COALESCE(reasoning_tokens,0)>0 OR COALESCE(cache_write_tokens,0)>0
-                       OR COALESCE(request_body_bytes,0)>0 OR COALESCE(image_bytes,0)>0
-                       OR COALESCE(actual_cost,0)>0 OR COALESCE(estimated_cost,0)>0
-                   ) THEN 1 ELSE 0 END),0) unknown_count,
-                   COALESCE(SUM(CASE WHEN cost_source='unknown' AND started_at >= :day_start AND started_at < :day_end AND (
-                       COALESCE(input_tokens,0)>0 OR COALESCE(output_tokens,0)>0 OR COALESCE(cached_tokens,0)>0
-                       OR COALESCE(reasoning_tokens,0)>0 OR COALESCE(cache_write_tokens,0)>0
-                       OR COALESCE(request_body_bytes,0)>0 OR COALESCE(image_bytes,0)>0
-                       OR COALESCE(actual_cost,0)>0 OR COALESCE(estimated_cost,0)>0
-                   ) THEN 1 ELSE 0 END),0) today_unknown_count,
+                   COALESCE(SUM(CASE WHEN cost_source='unknown' AND {evidence} THEN 1 ELSE 0 END),0) unknown_count,
+                   COALESCE(SUM(CASE WHEN cost_source='unknown' AND started_at >= :day_start AND started_at < :day_end AND {evidence} THEN 1 ELSE 0 END),0) today_unknown_count,
                    COALESCE(SUM(input_tokens),0) input_tokens,COALESCE(SUM(output_tokens),0) output_tokens
             FROM api_usage
-            """,
+            """,  # noqa: S608 -- fixed internal predicate; periods are bound.
             periods,
         ).fetchone()
         by_model = connection.execute(
-            """SELECT provider,model,SUM(input_tokens) input_tokens,SUM(output_tokens) output_tokens,
+            f"""SELECT provider,model,SUM(input_tokens) input_tokens,SUM(output_tokens) output_tokens,
                       SUM(CASE WHEN cost_source<>'unknown' THEN COALESCE(actual_cost,estimated_cost) ELSE 0 END) cost,
-                      SUM(CASE WHEN cost_source='unknown' AND (
-                          COALESCE(input_tokens,0)>0 OR COALESCE(output_tokens,0)>0 OR COALESCE(cached_tokens,0)>0
-                          OR COALESCE(reasoning_tokens,0)>0 OR COALESCE(cache_write_tokens,0)>0
-                          OR COALESCE(request_body_bytes,0)>0 OR COALESCE(image_bytes,0)>0
-                          OR COALESCE(actual_cost,0)>0 OR COALESCE(estimated_cost,0)>0
-                      ) THEN 1 ELSE 0 END) unknown_count,
+                      SUM(CASE WHEN cost_source='unknown' AND {evidence} THEN 1 ELSE 0 END) unknown_count,
                       COUNT(*) requests
-               FROM api_usage GROUP BY provider,model ORDER BY cost DESC"""
+               FROM api_usage GROUP BY provider,model ORDER BY cost DESC"""  # noqa: S608 -- fixed internal evidence predicate.
         ).fetchall()
         usage_retention = connection.execute(
             "SELECT retention_days FROM data_retention_policies WHERE data_type='api_usage'"

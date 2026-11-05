@@ -136,6 +136,9 @@ def test_credit_rejected_photo_can_resume_without_rebilling_an_unknown_request(a
 class ResponsesBatch(FakeBatchProvider):
     fail_first = False
 
+    def retrieve_file(self, file_id):
+        return {"id": file_id, "purpose": "batch", "expires_at": None}
+
     def build_analysis_request_body(self, **kwargs):
         return provider().build_analysis_request_body(**kwargs)
 

@@ -67,3 +67,22 @@ def test_verify_checks_inner_ciphertext_and_duplicate_secret_names(tmp_path, mon
     payload["secrets"].append(payload["secrets"][0].copy())
     with pytest.raises(RecoveryBundleError, match="RECOVERY-007"):
         service.verify(tmp_path / "fixture", "dummy-passphrase-long")
+
+
+def test_post_commit_directory_failure_keeps_committed_key_and_recovery_marker(tmp_path, monkeypatch):
+    import inktime.app.services.secret_recovery as module
+
+    service = _service(tmp_path, "source", "dummy-key-a")
+    bundle = tmp_path / "bundle.json"
+    service.create(bundle, "dummy-passphrase-long")
+    # The DB and bundle agree, but the stale on-disk key must not be restored
+    # after the secret replacement has committed.
+    service.session_path.write_text("stale-key-b", encoding="utf-8")
+    def failed_sync(_directory):
+        raise OSError("directory sync failed after commit")
+    monkeypatch.setattr(module, "sync_directory", failed_sync)
+    with pytest.raises(OSError, match="after commit"):
+        service.restore(bundle, "dummy-passphrase-long")
+    assert service.session_path.read_text() == "dummy-key-a"
+    assert SecretStore(service.database, "dummy-key-a").get("fixture.secret") == "dummy-value"
+    assert (service.data_dir / ".secret-recovery-in-progress").exists()

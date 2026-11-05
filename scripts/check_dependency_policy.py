@@ -11,7 +11,7 @@ from packaging.version import Version
 
 ROOT = Path(__file__).resolve().parents[1]
 EXACT_REQUIREMENT = re.compile(r"^[A-Za-z0-9_.-]+(?:\[[A-Za-z0-9_,.-]+\])?==[^\s;]+(?:\s*;.+)?$")
-ACTION_SHA = re.compile(r"\buses:\s*[^\s]+@([0-9a-fA-F]+)")
+ACTION_SHA = re.compile(r"\buses:\s*([^\s#]+)")
 PINNED_PYTHON = re.compile(r"^FROM python:3\.12-slim@sha256:[0-9a-f]{64}(?:\s+AS\s+\w+)?$")
 PYTHON_312 = Version("3.12")
 
@@ -138,7 +138,10 @@ def main() -> int:
     for workflow in sorted((ROOT / ".github/workflows").glob("*.yml")):
         for number, line in enumerate(workflow.read_text(encoding="utf-8").splitlines(), 1):
             match = ACTION_SHA.search(line)
-            if match and len(match.group(1)) != 40:
+            reference = match.group(1).strip("\"'") if match else ""
+            remote = bool(reference and not reference.startswith(("./", "docker://")))
+            revision = reference.rsplit("@", 1)[-1] if "@" in reference else ""
+            if remote and re.fullmatch(r"[0-9a-fA-F]{40}", revision) is None:
                 errors.append(f"{workflow.name}:{number}: GitHub Action 必須 pin 40-char commit SHA")
 
     if errors:
