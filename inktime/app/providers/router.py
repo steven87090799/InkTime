@@ -358,6 +358,8 @@ class FailoverVisionProvider(VisionProvider):
             if not self.acquire_channel(channel):
                 continue
             self._local.channel = channel
+            vision_state = kwargs.get("vision_attempt")
+            vision_started_before = bool(getattr(vision_state, "vision_started", False))
             try:
                 if before_attempt is not None:
                     before_attempt(channel.provider, self._effective_model(channel, kwargs))
@@ -367,9 +369,15 @@ class FailoverVisionProvider(VisionProvider):
             except Exception as exc:
                 last_error = exc
                 self.release_channel(channel, error=exc)
+                rejected = openai_request_rejected(channel.provider, exc)
+                if rejected and vision_state is not None:
+                    # This refusal added no execution uncertainty. Restore the
+                    # incoming marker instead of attributing it to the next
+                    # channel's pre-request budget/availability failure.
+                    vision_state.vision_started = vision_started_before
                 side_effect_unknown = any(bool(getattr(exc, field, False))
                                           for field in ("vision_started", "request_started", "ambiguous"))
-                if side_effect_unknown and not openai_request_rejected(channel.provider, exc):
+                if side_effect_unknown and not rejected:
                     raise
                 if should_log_rate_limited(
                     f"provider-failover:{channel.provider.name}:{method}",

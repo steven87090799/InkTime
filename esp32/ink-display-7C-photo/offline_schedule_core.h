@@ -12,8 +12,9 @@ constexpr uint8_t kMaxOfflineSlots = 24;
 constexpr uint8_t kMaxAckJournalEntries = 32;
 constexpr int32_t kOfflineScheduleSchemaVersion = 1;
 
-inline bool transientOfflineHttpFailure(int status) {
-  return status < 0 || status == 408 || status == 429 || (status >= 500 && status <= 599);
+inline bool transientOfflineHttpFailure(int status, bool truncatedBody = false) {
+  return status < 0 || status == 408 || status == 429 || (status >= 500 && status <= 599)
+    || (status == 200 && truncatedBody);
 }
 
 inline bool allowOfflineCachedFormalFrame(bool transientFailure, bool formalSlotDue,

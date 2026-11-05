@@ -103,7 +103,7 @@ class ScoringLabService:
 
         def reserve_attempt(actual_provider, actual_model):
             # The router invokes this after selecting each concrete channel.
-            # Reaching another channel means the previous attempt was not sent.
+            # A new channel follows either no send or a definite native refusal.
             self.budgets.release(operation_id)
             self.budgets.reserve(
                 operation_id, self.budgets.estimate_reserve(actual_provider, actual_model, output_tokens=max_tokens),

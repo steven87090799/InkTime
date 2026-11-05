@@ -103,6 +103,10 @@ int main() {
   assert(!allowOfflineCachedFormalFrame(true, false, false, false));
   assert(!allowOfflineCachedFormalFrame(true, true, true, false));
   assert(!allowOfflineCachedFormalFrame(true, true, false, true));
+  assert(transientOfflineHttpFailure(200, true));
+  assert(!transientOfflineHttpFailure(200, false));
+  assert(!transientOfflineHttpFailure(401, true));
+  assert(!transientOfflineHttpFailure(403, true));
   testContentNoticeOverlay();
   testUnusedSensorSleep();
   uint8_t powerAttempt = 0U;

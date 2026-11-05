@@ -67,6 +67,29 @@ def test_only_definite_native_rejection_permits_failover(kind, ambiguous, should
         assert second.calls == 0
 
 
+@pytest.mark.parametrize("already_started", [False, True])
+def test_definite_refusal_restores_only_its_own_attempt_marker(already_started):
+    from inktime.app.providers.base import VisionAttemptState
+    state = VisionAttemptState(vision_started=already_started, vision_completed=already_started)
+    class Refused(StubProvider):
+        kind = "openai"
+        def analyze(self, **kwargs):
+            kwargs["vision_attempt"].vision_started = True
+            raise ProviderHTTPError("refused", "VLM-007", http_status=429,
+                                    request_started=True, vision_started=True)
+    first, second = Refused("first"), StubProvider("second")
+    router = FailoverVisionProvider([ProviderChannel(first, priority=1), ProviderChannel(second, priority=2)])
+    def before_attempt(provider, _model):
+        if provider is second:
+            raise ValueError("not sent")
+    with pytest.raises(ValueError, match="not sent"):
+        router.analyze(image_path=Path("photo.jpg"), model="vision", detail="high", stage="single",
+                       vision_attempt=state, before_attempt=before_attempt)
+    assert state.vision_started is already_started
+    assert state.vision_completed is already_started
+    assert second.calls == 0
+
+
 def test_provider_channel_model_overrides_global_model_for_vision_and_repair():
     provider = StubProvider("openrouter")
     router = FailoverVisionProvider([ProviderChannel(provider, model="openrouter/free")])

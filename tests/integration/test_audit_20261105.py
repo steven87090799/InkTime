@@ -152,9 +152,45 @@ def test_provider_test_blocks_approval_during_its_external_call(app, client, mon
     assert response.status_code == 200 and calls == [True]
 
 
+def test_native_refusal_then_unsent_budget_failure_does_not_create_unknown_usage(app, tmp_path, monkeypatch):
+    from inktime.app.providers.openai_compatible import ProviderHTTPError
+    from inktime.app.providers.router import FailoverVisionProvider, ProviderChannel
+    from inktime.app.services.budgets import BudgetExceeded
+    setup_dual(app)
+    image = tmp_path / "refused-then-budget.jpg"
+    Image.new("RGB", (64, 64), "orange").save(image)
+    class Refused(LabProvider):
+        provider_id, kind = "direct-test", "openai"
+        def analyze(self, **kwargs):
+            kwargs["vision_attempt"].vision_started = True
+            raise ProviderHTTPError("refused", "VLM-007", http_status=429,
+                                    request_started=True, vision_started=True)
+    class Unsent(LabProvider):
+        provider_id, kind = "daily-free", "openrouter"
+        def analyze(self, **kwargs):
+            pytest.fail("second provider must be refused before sending")
+    service = app.extensions["inktime_scoring_lab_service"]
+    provider = FailoverVisionProvider([ProviderChannel(Refused(), priority=1), ProviderChannel(Unsent(), priority=2)])
+    monkeypatch.setattr(service.providers, "build_router", lambda *args, **kwargs: provider)
+    reserve = service.budgets.reserve
+    def reserve_second_refused(*args, **kwargs):
+        if kwargs.get("provider_id") == "daily-free":
+            raise BudgetExceeded("second provider budget exhausted")
+        return reserve(*args, **kwargs)
+    monkeypatch.setattr(service.budgets, "reserve", reserve_second_refused)
+    with pytest.raises(BudgetExceeded):
+        service.analyze(image)
+    with service.usage.database.session() as connection:
+        assert connection.execute("SELECT state FROM billable_operations").fetchone()[0] == "not_sent"
+        assert connection.execute("SELECT COUNT(*) FROM api_usage").fetchone()[0] == 0
+        assert connection.execute("SELECT COUNT(*) FROM budget_reservations WHERE state='active'").fetchone()[0] == 0
+
+
 @pytest.mark.parametrize("known_cost", [True, False])
 @pytest.mark.parametrize("prefixed", [True, False])
-def test_reservation_reconciliation_uses_operation_evidence_for_all_key_formats(app, known_cost, prefixed):
+def test_reservation_reconciliation_uses_operation_evidence_for_all_key_formats(app, monkeypatch, known_cost, prefixed):
+    from types import SimpleNamespace
+    import inktime.app.workers.scheduler as scheduler_module
     database = app.extensions["inktime_database"]
     budgets = app.extensions["inktime_budget_service"]
     operations = BillableOperationRepository(database)
@@ -169,7 +205,21 @@ def test_reservation_reconciliation_uses_operation_evidence_for_all_key_formats(
         status="completed", operation_id=operation_id, cost_source="estimated" if known_cost else "unknown")
     with database.transaction() as connection:
         connection.execute("UPDATE budget_reservations SET created_at='2000-01-01T00:00:00+00:00'")
-    assert budgets.expire_stale_reservations() == int(known_cost)
+    expire = budgets.expire_stale_reservations
+    calls = []
+    def reconcile():
+        calls.append(expire())
+    monkeypatch.setattr(budgets, "expire_stale_reservations", reconcile)
+    clock = [1000.0]
+    monkeypatch.setattr(scheduler_module, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+    runner = scheduler_module.SchedulerRunner(app)
+    runner.tick()
+    clock[0] += 60
+    runner.tick()
+    assert calls == [int(known_cost)]
+    clock[0] += 3540
+    runner.tick()
+    assert calls == [int(known_cost), 0]
     with database.session() as connection:
         assert connection.execute("SELECT state FROM budget_reservations WHERE id=?", (reservation_id,)).fetchone()[0] == (
             "released" if known_cost else "active")

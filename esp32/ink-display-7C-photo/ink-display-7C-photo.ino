@@ -441,7 +441,8 @@ static void applyFixedTimezoneWithoutNtp(int32_t offsetMinutes) {
 }
 
 static DeserializationError readDeviceHttpJson(
-    HTTPClient &http, JsonDocument &document, size_t maximumBytes) {
+    HTTPClient &http, JsonDocument &document, size_t maximumBytes, bool *truncatedBody = nullptr) {
+  if (truncatedBody != nullptr) *truncatedBody = false;
   const int expected = http.getSize();
   if (expected <= 0 || static_cast<size_t>(expected) > maximumBytes) {
     return DeserializationError(DeserializationError::InvalidInput);
@@ -451,6 +452,7 @@ static DeserializationError readDeviceHttpJson(
   // Bound allocation first and reject truncated bodies before parsing any JSON.
   const String body = http.getString();
   if (body.length() != static_cast<size_t>(expected)) {
+    if (truncatedBody != nullptr) *truncatedBody = body.length() < static_cast<size_t>(expected);
     return DeserializationError(DeserializationError::IncompleteInput);
   }
   return deserializeJson(document, body);
@@ -4567,8 +4569,10 @@ static bool downloadOfflineScheduleSlot(
   const String &downloadUrl,
   const String &expectedSha,
   const String &pixelFormat,
-  int64_t expectedSize
+  int64_t expectedSize,
+  bool &transientFailure
 ) {
+  transientFailure = false;
   if (!inktime::isSha256Hex(expectedSha.c_str())
       || !inktime::isSafeQueueDownloadPath(downloadUrl.c_str(), downloadUrl.length())) {
     lastDeviceErrorCode = "DEVICE-OFFLINE-SCHEDULE-ITEM";
@@ -4626,6 +4630,7 @@ static bool downloadOfflineScheduleSlot(
     return false;
   }
   const int fileStatus = countedHttpGet(fileHttp);
+  transientFailure = inktime::transientOfflineHttpFailure(fileStatus);
   if (handleDeviceAuthStatus(cfg, fileStatus)) {
     fileHttp.end();
     heap_caps_free(packed);
@@ -4659,6 +4664,7 @@ static bool downloadOfflineScheduleSlot(
   }
   fileHttp.end();
   if (total != packedSize) {
+    transientFailure = true;
     heap_caps_free(packed);
     lastDeviceErrorCode = "DEVICE-OFFLINE-SCHEDULE-DOWNLOAD";
     lastDeviceErrorMessage = "離線排程 Slot Payload 未完整下載";
@@ -4907,7 +4913,9 @@ static bool downloadOfflineScheduleAndFrames(Config &cfg, bool targetNext = fals
     return false;
   }
   JsonDocument schedule;
-  const DeserializationError jsonError = readDeviceHttpJson(scheduleHttp, schedule, 32768U);
+  bool truncatedBody = false;
+  const DeserializationError jsonError = readDeviceHttpJson(scheduleHttp, schedule, 32768U, &truncatedBody);
+  offlineScheduleTransientFailure = inktime::transientOfflineHttpFailure(status, truncatedBody);
   scheduleHttp.end();
   const JsonVariantConst schema = schedule["schema_version"];
   const JsonVariantConst rawSlots = schedule["slots"];
@@ -5235,8 +5243,11 @@ static bool downloadOfflineScheduleAndFrames(Config &cfg, bool targetNext = fals
     currentPayloadShaVerified = false;
     currentPayloadIntegrityTrusted = false;
     if (!sendQueueEvent(cfg, inktime::QueueEvent::ManifestReceived)
-        || !sendQueueEvent(cfg, inktime::QueueEvent::DownloadStarted)
-        || !downloadOfflineScheduleSlot(
+        || !sendQueueEvent(cfg, inktime::QueueEvent::DownloadStarted)) {
+      return false;
+    }
+    bool slotTransientFailure = false;
+    if (!downloadOfflineScheduleSlot(
              cfg,
              remoteRotation == 180
                ? inktime::DisplayRotation::Rotate180
@@ -5245,10 +5256,13 @@ static bool downloadOfflineScheduleAndFrames(Config &cfg, bool targetNext = fals
              downloadUrl,
              sha,
              pixelFormat,
-             rawSize.as<int64_t>())
-        || !sendQueueEvent(cfg, inktime::QueueEvent::DownloadCompleted)) {
+             rawSize.as<int64_t>(), slotTransientFailure)) {
+      // A received newer configuration revokes the old cache, even when
+      // fetching its replacement frame later encounters a transport failure.
+      offlineScheduleTransientFailure = slotTransientFailure && remoteConfigVersion == cfg.config_version;
       return false;
     }
+    if (!sendQueueEvent(cfg, inktime::QueueEvent::DownloadCompleted)) return false;
     currentPayloadShaVerified = true;
     if (!sendQueueEvent(cfg, inktime::QueueEvent::HashVerified)) return false;
   }
@@ -6294,6 +6308,8 @@ bool downloadDailyPhotoBin(Config &cfg) {
         if (latest) currentDisplaySkipped = shouldSkipCurrentDisplay(cfg);
         return latest;
       }
+      if (!downloaded && !offlineScheduleTransientFailure
+          && downloadErrorCode != "DEVICE-OFFLINE-SCHEDULE-NOT-READY") return false;
       currentPrefetchOnly = false;
       const bool loaded = loadOfflineScheduledLocalFrame(cfg, time(nullptr), false);
       if (!loaded && !downloaded && !downloadErrorCode.isEmpty()) {
