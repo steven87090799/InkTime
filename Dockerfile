@@ -37,6 +37,8 @@ ARG DEBIAN_SECURITY_SNAPSHOT=20261105T000000Z
 # Keep the other reviewed package families on their original snapshot. Only
 # SQLite comes from this signed sid snapshot containing the upstream FTS5 fix.
 ARG DEBIAN_SQLITE_SNAPSHOT=20261103T023120Z
+# Debian bug #1153063: zlib's gzwrite fix is available in sid 1.3.2-4.
+ARG DEBIAN_ZLIB_SNAPSHOT=20261105T000000Z
 COPY scripts/ci/fetch_debian_packages.py /tmp/fetch_debian_packages.py
 RUN set -eux; \
     rm -f /etc/apt/sources.list.d/debian.sources; \
@@ -49,6 +51,8 @@ RUN set -eux; \
         > /etc/apt/sources.list.d/inktime-runtime-fixes.list; \
     printf '%s\n' "deb [check-valid-until=no] https://snapshot.debian.org/archive/debian/${DEBIAN_SQLITE_SNAPSHOT}/ sid main" \
         > /etc/apt/sources.list.d/inktime-sqlite-fix.list; \
+    printf '%s\n' "deb [check-valid-until=no] https://snapshot.debian.org/archive/debian/${DEBIAN_ZLIB_SNAPSHOT}/ sid main" \
+        > /etc/apt/sources.list.d/inktime-zlib-fix.list; \
     printf '%s\n' \
         'Package: *' \
         'Pin: release n=forky' \
@@ -104,7 +108,10 @@ RUN set -eux; \
         openssl \
         openssl-provider-legacy \
         perl-base \
-        util-linux; \
+        util-linux \
+        zlib1g=1:1.3.dfsg+really1.3.2-4; \
+    zlib_version="$(dpkg-query -W -f='${Version}' zlib1g)"; \
+    dpkg --compare-versions "${zlib_version}" eq '1:1.3.dfsg+really1.3.2-4'; \
     for apt_package in apt libapt-pkg7.0; do \
         apt_version="$(dpkg-query -W -f='${Version}' "${apt_package}")"; \
         dpkg --compare-versions "${apt_version}" eq '3.0.4'; \

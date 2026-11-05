@@ -38,6 +38,7 @@ FIXES = {
     # claim is limited to the exact reviewed Debian source/binary version.
     # See debian_sqlite_evidence.json; old 3.53.4 and future builds stay visible.
     "CVE-2026-119373": ("sqlite3", "3.54.1-1", {"libsqlite3-0": "3.54.1-1"}),
+    "CVE-2026-76844": ("zlib", "1:1.3.dfsg+really1.3.2-4", {"zlib1g": "1:1.3.dfsg+really1.3.2-4"}),
 }
 
 
@@ -103,6 +104,10 @@ def build_vex(report: dict, image_id: str) -> dict:
             "Evidence: scripts/ci/debian_sqlite_evidence.json; upstream "
             "https://github.com/sqlite/sqlite/commit/e1c9934f9f11a499029abb020ea715a08970da80"
             if code == "CVE-2026-119373" else
+            f"Exact Debian 20261105 sid zlib 1:1.3.dfsg+really1.3.2-4 source/binary; image {image_id}. "
+            "Vendor fix: https://bugs.debian.org/1153063; "
+            "https://security-tracker.debian.org/tracker/CVE-2026-76844"
+            if code == "CVE-2026-76844" else
             f"Exact signed Debian 20261012 snapshot binary/source versions; image {image_id}. "
             f"Vendor evidence: https://security-tracker.debian.org/tracker/{code}"
         ),

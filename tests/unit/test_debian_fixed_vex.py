@@ -11,6 +11,22 @@ IMAGE = "sha256:" + "a" * 64
 PURL = "pkg:deb/debian/libmount1@2.42.4-1?arch=amd64&distro=debian-13.6"
 
 
+@pytest.mark.parametrize("arch", ["amd64", "arm64"])
+@pytest.mark.parametrize("release,accepted", [("3", False), ("4", True), ("5", False)])
+def test_zlib_requires_exact_vendor_fixed_source_and_binary(arch, release, accepted):
+    version = "1.3.dfsg+really1.3.2"
+    package = {"ID": "zlib-fixed", "Name": "zlib1g", "Version": version, "Release": release, "Epoch": 1,
+               "SrcName": "zlib", "SrcVersion": version, "SrcRelease": release, "SrcEpoch": 1, "Arch": arch}
+    finding = {"VulnerabilityID": "CVE-2026-76844", "PkgID": "zlib-fixed", "PkgName": "zlib1g",
+               "InstalledVersion": f"1:{version}-{release}",
+               "PkgIdentifier": {"PURL": f"pkg:deb/debian/zlib1g@{version}-{release}?arch={arch}&distro=debian-13.6&epoch=1"}}
+    report = {"Metadata": {"ImageID": IMAGE, "OS": {"Family": "debian", "Name": "13.6"}},
+              "Results": [{"Class": "os-pkgs", "Type": "debian", "Packages": [package], "Vulnerabilities": [finding]}]}
+    assert bool(build_vex(report, IMAGE)["statements"]) is accepted
+    package["SrcRelease"] = "3"
+    assert build_vex(report, IMAGE)["statements"] == []
+
+
 def _report():
     return {"SchemaVersion": 2, "Metadata": {"ImageID": IMAGE, "OS": {"Family": "debian", "Name": "13.6"}},
             "Results": [{"Class": "os-pkgs", "Type": "debian", "Packages": [{
