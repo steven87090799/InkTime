@@ -62,7 +62,10 @@ def test_repair_confirmation_restores_only_enabled_offline_prepare_deadlines(app
     device_id, _ = devices.create("repair", auth_mode="automatic", enabled=enabled,
                                   delivery_mode="inktime_offline_schedule", offline_prefetch_allowed=True)
     with devices.database.transaction() as connection:
-        connection.execute("UPDATE devices SET next_offline_prepare_at=NULL,offline_schedule_capability_state='legacy_ambiguous' WHERE id=?", (device_id,))
+        # Model the administrator's state of an already paired frame. New
+        # automatic scaffolds are deliberately disabled by create().
+        connection.execute("UPDATE devices SET enabled=?,pairing_state='paired',next_offline_prepare_at=NULL,"
+                           "offline_schedule_capability_state='legacy_ambiguous' WHERE id=?", (int(enabled), device_id))
         service._update_confirmed_device(connection, device_id=device_id,
             envelope={"credential_version": 2, "device_secret": "test-confirmation-secret", "offline_schedule_max_slots": 24},
             now=datetime.now(timezone.utc))

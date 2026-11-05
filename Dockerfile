@@ -31,7 +31,9 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 # Runtime/upgrade acceptance remains covered by hosted image and NAS tests.
 ARG DEBIAN_SNAPSHOT=20261012T000000Z
 ARG DEBIAN_RUNTIME_SNAPSHOT=20261012T000000Z
-ARG DEBIAN_SECURITY_SNAPSHOT=20261012T000000Z
+# DSA-6607-1: retain the reviewed runtime/SQLite snapshots while taking APT's
+# stable-security 3.0.4 fix from the first following UTC-day snapshot.
+ARG DEBIAN_SECURITY_SNAPSHOT=20261105T000000Z
 # Keep the other reviewed package families on their original snapshot. Only
 # SQLite comes from this signed sid snapshot containing the upstream FTS5 fix.
 ARG DEBIAN_SQLITE_SNAPSHOT=20261103T023120Z
@@ -63,11 +65,13 @@ RUN set -eux; \
         'Pin: release n=sid' \
         'Pin-Priority: 1002' \
         > /etc/apt/preferences.d/inktime-runtime-fixes; \
-    apt-get update; \
-    DEBIAN_FRONTEND=noninteractive apt-get install --no-install-recommends -y \
+    apt-get -o Acquire::Retries=0 update; \
+    DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=0 install --no-install-recommends -y \
+        apt=3.0.4 \
         bsdutils \
         gzip \
         libacl1 \
+        libapt-pkg7.0=3.0.4 \
         libblkid1 \
         libc6 \
         libc-bin \
@@ -90,6 +94,10 @@ RUN set -eux; \
         openssl-provider-legacy \
         perl-base \
         util-linux; \
+    for apt_package in apt libapt-pkg7.0; do \
+        apt_version="$(dpkg-query -W -f='${Version}' "${apt_package}")"; \
+        dpkg --compare-versions "${apt_version}" eq '3.0.4'; \
+    done; \
     gzip_version="$(dpkg-query -W -f='${Version}' gzip)"; \
     dpkg --compare-versions "${gzip_version}" ge '1.13-1+deb13u1'; \
     perl_version="$(dpkg-query -W -f='${Version}' perl-base)"; \
