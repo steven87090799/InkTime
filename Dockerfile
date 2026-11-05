@@ -65,8 +65,17 @@ RUN set -eux; \
         'Pin: release n=sid' \
         'Pin-Priority: 1002' \
         > /etc/apt/preferences.d/inktime-runtime-fixes; \
-    apt-get -o Acquire::Retries=0 update; \
-    DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=0 install --no-install-recommends -y \
+    apt_retry() { \
+        apt_attempt=1; \
+        while ! apt-get -o Acquire::Retries=0 -o Acquire::http::Timeout=60 -o Acquire::https::Timeout=60 "$@"; do \
+            if [ "${apt_attempt}" -ge 4 ]; then return 1; fi; \
+            apt-get clean; \
+            sleep "$((apt_attempt * 5))"; \
+            apt_attempt="$((apt_attempt + 1))"; \
+        done; \
+    }; \
+    apt_retry update; \
+    DEBIAN_FRONTEND=noninteractive apt_retry install --no-install-recommends -y \
         apt=3.0.4 \
         bsdutils \
         gzip \

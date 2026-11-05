@@ -323,7 +323,8 @@ jobs:
     if: ${{ needs.changes.outputs.full_validation == 'true' && needs.changes.outputs.run_python_quality == 'true' }}
     needs: changes
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    # The complete coverage run reached 95% at the former two-hour limit.
+    timeout-minutes: 180
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (Node 24)
         with: {fetch-depth: 0}
@@ -350,6 +351,7 @@ jobs:
           INKTIME_RENDER_ARTIFACT_DIR: ${{ runner.temp }}/rendered-pairs
         run: >-
           pytest --cov=inktime --cov-config=pyproject.toml
+          --maxfail=1 -v --tb=short
           --cov-report=term-missing --cov-fail-under=80
           --durations=30 --durations-min=1 --junitxml=artifacts/python-full.xml
           -m "not performance"
