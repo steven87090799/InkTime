@@ -12,20 +12,23 @@ import tempfile
 from urllib.parse import unquote, urlsplit
 from urllib.request import urlopen
 
+CACHE_DIRECTORY = Path("/var/cache/apt/archives")
+SNAPSHOT_HOSTS = {"snapshot.debian.org", "snapshot-fastly.debian.org"}
+
 
 def fetch(packages: list[str]) -> None:
     plan = subprocess.check_output(  # noqa: S603 -- fixed executable and Dockerfile-owned package arguments.
         ["/usr/bin/apt-get", "--print-uris", "--yes", "--download-only", "install", "--no-install-recommends", *packages],
         text=True,
     )
-    cache = Path("/var/cache/apt/archives")
+    cache = CACHE_DIRECTORY
     cache.mkdir(parents=True, exist_ok=True)
     for line in plan.splitlines():
         if not line.startswith("'"):
             continue
         url, filename, size, *_ = shlex.split(line)
         parsed = urlsplit(url)
-        if parsed.scheme != "https" or parsed.hostname != "snapshot.debian.org":
+        if parsed.scheme != "https" or parsed.hostname not in SNAPSHOT_HOSTS:
             raise ValueError("Unreviewed package origin")
         if Path(filename).name != filename:
             raise ValueError("Invalid cache filename")

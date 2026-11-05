@@ -104,7 +104,7 @@ def build_vex(report: dict, image_id: str) -> dict:
             "Evidence: scripts/ci/debian_sqlite_evidence.json; upstream "
             "https://github.com/sqlite/sqlite/commit/e1c9934f9f11a499029abb020ea715a08970da80"
             if code == "CVE-2026-119373" else
-            f"Exact Debian 20261105 sid zlib 1:1.3.dfsg+really1.3.2-4 source/binary; image {image_id}. "
+            f"Exact Debian 20261103T023120Z sid zlib 1:1.3.dfsg+really1.3.2-4 source/binary; image {image_id}. "
             "Vendor fix: https://bugs.debian.org/1153063; "
             "https://security-tracker.debian.org/tracker/CVE-2026-76844"
             if code == "CVE-2026-76844" else

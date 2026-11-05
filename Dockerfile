@@ -34,11 +34,9 @@ ARG DEBIAN_RUNTIME_SNAPSHOT=20261012T000000Z
 # DSA-6607-1: retain the reviewed runtime/SQLite snapshots while taking APT's
 # stable-security 3.0.4 fix from the first following UTC-day snapshot.
 ARG DEBIAN_SECURITY_SNAPSHOT=20261105T000000Z
-# Keep the other reviewed package families on their original snapshot. Only
-# SQLite comes from this signed sid snapshot containing the upstream FTS5 fix.
+# Keep the other reviewed package families on their original snapshot.
+# SQLite and fixed zlib share this reviewed, signed sid snapshot.
 ARG DEBIAN_SQLITE_SNAPSHOT=20261103T023120Z
-# Debian bug #1153063: zlib's gzwrite fix is available in sid 1.3.2-4.
-ARG DEBIAN_ZLIB_SNAPSHOT=20261105T000000Z
 COPY scripts/ci/fetch_debian_packages.py /tmp/fetch_debian_packages.py
 RUN set -eux; \
     rm -f /etc/apt/sources.list.d/debian.sources; \
@@ -51,8 +49,6 @@ RUN set -eux; \
         > /etc/apt/sources.list.d/inktime-runtime-fixes.list; \
     printf '%s\n' "deb [check-valid-until=no] https://snapshot.debian.org/archive/debian/${DEBIAN_SQLITE_SNAPSHOT}/ sid main" \
         > /etc/apt/sources.list.d/inktime-sqlite-fix.list; \
-    printf '%s\n' "deb [check-valid-until=no] https://snapshot.debian.org/archive/debian/${DEBIAN_ZLIB_SNAPSHOT}/ sid main" \
-        > /etc/apt/sources.list.d/inktime-zlib-fix.list; \
     printf '%s\n' \
         'Package: *' \
         'Pin: release n=forky' \
@@ -75,6 +71,13 @@ RUN set -eux; \
         while ! apt-get -o Acquire::Retries=0 -o APT::Update::Error-Mode=any -o Acquire::http::Timeout=60 -o Acquire::https::Timeout=60 "$@"; do \
             if [ "${apt_attempt}" -ge 4 ]; then return 1; fi; \
             apt-get clean; \
+            if [ "$1" = update ]; then \
+                if [ "$((apt_attempt % 2))" -eq 1 ]; then \
+                    sed -i 's#https://snapshot.debian.org/#https://snapshot-fastly.debian.org/#g' /etc/apt/sources.list /etc/apt/sources.list.d/inktime-*.list; \
+                else \
+                    sed -i 's#https://snapshot-fastly.debian.org/#https://snapshot.debian.org/#g' /etc/apt/sources.list /etc/apt/sources.list.d/inktime-*.list; \
+                fi; \
+            fi; \
             sleep "$((apt_attempt * 5))"; \
             apt_attempt="$((apt_attempt + 1))"; \
         done; \
