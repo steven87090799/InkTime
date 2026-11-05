@@ -37,6 +37,7 @@ ARG DEBIAN_SECURITY_SNAPSHOT=20261105T000000Z
 # Keep the other reviewed package families on their original snapshot. Only
 # SQLite comes from this signed sid snapshot containing the upstream FTS5 fix.
 ARG DEBIAN_SQLITE_SNAPSHOT=20261103T023120Z
+COPY scripts/ci/fetch_debian_packages.py /tmp/fetch_debian_packages.py
 RUN set -eux; \
     rm -f /etc/apt/sources.list.d/debian.sources; \
     printf '%s\n' \
@@ -67,7 +68,7 @@ RUN set -eux; \
         > /etc/apt/preferences.d/inktime-runtime-fixes; \
     apt_retry() { \
         apt_attempt=1; \
-        while ! apt-get -o Acquire::Retries=0 -o Acquire::http::Timeout=60 -o Acquire::https::Timeout=60 "$@"; do \
+        while ! apt-get -o Acquire::Retries=0 -o APT::Update::Error-Mode=any -o Acquire::http::Timeout=60 -o Acquire::https::Timeout=60 "$@"; do \
             if [ "${apt_attempt}" -ge 4 ]; then return 1; fi; \
             apt-get clean; \
             sleep "$((apt_attempt * 5))"; \
@@ -75,7 +76,8 @@ RUN set -eux; \
         done; \
     }; \
     apt_retry update; \
-    DEBIAN_FRONTEND=noninteractive apt_retry install --no-install-recommends -y \
+    apt_install() { python /tmp/fetch_debian_packages.py "$@"; DEBIAN_FRONTEND=noninteractive apt_retry install --no-install-recommends -y "$@"; }; \
+    apt_install \
         apt=3.0.4 \
         bsdutils \
         gzip \
@@ -141,6 +143,7 @@ RUN set -eux; \
     dpkg --compare-versions "${sqlite_version}" eq '3.54.1-1'; \
     python -c "import sqlite3; assert sqlite3.sqlite_version_info == (3,54,1); c=sqlite3.connect(':memory:'); c.execute('CREATE VIRTUAL TABLE documents USING fts5(text, detail=none)'); c.executemany('INSERT INTO documents(rowid,text) VALUES (?,?)', [(i,'ab') for i in range(1,56)]+[(-9223372036854775808,'abc')]); assert c.execute(\"SELECT count(*) FROM documents WHERE documents MATCH 'a*'\").fetchone() == (56,); c.close()"; \
     apt-get check; \
+    rm /tmp/fetch_debian_packages.py; \
     mount --version; \
     nsenter --version; \
     infocmp -V; \
