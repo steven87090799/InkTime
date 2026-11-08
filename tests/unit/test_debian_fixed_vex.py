@@ -20,7 +20,7 @@ def test_zlib_requires_exact_vendor_fixed_source_and_binary(arch, release, accep
     finding = {"VulnerabilityID": "CVE-2026-76844", "PkgID": "zlib-fixed", "PkgName": "zlib1g",
                "InstalledVersion": f"1:{version}-{release}",
                "PkgIdentifier": {"PURL": f"pkg:deb/debian/zlib1g@{version}-{release}?arch={arch}&distro=debian-13.6&epoch=1"}}
-    report = {"Metadata": {"ImageID": IMAGE, "OS": {"Family": "debian", "Name": "13.6"}},
+    report = {"SchemaVersion": 2, "Metadata": {"ImageID": IMAGE, "OS": {"Family": "debian", "Name": "13.6"}},
               "Results": [{"Class": "os-pkgs", "Type": "debian", "Packages": [package], "Vulnerabilities": [finding]}]}
     assert bool(build_vex(report, IMAGE)["statements"]) is accepted
     package["SrcRelease"] = "3"
