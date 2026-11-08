@@ -120,7 +120,8 @@ def test_reviewed_independent_architecture_and_systemd_packages_have_exact_fixed
 
 @pytest.mark.parametrize("architecture", ["amd64", "arm64"])
 @pytest.mark.parametrize("version,accepted", [("3.53.4", False), ("3.54.1", True), ("3.99.0", False)])
-def test_sqlite_upstream_fix_attestation_is_exact_and_never_hides_old_or_future_builds(architecture, version, accepted):
+@pytest.mark.parametrize("code", ["CVE-2026-119373", "CVE-2026-119374", "CVE-2026-119379"])
+def test_sqlite_fix_attestation_is_exact_and_never_hides_old_or_future_builds(architecture, version, accepted, code):
     report = _report()
     binary = version + "-1"
     purl = f"pkg:deb/debian/libsqlite3-0@{binary}?arch={architecture}&distro=debian-13.6"
@@ -128,12 +129,16 @@ def test_sqlite_upstream_fix_attestation_is_exact_and_never_hides_old_or_future_
     package.update(ID="libsqlite3-0@" + binary, Name="libsqlite3-0", Version=version, Release="1",
                    SrcName="sqlite3", SrcVersion=version, SrcRelease="1", Arch=architecture)
     finding = report["Results"][0]["Vulnerabilities"][0]
-    finding.update(VulnerabilityID="CVE-2026-119373", PkgID=package["ID"], PkgName="libsqlite3-0",
+    finding.update(VulnerabilityID=code, PkgID=package["ID"], PkgName="libsqlite3-0",
                    InstalledVersion=binary, PkgIdentifier={"PURL": purl})
     statements = build_vex(report, IMAGE)["statements"]
     assert bool(statements) == accepted
     if accepted:
-        assert "Debian tracker still lists unfixed" in statements[0]["status_notes"]
-        assert "e1c9934f9f11a499029abb020ea715a08970da80" in statements[0]["status_notes"]
+        if code == "CVE-2026-119373":
+            assert "Debian tracker still lists unfixed" in statements[0]["status_notes"]
+            assert "e1c9934f9f11a499029abb020ea715a08970da80" in statements[0]["status_notes"]
+        else:
+            assert f"https://security-tracker.debian.org/tracker/{code}" in statements[0]["status_notes"]
+            assert "20261103T023120Z sqlite3 3.54.1-1" in statements[0]["status_notes"]
         package["SrcVersion"] = "3.53.4"
         assert build_vex(report, IMAGE)["statements"] == []
