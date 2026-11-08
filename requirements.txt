@@ -4,7 +4,7 @@ Werkzeug==3.1.9
 requests==2.34.2
 openai==3.41.0
 # Security baseline for the TLS CA bundle; keep both runtime locks aligned.
-certifi==2026.10.19
+certifi==2026.10.23
 Pillow==13.0.0
 pillow-heif==1.8.1
 cryptography==50.0.2
