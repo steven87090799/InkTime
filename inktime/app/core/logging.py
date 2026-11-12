@@ -86,6 +86,13 @@ _MAX_RATE_LIMIT_KEYS = 256
 _SAFE_CONTEXT_KEY = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 
 
+_SECRET_LABELS = frozenset({
+    "password", "wifi_password", "api_key", "authorization", "access_token",
+    "refresh_token", "device_secret", "secret", "token", "cookie", "credentials",
+    "pairing_code", "pairing_nonce", "session_key", "webhook_token",
+})
+
+
 def _safe_text(value: Any, limit: int = MAX_STRING_LENGTH) -> str:
     try:
         normalized_limit = max(0, int(limit))
@@ -112,10 +119,15 @@ def _bounded(value: Any, *, depth: int = 0) -> Any:
                 if index >= MAX_DETAILS_ITEMS:
                     bounded_mapping["_truncated"] = True
                     break
-                safe_key = _safe_text(key, 128)
+                # These are schema labels, not credential values. A short
+                # registered test/provider credential such as "secret" must
+                # not rename device_secret and lose its diagnostic identity.
+                raw_key = str(key)
+                sensitive = bool(SENSITIVE_KEY.search(raw_key))
+                safe_key = raw_key if raw_key.casefold() in _SECRET_LABELS else _safe_text(key, 128)
                 bounded_mapping[safe_key] = (
                     "[已遮蔽]"
-                    if SENSITIVE_KEY.search(safe_key)
+                    if sensitive
                     else _bounded(item, depth=depth + 1)
                 )
             return bounded_mapping

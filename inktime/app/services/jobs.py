@@ -87,14 +87,21 @@ class JobService:
             raise InvalidJobTransition("目前狀態無法啟動")
 
     def pause(self, job_id: str) -> None:
-        if not self.repository.request_pause(job_id):
-            raise InvalidJobTransition("目前狀態無法暫停")
         job = self.repository.get(job_id)
         if job and json.loads(job["settings_json"]).get("complementary_lane") == "openai_backfill":
-            with self.repository.database.session() as connection:
-                connection.execute("UPDATE openai_backfill_control SET pause_kind='manual',pause_reason='使用者已暫停工作',resume_job_id=NULL WHERE id=1")
+            with self.repository.database.operation_lock("openai-backfill-submit"):
+                if not self.repository.request_pause(job_id):
+                    raise InvalidJobTransition("目前狀態無法暫停")
+                with self.repository.database.session() as connection:
+                    connection.execute("UPDATE openai_backfill_control SET pause_kind='manual',pause_reason='使用者已暫停工作',resume_job_id=NULL WHERE id=1")
+            return
+        if not self.repository.request_pause(job_id):
+            raise InvalidJobTransition("目前狀態無法暫停")
 
     def resume(self, job_id: str) -> None:
+        job = self.repository.get(job_id)
+        if job and json.loads(job["settings_json"]).get("complementary_lane") == "openai_backfill":
+            raise InvalidJobTransition("OpenAI 補齊請使用「雙 Provider 分工」的恢復操作，以重新核對預算及人工暫停狀態")
         if not self.repository.transition(job_id, {"paused", "budget_exceeded"}, "running", "resumed"):
             raise InvalidJobTransition("目前狀態無法繼續")
 

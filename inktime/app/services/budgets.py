@@ -6,7 +6,9 @@ import time
 from uuid import uuid4
 
 from inktime.app.db import Database
-from inktime.app.providers.base import Usage, request_definitely_not_sent
+from inktime.app.providers.base import Usage, request_definitely_not_sent, openai_request_rejected
+from inktime.app.repositories.billable_operations import BillableOperationRepository, paid_operation_lock_name
+import hashlib
 from inktime.app.repositories.usage import UsageRepository
 from inktime.app.repositories.settings import SettingsRepository
 from inktime.app.services.usage_periods import usage_periods
@@ -49,10 +51,10 @@ class BudgetService:
         return (datetime.now(timezone.utc) - timedelta(seconds=window)).isoformat()
 
     def expire_stale_reservations(self) -> int:
-        """Recover old Vision reservations only with durable settlement evidence.
+        """Recover operation reservations only with durable settlement evidence.
 
         Batch reservations belong to the importer, which knows when every item
-        is accounted. Unidentified/diagnostic and ambiguous reservations remain
+        is accounted. Unidentified and ambiguous reservations remain
         reserved; absence of usage is never evidence of zero cost.
         """
         cutoff = self._reservation_cutoff()
@@ -60,9 +62,11 @@ class BudgetService:
             return int(
                 connection.execute(
                     """UPDATE budget_reservations SET state='released'
-                    WHERE state='active' AND created_at<? AND id LIKE 'vision:%' AND EXISTS (
+                    WHERE state='active' AND created_at<? AND EXISTS (
                         SELECT 1 FROM billable_operations o
-                        WHERE o.id=substr(budget_reservations.id,8)
+                        WHERE o.id IN (budget_reservations.id,
+                            CASE WHEN substr(budget_reservations.id,1,7)='vision:'
+                                 THEN substr(budget_reservations.id,8) END)
                           AND (o.state='not_sent' OR (
                               o.state IN ('response','completed','approved') AND EXISTS (
                                   SELECT 1 FROM api_usage u WHERE u.operation_id=o.id
@@ -216,37 +220,57 @@ class BudgetService:
 
     def call(self, provider, method: str, **kwargs):
         """Shared paid-call gate for diagnostics and live benchmark subrequests."""
+        if getattr(provider, "kind", None) == "openai" and not self.openai.is_openai(getattr(provider, "provider_id", None)):
+            raise BudgetExceeded("原生 OpenAI 請求缺少有效的 Provider 帳戶 ID，未送出請求")
         function = getattr(provider, method)
         if not callable(function):
             raise ValueError("diagnostic provider method must be callable")
-        reservation_id = str(uuid4())
+        request_key = "diagnostic:" + str(uuid4())
+        content_key = hashlib.sha256(request_key.encode()).hexdigest()
         model = str(kwargs["model"])
-        self.reserve(reservation_id, self.estimate_reserve(
-            provider, model, output_tokens=int(kwargs.get("max_tokens") or 2048)), provider_id=getattr(provider, "provider_id", None))
-        started_at = datetime.now(timezone.utc).isoformat()
-        started = time.monotonic()
-        try:
-            response = function(**kwargs)
-        except Exception as error:
-            if request_definitely_not_sent(error):
+        operations = BillableOperationRepository(self.database)
+        with self.database.operation_lock(paid_operation_lock_name(content_key)):
+            operation_id, _ = operations.begin(content_key, request_key,
+                context={"provider": provider.name, "model": model, "purpose": "diagnostic_" + method})
+            reservation_id = "vision:" + operation_id
+            try:
+                self.reserve(reservation_id, self.estimate_reserve(
+                    provider, model, output_tokens=int(kwargs.get("max_tokens") or 2048)),
+                    provider_id=getattr(provider, "provider_id", None))
+            except Exception:
+                operations.finish(operation_id, not_sent=True)
+                raise
+            started_at = datetime.now(timezone.utc).isoformat()
+            started = time.monotonic()
+            try:
+                response = function(**kwargs)
+            except Exception as error:
+                if request_definitely_not_sent(error) or openai_request_rejected(provider, error):
+                    self.release(reservation_id)
+                    if openai_request_rejected(provider, error):
+                        operations.finish_rejected(operation_id, error)
+                    else:
+                        operations.finish(operation_id, not_sent=True)
+                raise
+            operations.save_response(operation_id, response)
+            usage = response.usage
+            estimated = provider.estimate_cost(str(response.served_model or model), usage) if usage.tokens_reported else None
+            actual = usage.provider_reported_cost
+            UsageRepository(self.database).record(
+                provider=provider.name, provider_id=getattr(provider, "provider_id", None),
+                model=str(response.served_model or model), job_id=None, photo_id=None,
+                request_type="diagnostic_" + method, tokens_reported=usage.tokens_reported,
+                input_tokens=usage.input_tokens, output_tokens=usage.output_tokens,
+                cached_tokens=usage.cached_tokens, estimated_cost=estimated, actual_cost=actual,
+                started_at=started_at, latency_ms=int((time.monotonic()-started)*1000), status="completed",
+                request_id=response.request_id, reasoning_tokens=usage.reasoning_tokens,
+                cache_write_tokens=usage.cache_write_tokens, operation_id=operation_id,
+                cost_source="provider_reported" if actual is not None else "estimated" if estimated is not None else "unknown",
+            )
+            operations.finish(operation_id)
+            if actual is not None or estimated is not None:
                 self.release(reservation_id)
-            raise
-        usage = response.usage
-        estimated = provider.estimate_cost(str(response.served_model or model), usage) if usage.tokens_reported else None
-        actual = usage.provider_reported_cost
-        UsageRepository(self.database).record(
-            provider=provider.name, provider_id=getattr(provider, "provider_id", None),
-            model=str(response.served_model or model), job_id=None, photo_id=None,
-            request_type="diagnostic_" + method, tokens_reported=usage.tokens_reported, input_tokens=usage.input_tokens, output_tokens=usage.output_tokens,
-            cached_tokens=usage.cached_tokens, estimated_cost=estimated, actual_cost=actual,
-            started_at=started_at, latency_ms=int((time.monotonic()-started)*1000), status="completed",
-            request_id=response.request_id, reasoning_tokens=usage.reasoning_tokens,
-            cache_write_tokens=usage.cache_write_tokens,
-            cost_source="provider_reported" if actual is not None else "estimated" if estimated is not None else "unknown",
-        )
-        if actual is not None or estimated is not None:
-            self.release(reservation_id)
-        return response
+            return response
 
     def assert_request_allowed(self, job_id: str | None, photo_id: str | None) -> None:
         self.assert_restore_reconciled()

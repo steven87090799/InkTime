@@ -111,6 +111,7 @@ class BoundedJobWorker:
         self.shutdown_deadline: float | None = None
         self.max_observed_futures = 0
         self.processed_items = 0
+        self.max_items_per_run: int | None = None
         self.failure_count = 0
         self._schema_failure_streak = 0
         self._provider_rejection_streak = 0
@@ -374,16 +375,33 @@ class BoundedJobWorker:
         # must reach the queue before another photo starts a model request.
         dispatch_capacity = min(self.queue_size, self.concurrency)
         timed_out: set[Future] = set()
+        finished_at: dict[str, float] = {}
+        finished_lock = threading.Lock()
+        claimed_count = 0
         timeout_triggered = False
         last_lease_renewal = time.monotonic()
         executor = ThreadPoolExecutor(max_workers=self.concurrency, thread_name_prefix="inktime")
         forced_shutdown = False
 
+        def process_timed(item):
+            try:
+                return self._process(item)
+            finally:
+                with finished_lock:
+                    finished_at[str(item["id"])] = time.monotonic()
+
         def consume(future: Future, item_id: str) -> None:
+            with finished_lock:
+                finished_at.pop(item_id, None)
             try:
                 completed_id, result, cost = future.result()
             except Exception as exc:
-                self._record_failure(job_id, item_id, exc)
+                if future in timed_out and not request_definitely_not_sent(exc):
+                    timeout_error = JobShutdownAmbiguousError("工作已逾時，晚到錯誤需先核對，禁止自動重送")
+                    timeout_error.__cause__ = exc
+                    self._record_failure(job_id, item_id, timeout_error)
+                else:
+                    self._record_failure(job_id, item_id, exc)
             else:
                 self._schema_failure_streak = 0
                 self._provider_rejection_streak = 0
@@ -429,11 +447,17 @@ class BoundedJobWorker:
                     and not self.stop_event.is_set()
                     and job["status"] in {"running", "retrying"}
                     and len(futures) < dispatch_capacity
+                    and (self.max_items_per_run is None or claimed_count < self.max_items_per_run)
                 ):
-                    claimed = self.repository.claim(job_id, self.worker_id, dispatch_capacity - len(futures))
+                    capacity = dispatch_capacity - len(futures)
+                    if self.max_items_per_run is not None:
+                        capacity = min(capacity, self.max_items_per_run - claimed_count)
+                    claimed = self.repository.claim(job_id, self.worker_id, capacity)
+                    claimed_count += len(claimed)
                     for item in claimed:
-                        future = executor.submit(self._process, item)
-                        futures[future] = (str(item["id"]), time.monotonic())
+                        started = time.monotonic()
+                        future = executor.submit(process_timed, item)
+                        futures[future] = (str(item["id"]), started)
                     self.max_observed_futures = max(self.max_observed_futures, len(futures))
 
                 if not futures:
@@ -446,24 +470,26 @@ class BoundedJobWorker:
                 if self.shutdown_deadline is not None:
                     wait_timeout = min(wait_timeout, max(0.0, self.shutdown_deadline - time.monotonic()))
                 done, _ = wait(futures, timeout=wait_timeout, return_when=FIRST_COMPLETED)
+                if self.timeout_seconds:
+                    with finished_lock:
+                        observed_at = time.monotonic()
+                        expired = [
+                            future
+                            for future, (item_id, started) in futures.items()
+                            if finished_at.get(item_id, observed_at) - started >= self.timeout_seconds
+                        ]
+                    for future in expired:
+                        timed_out.add(future)
+                        timeout_triggered = True
+                        # Thread 無法被安全強制終止；停止 claim、要求 cooperative
+                        # cancellation，並持續追蹤 Future 到真正完成。
+                        self.request_stop()
                 if not done:
                     if self.shutdown_deadline is not None and time.monotonic() >= self.shutdown_deadline:
                         forced_shutdown = bool(futures)
                         break
                     self.repository.renew_leases(job_id, self.worker_id)
                     last_lease_renewal = time.monotonic()
-                    if self.timeout_seconds:
-                        expired = [
-                            future
-                            for future, (_item_id, started) in futures.items()
-                            if time.monotonic() - started >= self.timeout_seconds
-                        ]
-                        for future in expired:
-                            timed_out.add(future)
-                            timeout_triggered = True
-                            # Thread 無法被安全強制終止；停止 claim、要求 cooperative
-                            # cancellation，並持續追蹤 Future 到真正完成。
-                            self.request_stop()
                     continue
                 for future in done:
                     item_id, _started = futures.pop(future)

@@ -245,10 +245,11 @@ def _execute_job_item(app, item, *, job, settings, provider, provider_error, ana
                     "outcome_code": "NO_ELIGIBLE_CANDIDATES", "message": str(exc)}
         return {"scan": scan, "release": release}
     if job["kind"] == "backup":
-        path = app.extensions["inktime_backup_service"].create()
+        automatic = settings.get("source") != "manual-backup"
+        path = app.extensions["inktime_backup_service"].create(automatic=automatic)
         removed = app.extensions["inktime_backup_service"].enforce_retention(
             max(0, int(settings.get("retention_days", 14)))
-        )
+        ) if automatic else 0
         return {"backup": path.name, "removed": removed}
     if job["kind"] == "cleanup":
         cache = app.extensions["inktime_thumbnail_cache"]
@@ -335,7 +336,6 @@ class WorkerRunner:
         # Stale lease recovery has one owner: SchedulerRunner.  A Worker only
         # claims work that Scheduler has made runnable, avoiding two processes
         # racing to requeue the same expired item.
-        recovered = 0
         processed_jobs = 0
         for job in repository.iter_runnable():
             if self.stop.is_set() or job["status"] not in {"running", "retrying"}:
@@ -678,9 +678,9 @@ class WorkerRunner:
                 "開始處理工作",
                 event="job_started",
                 job_id=job["id"],
-                details={"recovered_items": recovered},
             )
             try:
+                self.current.max_items_per_run = max(16, self.current.concurrency * 2)
                 self.current.run_job(job["id"])
             finally:
                 close_provider = getattr(provider, "close", None)

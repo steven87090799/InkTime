@@ -13,6 +13,7 @@ import json
 import logging
 from typing import Any, Iterable
 from uuid import uuid4
+from zoneinfo import ZoneInfo as DeviceZoneInfo
 
 from inktime.app.core.json_values import json_bool, json_int, nullable_json_int
 from inktime.app.core.logging import log_event, should_log_rate_limited
@@ -308,6 +309,8 @@ class ResilienceRepository:
                 "SELECT photo_id,rank,base_score,adjusted_score,selected,rejection_code,score_components_json FROM selection_decision_candidates WHERE trace_id=? ORDER BY rank",
                 (trace_id,),
             ).fetchall()
+        result["candidate_detail_state"] = "available" if candidates else "not_available"
+        result["stored_candidate_count"] = len(candidates)
         result["candidates"] = [
             {
                 **dict(item),
@@ -537,6 +540,8 @@ class ResilienceRepository:
 
     def update_shadow_config(self, payload: dict[str, Any], *, user_id: str) -> dict[str, Any]:
         current = self.shadow_config()
+        if json_bool(payload, "generate_preview", default=bool(current["generate_preview"]), error_prefix="SHADOW-001"):
+            raise ValueError("SHADOW-001 Shadow 預覽產出與清理尚未支援，請將 generate_preview 設為 false")
         percent = json_int(
             payload,
             "sample_percent",
@@ -598,17 +603,24 @@ class ResilienceRepository:
             )
         return self.shadow_config()
 
-    def queue(self, device_id: str) -> dict[str, Any] | None:
+    def queue(self, device_id: str, *, online_due_at: str | None = None) -> dict[str, Any] | None:
         with self.database.session() as connection:
             head = connection.execute(
                 "SELECT * FROM device_content_queues WHERE device_id=?", (device_id,)
             ).fetchone()
             if not head:
                 return None
-            items = connection.execute(
-                "SELECT * FROM device_content_queue_items WHERE device_id=? ORDER BY position,id",
-                (device_id,),
-            ).fetchall()
+            if online_due_at is None:
+                items = connection.execute(
+                    "SELECT * FROM device_content_queue_items WHERE device_id=? ORDER BY position,id", (device_id,),
+                ).fetchall()
+            else:
+                items = connection.execute(
+                    "SELECT * FROM device_content_queue_items WHERE device_id=? AND delivery_mode='online_queue' "
+                    "AND status IN ('READY','AVAILABLE','DOWNLOADED','ACKNOWLEDGED') "
+                    "AND (display_after IS NULL OR julianday(display_after)<=julianday(?)) "
+                    "ORDER BY priority DESC,position,id LIMIT 256", (device_id, online_due_at),
+                ).fetchall()
         return {"queue": dict(head), "items": [dict(item) for item in items]}
 
     def ensure_queue(self, device_id: str, *, depth: int = 3) -> dict[str, Any]:
@@ -919,7 +931,8 @@ class ResilienceRepository:
                 raise ValueError("QUEUE-005 event_epoch 僅可用於 delayed_terminal ACK")
             event_at = now
             timestamp_source = "server_fallback"
-            history_date = now[:10]
+            device_zone = connection.execute("SELECT timezone FROM devices WHERE id=?", (device_id,)).fetchone()
+            history_date = datetime.fromisoformat(now).astimezone(DeviceZoneInfo(str(device_zone[0] or "UTC"))).date().isoformat()
             if delayed_terminal:
                 slot = connection.execute(
                     """
@@ -1021,7 +1034,8 @@ class ResilienceRepository:
                     manifest = json.loads(str(release["manifest_json"])) if release else {}
                 except (TypeError, ValueError, json.JSONDecodeError):
                     manifest = {}
-                from inktime.app.domain.rendering.release_sources import release_source_photo_ids
+                from inktime.app.domain.rendering.release_sources import release_source_photo_ids, release_source_content_hashes
+                frozen_hashes = release_source_content_hashes(manifest)
 
                 for photo_id in release_source_photo_ids(manifest):
                     if (
@@ -1043,6 +1057,7 @@ class ResilienceRepository:
                                         "device_id": device_id,
                                         "queue_item_id": item_id,
                                         "timestamp_source": timestamp_source,
+                                        "content_sha256": frozen_hashes.get(photo_id),
                                     }
                                 ),
                                 photo_id,
@@ -1077,6 +1092,8 @@ class ResilienceRepository:
         if data_type not in allowed:
             raise KeyError(data_type)
         current = next(row for row in self.retention_policies() if row["data_type"] == data_type)
+        if any(payload.get(key) is not None for key in ("maximum_items", "maximum_bytes")):
+            raise ValueError("RETENTION-001 目前僅支援依天數清理，數量與容量上限尚未支援")
         days, batch = (
             json_int(
                 payload,
@@ -1148,6 +1165,15 @@ class ResilienceRepository:
         return next(row for row in self.retention_policies() if row["data_type"] == data_type)
 
     def cleanup(self, *, dry_run: bool = True) -> dict[str, Any]:
+        with self.database.operation_lock("retention-cleanup"):
+            with self.database.transaction(operation="retention_interrupted") as connection:
+                connection.execute(
+                    "UPDATE data_cleanup_runs SET status='failed',completed_at=?,error_code='RETENTION-CLEANUP-FAILED' "
+                    "WHERE status='running'", (utc_now(),),
+                )
+            return self._cleanup_owned(dry_run=dry_run)
+
+    def _cleanup_owned(self, *, dry_run: bool = True) -> dict[str, Any]:
         run_id, now = str(uuid4()), utc_now()
         summary: dict[str, int] = {}
         outcomes: dict[str, str] = {}
@@ -1262,12 +1288,17 @@ class ResilienceRepository:
                         # Protect the newest minimum in the same writer transaction.
                         # The candidate list is already bounded by cleanup_batch_size.
                         placeholders = ",".join("?" for _ in ids)
-                        protected = connection.execute(
-                            f"SELECT {id_column} FROM (SELECT {id_column} FROM {table} "  # noqa: S608 -- fixed mapping
-                            f"ORDER BY {time_column} DESC,{id_column} DESC LIMIT ?) "
-                            f"WHERE {id_column} IN ({placeholders})",  # noqa: S608 -- fixed mapping
-                            (minimum, *(row[0] for row in ids)),
-                        ).fetchall()
+                        if table == "selection_decision_candidates":
+                            protected_sql = (
+                                "SELECT id FROM (SELECT c.id FROM selection_decision_candidates c "  # noqa: S608 -- only bound placeholder count is dynamic.
+                                "JOIN selection_decision_traces t ON t.trace_id=c.trace_id "
+                                f"ORDER BY t.created_at DESC,c.id DESC LIMIT ?) WHERE id IN ({placeholders})"  # noqa: S608 -- bound IDs, fixed shape.
+                            )
+                        else:
+                            protected_sql = (f"SELECT {id_column} FROM (SELECT {id_column} FROM {table} "  # noqa: S608 -- fixed internal table/column mapping.
+                                             f"ORDER BY {time_column} DESC,{id_column} DESC LIMIT ?) "
+                                             f"WHERE {id_column} IN ({placeholders})")  # noqa: S608 -- fixed mapping.
+                        protected = connection.execute(protected_sql, (minimum, *(row[0] for row in ids))).fetchall()
                         protected_ids = {str(row[0]) for row in protected}
                         ids = [row for row in ids if str(row[0]) not in protected_ids]
                     for row in ids:
@@ -1508,8 +1539,10 @@ class ResilienceRepository:
             item_id = self._rollout_delivery_locked(connection, device_id, fallback, now, 1000, deadline)
             connection.execute("UPDATE rollout_targets SET queue_item_id=?,status='rollback_pending',last_error_code=NULL,updated_at=? WHERE id=?",
                                (item_id, now, target["id"]))
-        status = "FAILED" if missing else "ROLLING_BACK"
-        detail = "ROLLBACK-002 缺少可驗證的回復身分" if missing else reason
+        pending = connection.execute("SELECT 1 FROM rollout_targets WHERE rollout_id=? AND status='rollback_pending' LIMIT 1", (rollout_id,)).fetchone()
+        no_compatible_targets = pending is None
+        status = "FAILED" if missing or no_compatible_targets else "ROLLING_BACK"
+        detail = ("ROLLBACK-002 沒有可回復的線上裝置或可驗證身分" if missing or no_compatible_targets else reason)
         connection.execute("UPDATE rollout_campaigns SET status=?,rollback_reason=?,updated_at=? WHERE id=?",
                            (status, detail[:500], now, rollout_id))
         self._action(connection, rollout_id, actor_id, "rollback_failed" if missing else "rollback_started", detail)
@@ -1571,6 +1604,20 @@ class ResilienceRepository:
         # Rotate the bounded scheduler page even when a campaign awaits ACKs.
         connection.execute("UPDATE rollout_campaigns SET updated_at=? WHERE id=?", (now, rollout_id))
         if campaign["status"] == "ROLLING_BACK":
+            pending = connection.execute("SELECT 1 FROM rollout_targets WHERE rollout_id=? AND status IN ('rollback_pending','in_progress') LIMIT 1", (rollout_id,)).fetchone()
+            if pending is None:
+                succeeded = connection.execute(
+                    "SELECT 1 FROM rollout_targets WHERE rollout_id=? AND status='succeeded' LIMIT 1",
+                    (rollout_id,),
+                ).fetchone()
+                failed = connection.execute(
+                    "SELECT 1 FROM rollout_targets WHERE rollout_id=? AND status NOT IN ('succeeded','rollback_skipped_incompatible_offline','skipped_incompatible_offline') LIMIT 1",
+                    (rollout_id,),
+                ).fetchone()
+                status = "ROLLED_BACK" if succeeded and not failed else "FAILED"
+                reason = None if status == "ROLLED_BACK" else "ROLLBACK-002 沒有可繼續回復的線上裝置"
+                connection.execute("UPDATE rollout_campaigns SET status=?,rollback_reason=?,updated_at=? WHERE id=?", (status, reason, now, rollout_id))
+                return True
             expired = connection.execute(
                 "SELECT 1 FROM rollout_targets t JOIN device_content_queue_items q ON q.id=t.queue_item_id "
                 "WHERE t.rollout_id=? AND t.status IN ('rollback_pending','in_progress') AND q.ack_deadline<=? LIMIT 1",

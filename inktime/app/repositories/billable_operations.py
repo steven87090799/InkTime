@@ -1,6 +1,8 @@
+from contextlib import nullcontext
 from dataclasses import asdict
 from datetime import datetime, timezone
 import json
+import hashlib
 from uuid import uuid4
 
 from inktime.app.db import Database
@@ -16,6 +18,10 @@ class UnreconciledOperationError(RuntimeError):
 class SeasonalAlreadyProcessedError(RuntimeError):
     code = "SEASONAL-ALREADY-PROCESSED"
     not_sent = True
+
+
+def paid_operation_lock_name(content_sha256: str) -> str:
+    return "paid-operation-" + hashlib.sha256(content_sha256.encode()).hexdigest()[:3]
 
 
 class BillableOperationRepository:
@@ -114,24 +120,30 @@ class BillableOperationRepository:
             row = connection.execute("SELECT state FROM billable_operations WHERE id=?", (operation_id,)).fetchone()
         return row is not None and row["state"] == "completed"
 
-    def finish(self, operation_id: str, *, not_sent: bool = False) -> None:
-        with self.database.transaction() as connection:
+    def finish(self, operation_id: str, *, not_sent: bool = False, connection=None) -> None:
+        context = self.database.transaction() if connection is None else nullcontext(connection)
+        with context as connection:
             connection.execute(
                 "UPDATE billable_operations SET state=?,updated_at=? WHERE id=?",
                 ("not_sent" if not_sent else "completed", datetime.now(timezone.utc).isoformat(), operation_id),
             )
 
-    def finish_rejected(self, operation_id: str) -> None:
+    def finish_rejected(self, operation_id: str, error: Exception | None = None) -> None:
         """Close a definite OpenAI 4xx rejection, retaining sent-request evidence.
 
         The legacy not_sent state also releases a call the provider explicitly
         refused to execute. It must never be used for a timeout or generic 5xx.
         """
+        status = (getattr(error, "http_status", None)
+                  or getattr(getattr(error, "call_trace", None), "http_status", None))
+        note = "OpenAI definitive HTTP rejection; model execution was not accepted"
+        if error is not None:
+            note += f"; HTTP {status}; code={str(getattr(error, 'code', type(error).__name__))[:80]}"
         with self.database.transaction() as connection:
             connection.execute(
                 "UPDATE billable_operations SET state='not_sent',resolution_note=?,updated_at=? "
                 "WHERE id=? AND state='started'",
-                ("OpenAI definitive HTTP rejection; model execution was not accepted",
+                (note,
                  datetime.now(timezone.utc).isoformat(), operation_id),
             )
 
@@ -139,11 +151,21 @@ class BillableOperationRepository:
         """Explicit operator decision; retain unknown billing and the original evidence."""
         if not reason.strip():
             raise ValueError("重送批准必須記錄原因")
-        with self.database.transaction() as connection:
-            cursor = connection.execute(
-                "UPDATE billable_operations SET state='approved',resolution_note=COALESCE(resolution_note || char(10),'') || ?,updated_at=? "
-                "WHERE id=? AND state IN ('started','response')",
-                (reason.strip()[:2000], datetime.now(timezone.utc).isoformat(), operation_id),
-            )
-            if cursor.rowcount != 1:
-                raise ValueError("找不到待對帳或回應待處理操作，或該操作已處理")
+        with self.database.session() as connection:
+            operation = connection.execute("SELECT content_sha256 FROM billable_operations WHERE id=?", (operation_id,)).fetchone()
+        if operation is None:
+            raise ValueError("找不到付費操作")
+        lock = self.database.try_acquire_operation_lock(paid_operation_lock_name(str(operation[0])))
+        if lock is None:
+            raise ValueError("模型請求仍由執行者處理中，不可批准重送")
+        try:
+            with self.database.transaction() as connection:
+                cursor = connection.execute(
+                    "UPDATE billable_operations SET state='approved',resolution_note=COALESCE(resolution_note || char(10),'') || ?,updated_at=? "
+                    "WHERE id=? AND state IN ('started','response')",
+                    (reason.strip()[:2000], datetime.now(timezone.utc).isoformat(), operation_id),
+                )
+                if cursor.rowcount != 1:
+                    raise ValueError("找不到待對帳或回應待處理操作，或該操作已處理")
+        finally:
+            lock.close()

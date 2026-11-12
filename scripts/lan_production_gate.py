@@ -459,8 +459,30 @@ def _exercise(state_path: Path) -> None:
             raise RuntimeError("same-content Device Status failed")
     with browser.request("/api/v1/backups", payload={}, csrf=csrf) as response:
         backup = json.load(response)
-    state["backup_name"] = backup["name"]
+    backup_name = _completed_backup_name(browser, str(backup["job_id"]))
+    with browser.request(f"/api/v1/backups/{backup_name}") as response:
+        if response.status != 200 or not response.read(4).startswith(b"PK"):
+            raise RuntimeError("LAN background backup ZIP is unavailable")
+    state["backup_name"] = backup_name
     _write_state(state_path, state)
+
+
+def _completed_backup_name(browser: Browser, job_id: str) -> str:
+    deadline = time.monotonic() + 120
+    while time.monotonic() < deadline:
+        with browser.request(f"/api/v1/jobs/{job_id}") as response:
+            job = json.load(response)
+        status = str(job["status"])
+        if status == "completed":
+            result = job.get("result")
+            name = result.get("backup") if isinstance(result, dict) else None
+            if not isinstance(name, str) or Path(name).name != name or not name.endswith(".zip"):
+                raise RuntimeError("LAN background backup has no valid archive result")
+            return name
+        if status in {"completed_with_errors", "failed", "cancelled", "budget_exceeded", "paused"}:
+            raise RuntimeError(f"LAN background backup ended in {status}")
+        time.sleep(1)
+    raise RuntimeError("LAN background backup timed out")
 
 
 def _verify(state_path: Path) -> None:

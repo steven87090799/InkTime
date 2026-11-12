@@ -553,6 +553,27 @@ class JobRepository:
                 (dedupe_key,),
             ).fetchone()
 
+    def latest_finalizer_failure(self, dedupe_key: str) -> dict[str, Any] | None:
+        """Return the latest unresolved finalizer error for one dedupe identity."""
+
+        with self.database.session() as connection:
+            row = connection.execute(
+                """
+                SELECT jobs.id, jobs.completed_at, job_errors.last_seen_at
+                FROM jobs
+                JOIN job_errors ON job_errors.job_id=jobs.id
+                WHERE jobs.dedupe_key=?
+                  AND jobs.status='completed_with_errors'
+                  AND job_errors.component='finalizer'
+                  AND job_errors.error_code='JOB-FINALIZER-001'
+                  AND job_errors.resolved_at IS NULL
+                ORDER BY jobs.completed_at DESC, jobs.id DESC, job_errors.id DESC
+                LIMIT 1
+                """,
+                (dedupe_key,),
+            ).fetchone()
+        return dict(row) if row is not None else None
+
     def has_active_dedupe(self, dedupe_key: str) -> bool:
         """Return whether a scheduler-owned identity is already in flight."""
 
@@ -644,7 +665,7 @@ class JobRepository:
                         if str(dedupe_key).startswith("idempotency:")
                         else (
                         "status NOT IN ('failed','cancelled')"
-                        if kind == "backup"
+                        if kind == "backup" and dedupe_key != "manual-backup"
                         else "status IN ('pending','preparing','running','pausing','retrying')"
                         )
                     )

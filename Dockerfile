@@ -31,7 +31,13 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 # Runtime/upgrade acceptance remains covered by hosted image and NAS tests.
 ARG DEBIAN_SNAPSHOT=20261012T000000Z
 ARG DEBIAN_RUNTIME_SNAPSHOT=20261012T000000Z
-ARG DEBIAN_SECURITY_SNAPSHOT=20261012T000000Z
+# DSA-6607-1: retain the reviewed runtime/SQLite snapshots while taking APT's
+# stable-security 3.0.4 fix from the first following UTC-day snapshot.
+ARG DEBIAN_SECURITY_SNAPSHOT=20261105T000000Z
+# Keep the other reviewed package families on their original snapshot.
+# SQLite and fixed zlib share this reviewed, signed sid snapshot.
+ARG DEBIAN_SQLITE_SNAPSHOT=20261103T023120Z
+COPY scripts/ci/fetch_debian_packages.py /tmp/fetch_debian_packages.py
 RUN set -eux; \
     rm -f /etc/apt/sources.list.d/debian.sources; \
     printf '%s\n' \
@@ -41,6 +47,8 @@ RUN set -eux; \
         > /etc/apt/sources.list; \
     printf '%s\n' "deb [check-valid-until=no] https://snapshot.debian.org/archive/debian/${DEBIAN_SNAPSHOT}/ forky main" \
         > /etc/apt/sources.list.d/inktime-runtime-fixes.list; \
+    printf '%s\n' "deb [check-valid-until=no] https://snapshot.debian.org/archive/debian/${DEBIAN_SQLITE_SNAPSHOT}/ sid main" \
+        > /etc/apt/sources.list.d/inktime-sqlite-fix.list; \
     printf '%s\n' \
         'Package: *' \
         'Pin: release n=forky' \
@@ -49,12 +57,39 @@ RUN set -eux; \
         'Package: libsqlite3-0 bsdutils libblkid1 liblastlog2-2 libmount1 libsmartcols1 libuuid1 login mount util-linux libacl1 ncurses-base ncurses-bin libncurses6 libncursesw6 libtinfo6 perl-base libc6 libc-bin libc-gconv-modules-extra libsystemd0 libudev1' \
         'Pin: release n=forky' \
         'Pin-Priority: 1001' \
+        '' \
+        'Package: *' \
+        'Pin: release n=sid' \
+        'Pin-Priority: 50' \
+        '' \
+        'Package: libsqlite3-0' \
+        'Pin: release n=sid' \
+        'Pin-Priority: 1002' \
         > /etc/apt/preferences.d/inktime-runtime-fixes; \
-    apt-get update; \
-    DEBIAN_FRONTEND=noninteractive apt-get install --no-install-recommends -y \
+    apt_retry() { \
+        apt_attempt=1; \
+        while ! apt-get -o Acquire::Retries=0 -o APT::Update::Error-Mode=any -o Acquire::http::Timeout=60 -o Acquire::https::Timeout=60 "$@"; do \
+            if [ "${apt_attempt}" -ge 4 ]; then return 1; fi; \
+            apt-get clean; \
+            if [ "$1" = update ]; then \
+                if [ "$((apt_attempt % 2))" -eq 1 ]; then \
+                    sed -i 's#https://snapshot.debian.org/#https://snapshot-fastly.debian.org/#g' /etc/apt/sources.list /etc/apt/sources.list.d/inktime-*.list; \
+                else \
+                    sed -i 's#https://snapshot-fastly.debian.org/#https://snapshot.debian.org/#g' /etc/apt/sources.list /etc/apt/sources.list.d/inktime-*.list; \
+                fi; \
+            fi; \
+            sleep "$((apt_attempt * 5))"; \
+            apt_attempt="$((apt_attempt + 1))"; \
+        done; \
+    }; \
+    apt_retry update; \
+    apt_install() { python /tmp/fetch_debian_packages.py "$@"; DEBIAN_FRONTEND=noninteractive apt_retry install --no-install-recommends -y "$@"; }; \
+    apt_install \
+        apt=3.0.4 \
         bsdutils \
         gzip \
         libacl1 \
+        libapt-pkg7.0=3.0.4 \
         libblkid1 \
         libc6 \
         libc-bin \
@@ -63,7 +98,7 @@ RUN set -eux; \
         libncursesw6 \
         libpcre2-8-0 \
         libssl3t64 \
-        libsqlite3-0 \
+        libsqlite3-0=3.54.1-1 \
         libsmartcols1 \
         libsystemd0 \
         libtinfo6 \
@@ -76,7 +111,14 @@ RUN set -eux; \
         openssl \
         openssl-provider-legacy \
         perl-base \
-        util-linux; \
+        util-linux \
+        zlib1g=1:1.3.dfsg+really1.3.2-4; \
+    zlib_version="$(dpkg-query -W -f='${Version}' zlib1g)"; \
+    dpkg --compare-versions "${zlib_version}" eq '1:1.3.dfsg+really1.3.2-4'; \
+    for apt_package in apt libapt-pkg7.0; do \
+        apt_version="$(dpkg-query -W -f='${Version}' "${apt_package}")"; \
+        dpkg --compare-versions "${apt_version}" eq '3.0.4'; \
+    done; \
     gzip_version="$(dpkg-query -W -f='${Version}' gzip)"; \
     dpkg --compare-versions "${gzip_version}" ge '1.13-1+deb13u1'; \
     perl_version="$(dpkg-query -W -f='${Version}' perl-base)"; \
@@ -108,8 +150,10 @@ RUN set -eux; \
         dpkg --compare-versions "${openssl_version}" ge '3.5.7-1~deb13u3'; \
     done; \
     sqlite_version="$(dpkg-query -W -f='${Version}' libsqlite3-0)"; \
-    dpkg --compare-versions "${sqlite_version}" ge '3.53.2-1'; \
+    dpkg --compare-versions "${sqlite_version}" eq '3.54.1-1'; \
+    python -c "import sqlite3; assert sqlite3.sqlite_version_info == (3,54,1); c=sqlite3.connect(':memory:'); c.execute('CREATE VIRTUAL TABLE documents USING fts5(text, detail=none)'); c.executemany('INSERT INTO documents(rowid,text) VALUES (?,?)', [(i,'ab') for i in range(1,56)]+[(-9223372036854775808,'abc')]); assert c.execute(\"SELECT count(*) FROM documents WHERE documents MATCH 'a*'\").fetchone() == (56,); c.close()"; \
     apt-get check; \
+    rm /tmp/fetch_debian_packages.py; \
     mount --version; \
     nsenter --version; \
     infocmp -V; \

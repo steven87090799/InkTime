@@ -122,7 +122,7 @@ curl -fsS http://127.0.0.1:8765/health/ready
 1. 開啟設定的公開 URL，進入 `/setup` 建立第一個管理員，然後登入。
 2. 在設定中核對時區、照片路徑與執行模式。容器內相簿路徑使用 `/photos`。
 3. 從維護／工作介面建立掃描工作，確認照片數量、EXIF、縮圖與本機品質結果。
-4. 新安裝預設 `analysis.execution_mode=local_only`；可先用本機選片與渲染完成首張 Release，不需 Provider。
+4. 新安裝預設 `analysis.execution_mode=seasonal_ai`；先設定 Provider、模型與預算，再依顯示日期準備。只做本機處理時明確選 `local_only`；本機預覽不代表具有正式 Release 的 v6 安全資格。
 5. 若需要一般 AI 分析，在模型管理設定 Provider、模型與價格，再由管理員明確切換為 `automatic_ai`。先建立小批量 `single` 分析工作並設定預算；`local_with_manual_ai` 只允許明確的人工 AI 操作。
 6. 查看工作、Activity 與 AI Trace 的狀態、使用量和時間；本機結果、快取或繼承分析不代表此次發出新 Provider 請求。
 7. 在渲染頁選擇與裝置一致的面板 Profile、版型、字型及色盤，預覽後發布 Release。

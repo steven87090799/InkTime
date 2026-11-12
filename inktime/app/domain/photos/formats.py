@@ -9,6 +9,7 @@ decoder draft reduction. This does NOT claim thumbnail() bounds HEIF decoding.
 from __future__ import annotations
 
 from contextlib import contextmanager
+from dataclasses import dataclass
 import errno
 from hashlib import sha256
 import logging
@@ -124,7 +125,18 @@ def _signature(info):
     return info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns
 
 
-def assert_source_content(path: Path, expected_sha256: str | None) -> None:
+@dataclass(frozen=True)
+class SourceVerification:
+    path: Path
+    content_sha256: str
+    signature: tuple[int, int, int, int, int]
+
+    def matches(self, path: Path, content_sha256: str) -> bool:
+        return (path == self.path and content_sha256 == self.content_sha256
+                and _signature(validate_source_file(path)) == self.signature)
+
+
+def assert_source_content(path: Path, expected_sha256: str | None) -> SourceVerification | None:
     """Verify indexed bytes before reusing results, even if mtime was preserved.
 
     Historical records without a SHA remain readable; a full scan supplies
@@ -132,7 +144,7 @@ def assert_source_content(path: Path, expected_sha256: str | None) -> None:
     """
     expected = str(expected_sha256 or "").casefold()
     if len(expected) != 64 or any(character not in "0123456789abcdef" for character in expected):
-        return
+        return None
     before = validate_source_file(path)
     descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
     with os.fdopen(descriptor, "rb") as stream:
@@ -143,6 +155,7 @@ def assert_source_content(path: Path, expected_sha256: str | None) -> None:
             digest.update(chunk)
     if digest.hexdigest() != expected or _signature(path.stat()) != _signature(before):
         raise ImageSourceError("THUMB-004", "原始照片內容與分析紀錄不符；請重新掃描，不會重新送出模型", 409)
+    return SourceVerification(path, expected, _signature(before))
 
 
 @contextmanager

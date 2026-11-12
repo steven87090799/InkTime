@@ -9,7 +9,7 @@ import time
 from typing import Any
 
 from inktime.app.core.logging import log_event, should_log_rate_limited
-from .base import ProviderResponse, Usage, VisionProvider, provider_process_timeout
+from .base import ProviderResponse, Usage, VisionProvider, provider_process_timeout, openai_request_rejected
 from .openai_compatible import ProviderHTTPError
 
 
@@ -344,7 +344,7 @@ class FailoverVisionProvider(VisionProvider):
             getattr(self._local, "request_slots", {}).pop(id(channel), None)
             channel.semaphore.release()
 
-    def _execute(self, method: str, **kwargs) -> ProviderResponse:
+    def _execute(self, method: str, *, before_attempt=None, **kwargs) -> ProviderResponse:
         last_error: Exception | None = None
         _log_debug(
             "Provider route started",
@@ -358,16 +358,26 @@ class FailoverVisionProvider(VisionProvider):
             if not self.acquire_channel(channel):
                 continue
             self._local.channel = channel
+            vision_state = kwargs.get("vision_attempt")
+            vision_started_before = bool(getattr(vision_state, "vision_started", False))
             try:
+                if before_attempt is not None:
+                    before_attempt(channel.provider, self._effective_model(channel, kwargs))
                 response = getattr(channel.provider, method)(
                     **self._call_kwargs(channel, method, kwargs)
                 )
             except Exception as exc:
                 last_error = exc
                 self.release_channel(channel, error=exc)
-                if bool(getattr(exc, "vision_started", False)) or bool(
-                    getattr(exc, "request_started", False)
-                ) or bool(getattr(exc, "ambiguous", False)):
+                rejected = openai_request_rejected(channel.provider, exc)
+                if rejected and vision_state is not None:
+                    # This refusal added no execution uncertainty. Restore the
+                    # incoming marker instead of attributing it to the next
+                    # channel's pre-request budget/availability failure.
+                    vision_state.vision_started = vision_started_before
+                side_effect_unknown = any(bool(getattr(exc, field, False))
+                                          for field in ("vision_started", "request_started", "ambiguous"))
+                if side_effect_unknown and not rejected:
                     raise
                 if should_log_rate_limited(
                     f"provider-failover:{channel.provider.name}:{method}",

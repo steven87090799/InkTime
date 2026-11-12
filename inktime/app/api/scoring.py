@@ -34,6 +34,7 @@ from inktime.app.providers.openai_compatible import (
     analysis_system_prompt,
 )
 from inktime.app.services.budgets import BudgetExceeded
+from inktime.app.services.openai_budget import OpenAIBudgetExceeded
 from inktime.app.web.access import administrator_required, login_required
 
 
@@ -240,7 +241,7 @@ def test_scoring():
             result = current_app.extensions["inktime_scoring_lab_service"].analyze(normalized, idempotency_key=key)
         except (UnidentifiedImageError, OSError):
             abort(400, description="IMG-002 無法解碼測試照片")
-        except BudgetExceeded as exc:
+        except (BudgetExceeded, OpenAIBudgetExceeded) as exc:
             abort(409, description=f"{exc.code} {exc}")
         except UnreconciledOperationError as exc:
             abort(409, description=f"{exc.code} {exc}")
