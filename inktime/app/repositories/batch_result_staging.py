@@ -1,5 +1,5 @@
 from collections.abc import MutableMapping
-from contextlib import nullcontext
+from contextlib import ExitStack, nullcontext
 from hashlib import sha256
 import json
 from uuid import uuid4
@@ -13,21 +13,20 @@ class BatchResultStore(MutableMapping):
         self.batch_id = batch_id
         self.run_id = str(uuid4())
         self._connection = None
-        self._connection_context = None
-        self._owner = None
+        self._resources: ExitStack | None = None
 
     def __enter__(self):
-        self._owner = self.database.try_acquire_operation_lock("batch-ingest-" + sha256(self.batch_id.encode()).hexdigest()[:3])
-        if self._owner is None:
-            raise ValueError("Batch 匯入仍由其他執行者持有，請稍後再試")
-        self._connection_context = self.database.session()
-        try:
-            self._connection = self._connection_context.__enter__()
-            self._connection.execute("DELETE FROM batch_result_staging WHERE batch_id=?", (self.batch_id,))
-        except Exception:
-            self._owner.close()
-            self._owner = None
-            raise
+        with ExitStack() as resources:
+            owner = self.database.try_acquire_operation_lock(
+                "batch-ingest-" + sha256(self.batch_id.encode()).hexdigest()[:3]
+            )
+            if owner is None:
+                raise ValueError("Batch 匯入仍由其他執行者持有，請稍後再試")
+            resources.callback(owner.close)
+            connection = resources.enter_context(self.database.session())
+            connection.execute("DELETE FROM batch_result_staging WHERE batch_id=?", (self.batch_id,))
+            self._connection = connection
+            self._resources = resources.pop_all()
         return self
 
     def __exit__(self, *_exc):
@@ -100,12 +99,7 @@ class BatchResultStore(MutableMapping):
                 connection.execute("DELETE FROM batch_result_staging WHERE batch_id=? AND run_id=?",
                                    (self.batch_id, self.run_id))
         finally:
-            try:
-                if self._connection_context is not None:
-                    self._connection_context.__exit__(None, None, None)
-            finally:
-                self._connection_context = None
-                self._connection = None
-                if self._owner is not None:
-                    self._owner.close()
-                    self._owner = None
+            resources, self._resources = self._resources, None
+            self._connection = None
+            if resources is not None:
+                resources.close()

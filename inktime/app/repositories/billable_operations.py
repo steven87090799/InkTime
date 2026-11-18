@@ -20,8 +20,11 @@ class SeasonalAlreadyProcessedError(RuntimeError):
     not_sent = True
 
 
-def paid_operation_lock_name(content_sha256: str) -> str:
-    return "paid-operation-" + hashlib.sha256(content_sha256.encode()).hexdigest()[:3]
+def paid_operation_lock_name(content_key: str) -> str:
+    # A Provider contract can hold its diagnostic lock while sending a paid
+    # subrequest. Separate the namespaces so their lock shards cannot collide.
+    prefix = "paid-diagnostic-" if content_key.startswith("diagnostic:") else "paid-operation-"
+    return prefix + hashlib.sha256(content_key.encode()).hexdigest()[:3]
 
 
 class BillableOperationRepository:

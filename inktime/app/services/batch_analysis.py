@@ -19,7 +19,7 @@ import resource
 import sqlite3
 import threading
 import time
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from typing import Any, Callable, Iterable, Literal, Mapping
 from uuid import uuid4
 
@@ -3151,9 +3151,23 @@ class BatchAnalysisService:
                 self._cleanup_remote(dict(current) if current is not None else dict(batch), plan)
             return {"batch_id": batch_id, "cleanup_only": True}
         assert isinstance(plan, dict)
-        self.batches.update_batch(batch_id, status="importing")
-        provider = self._provider(str(batch["provider_id"]), plan)
-        try:
+        with BatchResultStore(self.database, batch_id) as records, ExitStack() as resources:
+            batch = self.batches.get(batch_id)
+            if batch is None:
+                raise KeyError(batch_id)
+            # Ownership covers the status transition, downloads and import.
+            # Recheck terminal state in case an earlier importer just finished.
+            terminal_mode = self._terminal_import_mode(batch)
+            if terminal_mode == "noop":
+                return {"batch_id": batch_id, "already_imported": True}
+            if terminal_mode == "cleanup_only" or str(batch["status"]) == "cleanup_pending":
+                self._cleanup_remote(dict(batch), plan)
+                return {"batch_id": batch_id, "cleanup_only": True}
+            self.batches.update_batch(batch_id, status="importing")
+            provider = self._provider(str(batch["provider_id"]), plan)
+            close = getattr(provider, "close", None)
+            if callable(close):
+                resources.callback(close)
             output_path = Path(
                 str(batch["local_output_path"] or (self.batch_root / batch_id / "output.jsonl"))
             )
@@ -3164,33 +3178,21 @@ class BatchAnalysisService:
             if batch["error_file_id"] and not error_path.is_file():
                 provider.download_file_content(str(batch["error_file_id"]), error_path)
                 self.batches.update_batch(batch_id, local_error_path=str(error_path))
-        finally:
-            close = getattr(provider, "close", None)
-            if callable(close):
-                close()
-        provider = self._provider(str(batch["provider_id"]), plan)
-        with BatchResultStore(self.database, batch_id) as records:
             successes: set[str] = set()
             errors: set[str] = set()
-            try:
-                current_batch = self.batches.get(batch_id)
-                self._read_results(
-                    Path(str(current_batch["local_output_path"])) if current_batch["local_output_path"] else None,
-                    current_batch,
-                    is_error=False,
-                    records=records,
-                )
-                current_batch = self.batches.get(batch_id)
-                self._read_results(
-                    Path(str(current_batch["local_error_path"])) if current_batch["local_error_path"] else None,
-                    current_batch,
-                    is_error=True,
-                    records=records,
-                )
-            finally:
-                close = getattr(provider, "close", None)
-                if callable(close):
-                    close()
+            current_batch = self.batches.get(batch_id)
+            self._read_results(
+                Path(str(current_batch["local_output_path"])) if current_batch["local_output_path"] else None,
+                current_batch,
+                is_error=False,
+                records=records,
+            )
+            self._read_results(
+                Path(str(current_batch["local_error_path"])) if current_batch["local_error_path"] else None,
+                current_batch,
+                is_error=True,
+                records=records,
+            )
             expected: dict[str, dict[str, Any]] = {
                 str(item["custom_id"]): item for item in self.batches.items(batch_id)
             }

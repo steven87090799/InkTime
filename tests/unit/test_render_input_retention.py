@@ -130,6 +130,15 @@ def test_dead_uploader_staging_is_reclaimed_without_deleting_live_upload(app):
     assert path.exists()
     # Simulate process exit releasing its cross-process uploader fence.
     workload._release_staging_owner(token)
+    job_id = workload.jobs.create_maintenance(
+        kind="render_preview", name="unbound render", settings={"input_token": token}, created_by=None,
+    )
+    with workload.jobs.database.transaction() as connection:
+        connection.execute("UPDATE jobs SET settings_json='not-json' WHERE id=?", (job_id,))
+    assert workload.cleanup() == 0
+    assert path.exists()
+    with workload.jobs.database.transaction() as connection:
+        connection.execute("UPDATE jobs SET status='failed' WHERE id=?", (job_id,))
     workload.cleanup()
     assert not path.exists()
     with workload.jobs.database.session() as connection:

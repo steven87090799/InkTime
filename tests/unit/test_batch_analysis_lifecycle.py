@@ -933,6 +933,13 @@ def test_fake_batch_imports_unordered_results_once(app, tmp_path):
     assert fake.custom_ids
     first = service.poll_due(limit=10)
     assert first["polled"] == 1
+    before_ingest = dict(service.batches.get(batch_id))
+    shard = sha256(batch_id.encode()).hexdigest()[:3]
+    with service.database.operation_lock("batch-ingest-" + shard):
+        with pytest.raises(ValueError, match="匯入仍由其他執行者持有"):
+            service.import_batch(batch_id)
+    assert dict(service.batches.get(batch_id)) == before_ingest
+
     result = service.import_batch(batch_id)
     assert result["success"] == len(photo_ids)
     detail = service.get_detail(batch_id)

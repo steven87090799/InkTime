@@ -504,11 +504,11 @@ class RenderWorkloadService:
         try:
             self._atomic_png(destination, image.convert("RGB"))
             self._record_input_size(token, destination.stat().st_size)
+            with destination.open("rb") as source:
+                digest = file_digest(source, "sha256").hexdigest()
         except Exception:
             self.delete_input(token, suffix=".png")
             raise
-        with destination.open("rb") as source:
-            digest = file_digest(source, "sha256").hexdigest()
         return token, digest
 
     @staticmethod
@@ -607,10 +607,13 @@ class RenderWorkloadService:
         return self.input_root / f"{token}{suffix}"
 
     def delete_input(self, token: str, *, suffix: str) -> None:
-        with self._files.exclusive(self._files_lock):
-            self.input_path(token, suffix=suffix).unlink(missing_ok=True)
-            with self.jobs.database.transaction(operation="render_input_delete") as connection:
-                connection.execute("DELETE FROM render_input_leases WHERE token=?", (token,))
+        path = self.input_path(token, suffix=suffix)
+        try:
+            with self._files.exclusive(self._files_lock):
+                path.unlink(missing_ok=True)
+                with self.jobs.database.transaction(operation="render_input_delete") as connection:
+                    connection.execute("DELETE FROM render_input_leases WHERE token=?", (token,))
+        finally:
             self._release_staging_owner(token)
 
     def _open_input(self, token: str) -> Image.Image:
@@ -1189,7 +1192,8 @@ class RenderWorkloadService:
                         removed = connection.execute(
                             "DELETE FROM render_input_leases WHERE token=? AND staged=1 AND job_id IS NULL AND created_at<? "
                             "AND NOT EXISTS(SELECT 1 FROM jobs WHERE status NOT IN ('completed','completed_with_errors','failed','cancelled') "
-                            "AND json_valid(settings_json) AND json_extract(settings_json,'$.input_token')=?)",
+                            "AND CASE WHEN json_valid(settings_json) "
+                            "THEN json_extract(settings_json,'$.input_token')=? ELSE 1 END)",
                             (token, cutoff, token),
                         ).rowcount
                     if removed:
