@@ -20,6 +20,20 @@ class SeasonalAlreadyProcessedError(RuntimeError):
     not_sent = True
 
 
+class SavedModelResultAvailableError(RuntimeError):
+    """A result appeared after the local reuse check, before a new request."""
+
+    not_sent = True
+
+
+def deserialize_response(raw: str) -> ProviderResponse:
+    payload = json.loads(raw)
+    payload["usage"] = Usage(**payload["usage"])
+    if payload.get("call_trace"):
+        payload["call_trace"] = ProviderCallTrace(**payload["call_trace"])
+    return ProviderResponse(**payload)
+
+
 def paid_operation_lock_name(content_key: str) -> str:
     # A Provider contract can hold its diagnostic lock while sending a paid
     # subrequest. Separate the namespaces so their lock shards cannot collide.
@@ -33,7 +47,36 @@ class BillableOperationRepository:
     def __init__(self, database: Database):
         self.database = database
 
-    def check_retry(self, content_sha256: str, request_fingerprint: str, *, reuse_completed: bool = False) -> bool:
+    def photo_operation(
+        self, content_sha256: str, *, include_completed: bool, job_id: str | None = None,
+    ) -> dict | None:
+        with self.database.session() as connection:
+            row = connection.execute(
+                """
+                SELECT o.*,e.request_json,e.response_json AS transport_response,
+                       original_job.id AS original_job_id,original_job.analysis_spec_json AS original_job_plan,
+                       original_photo.id AS original_photo_id,reservation.provider_id AS reserved_provider_id
+                FROM billable_operations o
+                LEFT JOIN model_request_evidence e ON e.operation_id=o.id
+                LEFT JOIN jobs original_job ON original_job.id=json_extract(
+                    CASE WHEN json_valid(o.resolution_note) THEN o.resolution_note ELSE '{}' END, '$.job_id')
+                LEFT JOIN photos original_photo ON original_photo.id=json_extract(
+                    CASE WHEN json_valid(o.resolution_note) THEN o.resolution_note ELSE '{}' END, '$.photo_id')
+                LEFT JOIN budget_reservations reservation ON reservation.id='vision:'||o.id
+                WHERE o.content_sha256=?
+                  AND (o.state IN ('started','response')
+                    OR (o.state='completed' AND (? OR original_job.id=?)))
+                ORDER BY CASE WHEN o.state='completed' THEN 1 ELSE 0 END,o.created_at DESC,o.id DESC
+                LIMIT 1
+                """,
+                (content_sha256, int(include_completed), job_id),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def check_retry(
+        self, content_sha256: str, request_fingerprint: str, *, reuse_completed: bool = False,
+        job_id: str | None = None,
+    ) -> bool:
         with self.database.session() as connection:
             if connection.execute(
                 "SELECT 1 FROM billable_operations o LEFT JOIN ai_cache_reservations r "
@@ -44,14 +87,19 @@ class BillableOperationRepository:
                 raise UnreconciledOperationError("先前 Vision 請求狀態未知；須先對帳，不得自動重新送圖")
             saved = connection.execute(
                 "SELECT 1 FROM billable_operations WHERE request_fingerprint=? "
-                "AND (state='response' OR (? AND state='completed')) LIMIT 1",
-                (request_fingerprint, int(reuse_completed)),
+                "AND (state='response' OR (state='completed' AND (? OR "
+                "json_extract(CASE WHEN json_valid(resolution_note) THEN resolution_note ELSE '{}' END,'$.job_id')=?))) "
+                "LIMIT 1",
+                (request_fingerprint, int(reuse_completed), job_id),
             ).fetchone() is not None
             if not saved:
                 assert_no_batch_content_owner(connection, content_sha256)
             return saved
 
-    def begin(self, content_sha256: str, request_fingerprint: str, *, reuse_completed: bool = False, context: dict | None = None) -> tuple[str, ProviderResponse | None]:
+    def begin(
+        self, content_sha256: str, request_fingerprint: str, *, reuse_completed: bool = False,
+        context: dict | None = None, guard_paid_photo: bool = False,
+    ) -> tuple[str, ProviderResponse | None]:
         now = datetime.now(timezone.utc).isoformat()
         with self.database.transaction() as connection:
             prior = connection.execute(
@@ -70,17 +118,16 @@ class BillableOperationRepository:
             ).fetchone()
             if unknown:
                 raise UnreconciledOperationError("先前 Vision 請求狀態未知；須先對帳，不得自動重新送圖")
+            job_id = (context or {}).get("job_id") if guard_paid_photo else None
             saved = connection.execute(
                 "SELECT id,response_json FROM billable_operations WHERE request_fingerprint=? "
-                "AND (state='response' OR (? AND state='completed')) ORDER BY created_at DESC LIMIT 1",
-                (request_fingerprint, int(reuse_completed)),
+                "AND (state='response' OR (state='completed' AND (? OR "
+                "json_extract(CASE WHEN json_valid(resolution_note) THEN resolution_note ELSE '{}' END,'$.job_id')=?))) "
+                "ORDER BY created_at DESC LIMIT 1",
+                (request_fingerprint, int(reuse_completed), job_id),
             ).fetchone()
             if saved:
-                payload = json.loads(saved["response_json"])
-                payload["usage"] = Usage(**payload["usage"])
-                if payload.get("call_trace"):
-                    payload["call_trace"] = ProviderCallTrace(**payload["call_trace"])
-                return str(saved["id"]), ProviderResponse(**payload)
+                return str(saved["id"]), deserialize_response(saved["response_json"])
             backfill = connection.execute(
                 "SELECT 1 FROM jobs WHERE id=? AND json_extract(settings_json,'$.missing_analysis_backfill')=1",
                 ((context or {}).get("job_id"),),
@@ -102,6 +149,19 @@ class BillableOperationRepository:
                 (content_sha256,),
             ).fetchone():
                 raise SeasonalAlreadyProcessedError("相同內容已有付費回應，沿用原資料；不因模型規格不同再次送出")
+            if guard_paid_photo and reuse_completed and connection.execute(
+                "SELECT 1 FROM model_analysis_results WHERE content_sha256=? "
+                "UNION ALL SELECT 1 FROM billable_operations WHERE content_sha256=? "
+                "AND state IN ('response','completed') LIMIT 1",
+                (content_sha256, content_sha256),
+            ).fetchone():
+                raise SavedModelResultAvailableError("相同照片已保存模型結果，改為讀取本機紀錄")
+            if job_id is not None and not reuse_completed and connection.execute(
+                "SELECT 1 FROM billable_operations WHERE content_sha256=? AND state='completed' "
+                "AND json_extract(CASE WHEN json_valid(resolution_note) THEN resolution_note ELSE '{}' END,'$.job_id')=?",
+                (content_sha256, job_id),
+            ).fetchone():
+                raise SavedModelResultAvailableError("這份重算工作已保存模型結果，改為讀取本機紀錄")
             assert_no_batch_content_owner(connection, content_sha256)
             operation_id = str(uuid4())
             connection.execute(

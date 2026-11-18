@@ -9,7 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import ipaddress
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Mapping, Protocol
 from urllib.parse import urlparse
 
@@ -206,6 +206,9 @@ class MountInfo:
     filesystem: str
     mount_point: str
     read_only: bool
+    device: str
+    root: PurePosixPath
+    source: str
 
 
 def _decode_mountinfo_path(value: str) -> str:
@@ -223,7 +226,7 @@ def _mountinfo_entries(adapter: OSAdapter | None = None) -> tuple[MountInfo, ...
     for line in text.splitlines():
         before, marker, after = line.partition(" - ")
         fields, fs_fields = before.split(), after.split()
-        if not marker or len(fields) < 6 or not fs_fields:
+        if not marker or len(fields) < 6 or len(fs_fields) < 2:
             continue
         mount_options = {item.casefold() for item in fields[5].split(",")}
         entries.append(
@@ -231,6 +234,9 @@ def _mountinfo_entries(adapter: OSAdapter | None = None) -> tuple[MountInfo, ...
                 fs_fields[0].casefold(),
                 _decode_mountinfo_path(fields[4]),
                 "ro" in mount_options,
+                fields[2],
+                PurePosixPath(_decode_mountinfo_path(fields[3])),
+                _decode_mountinfo_path(fs_fields[1]),
             )
         )
     return tuple(entries)
@@ -242,9 +248,12 @@ def mount_for(path: Path, adapter: OSAdapter | None = None) -> MountInfo | None:
     macOS does not expose Linux mountinfo.  Tests can provide an adapter and
     production macOS deployments should use a local APFS data directory.
     """
-    target = str(path.expanduser().resolve())
+    return _mount_for(str(path.expanduser().resolve()), _mountinfo_entries(adapter))
+
+
+def _mount_for(target: str, mounts: tuple[MountInfo, ...]) -> MountInfo | None:
     best: tuple[int, MountInfo] | None = None
-    for entry in _mountinfo_entries(adapter):
+    for entry in mounts:
         mount_point = entry.mount_point
         if target == mount_point or target.startswith(mount_point.rstrip("/") + "/"):
             candidate = (len(mount_point), entry)
@@ -253,14 +262,13 @@ def mount_for(path: Path, adapter: OSAdapter | None = None) -> MountInfo | None:
     return best[1] if best else None
 
 
-def mounts_at_or_below(path: Path, adapter: OSAdapter | None = None) -> tuple[MountInfo, ...]:
+def _mounts_at_or_below(target: str, mounts: tuple[MountInfo, ...]) -> tuple[MountInfo, ...]:
     """Return exact and descendant mounts using path-component boundaries."""
 
-    target = str(path.expanduser().resolve()).rstrip("/") or "/"
     prefix = target.rstrip("/") + "/"
     return tuple(
         entry
-        for entry in _mountinfo_entries(adapter)
+        for entry in mounts
         if entry.mount_point == target or entry.mount_point.startswith(prefix)
     )
 
@@ -270,7 +278,7 @@ def filesystem_for(path: Path, adapter: OSAdapter | None = None) -> str | None:
     return mount.filesystem if mount else None
 
 
-def _paths_overlap(left: Path, right: Path) -> bool:
+def _paths_overlap(left: PurePosixPath | Path, right: PurePosixPath | Path) -> bool:
     if left == right:
         return True
     try:
@@ -283,6 +291,27 @@ def _paths_overlap(left: Path, right: Path) -> bool:
         return True
     except ValueError:
         return False
+
+
+def _shares_backing_filesystem(left: MountInfo, right: MountInfo) -> bool:
+    # Btrfs subvolumes can have distinct device numbers on the same volume.
+    return left.device == right.device or (
+        left.filesystem == right.filesystem == "btrfs"
+        and left.source.startswith("/dev/") and left.source == right.source
+    )
+
+
+def _has_writable_photo_alias(path: Path, mounts: tuple[MountInfo, ...], photo_mounts: tuple[MountInfo, ...]) -> bool:
+    target = str(path)
+    writable = [(mount, mount.root) for mount in _mounts_at_or_below(target, mounts) if not mount.read_only]
+    parent = _mount_for(target, mounts)
+    if parent is not None and not parent.read_only and parent.mount_point != target:
+        relative = PurePosixPath(target).relative_to(parent.mount_point)
+        writable.append((parent, parent.root / relative))
+    return any(
+        _shares_backing_filesystem(mount, photo_mount) and _paths_overlap(root, photo_mount.root)
+        for mount, root in writable for photo_mount in photo_mounts
+    )
 
 
 @dataclass(frozen=True)
@@ -341,14 +370,16 @@ def run_production_preflight(
             "Production SQLite database 必須直接位於 /data 對應的 data directory",
             "設定 INKTIME_DATABASE=/data/inktime.db",
         )
-    if _paths_overlap(config.photo_dir, config.data_dir):
+    writable_roots = (config.data_dir, config.backup_dir, config.cache_dir, config.release_dir)
+    if any(_paths_overlap(config.photo_dir, path) for path in writable_roots):
         _fail(
             "DEPLOY-PATH-OVERLAP-001",
             "Production photo 與 data directory 不得相同或互為父子路徑",
             "使用彼此獨立的 /data 可寫 bind mount 與 /photos 唯讀 bind mount",
         )
     photo_target = str(config.photo_dir.expanduser().resolve())
-    photo_mounts = mounts_at_or_below(config.photo_dir, adapter)
+    mounts = _mountinfo_entries(adapter)
+    photo_mounts = _mounts_at_or_below(photo_target, mounts)
     exact_photo_mounts = tuple(
         entry for entry in photo_mounts if entry.mount_point == photo_target
     )
@@ -372,7 +403,14 @@ def run_production_preflight(
             "Production /photos 含有可寫入的下層 mount",
             "將照片樹下每一個 nested mount 全部改為唯讀，或改用不含可寫下層 mount 的照片根目錄",
         )
-    fs_type = filesystem_for(config.database_path.parent, adapter)
+    if any(_has_writable_photo_alias(path, mounts, photo_mounts) for path in writable_roots):
+        _fail(
+            "DEPLOY-PATH-OVERLAP-001",
+            "Production 可寫資料目錄與原始照片在同一棵實體掛載樹上",
+            "在 NAS 主機選擇互相獨立的資料與照片路徑，再以唯讀方式掛載照片",
+        )
+    data_mount = _mount_for(str(config.database_path.parent), mounts)
+    fs_type = data_mount.filesystem if data_mount else None
     unsafe = fs_type in UNSAFE_NETWORK_FILESYSTEMS
     if (unsafe or fs_type is None) and not config.allow_unsafe_network_database:
         _fail(

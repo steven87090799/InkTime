@@ -17,6 +17,13 @@
   {% endif %}
   <section class="card">
     <h2>結果與成本</h2>
+    {% if batch.can_replay_saved and g.user.role == 'administrator' %}
+    <form method="post" action="{{ url_for('analysis_batches.batches_page_action') }}">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <input type="hidden" name="batch_id" value="{{ batch.id }}">
+      <button class="secondary" name="action" value="import_saved">復原已保存文案</button>
+    </form>
+    {% endif %}
     <p>總數 {{ batch.total_items }}；成功 {{ batch.imported_items }}；失敗 {{ batch.failed_items }}；漏件 {{ batch.missing_items }}；Stale {{ batch.stale_items }}。</p>
     <p>Input {{ batch.input_tokens }}；Cached {{ batch.cached_tokens }}；Output {{ batch.output_tokens }}；Reasoning {{ batch.reasoning_tokens }}；已知成本 {{ money(batch.actual_cost) }}{% if not batch.cost_complete %}（已確認小計 USD {{ '%.6f'|format(batch.known_cost) }}；{{ batch.unknown_cost_items }} 筆待對帳）{% endif %}。</p>
     <p>平均每張 {{ money(batch.average_cost) }}；每千張推估 {{ money(batch.per_thousand_cost, 3) }}；目前全庫缺件 {{ batch.eligible_missing_count }} 張，推估全庫 {{ money(batch.full_library_estimated_cost, 3) }}；Schema 成功率 {{ '%.2f'|format(batch.schema_success_rate) }}%。</p>
@@ -27,5 +34,9 @@
     <details><summary>候選 Snapshot</summary><pre>{{ batch.candidate_snapshot_json }}</pre></details>
   </section>
   <section class="card"><h2>Item 對帳</h2><table><thead><tr><th>狀態</th><th>匿名 custom_id</th><th>HTTP</th><th>問題與處理建議</th><th>Token</th><th>成本</th></tr></thead><tbody>{% for item in batch["items"] %}<tr><td>{{ item.status }}</td><td><code>{{ item.custom_id }}</code></td><td>{{ item.http_status or '—' }}</td><td>{{ error_notice(item.error_code,item.error_message|default('')) if item.error_code else '—' }}</td><td>{{ item.input_tokens + item.output_tokens }}</td><td>{{ money(item.display_cost) }}</td></tr>{% else %}<tr><td colspan="6">尚無 Item。</td></tr>{% endfor %}</tbody></table></section>
+  <nav aria-label="Batch 項目分頁">
+    {% if batch.item_page > 1 %}<a class="secondary" href="{{ url_for('analysis_batches.batch_detail_page', batch_id=batch.id, page=batch.item_page-1) }}">上一頁</a>{% endif %}
+    {% if batch.has_more_items %}<a class="secondary" href="{{ url_for('analysis_batches.batch_detail_page', batch_id=batch.id, page=batch.item_page+1) }}">下一頁</a>{% endif %}
+  </nav>
 </main>
 {% endblock %}

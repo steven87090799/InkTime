@@ -83,7 +83,10 @@ def save_model_request(database: Database, operation_id: str, request: dict) -> 
         raise ModelEvidenceNotSavedError("模型輸入證據無法永久保存；請求未送出") from exc
 
 
-def save_model_transport_response(database: Database, operation_id: str, raw: str) -> None:
+def save_model_transport_response(
+    database: Database, operation_id: str, raw: str, *,
+    http_status: int | None = None, request_id: str | None = None,
+) -> None:
     # An I/O failure here is deliberately not labelled not_sent. The durable
     # started operation must fence retries if a response cannot be committed.
     try:
@@ -94,5 +97,15 @@ def save_model_transport_response(database: Database, operation_id: str, raw: st
             )
             if cursor.rowcount != 1:
                 raise ValueError("Missing durable model request")
+            if http_status is not None:
+                connection.execute(
+                    """
+                    UPDATE billable_operations SET resolution_note=json_set(
+                        CASE WHEN json_valid(resolution_note) THEN resolution_note ELSE '{}' END,
+                        '$.transport_status', ?, '$.transport_request_id', ?
+                    ) WHERE id=? AND state='started'
+                    """,
+                    (http_status, request_id or None, operation_id),
+                )
     except Exception as exc:
         raise ModelResponseNotSavedError("模型已收到請求但回應無法永久保存；須先對帳，禁止自動重送") from exc

@@ -1128,13 +1128,11 @@ def test_paid_batch_result_is_kept_and_charged_before_validation(app, tmp_path, 
 
         monkeypatch.setattr(fake, "download_file_content", invalid_download)
     else:
-        original_plan = service._plan
-
-        def changed_plan():
-            plan, _fingerprint, model = original_plan()
-            return plan, "changed-plan", model
-
-        monkeypatch.setattr(service, "_plan", changed_plan)
+        with app.extensions["inktime_database"].transaction() as connection:
+            connection.execute(
+                "UPDATE analysis_batch_items SET analysis_fingerprint='broken-frozen-item' WHERE batch_id=?",
+                (batch_id,),
+            )
     service.poll_due(limit=10)
     service.import_batch(batch_id)
     service.import_batch(batch_id)
@@ -1145,6 +1143,153 @@ def test_paid_batch_result_is_kept_and_charged_before_validation(app, tmp_path, 
         item = connection.execute("SELECT status,raw_response_json FROM analysis_batch_items WHERE batch_id=?", (batch_id,)).fetchone()
         assert item["status"] == failure
         assert item["raw_response_json"]
+
+
+def test_batch_replays_frozen_result_after_live_settings_change(app, tmp_path, monkeypatch):
+    photo_id = _prepare_photos(app, tmp_path, count=1)[0]
+    fake = FakeBatchProvider()
+    service = _wire_fake(app, fake)
+    batch_id = service.submit(scope="sample", sample_count=1, created_by="tester")["batch_ids"][0]
+    service.poll_due(limit=10)
+
+    def changed_plan(*args, **kwargs):
+        raise AssertionError("import must use the frozen plan, even when the live route cannot be built")
+
+    monkeypatch.setattr(service, "_plan", changed_plan)
+    assert service.import_batch(batch_id)["success"] == 1
+    assert service.import_batch(batch_id)["already_imported"]
+    assert fake.batch_counter == 1
+    with app.extensions["inktime_database"].session() as connection:
+        analysis = connection.execute("SELECT side_caption,analysis_fingerprint FROM photo_analysis WHERE photo_id=?", (photo_id,)).fetchone()
+        assert analysis["side_caption"]
+        assert analysis["analysis_fingerprint"] == service.batches.get(batch_id)["analysis_fingerprint"]
+        assert connection.execute("SELECT COUNT(*) FROM api_usage WHERE batch_id=?", (batch_id,)).fetchone()[0] == 1
+
+
+def test_batch_reuses_output_saved_before_crash_even_without_a_provider(app, tmp_path, monkeypatch):
+    photo_id = _prepare_photos(app, tmp_path, count=1)[0]
+    fake = FakeBatchProvider()
+    service = _wire_fake(app, fake)
+    batch_id = service.submit(scope="sample", sample_count=1, created_by="tester")["batch_ids"][0]
+    service.poll_due(limit=10)
+    batch = service.batches.get(batch_id)
+    assert batch["local_output_path"] is None
+    fake.download_file_content(str(batch["output_file_id"]), service.batch_root / batch_id / "output.jsonl")
+
+    def no_provider(*args, **kwargs):
+        raise ValueError("fixture provider disabled")
+
+    def no_download(*args, **kwargs):
+        raise AssertionError("the durable local result is already present")
+
+    monkeypatch.setattr(service, "_provider", no_provider)
+    monkeypatch.setattr(service, "_result_download_provider", no_download)
+    assert service.import_batch(batch_id)["success"] == 1
+    assert fake.batch_counter == 1
+    with app.extensions["inktime_database"].session() as connection:
+        assert connection.execute("SELECT side_caption FROM photo_analysis WHERE photo_id=?", (photo_id,)).fetchone()[0]
+
+
+def test_legacy_stale_batch_caption_can_be_restored_from_sql_without_provider(app, client, tmp_path, monkeypatch):
+    from tests.conftest import create_admin, csrf, login
+
+    photo_id = _prepare_photos(app, tmp_path, count=1)[0]
+    fake = FakeBatchProvider()
+    service = _wire_fake(app, fake)
+    batch_id = service.submit(scope="sample", sample_count=1, created_by="tester")["batch_ids"][0]
+    service.poll_due(limit=10)
+    original = service._import_success
+
+    def simulate_legacy_rejection(batch, item, line, body, plan, provider):
+        service._persist_result_receipt(batch, item, line, body, provider)
+        service._mark_item_error(
+            item, "BATCH-STALE-ANALYSIS-FINGERPRINT", "old live-plan mismatch", "stale", job_id=batch["job_id"],
+        )
+        return "stale"
+
+    with monkeypatch.context() as fixture:
+        fixture.setattr(service, "_import_success", simulate_legacy_rejection)
+        assert service.import_batch(batch_id)["errors"] == 1
+    assert service._import_success == original
+    assert service.batches.get(batch_id)["status"] == "completed_with_errors"
+
+    create_admin(app)
+    login(client)
+    detail = client.get(f"/analysis/batches/{batch_id}")
+    assert detail.status_code == 200
+    assert 'value="import_saved"' in detail.get_data(as_text=True)
+    queued = client.post("/analysis/batches/action", data={
+        "action": "import_saved", "batch_id": batch_id, "csrf_token": csrf(client),
+    })
+    assert queued.status_code == 303
+    job = app.extensions["inktime_job_repository"].get(queued.location.rsplit("/", 1)[-1])
+    assert json.loads(job["settings_json"])["replay_saved"] is True
+
+    def no_provider(*args, **kwargs):
+        raise AssertionError("recovery must not contact a provider")
+
+    monkeypatch.setattr(service, "_provider", no_provider)
+    monkeypatch.setattr(service, "_result_download_provider", no_provider)
+    assert service.import_batch(batch_id, replay_saved=True)["restored"] == 1
+    assert service.import_batch(batch_id, replay_saved=True)["restored"] == 0
+    assert fake.batch_counter == 1
+    repaired_batch = service.batches.get(batch_id)
+    assert repaired_batch["imported_items"] == 1 and repaired_batch["stale_items"] == 0
+    with app.extensions["inktime_database"].session() as connection:
+        assert connection.execute("SELECT side_caption FROM photo_analysis WHERE photo_id=?", (photo_id,)).fetchone()[0]
+        assert connection.execute("SELECT COUNT(*) FROM api_usage WHERE batch_id=?", (batch_id,)).fetchone()[0] == 1
+        item = connection.execute("SELECT job_item_id,raw_response_json FROM analysis_batch_items WHERE batch_id=?", (batch_id,)).fetchone()
+        assert item["raw_response_json"]
+        assert connection.execute("SELECT status FROM job_items WHERE id=?", (item["job_item_id"],)).fetchone()[0] == "completed"
+
+
+def test_batch_cleanup_preserves_files_outside_its_evidence_directory(app, tmp_path):
+    service = app.extensions["inktime_batch_analysis_service"]
+    service.settings.update("batch.local_retention_days", 1, changed_by="test", source_ip="127.0.0.1")
+    fixture_photo = tmp_path / "source.jpg"
+    fixture_photo.write_bytes(b"synthetic source photo sentinel")
+    local = service.batch_root / "fixture-batch" / "output.jsonl"
+    local.parent.mkdir()
+    local.write_text("synthetic Batch output")
+    service._cleanup_local({
+        "id": "fixture-batch", "local_input_path": str(fixture_photo), "local_output_path": str(local),
+    }, immediate=True)
+    assert fixture_photo.read_bytes() == b"synthetic source photo sentinel"
+    assert not local.exists()
+
+
+def test_batch_details_page_items_without_loading_raw_receipts_for_html(app, client):
+    from tests.conftest import create_admin, login
+
+    batch_id = "fixture-paged-batch"
+    _insert_batch(app, batch_id, "completed")
+    create_admin(app)
+    login(client)
+    database = app.extensions["inktime_database"]
+    receipt = "raw-provider-receipt-marker"
+    with database.transaction() as connection:
+        connection.execute("UPDATE analysis_batches SET total_items=201,imported_items=201 WHERE id=?", (batch_id,))
+        connection.executemany(
+            """
+            INSERT INTO analysis_batch_items(id,batch_id,custom_id,content_sha256,analysis_fingerprint,
+                vision_request_fingerprint,vision_input_spec_json,status,raw_response_json,created_at,updated_at)
+            VALUES (?,?,?,'fixture-sha','fixture-plan','fixture-vision','{}','imported',?,'2026-01-01','2026-01-01')
+            """,
+            [(f"item-{i:03}", batch_id, f"custom-{i:03}", receipt) for i in range(201)],
+        )
+    service = app.extensions["inktime_batch_analysis_service"]
+    web_details = service.get_detail(batch_id, include_raw=False)
+    assert len(web_details["items"]) == 200 and web_details["has_more_items"]
+    assert "raw_response_json" not in web_details["items"][0]
+    first = client.get(f"/analysis/batches/{batch_id}").get_data(as_text=True)
+    assert "下一頁" in first and "custom-200" not in first
+    response = client.get(f"/api/v1/analysis/batches/{batch_id}?page=2")
+    assert response.status_code == 200
+    assert response.json["item_page"] == 2 and not response.json["has_more_items"]
+    assert response.json["unknown_cost_items"] == 201
+    assert [(item["custom_id"], item["raw_response_json"]) for item in response.json["items"]] == [
+        ("custom-200", receipt),
+    ]
 
 
 @pytest.mark.parametrize(

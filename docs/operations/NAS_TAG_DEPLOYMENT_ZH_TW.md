@@ -84,7 +84,7 @@ sudo chown -R 10001:10001 /your/local/path/inktime/data
 
 更新器需要操作 Docker，並且只對本次新建、已確認為空的 recovery 目錄執行 `chown 10001:10001`；請以 `sudo` 執行下列更新命令。它不會 chown／chmod 整棵 data tree、既有備份或 `session.key`。
 
-資料與照片路徑不得相同，也不得互為父子目錄。更新器不會用寫入測試探測照片目錄，不會在相簿新增暫存檔；它只確認路徑可讀，容器則用實際唯讀 mount 保護照片。`/photos` 下若另有 bind／tmpfs 等 nested mount，每一個也都必須是唯讀；`/photos/archive` 可寫會拒絕啟動，名稱相近但不在照片樹下的 `/photos-archive` 不受此規則誤判。
+資料與照片路徑不得相同，也不得互為父子目錄。啟動時會比對實際掛載的檔案系統及根目錄。即使容器內使用不同名稱，原始照片樹與可寫資料、備份、快取或發布目錄有重疊，也會拒絕啟動。更新器只檢查照片目錄的可讀性。`/photos` 下的子掛載也須全部唯讀。
 
 持久狀態邊界如下：SQLite 主檔、WAL／SHM 與應用程式鎖在 `/data/inktime.db*`；`session.key`、備份、Settings／Secrets、使用者、裝置、排程、Queue／Jobs、照片索引與分析／留存 metadata 都在該 SQLite 與 `/data/backups`；Release 與 rendered output 在 `/data/releases`；cache 在 `/data/cache`。原始照片只在 `/photos`，不屬於 recovery archive，也不可被更新流程寫入。
 

@@ -66,6 +66,49 @@ def _candidate(app, root, photo_id: str, *, eligible: int = 1, lifecycle: str = 
     )
 
 
+def test_caption_lookup_skips_blank_newer_history_and_does_not_read_large_semantic_json(app, tmp_path):
+    import tracemalloc
+
+    _candidate(app, tmp_path, "history")
+    _candidate(app, tmp_path, "second")
+    database = app.extensions["inktime_database"]
+    with database.transaction() as connection:
+        template = dict(connection.execute("SELECT * FROM photo_analysis WHERE photo_id='history'").fetchone())
+        template.pop("id")
+        template.update(side_caption="\t\u3000 ", created_at="2026-12-31", semantic_json=" " * 4096)
+        fields = ",".join(template)
+        marks = ",".join("?" for _ in template)
+        connection.executemany(
+            f"INSERT INTO photo_analysis ({fields}) VALUES ({marks})",  # noqa: S608 -- fixed table column names from schema.
+            [tuple(template.values())] * 1000,
+        )
+    service = app.extensions["inktime_render_service"]
+    tracemalloc.start()
+    try:
+        rows = service._caption_analyses(["history", "second", "missing"])
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert set(rows) == {"history", "second"}
+    assert rows["history"]["side_caption"] == "這是一段測試回憶短句。"
+    assert "semantic_json" not in rows["history"]
+    assert peak < 1024 * 1024
+
+
+def test_queued_single_photo_reuses_its_frozen_caption(app, tmp_path):
+    _candidate(app, tmp_path, "frozen-caption")
+    service = app.extensions["inktime_render_service"]
+    plan = service.preview_fingerprint("frozen-caption", layout="photo_info")["render_plan"]
+    with service._render_plan_image(plan) as first:
+        original = first.tobytes()
+    with app.extensions["inktime_database"].transaction() as connection:
+        connection.execute("UPDATE photo_analysis SET side_caption='更新的測試短句。' WHERE photo_id='frozen-caption'")
+    with service._render_plan_image(plan) as replay:
+        assert replay.tobytes() == original
+    updated = service.preview_fingerprint("frozen-caption", layout="photo_info")["render_plan"]
+    assert updated["primary_caption"]["text"] == "更新的測試短句。"
+
+
 def test_manual_excluded_photo_returns_stable_error_without_fallback(client, app, tmp_path):
     root = tmp_path / "photos"
     root.mkdir()

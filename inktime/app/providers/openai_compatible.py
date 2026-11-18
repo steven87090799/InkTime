@@ -961,6 +961,31 @@ class OpenAICompatibleProvider(VisionProvider):
     def _completion_payload(self, payload: dict) -> dict:
         return payload
 
+    @classmethod
+    def decode_completion(
+        cls, payload: dict, *, request_id: str | None = None,
+        request_metrics: dict | None = None, call_trace: ProviderCallTrace | None = None,
+    ) -> ProviderResponse:
+        """Decode the same completion envelope for live calls and local recovery."""
+        choices = payload.get("choices")
+        choice = choices[0] if isinstance(choices, list) and choices else None
+        if not isinstance(choice, dict) or not isinstance(choice.get("message"), dict):
+            raise ProviderHTTPError("Provider 回應缺少有效 Response Body", "VLM-006", ambiguous=True)
+        message = choice["message"]
+        content = message.get("content")
+        if isinstance(content, list):
+            content = "".join(str(part.get("text", "")) for part in content if isinstance(part, dict))
+        return ProviderResponse(
+            content=str(content or "").strip(),
+            usage=cls._usage(payload),
+            request_id=request_id or payload.get("id"),
+            request_metrics=request_metrics,
+            served_model=str(payload["model"]) if payload.get("model") else None,
+            finish_reason=str(choice.get("finish_reason") or "") or None,
+            refusal=str(message.get("refusal") or "") or None,
+            call_trace=call_trace,
+        )
+
     def _post_completion(
         self,
         body: dict,
@@ -1060,8 +1085,10 @@ class OpenAICompatibleProvider(VisionProvider):
                 if upload_guard is not None and upload_guard.get("operation_id"):
                     from inktime.app.db import Database
                     from inktime.app.repositories.model_evidence import save_model_transport_response
-                    save_model_transport_response(Database(Path(upload_guard["database_path"])),
-                                                  upload_guard["operation_id"], received.text)
+                    save_model_transport_response(
+                        Database(Path(upload_guard["database_path"])), upload_guard["operation_id"], received.text,
+                        http_status=received.status_code, request_id=self._provider_request_id(received),
+                    )
                     response_archived = True
 
             # Archiving inputs can involve slow NAS writes/fsync. Recheck mutable
@@ -1117,8 +1144,10 @@ class OpenAICompatibleProvider(VisionProvider):
         if not response_archived and upload_guard is not None and upload_guard.get("operation_id"):
             from inktime.app.db import Database
             from inktime.app.repositories.model_evidence import save_model_transport_response
-            save_model_transport_response(Database(Path(upload_guard["database_path"])),
-                                          upload_guard["operation_id"], response.text)
+            save_model_transport_response(
+                Database(Path(upload_guard["database_path"])), upload_guard["operation_id"], response.text,
+                http_status=response.status_code, request_id=self._provider_request_id(response),
+            )
         try:
             payload = self._completion_payload(
                 self._json_response(response, error_code="VLM-006", ambiguous_on_invalid=True)
@@ -1151,13 +1180,17 @@ class OpenAICompatibleProvider(VisionProvider):
             )
             raise
         try:
-            choice = payload["choices"][0]
-            message = choice["message"]
-            content = message.get("content")
-        except (KeyError, IndexError, TypeError) as exc:
-            error = ProviderHTTPError(
-                "Provider 回應缺少有效 Response Body", "VLM-006", ambiguous=True
+            headers = getattr(response, "headers", {}) or {}
+            served_model = str(payload["model"]) if payload.get("model") else None
+            result = self.decode_completion(
+                payload,
+                request_id=headers.get("x-request-id") or headers.get("x-openrouter-request-id"),
+                request_metrics=dict(self.last_request_metrics),
+                call_trace=call_trace(
+                    response=response, response_received_at=response_received_at, served_model=served_model,
+                ),
             )
+        except ProviderHTTPError as error:
             if vision_attempt is not None:
                 vision_attempt.vision_started = True
             error.call_trace = call_trace(
@@ -1181,26 +1214,7 @@ class OpenAICompatibleProvider(VisionProvider):
                 retryable=False,
                 ambiguous=True,
             )
-            raise error from exc
-        if isinstance(content, list):
-            content = "".join(str(part.get("text", "")) for part in content if isinstance(part, dict))
-        headers = getattr(response, "headers", {}) or {}
-        request_id = headers.get("x-request-id") or headers.get("x-openrouter-request-id") or payload.get("id")
-        served_model = str(payload.get("model")) if payload.get("model") else None
-        result = ProviderResponse(
-            content=str(content or "").strip(),
-            usage=self._usage(payload),
-            request_id=request_id,
-            request_metrics=dict(self.last_request_metrics),
-            served_model=served_model,
-            finish_reason=str(choice.get("finish_reason") or "") or None,
-            refusal=str(message.get("refusal") or "") or None,
-            call_trace=call_trace(
-                response=response,
-                response_received_at=response_received_at,
-                served_model=served_model,
-            ),
-        )
+            raise
         _log_debug(
             "Provider call completed",
             event="provider_success",

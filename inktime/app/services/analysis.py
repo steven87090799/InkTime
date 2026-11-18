@@ -51,7 +51,13 @@ from inktime.app.providers.base import assert_complete_response, provider_proces
 from inktime.app.repositories.photos import PhotoRepository
 from inktime.app.repositories.settings import SettingsRepository
 from inktime.app.repositories.usage import UsageRepository
-from inktime.app.repositories.billable_operations import BillableOperationRepository, paid_operation_lock_name
+from inktime.app.repositories.billable_operations import (
+    BillableOperationRepository,
+    SavedModelResultAvailableError,
+    UnreconciledOperationError,
+    deserialize_response,
+    paid_operation_lock_name,
+)
 from inktime.app.services.budgets import BudgetService
 from inktime.app.services.usage_tracking import record_failed_unknown_usage
 from inktime.app.services.usage_periods import usage_periods
@@ -651,6 +657,7 @@ class PhotoAnalysisService:
         request_metrics: dict[str, Any] | None = None,
         request_body_bytes: int = 0,
         retry_count: int = 0,
+        operation_id: str | None = None,
     ) -> int:
         metrics = self._failure_metrics(
             provider,
@@ -673,11 +680,12 @@ class PhotoAnalysisService:
             retry_count=retry_count,
             image_bytes=metrics.get("image_bytes", 0),
             error_code=str(getattr(error, "code", "") or "")[:128] or None,
+            operation_id=operation_id,
         )
 
     def _record(
         self,
-        provider: VisionProvider,
+        provider: VisionProvider | None,
         model: str,
         job_id: str | None,
         photo_id: str,
@@ -687,9 +695,10 @@ class PhotoAnalysisService:
         started_perf: float,
         retry_count: int = 0,
         operation_id: str | None = None,
+        provider_identity: tuple[str, str] | None = None,
     ) -> tuple[float, int]:
         recorded_model = str(response.served_model or model)
-        estimated_cost = provider.estimate_cost(recorded_model, response.usage)
+        estimated_cost = provider.estimate_cost(recorded_model, response.usage) if provider is not None else None
         provider_cost = response.usage.provider_reported_cost
         if provider_cost is not None:
             actual_cost = max(0.0, float(provider_cost))
@@ -708,9 +717,12 @@ class PhotoAnalysisService:
             else 0.0
         )
         metrics = dict(response.request_metrics or getattr(provider, "last_request_metrics", {}) or {})
+        if provider_identity is None:
+            assert provider is not None
+            provider_identity = (provider.name, str(getattr(provider, "provider_id", provider.name)))
         usage_id = self.usage.record(
-            provider=provider.name,
-            provider_id=str(getattr(provider, "provider_id", provider.name)),
+            provider=provider_identity[0],
+            provider_id=provider_identity[1],
             model=recorded_model,
             job_id=job_id,
             photo_id=photo_id,
@@ -736,6 +748,112 @@ class PhotoAnalysisService:
             operation_id=operation_id,
         )
         return effective_cost, usage_id
+
+    @staticmethod
+    def _saved_transport_response(saved: dict, context: dict, request: dict) -> ProviderResponse:
+        from inktime.app.providers.openai_compatible import OpenAICompatibleProvider, ProviderHTTPError
+        from inktime.app.providers.openai_responses import responses_to_completion
+
+        try:
+            if saved["response_json"]:
+                return deserialize_response(saved["response_json"])
+            payload = json.loads(saved["transport_response"] or "null")
+            status = context.get("transport_status")
+            if (status is not None and not 200 <= status < 300) or not isinstance(payload, dict) or payload.get("error"):
+                raise ValueError("not a successful model response")
+            if "input" in request or "output" in payload:
+                payload = responses_to_completion(payload)
+            return OpenAICompatibleProvider.decode_completion(payload, request_id=context.get("transport_request_id"))
+        except (ProviderHTTPError, KeyError, TypeError, ValueError) as exc:
+            raise UnreconciledOperationError("先前 Vision 請求缺少可核對的回應；須先對帳，不得自動重新送圖") from exc
+
+    def _reuse_saved_photo_analysis(
+        self, photo, job_id: str | None, provider: VisionProvider | None,
+        analysis_context: dict, *, force_recompute: bool,
+    ) -> dict | None:
+        """Recover the paid result while owning the same lock as transport."""
+        sha = str(photo["sha256"] or "")
+        photo_id = str(photo["id"])
+        if not force_recompute:
+            result = self.photos.inherit_existing_analysis(
+                photo_id, job_id, analysis_context=analysis_context, include_self=True,
+                semantic_only=True, match_plan=False, expected_content_sha256=sha,
+            )
+            if result is not None:
+                result = self._score_result(result, photo)
+                result.update(score_kind=SEMANTIC_SCORE_KIND, semantic_scores_available=True)
+                return {"analysis": result, "stage": "cache", "_actual_cost": 0}
+
+        operations = BillableOperationRepository(self.photos.database)
+        saved = operations.photo_operation(sha, include_completed=not force_recompute, job_id=job_id)
+        if saved is None:
+            return None
+        try:
+            context = json.loads(saved["resolution_note"] or "{}")
+            request = json.loads(saved["request_json"] or "{}")
+            if not isinstance(context, dict) or not isinstance(request, dict):
+                raise ValueError("invalid paid operation evidence")
+            plan_json = context.get("analysis_spec_json") or saved["original_job_plan"]
+            plan = json.loads(plan_json or "{}")
+            if not isinstance(plan, dict):
+                raise ValueError("invalid paid analysis plan")
+        except (TypeError, ValueError) as exc:
+            raise UnreconciledOperationError("無法核對已保存的模型請求，禁止自動重送") from exc
+        response = self._saved_transport_response(saved, context, request)
+        assert_complete_response(response)
+        operation_id = str(saved["id"])
+        payload = extract_json_value(response.content)
+        schema_version = context.get("schema_version") or plan.get("schema_version")
+        if schema_version is None and isinstance(payload, dict):
+            schema_version = payload.get("schema_version")
+        result = validate_model_response(
+            payload if isinstance(payload, dict) else response.content,
+            caption_controls=context.get("caption_controls") or plan.get("caption_controls"),
+            schema_version=int(schema_version or SCHEMA_VERSION),
+        )
+        provider_name = str(context.get("provider") or "stored-provider")
+        stored_provider_id = context.get("provider_id") or saved["reserved_provider_id"]
+        provider_id = str(stored_provider_id or provider_name)
+        model = str(context.get("model") or request.get("model") or response.served_model or "stored-model")
+        channels = getattr(provider, "channels", None)
+        pricing_provider = next((
+            candidate for candidate in ([channel.provider for channel in channels] if channels else [provider])
+            if candidate is not None and (
+                str(getattr(candidate, "provider_id", candidate.name)) == provider_id
+                or (not stored_provider_id and candidate.name == provider_name)
+            )
+        ), None)
+        if pricing_provider is not None and not stored_provider_id:
+            provider_id = str(getattr(pricing_provider, "provider_id", pricing_provider.name))
+        if saved["state"] == "started":
+            operations.save_response(operation_id, response)
+        if saved["state"] != "completed":
+            self._record(
+                pricing_provider, model, saved["original_job_id"], saved["original_photo_id"] or photo_id,
+                "single", response, saved["created_at"], time.perf_counter(),
+                operation_id=operation_id, provider_identity=(provider_name, provider_id),
+            )
+            if self.budgets and (
+                response.usage.provider_reported_cost is not None
+                or (pricing_provider is not None and response.usage.tokens_reported
+                    and pricing_provider.estimate_cost(response.served_model or model, response.usage) is not None)
+            ):
+                self.budgets.release("vision:" + operation_id)
+        with self.photos.database.transaction(operation="analysis_recover_paid") as connection:
+            result = self._save_result(
+                photo_id=photo_id, job_id=job_id, stage="single", provider=provider_id, model=model,
+                result=result, raw=response.content, photo=photo,
+                scoring_version_id=plan.get("scoring_profile_id") or analysis_context.get("scoring_version_id"),
+                schema_kind="full", score_kind=SEMANTIC_SCORE_KIND,
+                prompt_version=str(context.get("prompt_version") or plan.get("prompt_version") or PROMPT_VERSION),
+                analysis_fingerprint=context.get("analysis_fingerprint") or (stored_analysis_fingerprint(plan) if plan else None),
+                analysis_spec_json=plan_json,
+                vision_request_fingerprint=saved["request_fingerprint"],
+                vision_input_spec_json=context.get("vision_input_spec_json"),
+                analysis_source="recovered", connection=connection,
+            )
+            operations.finish(operation_id, connection=connection)
+        return {"analysis": result, "stage": "cache", "_actual_cost": 0}
 
     def _model_call(
         self,
@@ -875,7 +993,7 @@ class PhotoAnalysisService:
             trace_id=prompt_version,
         )
         has_checkpoint = BillableOperationRepository(self.photos.database).check_retry(
-            content_sha256, request_fingerprint, reuse_completed=not force_recompute
+            content_sha256, request_fingerprint, reuse_completed=not force_recompute, job_id=job_id,
         )
         owner_id = str(uuid4())
         provider_timeout = max(5, int(getattr(selected_provider, "timeout", 120)))
@@ -980,9 +1098,16 @@ class PhotoAnalysisService:
                     ),
                     trace_id=trace_id,
                     reuse_completed=not force_recompute,
+                    operation_context={
+                        "analysis_fingerprint": analysis_fingerprint,
+                        "analysis_spec_json": canonical_json(analysis_spec) if analysis_spec is not None else None,
+                    },
                 )
         except Exception as exc:
             self.photos.finish_ai_cache_reservation(cache_key, owner_id, error=str(exc))
+            if isinstance(exc, SavedModelResultAvailableError):
+                self._trace_write("complete_run", trace_id, status="SUCCESS", error_message=str(exc))
+                raise
             record_outcome = getattr(self.photos, "record_analysis_request_outcome", None)
             if callable(record_outcome):
                 ambiguous = bool(getattr(exc, "ambiguous", False))
@@ -1111,6 +1236,7 @@ class PhotoAnalysisService:
         provider_request_context_id: str,
         trace_id: str | None,
         reuse_completed: bool = True,
+        operation_context: dict | None = None,
     ) -> tuple[dict, str, float, Usage, int, bool]:
         started_at = datetime.now(timezone.utc).isoformat()
         started_perf = time.perf_counter()
@@ -1126,9 +1252,16 @@ class PhotoAnalysisService:
             requested_model=model,
         )
         operations = BillableOperationRepository(self.photos.database)
-        operation_id, checkpoint = operations.begin(content_sha256, vision_request_fingerprint,
-            reuse_completed=reuse_completed,
-            context={"provider": actual_call_provider.name, "model": model, "photo_id": photo_id, "job_id": job_id})
+        operation_id, checkpoint = operations.begin(
+            content_sha256, vision_request_fingerprint, reuse_completed=reuse_completed, guard_paid_photo=True,
+            context={
+                **(operation_context or {}),
+                "provider": actual_call_provider.name, "provider_id": getattr(actual_call_provider, "provider_id", actual_call_provider.name),
+                "model": model, "photo_id": photo_id, "job_id": job_id, "prompt_version": prompt_version,
+                "schema_version": cache_schema_version, "caption_controls": caption_controls,
+                "vision_input_spec_json": vision_input_spec_json,
+            },
+        )
         completed_checkpoint = checkpoint is not None and operations.is_completed(operation_id)
         if checkpoint is None and self.budgets:
             try:
@@ -1257,6 +1390,7 @@ class PhotoAnalysisService:
                             started_perf=started_perf,
                             error=timeout_error,
                             request_kind="vision",
+                            operation_id=operation_id,
                             image_path=image,
                             request_metrics=getattr(
                                 selected_channel.provider if selected_channel is not None else provider,
@@ -1324,6 +1458,7 @@ class PhotoAnalysisService:
                             started_perf=started_perf,
                             error=error,
                             request_kind="vision",
+                            operation_id=operation_id,
                             image_path=image,
                             request_metrics=getattr(
                                 selected_channel.provider if selected_channel is not None else provider,
@@ -1459,6 +1594,7 @@ class PhotoAnalysisService:
         job_id: str | None,
         provider: VisionProvider | None,
         strategy: str,
+        provider_error: ProviderUnavailableError | None = None,
         low_model: str = "low-cost-vision",
         high_model: str = "high-quality-vision",
         stage_two_threshold: float = 65,
@@ -1568,14 +1704,16 @@ class PhotoAnalysisService:
         )
         # Reuse identical bytes and semantic inputs across local ranking/version
         # changes, while retaining the current full plan for result provenance.
+        analysis_context = {
+            "analysis_fingerprint": analysis_fingerprint,
+            "analysis_spec_json": analysis_spec_json,
+            "scoring_version_id": scoring_version_id,
+        }
         inherited = None if force_recompute else self.photos.inherit_existing_analysis(
             photo_id,
             job_id,
-            analysis_context={
-                "analysis_fingerprint": analysis_fingerprint,
-                "analysis_spec_json": analysis_spec_json,
-                "scoring_version_id": scoring_version_id,
-            },
+            analysis_context=analysis_context,
+            expected_content_sha256=content_sha,
         )
         if inherited is not None:
             return {"analysis": inherited, "stage": "inherited", "_actual_cost": 0}
@@ -1623,6 +1761,21 @@ class PhotoAnalysisService:
                 **local_context("basic"),
             )
             return {"analysis": result, "stage": "prefilter", "_actual_cost": 0}
+
+        # A cache hit or saved receipt does not require a usable provider, a
+        # thumbnail, or new budget. Busy owners are handled by the model fence.
+        operation_lock_name = paid_operation_lock_name(content_sha)
+        operation_lock = self.photos.database.try_acquire_operation_lock(operation_lock_name)
+        if operation_lock is not None:
+            with operation_lock:
+                saved_result = self._reuse_saved_photo_analysis(
+                    photo, job_id, provider, analysis_context, force_recompute=force_recompute,
+                )
+            if saved_result is not None:
+                return saved_result
+
+        if provider_error is not None:
+            raise provider_error
 
         confirmed_screenshot = is_confirmed_screenshot(photo)
         prefiltered = (
@@ -1692,39 +1845,39 @@ class PhotoAnalysisService:
                     actor=force_actor,
                 )
 
-        (
-            result,
-            raw,
-            cost,
-            cache_hit,
-            actual_provider,
-            actual_model,
-            request_fingerprint,
-            input_spec_json,
-            _usage,
-            _latency,
-            ai_trace_id,
-        ) = self._model_call(
-            provider=provider,
-            image_factory=lambda: self.thumbnails.acquire_for_use(
-                source, sha, image_max_side, verify_source=True, source_verification=source_verification,
-            ),
-            model=model,
-            detail=str(vision_input.get("detail", "high")),
-            stage="single",
-            job_id=job_id,
-            photo_id=photo_id,
-            content_sha256=sha,
-            schema_kind="full",
-            reasoning_effort=str(analysis_spec["reasoning_effort"]),
-            caption_controls=caption_controls,
-            prompt_version=prompt_version,
-            analysis_fingerprint=analysis_fingerprint,
-            vision_input=vision_input,
-            provider_prompt_contract_sha256=str(analysis_spec.get("provider_prompt_contract_sha256") or "") or None,
-            analysis_spec=analysis_spec,
-            force_recompute=force_recompute,
-        )
+        try:
+            (
+                result, raw, cost, cache_hit, actual_provider, actual_model, request_fingerprint,
+                input_spec_json, _usage, _latency, ai_trace_id,
+            ) = self._model_call(
+                provider=provider,
+                image_factory=lambda: self.thumbnails.acquire_for_use(
+                    source, sha, image_max_side, verify_source=True, source_verification=source_verification,
+                ),
+                model=model,
+                detail=str(vision_input.get("detail", "high")),
+                stage="single",
+                job_id=job_id,
+                photo_id=photo_id,
+                content_sha256=sha,
+                schema_kind="full",
+                reasoning_effort=str(analysis_spec["reasoning_effort"]),
+                caption_controls=caption_controls,
+                prompt_version=prompt_version,
+                analysis_fingerprint=analysis_fingerprint,
+                vision_input=vision_input,
+                provider_prompt_contract_sha256=str(analysis_spec.get("provider_prompt_contract_sha256") or "") or None,
+                analysis_spec=analysis_spec,
+                force_recompute=force_recompute,
+            )
+        except (SavedModelResultAvailableError, UnreconciledOperationError):
+            with self.photos.database.operation_lock(operation_lock_name):
+                saved_result = self._reuse_saved_photo_analysis(
+                    photo, job_id, provider, analysis_context, force_recompute=force_recompute,
+                )
+            if saved_result is None:
+                raise
+            return saved_result
         total_cost = cost
         try:
             result = self._save_result(

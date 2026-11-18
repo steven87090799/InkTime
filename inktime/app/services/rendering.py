@@ -900,30 +900,29 @@ class RenderService:
         if not ids:
             return {}
         placeholders = ",".join("?" for _ in ids)
+        # Match Python str.strip() for historical captions, including ideographic spaces.
+        whitespace = (
+            "\t\n\v\f\r\x1c\x1d\x1e\x1f \x85\xa0\u1680"
+            "\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a"
+            "\u2028\u2029\u202f\u205f\u3000"
+        )
         with self.database.session() as connection:
             rows = connection.execute(
                 f"""
-                SELECT a.photo_id,a.side_caption,a.semantic_json,a.provider,a.model,a.stage,a.score_kind,
+                SELECT a.photo_id,a.side_caption,a.provider,a.model,a.stage,a.score_kind,
                        a.prompt_version,a.schema_version,a.created_at,a.analysis_source
-                FROM photo_analysis a
-                WHERE a.photo_id IN ({placeholders})
-                ORDER BY a.photo_id,{preferred_analysis_order_sql('a')}
+                FROM photos p
+                JOIN photo_analysis a ON a.id=(
+                    SELECT candidate.id FROM photo_analysis candidate WHERE candidate.photo_id=p.id
+                    ORDER BY (NULLIF(TRIM(candidate.side_caption, ?),'') IS NULL),
+                             {preferred_analysis_order_sql('candidate')}
+                    LIMIT 1
+                )
+                WHERE p.id IN ({placeholders})
                 """,  # noqa: S608 -- placeholders are generated from a small in-memory list.
-                ids,
-            ).fetchall()
-        result: dict[str, dict[str, Any]] = {}
-        latest: dict[str, dict[str, Any]] = {}
-        for row in rows:
-            photo_id = str(row["photo_id"])
-            analysis = dict(row)
-            latest.setdefault(photo_id, analysis)
-            if photo_id not in result and self._has_caption_content(analysis):
-                result[photo_id] = analysis
-        return {photo_id: result.get(photo_id, analysis) for photo_id, analysis in latest.items()}
-
-    @classmethod
-    def _has_caption_content(cls, analysis: dict[str, Any]) -> bool:
-        return bool(str(analysis.get("side_caption") or "").strip())
+                (whitespace, *ids),
+            )
+            return {str(row["photo_id"]): dict(row) for row in rows}
 
     def _caption_text(self, photo_id: str, analysis: dict[str, Any] | None) -> str:
         """Return the canonical model side-caption for rendering."""

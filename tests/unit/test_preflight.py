@@ -215,6 +215,45 @@ def test_production_rejects_effectively_writable_photo_mount(tmp_path):
         )
 
 
+@pytest.mark.parametrize("data_backing", ["/albums", "/albums/project", "/"])
+def test_production_rejects_aliases_of_readonly_photo_mount(tmp_path, data_backing):
+    config = _config(tmp_path)
+
+    class BackingFilesystem:
+        def mountinfo(self) -> str:
+            return "\n".join((
+                "1 0 0:1 / / ro - overlay overlay ro",
+                f"2 1 8:1 {data_backing} {config.data_dir} rw - ext4 /dev/volume rw",
+                f"3 1 8:1 /albums {config.photo_dir} ro - ext4 /dev/volume rw",
+            ))
+
+    with pytest.raises(PreflightError, match="DEPLOY-PATH-OVERLAP-001"):
+        run_production_preflight(config, adapter=BackingFilesystem())
+    assert not config.data_dir.exists()
+    assert not config.photo_dir.exists()
+
+
+def test_production_compares_writable_and_readonly_nested_mounts_by_backing_root(tmp_path):
+    config = _config(tmp_path)
+
+    class NestedFilesystem:
+        def __init__(self, writable_child: str) -> None:
+            self.writable_child = writable_child
+
+        def mountinfo(self) -> str:
+            return "\n".join((
+                "1 0 0:1 / / ro - overlay overlay ro",
+                f"2 1 8:1 /runtime {config.data_dir} rw - ext4 /dev/data rw",
+                f"3 1 8:1 /albums {config.photo_dir} ro - ext4 /dev/data rw",
+                f"4 3 0:21 /archive {config.photo_dir}/archive ro - btrfs /dev/media rw",
+                f"5 2 0:22 {self.writable_child} {config.cache_dir}/extra rw - btrfs /dev/media rw",
+            ))
+
+    assert run_production_preflight(config, adapter=NestedFilesystem("/archive-other")).healthy
+    with pytest.raises(PreflightError, match="DEPLOY-PATH-OVERLAP-001"):
+        run_production_preflight(config, adapter=NestedFilesystem("/archive/nested"))
+
+
 @pytest.mark.parametrize("photo_relative", ["photos", "runtime-old"])
 def test_production_accepts_component_distinct_sibling_paths(tmp_path, photo_relative):
     config = _config(tmp_path, photo_dir=tmp_path / photo_relative)

@@ -1160,14 +1160,21 @@ class PhotoRepository:
         self, photo_id: str, job_id: str | None, *, analysis_context: dict | None = None,
         include_self: bool = False,
         semantic_only: bool = False,
+        match_plan: bool = True,
+        expected_content_sha256: str | None = None,
     ) -> dict | None:
-        required_fingerprint = str((analysis_context or {}).get("analysis_fingerprint") or "")
-        required_spec = str((analysis_context or {}).get("analysis_spec_json") or "")
+        requested_fingerprint = str((analysis_context or {}).get("analysis_fingerprint") or "")
+        required_fingerprint = requested_fingerprint if match_plan else ""
+        required_spec = str((analysis_context or {}).get("analysis_spec_json") or "") if match_plan else ""
         reusable_fingerprint = None
         if required_spec:
             reusable_fingerprint = reusable_analysis_fingerprint(json.loads(required_spec))
         with self.database.session() as connection:
             target_content = connection.execute("SELECT sha256,gps_lat,gps_lon FROM photos WHERE id=?", (photo_id,)).fetchone()
+            if expected_content_sha256 is not None and (
+                target_content is None or target_content["sha256"] != expected_content_sha256
+            ):
+                raise ValueError("IMG-CHANGED 照片內容已變更，無法沿用原模型結果")
             candidates = connection.execute(
                 f"""
                 SELECT a.*,source.local_candidate_score AS source_local_candidate_score,
@@ -1177,9 +1184,10 @@ class PhotoRepository:
                 JOIN photo_analysis a ON a.photo_id=source.id
                 WHERE target.id=?
                   AND a.schema_version IN (4,5,6)
+                  AND COALESCE(a.content_sha256, source.sha256)=target.sha256
                   AND (?=0 OR a.score_kind='semantic')
                   AND (?='' OR a.analysis_fingerprint=? OR ?)
-                ORDER BY {preferred_analysis_order_sql('a')}
+                ORDER BY (source.id<>target.id),{preferred_analysis_order_sql('a')}
                 """,
                 (int(include_self), photo_id, int(semantic_only), required_fingerprint, required_fingerprint, reusable_fingerprint is not None),
             )
@@ -1195,6 +1203,7 @@ class PhotoRepository:
                         break
                 except (TypeError, ValueError):
                     continue
+            live_match = row is not None
             if row is None and target_content is not None:
                 covered = connection.execute(
                     "SELECT analysis_snapshot_json FROM model_analysis_results WHERE content_sha256=?",
@@ -1225,6 +1234,8 @@ class PhotoRepository:
         )
         semantic_available = source_kind == SEMANTIC_SCORE_KIND
         result = validate_analysis_result(row["raw_json"])
+        if live_match and not match_plan and str(row["photo_id"]) == photo_id and row["analysis_fingerprint"] == requested_fingerprint:
+            return result
         self.save_analysis(
             photo_id,
             job_id,
@@ -1628,6 +1639,39 @@ class PhotoRepository:
                     now,
                 ),
             )
+
+    def have_saved_model_evidence(self, photo_ids: Sequence[str]) -> bool:
+        """Identify requests that can be handled without a configured model."""
+        if not photo_ids:
+            return False
+        with self.database.session() as connection:
+            return connection.execute(
+                """
+                SELECT 1 FROM json_each(?) ids WHERE NOT EXISTS (
+                    SELECT 1 FROM photos p WHERE p.id=ids.value AND COALESCE(p.sha256,'')<>'' AND (
+                        EXISTS(SELECT 1 FROM model_analysis_results m WHERE m.content_sha256=p.sha256)
+                        OR EXISTS(
+                            SELECT 1 FROM billable_operations o
+                            LEFT JOIN model_request_evidence e ON e.operation_id=o.id
+                            WHERE o.content_sha256=p.sha256 AND o.state IN ('started','response','completed')
+                              AND COALESCE(o.response_json,e.response_json) IS NOT NULL
+                        )
+                    )
+                ) LIMIT 1
+                """,
+                (json.dumps(list(photo_ids)),),
+            ).fetchone() is None
+
+    def exclusion_reasons(self) -> list[str]:
+        with self.database.session() as connection:
+            return [str(row[0]) for row in connection.execute(
+                """
+                SELECT DISTINCT reject_reason FROM photos
+                WHERE reject_reason IS NOT NULL AND reject_reason<>''
+                  AND (eligible=0 OR exclusion_status IN ('auto_excluded','manually_excluded','pending_review'))
+                ORDER BY reject_reason
+                """
+            )]
 
     def search_exclusions(
         self,

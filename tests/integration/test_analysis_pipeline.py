@@ -1266,7 +1266,7 @@ def test_worker_context_inherits_only_the_same_frozen_plan_and_keeps_source_trac
     assert json.loads(copied["semantic_json"])["inherited_from"]["analysis_id"] == source["id"]
 
 
-def test_worker_context_does_not_inherit_a_different_frozen_plan(app, tmp_path):
+def test_worker_context_reuses_the_same_bytes_after_model_change(app, tmp_path):
     _, ids, _service = prepare(app, tmp_path, duplicate=True)
     settings = app.extensions["inktime_settings_repository"]
     settings.update("analysis.ai_mode", "eligible", changed_by="test", source_ip="127.0.0.1")
@@ -1282,7 +1282,7 @@ def test_worker_context_does_not_inherit_a_different_frozen_plan(app, tmp_path):
         strategy="high_quality", provider_route=[], scoring_profile_id=str(profile["id"])
     )
     first = MockProvider([valid_result()])
-    service.analyze_photo(
+    original = service.analyze_photo(
         photo_id=ids[0], job_id=None, provider=first, strategy="high_quality", analysis_plan=first_plan
     )
     settings.update("model.analysis_model", "new-model", changed_by="test", source_ip="127.0.0.1")
@@ -1293,8 +1293,11 @@ def test_worker_context_does_not_inherit_a_different_frozen_plan(app, tmp_path):
     result = service.analyze_photo(
         photo_id=ids[1], job_id=None, provider=second, strategy="high_quality", analysis_plan=second_plan
     )
-    assert result["stage"] == "single"
-    assert second.analyze_calls == 1
+    assert result["stage"] == "cache"
+    assert result["analysis"]["side_caption"] == original["analysis"]["side_caption"]
+    assert result["_actual_cost"] == 0
+    assert first.analyze_calls == 1
+    assert second.analyze_calls == 0
 
 
 def test_cloud_strategy_prefilters_screenshot_without_token_usage(app, tmp_path):

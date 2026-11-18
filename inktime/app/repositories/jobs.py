@@ -1670,7 +1670,8 @@ class JobRepository:
                 raise
 
     def complete_batch_item(
-        self, job_id: str, item_id: str, result: dict, actual_cost: float = 0, connection=None
+        self, job_id: str, item_id: str, result: dict, actual_cost: float = 0, connection=None,
+        *, recover_stale_receipt: bool = False,
     ) -> bool:
         """Persist a remote Batch result without claiming it in the normal worker queue."""
 
@@ -1678,18 +1679,26 @@ class JobRepository:
         context = self.database.transaction() if connection is None else nullcontext(connection)
         with context as active_connection:
             connection = active_connection
+            stale_failure = recover_stale_receipt and connection.execute(
+                "SELECT 1 FROM job_items WHERE id=? AND job_id=? "
+                "AND status='failed' AND error_code='BATCH-STALE-ANALYSIS-FINGERPRINT'",
+                (item_id, job_id),
+            ).fetchone() is not None
             cursor = connection.execute(
                 """
                 UPDATE job_items SET status='completed',completed_at=?,result_json=?,
-                    estimated_cost=?,stage='analysis_batch',lease_until=NULL
-                WHERE id=? AND job_id=? AND status NOT IN ('completed','failed','cancelled')
+                    estimated_cost=?,stage='analysis_batch',lease_until=NULL,error_code=NULL
+                WHERE id=? AND job_id=? AND (status NOT IN ('completed','failed','cancelled') OR ?)
                 """,
-                (now, json.dumps(result, ensure_ascii=False), actual_cost, item_id, job_id),
+                (now, json.dumps(result, ensure_ascii=False), actual_cost, item_id, job_id, int(stale_failure)),
             )
             if cursor.rowcount:
                 connection.execute(
-                    "UPDATE jobs SET completed_items=completed_items+1,spent=CASE WHEN (EXISTS(SELECT 1 FROM api_usage WHERE job_id=jobs.id) OR EXISTS(SELECT 1 FROM usage_cost_archive WHERE job_id=jobs.id)) THEN spent ELSE spent+? END,heartbeat_at=? WHERE id=?",
-                    (actual_cost, now, job_id),
+                    "UPDATE jobs SET completed_items=completed_items+1,failed_items=MAX(0,failed_items-?),"
+                    "spent=CASE WHEN (? OR EXISTS(SELECT 1 FROM api_usage WHERE job_id=jobs.id) "
+                    "OR EXISTS(SELECT 1 FROM usage_cost_archive WHERE job_id=jobs.id)) THEN spent ELSE spent+? END,"
+                    "heartbeat_at=? WHERE id=?",
+                    (int(stale_failure), int(recover_stale_receipt), actual_cost, now, job_id),
                 )
             return bool(cursor.rowcount)
 

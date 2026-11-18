@@ -22,6 +22,7 @@ def record_failed_unknown_usage(
     error_code: str | None = None,
     retry_count: int = 0,
     image_bytes: int = 0,
+    operation_id: str | None = None,
 ) -> int:
     """Persist one sent/ambiguous request as unknown-cost evidence.
 
@@ -69,4 +70,5 @@ def record_failed_unknown_usage(
         schema_chars=metrics.get("schema_chars", 0),
         request_body_bytes=metrics.get("request_body_bytes", 0),
         image_bytes=metrics.get("image_bytes", 0),
+        operation_id=operation_id,
     )

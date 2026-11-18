@@ -34,8 +34,6 @@ LOGGER = logging.getLogger("worker")
 def _execute_job_item(app, item, *, job, settings, provider, provider_error, analysis, analysis_plan, execution, progress_items, progress_seconds, scanner_disk_batch_size, scanner_write_batch_size, scanner_missing_threshold_ratio, scanner_safety, runtime_settings, scan_cancel_requested, log_scan_progress):
     if job["kind"] == "analysis" and execution == "disabled":
         raise AnalysisDisabledError("Frozen Analysis Plan 指定完全停用；工作項目已拒絕")
-    if provider_error is not None:
-        raise provider_error
     if job["kind"] == "analysis_coverage_audit":
         return app.extensions["inktime_analysis_backfill_service"].repository.reconcile(month=settings.get("month"))
     if job["kind"] == "analysis_batch_poll":
@@ -44,6 +42,7 @@ def _execute_job_item(app, item, *, job, settings, provider, provider_error, ana
         return app.extensions["inktime_batch_analysis_service"].import_batch(
             str(settings["batch_id"]),
             cleanup_only=bool(settings.get("cleanup_only", False)),
+            replay_saved=bool(settings.get("replay_saved", False)),
         )
     if job["kind"] == "render_preview":
         operation = str(settings.get("operation", ""))
@@ -282,6 +281,7 @@ def _execute_job_item(app, item, *, job, settings, provider, provider_error, ana
         force_ai=bool(settings.get("force_ai", False)),
         force_actor=str(job["created_by"] or "system"),
         force_recompute=bool(job["force_recompute"]),
+        **({"provider_error": provider_error} if provider_error is not None else {}),
     )
 
 

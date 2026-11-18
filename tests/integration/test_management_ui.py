@@ -46,6 +46,30 @@ def test_error_dates_render_as_configured_local_time_without_changing_storage(cl
         assert c.execute("SELECT first_seen_at FROM job_errors WHERE fingerprint='date-fixture'").fetchone()[0] == raw
 
 
+def test_excluded_photo_filters_stay_available_across_pages(client, app):
+    create_admin(app)
+    login(client)
+    ids = add_photos(app, 201)
+    with app.extensions["inktime_database"].transaction() as connection:
+        connection.execute(
+            "UPDATE photos SET eligible=0,exclusion_status='auto_excluded',rejected_at='2026-01-02',reject_reason='low_quality'"
+        )
+        connection.execute(
+            "UPDATE photos SET rejected_at='2026-01-01',reject_reason='screenshot' WHERE id=?", (ids[-1],),
+        )
+    first = client.get("/photos/excluded")
+    assert first.status_code == 200
+    assert b'value="screenshot"' in first.data
+    assert f'data-photo-id="{ids[-1]}"'.encode() not in first.data
+    second = client.get("/photos/excluded?page=2")
+    assert second.status_code == 200
+    assert f'data-photo-id="{ids[-1]}"'.encode() in second.data
+    assert b'value="low_quality"' in second.data
+    filtered = client.get("/photos/excluded?reason=screenshot")
+    assert f'data-photo-id="{ids[-1]}"'.encode() in filtered.data
+    assert filtered.data.count(b"data-photo-id=") == 1
+
+
 def test_primary_management_pages_render(client, app):
     create_admin(app)
     login(client)
@@ -821,8 +845,8 @@ def test_batch_management_api_dispatches_lifecycle_actions(client, app, monkeypa
         def submit(self, **kwargs):
             return {"batch_ids": ["batch-ui"], **kwargs}
 
-        def get_detail(self, _batch_id):
-            return detail
+        def get_detail(self, _batch_id, *, item_page=1, include_raw=True):
+            return {**detail, "item_page": item_page, "has_more_items": False}
 
         def cancel(self, batch_id):
             return {"batch_id": batch_id, "status": "cancelled"}

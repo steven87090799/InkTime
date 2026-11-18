@@ -245,7 +245,7 @@ class AnalysisBackfillService:
         if photo is None or photo["sha256"] != task["content_sha256"]:
             raise ValueError("IMG-CHANGED 補齊照片內容已變更，請重新掃描")
         sha = str(task["content_sha256"])
-        if self.repository.has_uncertain_content(sha):
+        if self.repository.has_uncertain_content(sha) and not self.photos.have_saved_model_evidence([photo_id]):
             raise UnreconciledOperationError("先前請求的回應或成本不確定，請先確認原紀錄")
         if self.repository.covered(sha):
             inherited = self.photos.inherit_existing_analysis(photo_id, job_id, include_self=True, semantic_only=True)

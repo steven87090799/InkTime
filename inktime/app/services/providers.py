@@ -33,6 +33,7 @@ class ProviderService:
         *,
         scoring_rules: str | None = None,
         caption_controls: dict | None = None,
+        batch_result_owner: dict[str, str] | None = None,
     ) -> FailoverVisionProvider | None:
         # ``None`` preserves the legacy "use the current route" behavior.  An
         # explicit empty snapshot is a frozen decision that no Provider may be
@@ -57,11 +58,15 @@ class ProviderService:
             if str(summary.get("usage_scope", "normal")) != str(snapshot.get("usage_scope", "normal")):
                 raise ValueError("VLM-008 補齊專用 Provider 不可用於日常分析路由")
             revision = str(snapshot.get("config_revision") or "")
-            if revision and revision != self.config_revision(summary):
+            if revision and batch_result_owner is None and revision != self.config_revision(summary):
                 raise ValueError(f"VLM-008 Job 指定的 Provider 設定已變更：{provider_id}")
             config = self.repository.get(provider_id, include_secret=True)
             if config is None:
                 raise ValueError(f"VLM-008 找不到 Job 指定的 Provider：{provider_id}")
+            if batch_result_owner is not None:
+                actual_identity = self._identity_for_config(config)
+                if any(actual_identity[key] != value for key, value in batch_result_owner.items()):
+                    raise ValueError("Batch 原始帳號、端點或專案已變更")
             effective_kind = effective_provider_kind(
                 str(config.get("kind") or "openai_compatible"), str(config.get("base_url") or "")
             )
@@ -222,6 +227,9 @@ class ProviderService:
         config = self.repository.get(provider_id, include_secret=True)
         if config is None:
             raise ValueError(f"VLM-008 找不到 Job 指定的 Provider：{provider_id}")
+        return self._identity_for_config(config)
+
+    def _identity_for_config(self, config: dict[str, Any]) -> dict[str, str]:
         base_url = OpenAICompatibleProvider.normalize_base_url(str(config.get("base_url") or ""))
         project_id = str(config.get("options", {}).get("project_id") or config.get("project_id") or config.get("project") or "")
         account_secret = str(config.get("api_key") or "")
