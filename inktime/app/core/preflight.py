@@ -262,6 +262,11 @@ def _mount_for(target: str, mounts: tuple[MountInfo, ...]) -> MountInfo | None:
     return best[1] if best else None
 
 
+def mounts_at_or_below(path: Path, adapter: OSAdapter | None = None) -> tuple[MountInfo, ...]:
+    """Return exact and descendant mounts for existing recovery callers."""
+    return _mounts_at_or_below(str(path.expanduser().resolve()), _mountinfo_entries(adapter))
+
+
 def _mounts_at_or_below(target: str, mounts: tuple[MountInfo, ...]) -> tuple[MountInfo, ...]:
     """Return exact and descendant mounts using path-component boundaries."""
 
