@@ -7,7 +7,7 @@
 | 項目 | 原始碼值 | 權威來源 |
 |---|---|---|
 | Python 套件 | `2.0.0.dev0`，部署／CI 支援 Python 3.12（`>=3.12,<3.13`） | [`inktime/_version.py`](../../inktime/_version.py)、[`pyproject.toml`](../../pyproject.toml) |
-| SQLite Migration | 連續 `1–78`；64–66 保護配送／渲染輸入並支援雙圖附說明，67 索引活動清理，68 永久保存照片內容版本與模型證據，69 加入 Batch 候選分頁索引與逐項失敗重試授權，70 支援橫單直雙與拍攝日期的自動版型，71 新增獨立地點證據與精確 GPS 快取，72 保存顯示／選定次數與完整選片快照，73 加入分析失敗持久通知，74 保存同期分析任務、去重與重跑確認，75 更新未另選的色彩預設為 D，76 保存內容模型資訊、補齊專用 Provider 與佇列，77 索引模型顯示優先序、照片帳務與配額租約，78 新增 OpenAI 週期費用帳本與補齊控制；保留歷史／外鍵 | [`migrations.py`](../../inktime/app/db/migrations.py) |
+| SQLite Migration | 連續 `1–80`；64–66 保護配送／渲染輸入並支援雙圖附說明，67 索引活動清理，68 永久保存照片內容版本與模型證據，69 加入 Batch 候選分頁索引與逐項失敗重試授權，70 支援橫單直雙與拍攝日期的自動版型，71 新增獨立地點證據與精確 GPS 快取，72 保存顯示／選定次數與完整選片快照，73 加入分析失敗持久通知，74 保存同期分析任務、去重與重跑確認，75 更新未另選的色彩預設為 D，76 保存內容模型資訊、補齊專用 Provider 與佇列，77 索引模型顯示優先序、照片帳務與配額租約，78 新增 OpenAI 週期費用帳本與補齊控制，79 索引帳本的時區相容日期範圍，80 保存內容綁定人工日期、Batch 回傳行與未連結付費證據並核對曝光內容；保留歷史／外鍵 | [`migrations.py`](../../inktime/app/db/migrations.py) |
 | AI Analysis Schema | 嚴格 v6；保留 v4/v5 相容閱讀。正式發布要求 v6 安全分析，舊結果不自動重付費 | [`plan.py`](../../inktime/app/domain/analysis/plan.py)、[`schema.py`](../../inktime/app/domain/analysis/schema.py) |
 | ESP32 7C／PhotoPainter 韌體 | `2.8.10`（本分支；實機部署需另行核對） | [`ink-display-7C-photo.ino`](../../esp32/ink-display-7C-photo/ink-display-7C-photo.ino) |
 | ESP32 Config Store payload | v5，讀取 v1–v5；舊容量 12、新 payload 24 slots read compatibility | [`device_config_store_core.h`](../../esp32/ink-display-7C-photo/device_config_store_core.h) |
@@ -55,7 +55,7 @@ Config Store v5 是裝置本機儲存格式，不是所有 HTTP Manifest 的版�
 
 NAS 使用[Tag 更新器](../operations/NAS_TAG_DEPLOYMENT_ZH_TW.md)拉取已發布映像，驗證 marker、lock、部署契約與 recovery point 後才重建。開發 Compose 與正式 NAS 流程分開；一般開發驗證遵守 [`AGENTS.md`](../../AGENTS.md)／[CI policy](../CI_POLICY.md)。
 
-一般 Web 備份預設排除 Secrets、原圖與 Release payload；NAS update recovery point 另保存含 Secrets 的 DB 與受保護的 session key。這些檔案不得公開。AI Trace 預設保留 30 天；API usage 原始預設為 400 天，管理員已改過的政策不應被覆蓋。Photo Analysis 歷史清理另有 dry-run digest 與明確確認，詳見[保留指南](../operations/PHOTO_ANALYSIS_RETENTION_ZH_TW.md)。
+一般 Web 備份預設排除 Secrets、原圖與 Release payload；NAS update recovery point 另保存含 Secrets 的 DB 與受保護的 session key。這些檔案不得公開。AI Trace 政策初始化為 enabled=true、30 天、dry_run=false；實際自動清理仍依目前政策及 Scheduler 運作，已修改政策不會被初始化覆蓋。API usage 原始預設為 400 天，管理員已改過的政策不應被覆蓋。Photo Analysis 歷史清理另有 dry-run digest 與明確確認，詳見[保留指南](../operations/PHOTO_ANALYSIS_RETENTION_ZH_TW.md)。
 
 歷史紀錄（2026-09-06）：當時依部署者授權重建 OrbStack debug 三服務，驗證 Migration 53→58、ready／login 與帳號、Provider、模型價格、Secrets、Session Key 和個人設定保留；這是本機環境證據。pytest 與完整回歸仍由目前提交的 Hosted CI 決定；付費 API、NAS 更新及刷機未執行。歷史 CI 與量測保存原日期。PhotoPainter 2026-08-22／23 的局部實板結果仍見[硬體交接](../devices/PHOTOPAINTER_REV2_TG28_HARDWARE_HANDOFF_ZH_TW.md)，不推廣為目前全部功能已驗收。
 

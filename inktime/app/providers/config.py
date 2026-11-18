@@ -191,14 +191,14 @@ def normalize_options(kind: str, options: Any, *, base_url: str | None = None) -
                 raise ValueError("PROVIDER-009 data_collection 必須是 allow 或 deny")
             result[key] = value
         elif key == "sort":
-            if value not in {"price", "throughput", "latency"} and not (
+            if not (isinstance(value, str) and value in {"price", "throughput", "latency"}) and not (
                 isinstance(value, dict) and set(value) <= {"by", "partition"}
             ):
                 raise ValueError("PROVIDER-010 sort 必須是 price、throughput、latency 或合法 sort object")
             if isinstance(value, dict):
-                if value.get("by") not in {"price", "throughput", "latency"}:
+                if not isinstance(value.get("by"), str) or value["by"] not in {"price", "throughput", "latency"}:
                     raise ValueError("PROVIDER-010 sort.by 不合法")
-                if "partition" in value and value["partition"] not in {"none", "model", "provider"}:
+                if "partition" in value and (not isinstance(value["partition"], str) or value["partition"] not in {"none", "model", "provider"}):
                     raise ValueError("PROVIDER-010 sort.partition 不合法")
                 result[key] = dict(value)
             else:

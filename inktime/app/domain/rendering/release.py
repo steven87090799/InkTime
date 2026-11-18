@@ -792,8 +792,9 @@ class AtomicReleasePublisher:
             metadata["stock_direct_expires_at"] = (
                 datetime.now(timezone.utc) + timedelta(seconds=STOCK_DIRECT_TEST_TTL_SECONDS)
             ).isoformat()
-        payload = payload_path.read_bytes()
         expected = 480 * 800 // (4 if profile.pixel_format == "2bpp" else 2)
+        with payload_path.open("rb") as stream:
+            payload = stream.read(expected + 1)
         if len(payload) != expected:
             raise ValueError("RENDER-002 索引影像檔案大小驗證失敗")
         with Image.open(preview_path) as opened:
@@ -908,7 +909,12 @@ class AtomicReleasePublisher:
                 or not isinstance(digest, str)
             ):
                 raise ValueError("RENDER-010 Release Payload 不存在")
-            payload = path.read_bytes()
+            if size > 64 * 1024 * 1024:
+                raise ValueError("RENDER-010 Release Payload 超過大小上限")
+            with path.open("rb") as stream:
+                if os.fstat(stream.fileno()).st_size != size:
+                    raise ValueError("RENDER-010 Release Payload 大小不一致")
+                payload = stream.read(size + 1)
             if len(payload) != size:
                 raise ValueError("RENDER-010 Release Payload 大小不一致")
             if sha256(payload).hexdigest() != digest:
@@ -1320,7 +1326,10 @@ class DeviceTestReleaseStore:
                         or _RELEASE_ID.fullmatch(release_id) is None
                     ):
                         raise ValueError("invalid assignment contract")
-                except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+                except OSError:
+                    # Failure to read is not evidence that the assignment is corrupt.
+                    return frozenset(referenced), False, examined
+                except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
                     if not self._quarantine_assignment(entry.name, type(exc).__name__):
                         return frozenset(), False, examined
                     continue

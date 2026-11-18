@@ -412,3 +412,15 @@ def test_complete_prompt_retains_original_contract_and_bounds_output():
     assert "文青風格" in COMMON_PROMPT
     assert "不須加總" in COMMON_PROMPT
     assert "保留所有必填欄位" in COMMON_PROMPT
+
+
+@pytest.mark.parametrize("structured", [True, False])
+def test_text_repair_sends_schema_once_and_keeps_plain_provider_fallback(structured):
+    provider = _provider()
+    provider.supports_json_schema = structured
+    provider.repair_json(invalid_content="{}", validation_error="invalid", model="provider/repair-model")
+    body = provider.captured_body
+    user = json.loads(body["messages"][1]["content"])
+    assert ("schema" in user) is not structured
+    assert ("response_format" in body) is structured
+    assert "image_url" not in json.dumps(body)

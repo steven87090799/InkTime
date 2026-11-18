@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+from collections import OrderedDict
 import hashlib
 from io import BytesIO
 import json
@@ -10,6 +11,7 @@ import os
 from pathlib import Path
 import re
 import time
+import threading
 from typing import Any, BinaryIO, cast
 from uuid import uuid4
 from datetime import datetime, timezone
@@ -47,6 +49,9 @@ from .multipart import BatchMultipartBody
 
 
 LOGGER = logging.getLogger("provider_transport")
+_FREE_METADATA_LOCK = threading.RLock()
+_FREE_METADATA_CACHE: OrderedDict[tuple, tuple[float, Any]] = OrderedDict()
+
 SAFE_REQUEST_ID = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
 
 
@@ -218,6 +223,9 @@ def analysis_prompt_sections(scoring_rules: str, caption_controls: dict[str, Any
         contract = COMPLETE_V5_V2_COMMON_PROMPT
     else:
         contract = COMMON_PROMPT
+        if caption_controls:
+            upper = normalize_caption_controls(caption_controls)["side_caption_max_chars"]
+            contract = contract.replace("不超過 20 字", f"不超過 {upper} 字")
     sections = [
         {"key": "contract", "label": "固定輸出、內容分類與方向規則", "editable": False, "text": contract},
         {"key": "scoring_contract", "label": "固定評分邊界", "editable": False, "text": SCORING_CONTRACT_PROMPT},
@@ -398,6 +406,7 @@ def calculate_usage_cost(
 
 class OpenAICompatibleProvider(VisionProvider):
     supports_upload_guard = True
+    archives_model_evidence = True
     supports_prompt_version = True
     completion_path = "/chat/completions"
     api_mode = "chat_completions"
@@ -443,7 +452,35 @@ class OpenAICompatibleProvider(VisionProvider):
         self.last_request_metrics: dict[str, int] = {}
         self._trace_sender = None
 
+    def _free_metadata_key(self, resource: str) -> tuple:
+        # Keys stay in memory, never enter logs, evidence or process specs.
+        return (self.base_url, hashlib.sha256(self.api_key.encode()).hexdigest(), resource)
+
     def free_daily_quota(self) -> dict[str, int]:
+        with _FREE_METADATA_LOCK:
+            key = self._free_metadata_key("quota:" + datetime.now(timezone.utc).date().isoformat())
+            cached = _FREE_METADATA_CACHE.get(key)
+            if cached and time.monotonic() - cached[0] < 30 and cached[1]["remaining"] > 0:
+                quota = dict(cached[1])
+                # Conservatively debit every permission check. Other processes
+                # still share server enforcement and the zero-price request cap.
+                _FREE_METADATA_CACHE[key] = (cached[0], {**quota, "used": quota["used"] + 1,
+                                                        "remaining": quota["remaining"] - 1})
+                return quota
+            _FREE_METADATA_CACHE.pop(key, None)
+            quota = self._read_free_daily_quota()
+            if quota["remaining"] > 0:
+                self._remember_free_metadata(key, {**quota, "used": quota["used"] + 1,
+                                                   "remaining": quota["remaining"] - 1})
+            return quota
+
+    @staticmethod
+    def _remember_free_metadata(key: tuple, value: Any) -> None:
+        if len(_FREE_METADATA_CACHE) >= 128:
+            _FREE_METADATA_CACHE.popitem(last=False)
+        _FREE_METADATA_CACHE[key] = (time.monotonic(), value)
+
+    def _read_free_daily_quota(self) -> dict[str, int]:
         """Read account-wide free requests, never infer exhaustion from a 5xx."""
         try:
             if not self.openrouter_compatible:
@@ -471,7 +508,18 @@ class OpenAICompatibleProvider(VisionProvider):
             ) from exc
 
     def assert_free_model(self, model: str) -> None:
-        """Inspect live catalog metadata before dispatch, including temporary offers."""
+        """Cache successful metadata for five minutes; never reuse expired proof."""
+        with _FREE_METADATA_LOCK:
+            key = self._free_metadata_key("model:" + model)
+            cached = _FREE_METADATA_CACHE.get(key)
+            if cached and time.monotonic() - cached[0] < 300:
+                return
+            _FREE_METADATA_CACHE.pop(key, None)
+            self._assert_free_model(model)
+            self._remember_free_metadata(key, True)
+
+    def _assert_free_model(self, model: str) -> None:
+        """Fetch and validate the catalog, including temporary offers."""
         try:
             if not self.openrouter_compatible:
                 raise ValueError("補齊專用設定只支援 OpenRouter")
@@ -702,13 +750,38 @@ class OpenAICompatibleProvider(VisionProvider):
             if retry_policy == NO_RETRY_SIDE_EFFECT
             else "Batch 建立回應未知，未自動重送"
         )
+        streaming_download = bool(kwargs.get("stream", False))
         for attempt in range(attempts):
             try:
                 sender = getattr(self.session, method.lower())
                 kwargs.setdefault("allow_redirects", False)
+                kwargs.setdefault("stream", True)
                 if request_started_callback is not None:
                     request_started_callback()
                 response = sender(self._url(path), **kwargs)
+                if isinstance(response, requests.Response) and (not streaming_download or response.status_code >= 400):
+                    # Count decompressed bytes before .text/.json can materialize
+                    # unbounded remote content. Successful file downloads keep
+                    # their separate streaming 256 MiB contract.
+                    chunks = []
+                    size = 0
+                    try:
+                        buffered = response._content
+                        response_chunks = ((buffered,) if isinstance(buffered, bytes)
+                                           else response.iter_content(chunk_size=64 * 1024))
+                        for chunk in response_chunks:
+                            size += len(chunk)
+                            if size > 16 * 1024 * 1024:
+                                raise ProviderHTTPError("Provider 回應超過解析上限", "VLM-RESPONSE-SIZE",
+                                                        ambiguous=ambiguous, request_started=ambiguous,
+                                                        vision_started=ambiguous,
+                                                        request_id=self._provider_request_id(response) or None)
+                            chunks.append(chunk)
+                        response._content = b"".join(chunks)
+                        # requests' public stubs omit its internal consumed flag.
+                        cast(Any, response)._content_consumed = True
+                    finally:
+                        response.close()
             except requests.Timeout as exc:
                 request_sent = not self._transport_failed_before_send(exc)
                 if ambiguous and request_sent:
@@ -981,12 +1054,15 @@ class OpenAICompatibleProvider(VisionProvider):
                     from inktime.app.repositories.model_evidence import save_model_request
                     save_model_request(Database(Path(upload_guard["database_path"])),
                                        upload_guard["operation_id"], body)
+            response_archived = False
             def archive_transport_response(received):
+                nonlocal response_archived
                 if upload_guard is not None and upload_guard.get("operation_id"):
                     from inktime.app.db import Database
                     from inktime.app.repositories.model_evidence import save_model_transport_response
                     save_model_transport_response(Database(Path(upload_guard["database_path"])),
                                                   upload_guard["operation_id"], received.text)
+                    response_archived = True
 
             # Archiving inputs can involve slow NAS writes/fsync. Recheck mutable
             # consent after that work, immediately before handing off to transport.
@@ -1038,7 +1114,7 @@ class OpenAICompatibleProvider(VisionProvider):
         if vision_attempt is not None:
             vision_attempt.vision_started = True
         response_received_at = datetime.now(timezone.utc).isoformat()
-        if upload_guard is not None and upload_guard.get("operation_id"):
+        if not response_archived and upload_guard is not None and upload_guard.get("operation_id"):
             from inktime.app.db import Database
             from inktime.app.repositories.model_evidence import save_model_transport_response
             save_model_transport_response(Database(Path(upload_guard["database_path"])),
@@ -1209,7 +1285,6 @@ class OpenAICompatibleProvider(VisionProvider):
             body,
             model=model,
             stage=stage,
-            prompt_identity=self._system_prompt(caption_controls or self.caption_controls, stage=stage, prompt_version=prompt_version),
             reasoning_effort=reasoning_effort,
             provider_request_context_id=provider_request_context_id,
             allow_reasoning=True,
@@ -1239,7 +1314,6 @@ class OpenAICompatibleProvider(VisionProvider):
         *,
         model: str,
         stage: str,
-        prompt_identity: str,
         reasoning_effort: str | None,
         provider_request_context_id: str | None,
         allow_reasoning: bool,
@@ -1360,12 +1434,11 @@ class OpenAICompatibleProvider(VisionProvider):
                             "invalid_json": invalid_content[:12000],
                             "error": validation_error,
                             "immutable_semantic_values": dict(immutable_semantic_values or {}),
-                            "schema": _json_schema_for_provider(
-                                self.kind,
-                                stage,
+                            **({"schema": _json_schema_for_provider(
+                                self.kind, stage,
                                 caption_controls=caption_controls or self.caption_controls,
                                 prompt_version=prompt_version,
-                            )["schema"],
+                            )["schema"]} if not self.supports_json_schema else {}),
                         },
                         ensure_ascii=False,
                     ),
@@ -1385,20 +1458,10 @@ class OpenAICompatibleProvider(VisionProvider):
             }
         if max_tokens is not None:
             body["max_tokens"] = max_tokens
-        repair_prompt_identity = json.dumps(
-            {
-                "repair": "json-schema-repair",
-                "stage": stage,
-                "schema_version": _analysis_schema_version(prompt_version),
-            },
-            sort_keys=True,
-            separators=(",", ":"),
-        )
         self._apply_provider_request_policy(
             body,
             model=model,
             stage=f"{stage}:repair",
-            prompt_identity=repair_prompt_identity,
             reasoning_effort="none",
             provider_request_context_id=provider_request_context_id,
             allow_reasoning=False,

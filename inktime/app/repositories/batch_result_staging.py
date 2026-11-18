@@ -1,5 +1,5 @@
 from collections.abc import MutableMapping
-from contextlib import nullcontext
+from contextlib import ExitStack, nullcontext
 from hashlib import sha256
 import json
 from uuid import uuid4
@@ -13,11 +13,20 @@ class BatchResultStore(MutableMapping):
         self.batch_id = batch_id
         self.run_id = str(uuid4())
         self._connection = None
-        self._connection_context = None
+        self._resources: ExitStack | None = None
 
     def __enter__(self):
-        self._connection_context = self.database.session()
-        self._connection = self._connection_context.__enter__()
+        with ExitStack() as resources:
+            owner = self.database.try_acquire_operation_lock(
+                "batch-ingest-" + sha256(self.batch_id.encode()).hexdigest()[:3]
+            )
+            if owner is None:
+                raise ValueError("Batch 匯入仍由其他執行者持有，請稍後再試")
+            resources.callback(owner.close)
+            connection = resources.enter_context(self.database.session())
+            connection.execute("DELETE FROM batch_result_staging WHERE batch_id=?", (self.batch_id,))
+            self._connection = connection
+            self._resources = resources.pop_all()
         return self
 
     def __exit__(self, *_exc):
@@ -26,11 +35,15 @@ class BatchResultStore(MutableMapping):
     def _session(self):
         return nullcontext(self._connection) if self._connection is not None else self.database.session()
 
-    def save_raw(self, raw_line: bytes):
+    def save_raw(self, raw_line: bytes, *, source_file: str = "", line_number: int = 0):
         with self._session() as connection:
             connection.execute(
                 "INSERT OR IGNORE INTO batch_result_raw(batch_id,line_sha256,raw_line) VALUES (?,?,?)",
                 (self.batch_id, sha256(raw_line).hexdigest(), raw_line),
+            )
+            connection.execute(
+                "INSERT OR IGNORE INTO batch_result_occurrences(batch_id,source_file,line_number,line_sha256) VALUES (?,?,?,?)",
+                (self.batch_id, source_file, line_number, sha256(raw_line).hexdigest()),
             )
 
     def __getitem__(self, key):
@@ -86,7 +99,7 @@ class BatchResultStore(MutableMapping):
                 connection.execute("DELETE FROM batch_result_staging WHERE batch_id=? AND run_id=?",
                                    (self.batch_id, self.run_id))
         finally:
-            if self._connection_context is not None:
-                self._connection_context.__exit__(None, None, None)
-                self._connection_context = None
-                self._connection = None
+            resources, self._resources = self._resources, None
+            self._connection = None
+            if resources is not None:
+                resources.close()

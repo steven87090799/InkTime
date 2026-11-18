@@ -112,8 +112,9 @@ def _persistent_secret(runtime_config: RuntimeConfig, lock_provider: LockProvide
         return "test-secret-not-for-production"
     import os
     import sqlite3
-    import tempfile
 
+    if (runtime_config.data_dir / ".secret-recovery-in-progress").exists():
+        raise RuntimeError("SESSION-003 主密鑰恢復尚未完成；請使用原 Recovery Bundle 完成恢復後再啟動")
     configured = os.environ.get("INKTIME_SECRET_KEY", "").strip()
     if configured:
         return configured
@@ -141,22 +142,8 @@ def _persistent_secret(runtime_config: RuntimeConfig, lock_provider: LockProvide
             finally:
                 connection.close()
         value = secrets.token_urlsafe(64)
-        descriptor, name = tempfile.mkstemp(dir=path.parent, prefix=".session-key-")
-        temporary = Path(name)
-        try:
-            with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
-                os.fchmod(stream.fileno(), 0o600)
-                stream.write(value)
-                stream.flush()
-                os.fsync(stream.fileno())
-            os.replace(temporary, path)
-            directory = os.open(path.parent, os.O_RDONLY)
-            try:
-                os.fsync(directory)
-            finally:
-                os.close(directory)
-        finally:
-            temporary.unlink(missing_ok=True)
+        from inktime.app.core.atomic_files import write_private_bytes
+        write_private_bytes(path, value.encode("utf-8"))
         return value
 
 

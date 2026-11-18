@@ -65,7 +65,7 @@ def test_reuse_ignores_local_scoring_metadata_but_keeps_model_contract():
 def test_repair_policy_is_frozen_bounded_and_legacy_plans_are_upgraded():
     plan = _plan(repair_policy={"model": "repair-a", "max_tokens": 99999})
     assert plan["repair_policy"] == {
-        "enabled": True,
+        "enabled": False,
         "model": "repair-a",
         "max_tokens": 1200,
         "max_attempts": 1,
@@ -121,3 +121,21 @@ def test_pending_identity_matches_stored_results_and_ignores_display_repair():
     changed = dict(plan, caption_display_controls={"layout": "side"}, repair_policy={"enabled": False})
     assert stored_analysis_fingerprint(changed) == stored_analysis_fingerprint(plan)
     assert stored_analysis_fingerprint(dict(plan, prompt_version="changed")) != stored_analysis_fingerprint(plan)
+
+
+def test_actual_provider_contract_survives_route_reorder_but_not_provider_changes():
+    from copy import deepcopy
+    from inktime.app.domain.analysis.plan import effective_provider_contract
+
+    route = [{"provider_id": "a", "config_revision": "a-1", "model": "model-a"},
+             {"provider_id": "b", "config_revision": "b-1", "model": "model-b"}]
+    original = _plan(provider_route=route)
+    reordered = deepcopy(original)
+    reordered["provider_route"] = list(reversed(route))
+    expected = effective_provider_contract(original, "b", "model-b")
+    assert expected is not None
+    assert effective_provider_contract(reordered, "b", "model-b") == expected
+    reordered["provider_route"][0]["config_revision"] = "b-2"
+    assert effective_provider_contract(reordered, "b", "model-b") != expected
+    assert effective_provider_contract(original, "missing", "model-b") is None
+    assert effective_provider_contract(original, "b", "other-model") is None

@@ -31,7 +31,7 @@ from inktime.app.domain.photos.preprocessing import PhotoPreprocessor
 from inktime.app.domain.photos.quality_policy import local_candidate_score, evaluate_local_quality
 from inktime.app.domain.analysis.content_filter import evaluate_content_filter, evaluate_display_exclusion
 from inktime.app.domain.analysis.plan import normalize_reasoning_effort
-from inktime.app.domain.analysis.schema import AnalysisValidationError, validate_model_response
+from inktime.app.domain.analysis.schema import ANALYSIS_JSON_SCHEMA, AnalysisValidationError, validate_model_response
 from inktime.app.domain.analysis.scoring import (
     FAVORITE_SPECIAL_LEVEL_BOOST,
     DEFAULT_RANKING_WEIGHTS,
@@ -41,7 +41,7 @@ from inktime.app.domain.analysis.scoring import (
 from inktime.app.services.analysis import FULL_ANALYSIS_TOKEN_CAP
 from inktime.app.services.benchmark_metrics import calculate_benchmark_metrics
 from inktime.app.providers.base import ProviderResponse, VisionAttemptState, IncompleteProviderResponse, assert_complete_response
-from inktime.app.providers.config import normalize_options
+from inktime.app.providers.config import effective_provider_kind, normalize_options
 from inktime.app.providers.openai_compatible import OpenAICompatibleProvider, ProviderHTTPError
 
 
@@ -107,7 +107,7 @@ class BenchmarkAxis:
     def label(self) -> str:
         return (
             f"{self.provider}/{self.model} | {self.image_max_side}px | "
-            f"{self.prompt_profile} | variants={'on' if self.variants_enabled else 'off'} | "
+            f"{self.prompt_profile} | output_cap={3072 if self.variants_enabled else 2048} | "
             f"reasoning={self.reasoning_effort}"
         )
 
@@ -297,6 +297,12 @@ def _validate_manifest_expected(expected: Any) -> dict[str, Any]:
             raise BenchmarkError(f"golden manifest expected.{field} 不合法")
     if not isinstance(expected.get("should_keep"), bool):
         raise BenchmarkError("golden manifest expected.should_keep 必須是 Boolean")
+    types = expected.get("types")
+    allowed_types = ANALYSIS_JSON_SCHEMA["schema"]["properties"]["types"]["items"]["enum"]
+    if (not isinstance(types, list) or not types or len(types) > 3
+            or any(not isinstance(value, str) or value not in allowed_types for value in types)
+            or len(set(types)) != len(types)):
+        raise BenchmarkError("golden manifest expected.types 必須是 1–3 個不重複合法分類")
     has_nested_orientation = "visual_orientation" in expected
     has_flat_orientation = "rotation_cw" in expected or "ambiguous" in expected
     if has_nested_orientation and has_flat_orientation:
@@ -541,12 +547,20 @@ def _contract_metrics_snapshot(metrics: Mapping[str, Any]) -> dict[str, Any]:
 class ModelBenchmarkService:
     """Run a benchmark without mutating production domain repositories."""
 
-    def __init__(self, *, provider_factory=OpenAICompatibleProvider, budgets=None) -> None:
+    def __init__(self, *, provider_factory=OpenAICompatibleProvider, budgets=None, provider_id: str | None = None) -> None:
         self.provider_factory = provider_factory
         self.budgets = budgets
+        self.provider_id = provider_id
 
     def _paid_call(self, provider, method, **kwargs):
         if self.budgets is not None:
+            if self.provider_factory is OpenAICompatibleProvider:
+                with self.budgets.database.session() as connection:
+                    account = connection.execute("SELECT kind,base_url FROM providers WHERE id=? AND enabled=1",
+                                                 (self.provider_id,)).fetchone()
+                if (account is None or effective_provider_kind(str(account["kind"]), str(account["base_url"])) != provider.kind
+                        or str(account["base_url"]).rstrip("/") != str(provider.base_url).rstrip("/")):
+                    raise BenchmarkError("live benchmark 必須指定相符且已啟用的 Provider 帳戶 UUID")
             return self.budgets.call(provider, method, **kwargs)
         if self.provider_factory is OpenAICompatibleProvider:
             raise BenchmarkError("live benchmark requires the installation budget ledger")
@@ -591,14 +605,14 @@ class ModelBenchmarkService:
         return axes
 
     def _provider(self, axis: BenchmarkAxis, *, api_key: str = "", base_url: str = "https://openrouter.ai/api/v1"):
-        kind = "openrouter" if axis.provider.casefold() == "openrouter" else "openai_compatible"
+        kind = axis.provider.casefold() if axis.provider.casefold() in {"openrouter", "openai"} else "openai_compatible"
         options = normalize_options(kind, axis.options)
         return self.provider_factory(
             name=f"benchmark-{axis.provider}",
             base_url=base_url,
             api_key=api_key,
             kind=kind,
-            provider_id=axis.provider,
+            provider_id=self.provider_id or axis.provider,
             options=options,
             timeout=120,
             supports_json_schema=True,

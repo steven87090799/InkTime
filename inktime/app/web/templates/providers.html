@@ -25,9 +25,9 @@
           <article><strong>OpenAI</strong><span>官方雲端 API</span><p>適合直接使用 OpenAI Vision 模型；需要有效 API Key。</p></article>
           <article><strong>OpenRouter</strong><span>多模型路由</span><p>可指定模型、免費路由或路由規則；不支援 InkTime Batch。</p></article>
           <article><strong>相容 API</strong><span>第三方服務</span><p>服務必須相容 OpenAI Chat Completions 與 Vision 輸入格式。</p></article>
-          <article><strong>Ollama</strong><span>本機／區網</span><p>適合自架模型；只有此類型可直接使用私有 HTTP 端點。</p></article>
+          <article><strong>Ollama</strong><span>本機／區網</span><p>適合自架模型；私有 HTTP 需 literal IP，並在 options 顯式允許。</p></article>
         </div>
-        <label class="provider-field-wide">Base URL<input name="base_url" placeholder="https://api.openai.com/v1" required><small>填 API 根網址，不要填單一模型或聊天頁網址。公開 HTTP 一律拒絕；私有 HTTP 只接受 Ollama，或在 options 明確允許。</small></label>
+        <label class="provider-field-wide">Base URL<input name="base_url" placeholder="https://api.openai.com/v1" required><small>填 API 根網址，不要填單一模型或聊天頁網址。公開 HTTP 一律拒絕。私有／loopback HTTP 只接受 literal IP，且 options 必須填 {"allow_private_http":true}；Ollama 也需要。HTTP hostname（含 localhost）不支援。</small></label>
         <label class="provider-field-wide">API Key<input name="api_key" type="password" autocomplete="new-password" placeholder="本地 Ollama 通常可留空"><small>只會加密儲存，畫面不會完整回顯；編輯既有 Provider 時留空代表保留原 Key。</small></label>
       </div>
     </section>

@@ -370,6 +370,8 @@ class AITraceRepository:
                         attempt[name] = json.loads(attempt[name])
                     except (TypeError, ValueError, json.JSONDecodeError):
                         attempt[name] = None
+            if include_sensitive and not isinstance(attempt.get("request_json_sanitized"), dict):
+                attempt["request_json_sanitized"] = {}
             if not include_sensitive:
                 attempt.pop("request_json_sanitized", None)
                 attempt.pop("response_raw_sanitized", None)

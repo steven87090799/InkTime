@@ -427,7 +427,7 @@ def test_batch_preflight_and_mount_recovery_are_fail_closed():
     assert "FFat.freeBytes() >= requiredFree" in support
     download = firmware[firmware.index("static bool downloadOfflineScheduleAndFrames("):]
     assert download.index("runFormalFrameGcForWake(incomingJson.c_str()") < download.index(
-        "|| !downloadOfflineScheduleSlot("
+        "if (!downloadOfflineScheduleSlot("
     )
     load = support[support.index("bool PhotoPainterSupport::loadFormalFrame("):
                    support.index("bool PhotoPainterSupport::convertFrame(")]

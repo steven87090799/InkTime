@@ -19,8 +19,9 @@ from inktime.app.domain.photos.quality_policy import evaluate_local_quality, loc
 from inktime.app.repositories.scoring import ScoringProfileRepository
 from inktime.app.repositories.settings import SettingsRepository
 from inktime.app.repositories.usage import UsageRepository
-from inktime.app.repositories.billable_operations import BillableOperationRepository
-from inktime.app.providers.base import VisionAttemptState, IncompleteProviderResponse, assert_complete_response
+from inktime.app.repositories.billable_operations import BillableOperationRepository, paid_operation_lock_name
+from inktime.app.providers.base import VisionAttemptState, IncompleteProviderResponse, assert_complete_response, openai_request_rejected
+from inktime.app.providers.router import FailoverVisionProvider
 from inktime.app.services.budgets import BudgetService
 from inktime.app.services.providers import ProviderService
 from inktime.app.services.usage_tracking import record_failed_unknown_usage
@@ -74,29 +75,40 @@ class ScoringLabService:
     def _analyze_with_provider(
         self, image_path: Path, provider, *, plan: dict | None = None, idempotency_key: str | None = None,
     ) -> dict:
+        with image_path.open("rb") as source:
+            content_sha256 = file_digest(source, "sha256").hexdigest()
+        with self.usage.database.operation_lock(paid_operation_lock_name(content_sha256)):
+            return self._analyze_guarded(image_path, provider, plan=plan, idempotency_key=idempotency_key,
+                                         content_sha256=content_sha256)
+
+    def _analyze_guarded(
+        self, image_path: Path, provider, *, plan: dict | None, idempotency_key: str | None,
+        content_sha256: str,
+    ) -> dict:
         profile = self.profiles.current()
         plan = plan or self._plan()
         model = str(plan["model"])
         max_tokens = analysis_output_token_cap(self.settings)
-        with image_path.open("rb") as source:
-            content_sha256 = file_digest(source, "sha256").hexdigest()
         operations = BillableOperationRepository(self.usage.database)
         operation_id, checkpoint = operations.begin(
             content_sha256, idempotency_key or f"scoring-test:{uuid4()}", reuse_completed=True,
             context={"request_signature": request_fingerprint({"plan": plan, "max_tokens": max_tokens}), "kind": "scoring_test"},
         )
         provider_request_context_id = f"scoring_test|{operation_id}"
-        if checkpoint is None:
-            try:
-                self.budgets.reserve(operation_id, self.budgets.estimate_reserve(provider, model, output_tokens=max_tokens))
-            except Exception:
-                operations.finish(operation_id, not_sent=True)
-                raise
         selected_provider = provider
         provider_id = ""
         provider_name = provider.name
         attempt_summary: list[dict] = []
         vision_request_state = VisionAttemptState()
+
+        def reserve_attempt(actual_provider, actual_model):
+            # The router invokes this after selecting each concrete channel.
+            # A new channel follows either no send or a definite native refusal.
+            self.budgets.release(operation_id)
+            self.budgets.reserve(
+                operation_id, self.budgets.estimate_reserve(actual_provider, actual_model, output_tokens=max_tokens),
+                provider_id=getattr(actual_provider, "provider_id", None),
+            )
 
         def refresh_provider_identity() -> None:
             nonlocal selected_provider, provider_id, provider_name, model
@@ -256,6 +268,12 @@ class ScoringLabService:
         vision_started_at = datetime.now(timezone.utc).isoformat()
         vision_started_perf = time.perf_counter()
         try:
+            routing = {}
+            if checkpoint is None:
+                if isinstance(provider, FailoverVisionProvider):
+                    routing["before_attempt"] = reserve_attempt
+                else:
+                    reserve_attempt(provider, model)
             response = checkpoint or provider.analyze(
                 image_path=image_path,
                 model=model,
@@ -267,6 +285,7 @@ class ScoringLabService:
                 prompt_version=plan["prompt_version"],
                 vision_attempt=vision_request_state,
                 provider_request_context_id=provider_request_context_id,
+                **routing,
             )
         except Exception as error:
             refresh_provider_identity()
@@ -276,7 +295,10 @@ class ScoringLabService:
                 or getattr(error, "request_started", False)
                 or getattr(error, "ambiguous", False)
             )
-            if request_started:
+            if openai_request_rejected(selected_provider, error):
+                operations.finish_rejected(operation_id, error)
+                self.budgets.release(operation_id)
+            elif request_started:
                 record_failed_attempt(
                     request_type="scoring_test_vision",
                     model_name=model,

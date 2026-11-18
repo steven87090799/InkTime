@@ -382,3 +382,16 @@ def test_optional_visual_landmark_does_not_change_stored_analysis_or_trigger_rep
     frozen = _json_schema_for_provider('openrouter', 'single', caption_controls=None,
                                        prompt_version='photo-analysis-v6-literary20-20261021')
     assert 'landmark' not in frozen['schema']['properties']
+
+
+
+@pytest.mark.parametrize("caption", ["第一行\n第二行", '"光影慢慢走遠。"', "# 光影慢慢走遠。", "* 光影慢慢走遠。"])
+def test_new_model_caption_rejects_presentation_wrappers_without_breaking_stored_reads(caption):
+    value = valid_result(side_caption=caption)
+    with pytest.raises(AnalysisValidationError, match="單行句子"):
+        validate_model_response(value)
+    assert validate_analysis_result(value)["side_caption"] == caption
+
+
+def test_model_caption_keeps_user_requested_flexible_lower_bound():
+    assert validate_model_response(valid_result(side_caption="靜。"))["side_caption"] == "靜。"

@@ -415,6 +415,17 @@ class Database:
             raise RuntimeLockError("RESTORE-001 InkTime Web、Worker 或 Scheduler 尚未停止") from exc
         return lock
 
+    @contextmanager
+    def operation_lock(self, name: str):
+        """Serialize controls with external submissions without holding SQLite open."""
+        if not re.fullmatch(r"[a-z0-9-]+", name):
+            raise ValueError("invalid database operation lock name")
+        lock_path = Path(f"{self.path}.{name}.lock")
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        with lock_path.open("a+b") as lock:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            yield
+
     def try_acquire_operation_lock(self, name: str) -> IO[bytes] | None:
         """Try to acquire a database-scoped cross-process maintenance lock.
 

@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
+from io import BytesIO
+import json
+
+import pytest
 import subprocess
 import sys
 from pathlib import Path
@@ -49,3 +54,34 @@ def test_lan_source_uses_current_v6_authorization_and_still_rechecks_exclusion(a
     with database.transaction() as connection:
         connection.execute("UPDATE photos SET never_display=1 WHERE id=?", (LAN_SOURCE_ID,))
     assert not service._formal_content_is_current(manifest)
+
+
+class BackupJobBrowser:
+    def __init__(self, jobs):
+        self.jobs = iter(jobs)
+        self.paths = []
+
+    @contextmanager
+    def request(self, path):
+        self.paths.append(path)
+        yield BytesIO(json.dumps(next(self.jobs)).encode())
+
+
+def test_background_backup_waits_for_worker_result_and_returns_archive(monkeypatch):
+    import scripts.lan_production_gate as gate
+    monkeypatch.setattr(gate.time, "sleep", lambda _seconds: None)
+    browser = BackupJobBrowser([{"status": "running"},
+        {"status": "completed", "result": {"backup": "inktime-backup-manual.zip"}}])
+    assert gate._completed_backup_name(browser, "backup-job") == "inktime-backup-manual.zip"
+    assert browser.paths == ["/api/v1/jobs/backup-job"] * 2
+
+
+@pytest.mark.parametrize("job", [
+    {"status": "failed"}, {"status": "completed_with_errors"},
+    {"status": "completed", "result": None},
+    {"status": "completed", "result": {"backup": "../outside.zip"}},
+])
+def test_background_backup_never_accepts_failed_or_missing_archive(job):
+    import scripts.lan_production_gate as gate
+    with pytest.raises(RuntimeError, match="background backup"):
+        gate._completed_backup_name(BackupJobBrowser([job]), "backup-job")

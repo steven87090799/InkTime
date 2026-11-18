@@ -76,9 +76,31 @@
               "types": {
                 "type": "array",
                 "items": {
-                  "type": "string"
+                  "type": "string",
+                  "enum": [
+                    "人物",
+                    "其他",
+                    "夜景",
+                    "孩子",
+                    "家庭",
+                    "寵物",
+                    "建築",
+                    "截圖",
+                    "收據",
+                    "文件",
+                    "旅行",
+                    "日常",
+                    "植物",
+                    "活動",
+                    "美食",
+                    "貓咪",
+                    "雜物",
+                    "風景"
+                  ]
                 },
-                "uniqueItems": true
+                "uniqueItems": true,
+                "minItems": 1,
+                "maxItems": 3
               },
               "should_keep": {
                 "type": "boolean"

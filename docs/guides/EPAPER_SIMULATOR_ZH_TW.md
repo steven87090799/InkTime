@@ -7,7 +7,7 @@
 本機快速流程：
 
 1. 把照片放入專案的 `simulation_photos/`（Docker 容器內固定為 `/photos`）。
-2. 到「維護」按「掃描並送到虛擬墨水屏」。這個背景工作只做增量掃描與正式色盤發布，不呼叫 Provider。
+2. 已具備正式 v6 安全與方向資格的照片，可到「維護」按「掃描並送到虛擬墨水屏」做背景掃描與發布；缺少正式資格會保留既有畫面或明確失敗，不能用純本機結果補位。單純無模型預覽請使用下方 `/simulator`。
 3. 另開 `/virtual-display`。工作完成後，接收頁會自動顯示新 Release；不需在接收頁執行任何操作。
 
 這條路徑產生的 Release 也符合 ESP32 的正式 Manifest／BIN 契約，因此虛擬頁顯示的不是 CSS 濾鏡或另外產生的近似圖。
@@ -16,14 +16,14 @@
 
 登入 InkTime 後開啟「模擬器」或 `/simulator`，可直接上傳 JPG、PNG、WebP，或載入內建測試圖。模擬器會：
 
-1. 在瀏覽器組成與正式渲染相同的 480×800 直式畫布。
+1. 上傳原始輸入，由背景工作使用正式渲染設定組圖。
 2. 可手動輸入短文案，完全不等待模型產生內容。
 3. 呼叫本機 `/api/v1/rendering/simulate`，套用正式發布共用的 Profile、OKLab 色差與抖動演算法。
-4. 回傳純面板色的 PNG，可比較裁切、留白、色偏、顆粒與文字可讀性。
+4. 工作完成後下載純面板色 PNG，可比較裁切、留白、色偏、顆粒與文字可讀性。
 
 六色 GDEP 可選「Good Display 原廠相容」重現廠商固定色盤轉換，或選「照片平滑」先消除局部色塊與雜點，再套用相同固定色盤 Floyd–Steinberg。前者適合建立原廠基準，後者適合人像與 JPG 壓縮照片；兩者都應再以同一張照片做實體面板 A/B。
 
-此 API 不查照片資料庫、不建立 Job、不寫入 Release、不呼叫 Provider。上傳檔只存在單次請求的暫存目錄；最多 25 MiB／6000 萬像素（任一邊最多 12000px；[共用圖片 contract](../architecture/IMAGE_FORMAT_CONTRACT_ZH_TW.md)），處理完成即刪除。回應的 `X-InkTime-Model: disabled` 可用於自動測試確認模型沒有介入。
+模擬器不呼叫 Provider。上傳原始輸入後建立背景工作，以 Job／結果網址取得預覽；不再保證同步回傳影像。輸入以 lease 保留，待工作終態及保留規則允許才回收，不能宣稱請求完成即刪除。上傳上限與像素限制見[共用圖片 contract](../architecture/IMAGE_FORMAT_CONTRACT_ZH_TW.md)。正式相框發布另須 v6 安全與方向確認；photo_only 本機預覽不等於正式資格。Caption 是至多20字的一句完整文句，沒有固定下限。
 
 CSS 電子紙外框、紙張紋理與刷新動畫只協助觀察；下載的 PNG 不含這些裝飾。真正寫入面板的色彩與資料量則使用 `inktime/app/domain/rendering/palette.py` 的相同編碼器。
 

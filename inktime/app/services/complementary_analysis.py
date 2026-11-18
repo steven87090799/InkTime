@@ -45,17 +45,21 @@ class ComplementaryAnalysisService:
                 "timezone": str(self.settings.get("general.timezone", "Asia/Taipei"))}
 
     def configure(self, updates, actor):
+        with self.repository.database.operation_lock("openai-backfill-submit"):
+            return self._configure(updates, actor)
+
+    def _configure(self, updates, actor):
         allowed = set(self.state()["settings"])
         if not isinstance(updates, dict) or set(updates) - allowed:
             raise ValueError("分工設定包含不支援欄位")
         changed, _, merged = self.settings.prepare_updates(updates)
-        if merged["analysis.complementary_enabled"]:
+        stopping = updates in ({"analysis.openai_backfill_enabled": False}, {"analysis.complementary_enabled": False})
+        if merged["analysis.complementary_enabled"] and not stopping:
             self.providers.complementary_route("openai_backfill", str(merged["analysis.openai_provider_id"]))
             self.providers.complementary_route("openrouter_daily", str(merged["analysis.daily_openrouter_provider_id"]))
             if not permits_manual_ai(execution_mode(self.settings)):
                 raise ValueError("目前分析模式不允許模型分析")
         with self.repository.database.transaction() as connection:
-            stopping = updates == {"analysis.openai_backfill_enabled": False}
             if not stopping and connection.execute(
                 "SELECT 1 FROM jobs j JOIN job_items i ON i.job_id=j.id WHERE i.status='running' "
                 "AND json_extract(j.settings_json,'$.complementary_lane') IS NOT NULL LIMIT 1"
@@ -71,9 +75,19 @@ class ComplementaryAnalysisService:
                 self.jobs.request_pause(str(job["id"]))
         elif "analysis.openai_backfill_enabled" in changed or "analysis.complementary_enabled" in changed:
             # Explicitly enabling is allowed to resume manually paused work.
-            self.resume(actor)
+            try:
+                self._resume(actor)
+            except (ValueError, RuntimeError) as exc:
+                self.repository.clear_pause()
+                self._pause_for_error(exc, next((str(job["id"]) for job in self.repository.active_jobs()), None))
+                return {"settings_saved": True, "activation_state": "paused", "activation_message": str(exc)}
+        return {"settings_saved": True, "activation_state": "paused" if self.repository.control()["pause_kind"] else "enabled"}
 
     def resume(self, actor):
+        with self.repository.database.operation_lock("openai-backfill-submit"):
+            return self._resume(actor)
+
+    def _resume(self, actor):
         if not self.settings.get("analysis.complementary_enabled", False):
             raise ValueError("請先儲存並啟用雙 Provider 分工")
         self.providers.complementary_route("openai_backfill")
@@ -107,8 +121,18 @@ class ComplementaryAnalysisService:
         marker = state["day_start"] if kind == "daily" else state["start"]
         if marker == control["pause_cycle"]:
             return False
-        self.budgets.openai.assert_reserve()
         job_id = control["resume_job_id"]
+        if not job_id:
+            # Recover the unique old queue left by earlier versions that lost
+            # the association while changing an automatic budget pause reason.
+            held = [job for job in self.repository.active_jobs() if job["status"] in {"paused", "budget_exceeded"}]
+            if len(held) == 1:
+                job_id = str(held[0]["id"])
+        try:
+            self.budgets.openai.assert_reserve()
+        except OpenAIBudgetExceeded as exc:
+            self._pause_for_error(exc, job_id)
+            raise
         with self.repository.database.transaction() as connection:
             if kind == "credit":
                 if control["credit_attempt_cycle"] == state["start"]:
@@ -128,11 +152,9 @@ class ComplementaryAnalysisService:
         return True
 
     def can_run(self, job_id):
-        if not self.settings.get("analysis.complementary_enabled", False) or not self.settings.get("analysis.openai_backfill_enabled", False):
-            return False
-        if self.repository.control()["pause_kind"]:
-            return False
         with self.repository.database.session() as connection:
+            if not self.repository.enabled(connection):
+                return False
             urgent = connection.execute(
                 "SELECT 1 FROM jobs j JOIN job_items i ON i.job_id=j.id WHERE j.id<>? AND j.priority<6 "
                 "AND j.kind<>'render' AND j.status IN ('running','retrying') AND i.status='pending' "
@@ -147,8 +169,9 @@ class ComplementaryAnalysisService:
         if lock is None:
             return {"reason": "queue_owned", "job_id": None}
         try:
-            if not self._maybe_resume():
-                return {"reason": self.repository.control()["pause_kind"], "job_id": None}
+            with self.repository.database.operation_lock("openai-backfill-submit"):
+                if not self._maybe_resume():
+                    return {"reason": self.repository.control()["pause_kind"], "job_id": None}
             route = self.providers.complementary_route("openai_backfill")
             active = self.repository.active_jobs()
             if active:

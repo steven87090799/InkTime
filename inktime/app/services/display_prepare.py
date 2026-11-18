@@ -274,6 +274,7 @@ class DisplayPreparationService:
         config = DisplayPrepareConfig.from_mapping(raw_config)
         candidates = self.render_service.select_candidates_details(
             config.output_count,
+            device_ids=list(config.device_ids),
             candidate_years=list(config.candidate_years),
             record_history=True,
         )
@@ -423,9 +424,9 @@ class DisplayPreparationService:
         )
         candidates = (
             self.render_service.select_auto_photo_candidates(
-                len(schedule_times), frame_orientation=frame_orientation, target_date=target, record_history=True
+                len(schedule_times), frame_orientation=frame_orientation, target_date=target, record_history=True, device_ids=[device_id]
             ) if layout == "auto_photo" else self.render_service.select_candidates_details(
-                required_candidates, target_date=target, record_history=True
+                required_candidates, target_date=target, record_history=True, device_ids=[device_id]
             )
         )
         unique_candidates = list(
@@ -491,6 +492,7 @@ class DisplayPreparationService:
                     activate_pointers=False,
                     assign_device_releases=False,
                     target_date=target,
+                    display_date=target,
                     selection_run_ids=list(dict.fromkeys(
                         str(row["selection_run_id"]) for row in frame_candidates if row.get("selection_run_id")
                     )),

@@ -50,8 +50,8 @@ class DeviceQueueManifestService:
             return
 
     def build_manifest(self, *, device_id: str, profile_key: str) -> dict[str, Any]:
-        queue = self.repository.queue(device_id)
         now = self._now()
+        queue = self.repository.queue(device_id, online_due_at=now)
         if queue is None:
             return {
                 "schema_version": 1,

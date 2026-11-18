@@ -37,7 +37,8 @@ def test_timeout_cleans_resources_writes_redacted_summary_and_fails(tmp_path):
     assert summary["process_exit_status"] == 1
     assert summary["cleanup"]["threads_stopped"] is True
     assert summary["cleanup"]["child_processes_reaped"] is True
-    assert summary["cleanup"]["sqlite_connections_closed"] is True
+    assert summary["cleanup"]["sqlite_connections_closed"] is None
+    assert "sqlite_connections_closed" in summary["cleanup"]["unmeasured"]
     serialized = json.dumps(summary)
     assert "itd_" not in serialized
     assert "Authorization" not in serialized

@@ -272,6 +272,9 @@ def test_post_replace_validation_failure_automatically_recovers_current_database
     with database.session() as connection:
         assert connection.execute("SELECT COUNT(*) FROM photos").fetchone()[0] == 2
         assert connection.execute("SELECT caption FROM photo_analysis WHERE photo_id='photo'").fetchone()[0] == "重要分析"
+    assert service.last_restore_failure()["original_database_recovered"] is True
+    assert service.last_restore_failure()["requires_external_billing_reconciliation"] is True
+    assert database.path.with_suffix(database.path.suffix + ".paid-reconciliation-required").exists()
 
 
 def test_restore_directory_fsync_failure_recovers_original_database(monkeypatch, tmp_path):
@@ -511,3 +514,20 @@ def test_real_backup_restore_preserves_paid_state_after_database_restart(tmp_pat
         assert connection.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
         assert connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] == CURRENT_SCHEMA_VERSION
         assert connection.execute("SELECT caption FROM photo_analysis WHERE photo_id='photo'").fetchone()[0] == "重要分析"
+
+
+def test_automatic_retention_preserves_manual_and_legacy_archives(tmp_path):
+    import os
+    _, service = make_service(tmp_path)
+    service.backup_dir.mkdir(exist_ok=True)
+    names = ["inktime-backup-legacy.zip", "inktime-backup-manual.zip",
+             "inktime-backup-auto-old.zip", "inktime-backup-auto-new.zip"]
+    for index, name in enumerate(names):
+        path = service.backup_dir / name
+        path.write_bytes(b"fixture archive")
+        os.utime(path, (1000 + index, 1000 + index))
+    assert service.enforce_retention(1) == 1
+    assert not (service.backup_dir / "inktime-backup-auto-old.zip").exists()
+    assert (service.backup_dir / "inktime-backup-auto-new.zip").exists()
+    assert (service.backup_dir / "inktime-backup-legacy.zip").exists()
+    assert (service.backup_dir / "inktime-backup-manual.zip").exists()

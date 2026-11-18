@@ -235,7 +235,11 @@ class PinnedWebhookTransport:
         connection_factory: ConnectionFactory = _connection_factory,
         ssl_context: ssl.SSLContext | None = None,
         allowlist: Iterable[str] | None = None,
+        _isolated: bool = False,
     ) -> None:
+        self._isolate = (not _isolated and resolver is socket.getaddrinfo
+                         and connection_factory is _connection_factory and ssl_context is None and allowlist is None)
+        self._boundary: Any = None
         self.resolver = resolver
         self.connection_factory = connection_factory
         self.ssl_context = ssl_context or ssl.create_default_context()
@@ -265,6 +269,24 @@ class PinnedWebhookTransport:
         ):
             raise ValueError("Webhook timeout 必須包含正數 connect/read 秒數")
         connect_timeout, read_timeout = map(float, timeout)
+        if self._isolate:
+            from inktime.app.workers.process_boundary import KillableProcessBoundary, ProcessCallError, ProcessCallTimeout
+            if self._boundary is None:
+                self._boundary = KillableProcessBoundary(max_processes=2)
+            try:
+                result = self._boundary.call(
+                    _isolated_webhook_post,
+                    timeout_seconds=max(1.0, min(120.0, connect_timeout + read_timeout + 5.0)),
+                    kwargs={"url": url, "payload": json, "headers": headers, "timeout": timeout},
+                    process_name="inktime-webhook-transport",
+                )
+            except (ProcessCallError, ProcessCallTimeout) as exc:
+                raise WebhookReadTimeout("Webhook 總期限已到或傳輸結果不明，保留原通知ID") from exc
+            if result.get("unsafe"):
+                raise UnsafeWebhookURL("Webhook 目的地不符合安全規則")
+            if result.get("error"):
+                raise WebhookReadTimeout("Webhook 傳輸失敗或結果不明，保留原通知ID")
+            return WebhookResponse(int(result["status_code"]), dict(result["headers"]))
         target = resolve_webhook_destination(
             url,
             resolver=self.resolver,
@@ -342,3 +364,18 @@ def validate_webhook_url(url: str) -> str:
     """Compatibility helper for settings validation and callers without transport."""
 
     return resolve_webhook_destination(url).url
+
+
+
+def _isolated_webhook_post(*, url: str, payload: dict, headers: dict, timeout: tuple) -> dict:
+    """A hard parent deadline includes DNS and a slow response body."""
+    try:
+        response = PinnedWebhookTransport(_isolated=True).post(
+            url, json=payload, headers=headers, timeout=timeout, allow_redirects=False,
+        )
+        return {"status_code": response.status_code, "headers": response.headers}
+    except UnsafeWebhookURL:
+        return {"unsafe": True}
+    except Exception:
+        # Never serialize tokens, URLs or raw transport exceptions back to logs.
+        return {"error": True}

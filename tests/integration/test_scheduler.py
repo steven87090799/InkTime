@@ -1061,7 +1061,9 @@ def test_offline_transient_finalize_crash_isolated_and_terminal(app):
         [
             job
             for job in repository.list()
-            if '"offline_prepare"' in str(job["settings_json"]) and device_id in str(job["settings_json"])
+            if '"offline_prepare"' in str(job["settings_json"])
+            and device_id in str(job["settings_json"])
+            and json.loads(job["settings_json"])["offline_prepare"]["target_date"] == "2026-08-03"
         ]
     ) == 1
 
@@ -1695,3 +1697,21 @@ def test_analysis_schedule_freezes_plan_before_selecting_photos(app, monkeypatch
     assert plan["ai_execution_policy"]["execution_mode"] == "local_only"
     assert values["analysis_fingerprint"] == stored_analysis_fingerprint(plan)
     assert plan["scoring_profile_id"] == app.extensions["inktime_scoring_repository"].current()["id"]
+
+
+
+def test_missing_backfill_scheduler_is_throttled_without_stopping_other_ticks(app, monkeypatch):
+    from inktime.app.workers import scheduler
+    clock = [1000.0]
+    monkeypatch.setattr(scheduler.time, "monotonic", lambda: clock[0])
+    backfill = app.extensions["inktime_analysis_backfill_service"]
+    ensure = Mock()
+    monkeypatch.setattr(backfill, "ensure", ensure)
+    runner = SchedulerRunner(app)
+    runner.tick()
+    clock[0] += 60
+    runner.tick()
+    assert ensure.call_count == 1
+    clock[0] += 240
+    runner.tick()
+    assert ensure.call_count == 2

@@ -290,3 +290,15 @@ def test_offline_prepare_plan_is_single_source_for_targets_and_deadline():
         "2026-08-04",
     ]
     assert plan.next_deadline.isoformat() == "2026-08-03T13:00:00+00:00"
+
+
+def test_weekend_first_slot_is_used_for_its_own_deadline():
+    zone = ZoneInfo("Asia/Taipei")
+    # Friday has finished. Saturday starts at midnight, so its two-hour
+    # lead is already due before the configured 23:00 future handoff.
+    plan = offline_prepare_plan(now=datetime(2026, 11, 6, 22, 30, tzinfo=zone), timezone_name="Asia/Taipei",
+        schedule_times=["18:00"], prefetch_lead_minutes=120, server_margin_minutes=0,
+        future_prepare_hour_local=23,
+        dated_schedule_times={"2026-11-06": ["18:00"], "2026-11-07": ["00:00"]})
+    assert [target.isoformat() for target in plan.due_target_dates] == ["2026-11-07"]
+    assert plan.next_deadline.isoformat() == "2026-11-06T14:30:00+00:00"

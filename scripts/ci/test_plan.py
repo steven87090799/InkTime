@@ -250,11 +250,14 @@ INTEGRATION_TEST_OWNER_SUITES: dict[str, tuple[str, ...]] = {
     "tests/integration/test_health_readiness.py": ("runtime_scheduler_owner",),
 }
 
-# This intentionally remains outside the bounded impact runner.  It spans
-# scheduled release, persistence, queue, device, and rendering contracts and
-# is covered by the complete full-mode validation rather than making every
-# unrelated Draft production change run the whole multi-device pipeline.
+# These cross-domain regressions remain outside the bounded impact runner.
+# Complete full-mode validation covers them without making unrelated Draft
+# production changes run every affected domain.
 FULL_ONLY_TEST_PATH_REASONS = {
+    "tests/integration/test_audit_20261105.py": (
+        "cross-domain audit regressions cover provider budgets, scheduler, "
+        "device configuration, backups, and scoring in full-mode validation"
+    ),
     "tests/integration/test_scheduled_release_pipeline.py": (
         "multi-domain scheduled-release pipeline is reserved for full-mode "
         "pre-merge validation"

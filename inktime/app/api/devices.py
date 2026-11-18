@@ -543,7 +543,7 @@ def update_device(device_id: str):
     }
 
 
-def _device_configuration(device, profile_key: str) -> dict:
+def _device_configuration(device, profile_key: str, *, schedule_day: date | None = None) -> dict:
     zone = ZoneInfo(str(device["timezone"]))
     offset = datetime.now(zone).utcoffset()
     config = {
@@ -565,7 +565,10 @@ def _device_configuration(device, profile_key: str) -> dict:
                 "offline_schedule_capability_state": str(
                     device["offline_schedule_capability_state"] or "unknown_12"
                 ),
-                "schedule_times": json.loads(str(device["schedule_times_json"] or "[]")),
+                "schedule_times": _offline_schedules().times_for_date(
+                    schedule_day or datetime.now(zone).date(),
+                    json.loads(str(device["schedule_times_json"] or "[]")),
+                ),
                 "prefetch_lead_minutes": int(device["prefetch_lead_minutes"] or 0),
                 "button_wake_action": str(device["button_wake_action"] or "check_new"),
                 "offline_schedule_version": int(device["offline_schedule_version"] or 0),
@@ -854,7 +857,8 @@ def device_offline_schedule():
         now = datetime.now(timezone.utc)
         now_epoch = int(now.timestamp())
         try:
-            device_schedule = json.loads(str(device["schedule_times_json"] or "[]"))
+            fallback_schedule = json.loads(str(device["schedule_times_json"] or "[]"))
+            device_schedule = _offline_schedules().times_for_date(target_day, fallback_schedule)
             server_margin = int(
                 current_app.extensions["inktime_settings_repository"].get(
                     "offline.server_prefetch_margin_minutes", 15
@@ -882,6 +886,9 @@ def device_offline_schedule():
                     now=now,
                     timezone_name=str(device["timezone"]),
                     schedule_times=device_schedule,
+                    tomorrow_schedule_times=_offline_schedules().times_for_date(
+                        current_day + timedelta(days=1), fallback_schedule,
+                    ),
                     prefetch_lead_minutes=int(device["prefetch_lead_minutes"]),
                     server_margin_minutes=max(0, min(server_margin, 60)),
                     sync_strategy=str(device["sync_strategy"] or "first_display_lead"),
@@ -905,7 +912,7 @@ def device_offline_schedule():
         # offering a configuration that the frame could incorrectly acknowledge.
         try:
             device_config = _device_configuration(
-                device, str(device["panel_profile"] or DEFAULT_DEVICE_PANEL_PROFILE)
+                device, str(device["panel_profile"] or DEFAULT_DEVICE_PANEL_PROFILE), schedule_day=current_day,
             )
         except (TypeError, ValueError, KeyError, OverflowError):
             device_config = None

@@ -262,13 +262,89 @@ def test_worker_yields_after_each_batch_to_recheck_frame_priorities(app, monkeyp
     assert active[0]["completed_items"] == 0
 
 
-def test_content_reuse_preserves_named_landmark_evidence(app):
+@pytest.mark.parametrize("has_address", [False, True])
+@pytest.mark.parametrize("remove_source", [False, True])
+def test_content_reuse_preserves_named_landmark_evidence(app, has_address, remove_source):
     service, _ = setup_backfill(app)
     sha = _photo(app, "with-landmark")
     save_result(app, "with-landmark")
     locations = PhotoLocationRepository(service.repository.database)
     locations.save_landmark("with-landmark", sha, None, None, name="臺北一〇一", confidence=0.99)
     _photo(app, "same-with-landmark", same_as="with-landmark")
+    if has_address:
+        from inktime.app.domain.photos.places import PhotoPlace
+        locations.save_address("same-with-landmark", sha, None, None,
+                               PhotoPlace(city="臺北市", district="信義區", source="offline-district-index"))
+    if remove_source:
+        with service.repository.database.transaction() as connection:
+            connection.execute("DELETE FROM photos WHERE id='with-landmark'")
     service.photos.inherit_existing_analysis("same-with-landmark", None, semantic_only=True)
     copied = locations.get(service.photos.get_with_path("same-with-landmark"))
     assert copied.landmark == "臺北一〇一"
+    with service.repository.database.session() as connection:
+        snapshot = json.loads(connection.execute(
+            "SELECT analysis_snapshot_json FROM model_analysis_results WHERE content_sha256=?", (sha,),
+        ).fetchone()[0])
+    assert snapshot["landmark_evidence"]["landmark"] == "臺北一〇一"
+
+
+def test_content_reuse_keeps_explicit_vision_landmark_absence(app):
+    service, _ = setup_backfill(app)
+    sha = _photo(app, "source")
+    save_result(app, "source")
+    locations = PhotoLocationRepository(service.repository.database)
+    locations.save_landmark("source", sha, None, None, name="old name", confidence=.99)
+    locations.save_landmark("source", sha, None, None, name="", confidence=1)
+    _photo(app, "copy", same_as="source")
+    from inktime.app.domain.photos.places import PhotoPlace
+    locations.save_address("copy", sha, None, None, PhotoPlace(city="臺北市"))
+    service.photos.inherit_existing_analysis("copy", None, semantic_only=True)
+    assert locations.get(service.photos.get_with_path("copy")).landmark == ""
+
+
+
+def test_coverage_page_counts_and_empty_filter_share_one_population(app):
+    service, _ = setup_backfill(app)
+    for index in range(55):
+        _photo(app, f"coverage-{index:02}")
+    save_result(app, "coverage-00")
+    local = valid_result()
+    app.extensions["inktime_photo_repository"].save_analysis(
+        "coverage-01", None, "local_fallback", "local", "local", local, json.dumps(local),
+        score_kind="local_quality", schema_kind="full",
+    )
+    first = service.repository.status()
+    assert first["local_caption_only"] == 1
+    assert (first["total"], first["completed"], first["missing"], len(first["items"])) == (55, 1, 54, 50)
+    second = service.repository.status(category="missing", offset=50)
+    assert second["total"] == 55 and len(second["items"]) == 4
+    absent = service.repository.status(category="unknown")
+    assert absent["items"] == [] and absent["total"] == 55
+
+
+def test_bounded_claim_query_uses_photo_id_index(app):
+    service, _ = setup_backfill(app)
+    _photo(app, "bounded-claim")
+    with service.repository.database.session() as connection:
+        plan = connection.execute(
+            "EXPLAIN QUERY PLAN " + service.repository._population_sql(selected=True) +  # noqa: S608 -- internal population predicate.
+            " SELECT id,sha256 FROM population WHERE coverage_status='queued'",
+            (json.dumps(["bounded-claim"]),),
+        ).fetchall()
+    details = [str(row["detail"]) for row in plan]
+    assert any("SEARCH p USING INDEX" in detail and "(id=?)" in detail for detail in details)
+    assert not any(detail == "SCAN p" for detail in details)
+
+
+def test_scheduler_audit_resumes_pending_checkpoint_without_duplicate_job(app):
+    service = app.extensions["inktime_analysis_backfill_service"]
+    now = datetime(2026, 11, 3, tzinfo=timezone.utc)
+    key = "model-coverage-audit:2026-11"
+    job_id = service.jobs.create_maintenance(kind="analysis_coverage_audit", name="crash checkpoint", priority=5,
+        settings={"month": "2026-11", "max_attempts": 1}, created_by=None, dedupe_key=key)
+    assert service.jobs.get(job_id)["status"] == "pending"
+    assert service.enqueue_audit(now) == job_id
+    assert service.jobs.get(job_id)["status"] == "running"
+    assert service.enqueue_audit(now) is None
+    with service.repository.database.session() as connection:
+        assert connection.execute("SELECT COUNT(*) FROM jobs WHERE dedupe_key=?", (key,)).fetchone()[0] == 1

@@ -92,7 +92,7 @@ def test_release_workflow_pins_actions_and_preserves_release_identity():
     )
 
     immutable = next(
-        step for step in steps if step.get("name") == "Refuse to overwrite an existing version tag"
+        step for step in steps if step.get("id") == "existing"
     )
     assert "imagetools inspect" in immutable["run"]
 
@@ -309,3 +309,22 @@ def test_hosted_ci_runs_real_nas_updater_a_to_b_and_negative_safety_cases():
     assert "v1.0.0-ci-recovery-fail" in script
     assert "container_ids_before" in script
     assert "photo_state_before" in script
+
+
+def test_existing_release_resume_verifies_both_platform_identities():
+    from scripts.ci.verify_existing_release import verify_existing_release
+    import pytest
+
+    digest = "sha256:" + "1" * 64
+    manifests = [{"digest": "sha256:" + str(index) * 64, "platform": {"os": "linux", "architecture": architecture}}
+                 for index, architecture in [(2, "amd64"), (3, "arm64")]]
+    configs = {item["digest"]: {"os": "linux", "architecture": item["platform"]["architecture"],
+        "config": {"Labels": {"org.opencontainers.image.revision": "commit", "org.opencontainers.image.version": "v1",
+            "org.opencontainers.image.source": "source", "io.inktime.nas-deployment-contract": "3"}}} for item in manifests}
+    kwargs = {"revision": "commit", "tag": "v1", "source": "source", "contract": "3", "load_config": configs.__getitem__}
+    assert verify_existing_release({"digest": digest, "manifests": manifests}, **kwargs) == digest
+    with pytest.raises(ValueError, match="missing"):
+        verify_existing_release({"digest": digest, "manifests": manifests[:1]}, **kwargs)
+    configs[manifests[1]["digest"]]["config"]["Labels"]["org.opencontainers.image.revision"] = "wrong"
+    with pytest.raises(ValueError, match="identity differs"):
+        verify_existing_release({"digest": digest, "manifests": manifests}, **kwargs)

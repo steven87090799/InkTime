@@ -1118,3 +1118,28 @@ def test_switching_lan_to_public_invalidates_unconfirmed_requests(client, app):
         "pairing_id": body["pairing_id"], "pairing_nonce": "nonce-for-contract-test-0123456789",
     })
     assert claim.status_code == 410
+
+
+@pytest.mark.parametrize("layout", ["auto_photo", "photo_pair_caption"])
+def test_pairing_accepts_current_frame_layouts(app, layout):
+    service = app.extensions["inktime_device_pairing_service"]
+    config = service._normalize_config({"name": "frame", "layout_mode": layout}, fallback_name="frame")
+    assert config["layout_mode"] == layout
+
+
+def test_credential_confirmation_preserves_admin_configuration_and_disabled_state(app):
+    from datetime import datetime, timezone
+    devices = app.extensions["inktime_device_repository"]
+    service = app.extensions["inktime_device_pairing_service"]
+    device_id, _ = devices.create("admin-current", auth_mode="automatic", enabled=False)
+    envelope = {"credential_version": 2, "device_secret": "test-confirmation-secret",
+                "config": {"name": "stale-envelope", "schedule": "09:00"},
+                "offline_schedule_max_slots": 64}
+    with devices.database.transaction() as connection:
+        service._update_confirmed_device(connection, device_id=device_id, envelope=envelope,
+                                         now=datetime.now(timezone.utc))
+    with devices.database.session() as connection:
+        row = connection.execute("SELECT name,enabled,credential_version FROM devices WHERE id=?", (device_id,)).fetchone()
+    assert row["name"] == "admin-current"
+    assert row["enabled"] == 0
+    assert row["credential_version"] == 2

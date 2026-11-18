@@ -77,3 +77,11 @@ def test_quality_policy_v5_preserves_explicit_screenshot_evidence_and_rejects_ob
     clear = evaluate_local_quality(clear_frame)
     assert clear["decision"] == "pass"
     assert local_candidate_score(clear_frame, evaluation=clear) > 0
+
+
+def test_strong_screenshot_reason_wins_even_when_small_and_prefilter_disabled():
+    result = evaluate_local_quality({"relative_path": "small.png", "width": 120, "height": 180,
+        "format": "png", "screenshot_likelihood": 1.0},
+        settings={"analysis.prefilter_enabled": False})
+    assert result["decision"] == "auto_excluded"
+    assert result["primary_reason"] == "screenshot"

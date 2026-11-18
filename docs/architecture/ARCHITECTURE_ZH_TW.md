@@ -121,7 +121,7 @@ flowchart LR
 | `analysis.stage_two_threshold` | 舊版兩階段設定的讀取相容欄位 | 65 |
 | `render.memory_threshold` | 舊設定相容欄位，自動 AI 選片已不使用 | 70 |
 
-建立工作時可在「工作」頁選擇 `local` 或 `single`。`low_cost`、`smart`、`smart_two_stage`、`high_quality` 與 `single_high` 是舊輸入的讀取相容別名，會正規化為 `single`，不會再次啟用兩階段圖片請求。Provider、Base URL、API Key、價格與 Provider 專屬 `model` 在「模型」頁管理；全域 `model.analysis_model` 在「設定」頁。一般 AI 工作另要求 `analysis.execution_mode=automatic_ai`，新安裝預設 `local_only`。
+建立工作時可在「工作」頁選擇 `local` 或 `single`。`low_cost`、`smart`、`smart_two_stage`、`high_quality` 與 `single_high` 是舊輸入的讀取相容別名，會正規化為 `single`，不會再次啟用兩階段圖片請求。Provider、Base URL、API Key、價格與 Provider 專屬 `model` 在「模型」頁管理；全域 `model.analysis_model` 在「設定」頁。一般 AI 工作另要求 `analysis.execution_mode=automatic_ai`，新安裝預設 `seasonal_ai`，依同期日期需求準備；正式發布仍須 v6 內容安全與方向守門。
 
 ### 要改評分規則時看哪裡
 

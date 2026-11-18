@@ -403,7 +403,11 @@ def virtual_display_file(release_id: str, filename: str):
     )
     if file_entry is None:
         abort(404, description="發布 Manifest 未列出此檔案")
-    payload = payload_path.read_bytes()
+    expected_size = int(file_entry.get("size", -1))
+    if not 0 <= expected_size <= 64 * 1024 * 1024:
+        abort(500, description="DEVICE-002 發布檔案大小不合法")
+    with payload_path.open("rb") as stream:
+        payload = stream.read(expected_size + 1)
     actual_sha256 = sha256(payload).hexdigest()
     if (
         len(payload) != int(file_entry.get("size", -1))
@@ -543,6 +547,8 @@ def publish_test_release():
     transport = str(request.form.get("transport", "custom")).strip()
     if transport not in {"custom", "stock_direct"}:
         abort(400, description="DEVICE-006 測試傳送邊界不合法")
+    if transport != "stock_direct" and str(device.get("delivery_mode") or "") == "inktime_offline_schedule":
+        abort(409, description="DEVICE-008 離線排程裝置尚不支援此一次性 Custom 測試，請使用正式離線準備")
     if transport == "stock_direct" and str(device.get("delivery_mode") or "") != "stock_compat":
         abort(409, description="DEVICE-008 Stock 測試只能選擇 Stock 相容裝置")
     if transport == "stock_direct":
@@ -695,6 +701,7 @@ def preview(photo_id: str):
         abort(404)
     except ValueError as exc:
         abort(400, description=str(exc))
+    fingerprint["preview_quantized"] = quantized
     arguments["render_plan"] = fingerprint["render_plan"]
     arguments["layout"] = fingerprint["render_plan"]["layout"]
     arguments["secondary_photo_id"] = fingerprint["render_plan"]["secondary_photo_id"]

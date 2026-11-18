@@ -84,7 +84,7 @@ Provider 專屬模型會同時覆蓋 analysis 與 repair 的全域模型。模�
 
 ### 第 4 步：開啟執行模式並做單張驗收
 
-在「設定」搜尋 `analysis.execution_mode`／「分析執行模式」：一般背景 AI 工作要求 `automatic_ai`；只做明確單張手動 AI 可用 `local_with_manual_ai`。新安裝 `local_only` 不會因為 Key／Provider 已設定就開始送圖。找不到欄位時清除分類、風險與生效方式篩選。
+在「設定」搜尋 `analysis.execution_mode`／「分析執行模式」：一般背景 AI 工作要求 `automatic_ai`；只做明確單張手動 AI 可用 `local_with_manual_ai`。新安裝預設 `seasonal_ai`，依顯示日期需求準備同期照片；有可用 Provider、待處理內容與預算時可能送圖。若只要本機特徵，請明確選 `local_only`。找不到欄位時清除分類、風險與生效方式篩選。
 
 1. 到「評分」頁上傳一張不敏感、內容清楚的測試照片。
 2. 按「使用目前規則測試」。
@@ -286,6 +286,7 @@ ollama pull qwen3-vl:8b
 | 名稱 | `本機 Ollama` |
 | 類型 | `本地 Ollama 相容端點` |
 | Base URL | `http://127.0.0.1:11434/v1` |
+| Provider options | `{"allow_private_http":true}`（HTTP 必填） |
 | API Key | 可留空；未啟用驗證時 Ollama 會忽略 Key |
 | 最大並行 | `1` |
 | HTTP 逾時 | `300–600` |
@@ -294,9 +295,7 @@ ollama pull qwen3-vl:8b
 
 若 InkTime 在 Docker 而 Ollama 跑在宿主機，**不要填 `127.0.0.1`**，因為容器中的 localhost 是容器自己：
 
-- macOS／Windows Docker Desktop：通常填 `http://host.docker.internal:11434/v1`。
-- Ollama 與 InkTime 都在同一個 Compose network：填 Ollama service 名稱，例如 `http://ollama:11434/v1`。
-- Linux：需先替容器設定可解析的 host gateway，或使用同一 Compose network；不要為了方便把 Ollama 無驗證地暴露到公網。
+HTTP 只接受 loopback／私有 literal IP，且 Provider options 必須明確填 `{"allow_private_http":true}`，Ollama 也不例外。例如可從容器到達的 `http://192.168.1.10:11434/v1`。`localhost`、`host.docker.internal`、`ollama` 等 hostname 不符合 HTTP 驗證契約；需要 hostname 時使用受信任 HTTPS 端點。不要把無驗證服務暴露到公網。
 
 在 Provider 的「預設模型 ID」填 `ollama list` 顯示的完整 Vision 模型名稱；留白才沿用全域 `model.analysis_model`。只有文字模型即使能通過 `/models` 測試，也無法完成 InkTime 照片分析。
 
@@ -308,7 +307,7 @@ ollama pull qwen3-vl:8b
 |---|---|
 | 名稱 | `本機 LM Studio` |
 | 類型 | `本地 Ollama 相容端點` |
-| Base URL | `http://127.0.0.1:1234/v1`；Docker 內改用 `http://host.docker.internal:1234/v1` |
+| Base URL | `http://127.0.0.1:1234/v1`（同機）；Docker 使用可到達的私有 literal IP，options 加 `{"allow_private_http":true}` |
 | API Key | 未啟用驗證可留空；啟用後填 Developer 頁產生的 Token |
 | 最大並行 | `1` |
 | HTTP 逾時 | `300–600` |
@@ -374,7 +373,7 @@ Fireworks、NVIDIA NIM、自架 vLLM、LiteLLM Proxy 或其他平台若同時滿
 | 測試成功，單張照片卻 400 | 模型不支援圖片、`detail`、`temperature=0.1` 或 JSON Schema | 先取消「嚴格 JSON Schema」再測；仍失敗就換真正的 Vision Chat Completions 模型。 |
 | 回傳 VLM-003／VLM-004 | 模型輸出不是合法 JSON 或不符合 InkTime Schema | 使用支援 Structured Outputs 的模型；降低並行；不要選太小或不擅長指令遵循的本地模型。 |
 | 回傳 429 | 廠商 Rate Limit／餘額限制 | 將最大並行降到 1，設定較低 RPM／TPM，提高冷卻秒數，或升級廠商方案。 |
-| 本地端點無法連線 | Docker 容器內的 localhost 指錯位置，或本地服務只監聽 loopback | Docker 改用 service name／`host.docker.internal`，並檢查防火牆與服務監聽位址。 |
+| 本地端點無法連線 | Docker 容器內的 localhost 指錯位置，或本地服務只監聽 loopback | HTTP 使用可到達的私有 literal IP 並顯式設定 allow_private_http=true；hostname 使用受信任 HTTPS，另檢查防火牆與監聽位址。 |
 | 模型不存在 | 把顯示名稱當 ID、模型已下架、區域不提供、Provider 收到別家模型 ID | 從該 Provider 的 Models 頁重新複製 exact ID；逐家核對 Provider 專屬模型與全域 fallback。 |
 | 成本顯示 `unknown` | Provider 沒有回報成本，且價格欄位不完整或未設定 | 不要把 unknown 當免費；補齊 Provider 價格、改用能回報成本的 Provider，或先停止會增加未確認成本的工作。 |
 | Key 編輯後仍顯示遮罩 | 正常安全行為 | 編輯時 Key 留空會保留舊 Key；只有要更換時才貼新 Key。 |

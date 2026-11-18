@@ -377,6 +377,13 @@ def validate_model_response(raw: str | dict, *, caption_controls: dict[str, Any]
             raw = analysis_json_decoder().decode(raw)
         except json.JSONDecodeError as exc:
             raise AnalysisValidationError("模型回傳無效 JSON") from exc
+    if schema_version == SCHEMA_VERSION and isinstance(raw, dict):
+        caption = raw.get("side_caption")
+        if isinstance(caption, str):
+            text = caption.strip()
+            quoted = len(text) >= 2 and (text[0], text[-1]) in {('"', '"'), ("'", "'"), ("「", "」"), ("“", "”")}
+            if "\n" in caption or "\r" in caption or text.startswith(("*", "#", "```", "> ")) or quoted:
+                raise AnalysisValidationError("side_caption 必須是無外層引號或 Markdown 的單行句子")
     # Landmark is optional wire evidence, stored independently of v4/v5/v6 scores.
     if schema_version == SCHEMA_VERSION and isinstance(raw, dict):
         raw = {key: value for key, value in raw.items() if key != "landmark"}

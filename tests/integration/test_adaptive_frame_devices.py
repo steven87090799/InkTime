@@ -6,19 +6,24 @@ import pytest
 
 
 @pytest.mark.parametrize("lead", [0, 1, 120])
-def test_device_name_only_edit_preserves_prefetch_lead_and_config_version(client, app, lead):
+def test_device_name_only_edit_preserves_prefetch_lead_and_rejects_stale_edits(client, app, lead):
     create_admin(app)
     login(client)
     repository = app.extensions["inktime_device_repository"]
     device_id, _ = repository.create("zero lead", delivery_mode="inktime_offline_schedule",
                                      schedule_times=["08:00"], prefetch_lead_minutes=lead)
     before = repository.get(device_id)
+    headers = {"X-CSRF-Token": csrf(client), "If-Match": str(before["config_version"])}
     response = client.patch(f"/api/v1/devices/{device_id}", json={"name": "renamed"},
-                            headers={"X-CSRF-Token": csrf(client)})
+                            headers=headers)
     assert response.status_code == 200
     after = repository.get(device_id)
     assert after["prefetch_lead_minutes"] == lead
-    assert after["config_version"] == before["config_version"]
+    assert after["config_version"] == before["config_version"] + 1
+    assert after["offline_schedule_version"] == before["offline_schedule_version"]
+    stale = client.patch(f"/api/v1/devices/{device_id}", json={"name": "stale"}, headers=headers)
+    assert stale.status_code == 409
+    assert repository.get(device_id)["name"] == "renamed"
     page = client.get("/devices")
     assert f'data-prefetch-lead="{lead}"'.encode() in page.data
 

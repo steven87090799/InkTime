@@ -1,8 +1,14 @@
+from hashlib import sha256
+
 import pytest
 
 from inktime.app.db import Database, migrate
 from inktime.app.providers.base import ProviderResponse, Usage
-from inktime.app.repositories.billable_operations import BillableOperationRepository, UnreconciledOperationError
+from inktime.app.repositories.billable_operations import (
+    BillableOperationRepository,
+    UnreconciledOperationError,
+    paid_operation_lock_name,
+)
 from inktime.app.repositories.usage import UsageRepository
 
 
@@ -96,3 +102,14 @@ def test_only_explicit_pre_transport_evidence_authorizes_retry():
     exited = ProcessCallError("unexpected exit")
     exited.child_started = True
     assert not request_definitely_not_sent(exited)
+
+
+def test_provider_diagnostic_can_acquire_a_subrequest_in_the_same_lock_shard(tmp_path):
+    database = Database(tmp_path / "diagnostic-lock.sqlite3")
+    # These two inputs hash to the same three-character shard.
+    diagnostic_key = "diagnostic:provider-a"
+    request_key = sha256(b"diagnostic:subrequest-1359").hexdigest()
+    with database.operation_lock(paid_operation_lock_name(diagnostic_key)):
+        request_lock = database.try_acquire_operation_lock(paid_operation_lock_name(request_key))
+        assert request_lock is not None
+        request_lock.close()

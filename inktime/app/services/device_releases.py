@@ -32,7 +32,7 @@ from inktime.app.repositories.render_candidates import RenderCandidateRepository
 
 _RELEASE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _ACTIVE_QUEUE_STATES = ("READY", "AVAILABLE", "DOWNLOADED", "ACKNOWLEDGED")
-_DOWNLOADABLE_RELEASE_STATES = {"published"}
+_DOWNLOADABLE_RELEASE_STATES = {"published", "superseded"}
 _PAYLOAD_SHA256 = re.compile(r"^[0-9a-fA-F]{64}$")
 MAX_DEVICE_PAYLOAD_BYTES = 64 * 1024 * 1024
 MAX_STOCK_CLEANUP_MARKERS = 32
@@ -1049,7 +1049,10 @@ class DeviceReleaseService:
                 if identity != authorization.release_dir_identity:
                     raise UnsafePathError("Release 目錄在授權後已被替換")
                 with self._open_file_at(release_fd, filename) as handle:
-                    payload = handle.read()
+                    expected_size = int(entry["size"])
+                    if os.fstat(handle.fileno()).st_size != expected_size:
+                        raise ValueError("Release Payload 大小不一致")
+                    payload = handle.read(expected_size + 1)
         except UnsafePathError:
             raise
         except OSError as exc:

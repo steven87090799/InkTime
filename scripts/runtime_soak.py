@@ -122,7 +122,7 @@ def _snapshot(app, process: psutil.Process) -> dict[str, Any]:
         "threads": process.num_threads(),
         "file_descriptors": descriptors,
         "sqlite_open_files": sum(1 for entry in process.open_files() if entry.path.startswith(database_path)),
-        "sqlite_open_connections": 0,
+        "sqlite_open_connections": None,
         "sqlite": database.observability(),
         "child_processes": len(process.children(recursive=True)),
         "pending_jobs": pending_jobs,
@@ -131,7 +131,7 @@ def _snapshot(app, process: psutil.Process) -> dict[str, Any]:
             scheduler_heartbeat["updated_at"] if scheduler_heartbeat else None
         ),
         "webhook_retry_queue": webhook_retry_queue,
-        "pending_async_tasks": 0,
+        "pending_async_tasks": None,
         "stuck_leases": stuck_leases,
         "wal_bytes": _file_size(Path(f"{database.path}-wal")),
     }
@@ -454,8 +454,6 @@ def main() -> int:
             failures.append("file-descriptor-growth")
         if int(final["threads"]) > int(initial["threads"]) + 4:
             failures.append("thread-growth")
-        if int(final["sqlite_open_connections"]) != 0:
-            failures.append("sqlite-open-connections")
 
         summary = {
             "status": "PASS" if not failures else "FAIL",
@@ -480,7 +478,8 @@ def main() -> int:
             "cleanup": {
                 "threads_stopped": not any(thread.is_alive() for thread in workers),
                 "child_processes_reaped": final["child_processes"] == 0,
-                "sqlite_connections_closed": final["sqlite_open_connections"] == 0,
+                "sqlite_connections_closed": None,
+                "unmeasured": ["sqlite_connections_closed", "pending_async_tasks"],
                 "temporary_directory_removed_on_exit": True,
             },
             "process_exit_status": 0 if not failures else 1,

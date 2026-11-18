@@ -90,7 +90,7 @@
 </section>
 
 <section class="panel photo-analysis-panel">
-  <div class="panel-head"><div><p class="eyebrow">本機品質門檻 → AI 挑選</p><h2>模型與分析結果</h2><p class="analysis-history-note">自動顯示須同時完成本機品質檢查與有效 AI 模型分析（Schema v4 / v5）。本機負責排除不清楚的照片，AI 負責選片分；本機結果可直接併存在同一筆模型分析，不一定另有一張紀錄卡。歷史模型結果保留供查閱。</p></div><span>顯示優先結果與最近記錄，共 {{ [analysis_total, 2]|min }} / {{ analysis_total }} 筆</span></div>
+  <div class="panel-head"><div><p class="eyebrow">本機品質門檻 → AI 挑選</p><h2>模型與分析結果</h2><p class="analysis-history-note">自動顯示須同時完成本機品質檢查與有效 v6 安全與方向分析（v4 / v5 歷史仍可查閱）。本機負責排除不清楚的照片，AI 負責選片分；本機結果可直接併存在同一筆模型分析，不一定另有一張紀錄卡。歷史模型結果保留供查閱。</p></div><span>顯示優先結果與最近記錄，共 {{ [analysis_total, 2]|min }} / {{ analysis_total }} 筆</span></div>
   <div class="photo-analysis-grid">
     {% for a in analyses %}
     <article class="analysis-card">

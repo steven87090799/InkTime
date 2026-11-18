@@ -829,8 +829,18 @@ bool DeviceConfigStore::readJournal(
   present = false;
   Preferences store;
   if (!store.begin(storage_namespace_, true)) {
-    setError(error, "PAIRING-NVS-002");
-    return false;
+    // Preferences cannot open an absent namespace read-only. A controlled
+    // empty creation permits legacy dashcfg migration without erasing data.
+    Preferences initialize;
+    if (!initialize.begin(storage_namespace_, false)) {
+      setError(error, "PAIRING-NVS-002");
+      return false;
+    }
+    initialize.end();
+    if (!store.begin(storage_namespace_, true)) {
+      setError(error, "PAIRING-NVS-002");
+      return false;
+    }
   }
   std::string bytes;
   if (!readBlob(store, kJournalKey, bytes, present, error)) {

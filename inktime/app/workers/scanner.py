@@ -417,6 +417,9 @@ class PhotoScanner:
                     seen_without_write.append(stored.id)
 
             for entry in disk_entries:
+                if cancel_requested():
+                    cancelled = True
+                    break
                 stored = signatures.get(entry.relative_path)
                 if stored and stored.lifecycle_status in {"excluded", "archived", "deleted"}:
                     seen_without_write.append(stored.id)
@@ -472,13 +475,22 @@ class PhotoScanner:
                     )
 
             for seen_chunk in _slices(seen_without_write, write_batch_size):
+                if cancel_requested():
+                    cancelled = True
+                    break
                 self.repository.mark_seen_batch(scan_id, seen_chunk)
                 if self.location_enrichment is not None:
                     self.location_enrichment.enrich_ids(seen_chunk)
             for failed_chunk in _slices(processing_failures, write_batch_size):
+                if cancel_requested():
+                    cancelled = True
+                    break
                 self.repository.mark_processing_failed_batch(scan_id, failed_chunk)
 
             for prepared_chunk in _slices(prepared, write_batch_size):
+                if cancel_requested():
+                    cancelled = True
+                    break
                 try:
                     batch_results = self.repository.apply_scan_batch(
                         library_id,
@@ -532,6 +544,9 @@ class PhotoScanner:
                     batch_result.relative_path: batch_result for batch_result in batch_results
                 }
                 for item in prepared_chunk:
+                    if cancel_requested():
+                        cancelled = True
+                        break
                     batch_result = by_path[item.relative_path]
                     classification = classifications[item.relative_path]
                     counts["processed"] += 1
@@ -547,6 +562,9 @@ class PhotoScanner:
                     counts["duplicates"] += int(
                         batch_result.inherited and batch_result.action != "moved"
                     )
+                    if cancel_requested():
+                        cancelled = True
+                        break
                     if build_thumbnails and batch_result.action != "moved":
                         try:
                             self.thumbnails.get_or_create(item.source, batch_result.sha256, 512)

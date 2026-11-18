@@ -2,6 +2,7 @@
 {% from "components/error_notice.html" import error_notice with context %}
 {% block title %}Batch 照片分析{% endblock %}
 {% block content %}
+<p>第 {{ page|default(1) }} 頁，每頁最多 100 筆。{% if page|default(1) > 1 %}<a href="?page={{ page-1 }}">上一頁</a>{% endif %}{% if has_more|default(false) %}<a href="?page={{ page+1 }}">下一頁</a>{% endif %}</p>
 <main class="page-shell">
   <h1>OpenAI Batch 照片分析</h1>
   <p class="muted">每張照片只做一次完整分析；提交後由背景 Scheduler 輪詢，Worker 逐行匯入。</p>
@@ -12,6 +13,7 @@
     <h2>提交前估算</h2>
     <p>候選 {{ estimate.candidate_count }} 張、Cache 命中 {{ estimate.cache_hits }}、SHA 去重 {{ estimate.sha_duplicates }}、never_upload 排除 {{ estimate.never_upload_excluded }}、已有付費紀錄暫緩 {{ estimate.paid_operation_held|default(0) }} 張。</p>
     {% if estimate.paid_operation_hold_message %}<p class="notice warning">{{ estimate.paid_operation_hold_message }}</p>{% endif %}
+    <p>{{ estimate.estimate_scope_note }}</p>
     <p>預估 JSONL {{ estimate.estimated_jsonl_bytes }} bytes、分片 {{ estimate.estimated_shard_count }}、Input Token {{ estimate.estimated_input_tokens }}、Output Token {{ estimate.estimated_output_tokens }}、成本 USD {{ estimate.estimated_cost }}。</p>
     <p>模型 {{ estimate.model }}；Analysis Fingerprint {{ estimate.analysis_fingerprint }}。</p>
   </section>
@@ -95,7 +97,7 @@ batchForm?.addEventListener('submit',async event=>{
     if(action==='estimate'){
       const cost=data.estimated_cost===null?'費用待確認':`成本 USD ${data.estimated_cost}`;
       const held=Number(data.paid_operation_held||0),holdMessage=data.paid_operation_hold_message||'';
-      window.inktimeSetStatus(batchStatus,`候選 ${data.candidate_count} 張；預估 ${data.estimated_shard_count} 個分片，${cost}；已有付費紀錄暫緩 ${held} 張。${holdMessage}`,held?'warning':'success');return;
+      window.inktimeSetStatus(batchStatus,`候選 ${data.candidate_count} 張；Cache ${data.cache_hits}、SHA 去重 ${data.sha_duplicates}、never_upload 排除 ${data.never_upload_excluded}；預估 JSONL ${data.estimated_jsonl_bytes} bytes、${data.estimated_shard_count} 個分片、Input Token ${data.estimated_input_tokens}、Output Token ${data.estimated_output_tokens}，${cost}；已有付費紀錄暫緩 ${held} 張。${holdMessage} ${data.estimate_scope_note||''}`,held?'warning':'success');return;
     }
     const submitted=data.batch_ids||[],prepared=data.prepared_batch_ids||submitted;
     const pending=prepared.length-submitted.length;

@@ -200,11 +200,11 @@ class BackupService:
             indent=2,
         ).encode("utf-8")
 
-    def create(self, *, include_secrets: bool = False) -> Path:
+    def create(self, *, include_secrets: bool = False, automatic: bool = False) -> Path:
         """建立原子、可驗證備份；預設不納入 API Key／Webhook Token。"""
 
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
-        archive = self.backup_dir / f"inktime-backup-{stamp}.zip"
+        archive = self.backup_dir / f"inktime-backup-{'auto-' if automatic else ''}{stamp}.zip"
         db_handle = tempfile.NamedTemporaryFile(
             dir=self.backup_dir, prefix=".inktime-db-", suffix=".sqlite3", delete=False
         )
@@ -246,7 +246,7 @@ class BackupService:
                 "excludes": [
                     "原始照片",
                     "縮圖快取",
-                    "已渲染 Release 檔案",
+                    "已渲染 Release 檔案與韌體映像",
                     "記錄檔",
                     "model-inputs 影像輸入與 Batch JSONL（請另備份完整資料目錄）",
                     *([] if include_secrets else ["API Key", "Webhook Token"]),
@@ -494,27 +494,52 @@ class BackupService:
             if Database(self.database.path).integrity_check(full=True) != "ok":
                 raise ValueError("RESTORE-002 還原後 integrity_check 失敗")
             return safety_copy, counts
-        except Exception:
-            if replaced and safety_copy is not None and safety_copy.is_file():
-                for suffix in ("-wal", "-shm"):
-                    Path(f"{self.database.path}{suffix}").unlink(missing_ok=True)
-                recovery_handle = tempfile.NamedTemporaryFile(
-                    dir=self.database.path.parent,
-                    prefix=".inktime-recovery-",
-                    suffix=".sqlite3",
-                    delete=False,
-                )
-                recovery = Path(recovery_handle.name)
-                recovery_handle.close()
-                try:
-                    shutil.copy2(safety_copy, recovery)
-                    os.replace(recovery, self.database.path)
-                    _fsync_directory(self.database.path.parent)
-                finally:
-                    recovery.unlink(missing_ok=True)
+        except Exception as restore_error:
+            recovery_verified = False
+            try:
+                if replaced and safety_copy is not None and safety_copy.is_file():
+                    recovery_verified = self._recover_original(safety_copy)
+            finally:
+                from inktime.app.core.atomic_files import write_private_bytes
+                receipt = {"failed_at": datetime.now(timezone.utc).isoformat(),
+                           "error_type": type(restore_error).__name__, "database_replaced": replaced,
+                           "original_database_recovered": recovery_verified,
+                           "requires_external_billing_reconciliation": self.database.path.with_suffix(self.database.path.suffix + ".paid-reconciliation-required").exists()}
+                write_private_bytes(self.backup_dir / "restore-last-failure.json", json.dumps(receipt).encode())
             raise
         finally:
             runtime_lock.close()
+
+    def _recover_original(self, safety_copy: Path) -> bool:
+        if safety_copy.is_file():
+            for suffix in ("-wal", "-shm"):
+                Path(f"{self.database.path}{suffix}").unlink(missing_ok=True)
+            recovery_handle = tempfile.NamedTemporaryFile(
+                dir=self.database.path.parent,
+                prefix=".inktime-recovery-",
+                suffix=".sqlite3",
+                delete=False,
+            )
+            recovery = Path(recovery_handle.name)
+            recovery_handle.close()
+            try:
+                shutil.copy2(safety_copy, recovery)
+                os.replace(recovery, self.database.path)
+                _fsync_directory(self.database.path.parent)
+            finally:
+                recovery.unlink(missing_ok=True)
+            return Database(self.database.path).integrity_check(full=True) == "ok"
+        return False
+
+    def last_restore_failure(self) -> dict | None:
+        path = self.backup_dir / "restore-last-failure.json"
+        try:
+            with path.open("rb") as handle:
+                raw = handle.read(8193)
+            value = json.loads(raw) if len(raw) <= 8192 else None
+            return value if isinstance(value, dict) else None
+        except (OSError, ValueError):
+            return None
 
     def restore(self, archive: Path, *, exact_snapshot: bool = False) -> dict:
         """離線原子還原；任一步失敗均保持或自動回復原資料庫。"""
@@ -570,7 +595,7 @@ class BackupService:
 
     def enforce_retention(self, keep: int) -> int:
         removed = 0
-        for path in self.list()[max(1, keep) :]:
+        for path in [entry for entry in self.list() if entry.name.startswith("inktime-backup-auto-")][max(1, keep) :]:
             try:
                 path.unlink(missing_ok=True)
                 removed += 1

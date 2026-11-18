@@ -38,8 +38,9 @@ def _photo(app, root, identifier, score=90, month_day="10-22"):
 def _seen(app, identifier, at="2025-10-22T00:00:00+00:00"):
     with app.extensions["inktime_database"].transaction() as connection:
         connection.execute(
-            """INSERT INTO display_history(photo_id,history_date,selection_method,displayed_at)
-            VALUES (?,?,'device_queue_ack',?)""", (identifier, at[:10], at),
+            """INSERT INTO display_history(photo_id,history_date,selection_method,displayed_at,metadata_json)
+            VALUES (?,?,'device_queue_ack',?,json_object('content_sha256',
+                (SELECT sha256 FROM photos WHERE id=?)))""", (identifier, at[:10], at, identifier),
         )
 
 

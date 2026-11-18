@@ -101,3 +101,15 @@ def test_blank_model_is_allowed_only_when_a_caller_has_a_fallback():
     assert validate_model_id("openrouter", "") == ""
     with pytest.raises(ValueError, match="PROVIDER-021"):
         validate_model_id("openrouter", "", required=True)
+
+
+@pytest.mark.parametrize("sort", [[], {"by": []}, {"by": "price", "partition": {}}, {"extra": "price"}])
+def test_unhashable_sort_options_fail_with_validation_error(sort):
+    from inktime.app.providers.config import normalize_options
+    with pytest.raises(ValueError, match="PROVIDER-010"):
+        normalize_options("openrouter", {"sort": sort})
+
+
+def test_valid_structured_sort_preserves_partition():
+    from inktime.app.providers.config import normalize_options
+    assert normalize_options("openrouter", {"sort": {"by": "price", "partition": "model"}})["sort"] == {"by": "price", "partition": "model"}

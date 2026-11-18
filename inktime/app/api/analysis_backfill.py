@@ -81,8 +81,8 @@ def complementary_settings():
     payload = json_object_payload(request, maximum_bytes=8192, error_prefix="BACKFILL-001")
     try:
         service = current_app.extensions["inktime_complementary_analysis_service"]
-        service.configure(payload, str(g.user["id"]))
-        return service.state()
+        result = service.configure(payload, str(g.user["id"]))
+        return {**service.state(), **result}
     except (ValueError, RuntimeError) as exc:
         return {"message": str(exc)}, 409
 

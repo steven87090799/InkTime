@@ -583,6 +583,7 @@ class PhotoRepository:
                             crop_subject_left=NULL,crop_subject_top=NULL,crop_subject_right=NULL,
                             crop_subject_bottom=NULL,crop_method=NULL,crop_face_count=0,
                             crop_manual_x=NULL,crop_manual_y=NULL,local_features_status='pending',
+                            display_count=0,last_displayed_at=NULL,selection_count=0,last_selected_at=NULL,
                             e6_score=NULL,e6_contrast_score=NULL,e6_subject_score=NULL,
                             e6_skin_score=NULL,e6_text_score=NULL,e6_skin_pixels=0
                         WHERE id IN ({placeholders})
@@ -796,15 +797,22 @@ class PhotoRepository:
                     insert_parameters,
                 )
 
+            manual_dates = {str(row["photo_id"]): dict(row) for row in connection.execute(
+                "SELECT * FROM photo_manual_dates WHERE photo_id IN (SELECT value FROM json_each(?))",
+                (json.dumps([plan["id"] for plan in plans]),),
+            )}
             date_updates: list[tuple[str | None, str | None, str, str]] = []
             for plan in plans:
                 features = plan["item"].features
                 if not features.metadata_complete:
                     continue
-                captured_date, month_day, status = materialized_capture_fields(
-                    features.captured_at, warn=False
-                )
-                if features.capture_date_status == "invalid":
+                manual = manual_dates.get(str(plan["id"]))
+                has_manual_date = manual is not None and manual["content_sha256"] == features.sha256
+                capture_value = manual["captured_at"] if manual is not None and has_manual_date else features.captured_at
+                captured_date, month_day, status = materialized_capture_fields(capture_value, warn=False)
+                if has_manual_date:
+                    connection.execute("UPDATE photos SET captured_at=? WHERE id=?", (capture_value, plan["id"]))
+                if not has_manual_date and features.capture_date_status == "invalid":
                     status = "invalid"
                 date_updates.append((captured_date, month_day, status, plan["id"]))
             if date_updates:
@@ -1630,6 +1638,7 @@ class PhotoRepository:
         kind: str = "",
         origin: str = "",
         limit: int = 200,
+        offset: int = 0,
     ) -> list:
         # ``manually_restored`` is an audit state, not an exclusion.  Use the
         # effective eligibility plus review states so a successful restore
@@ -1669,9 +1678,9 @@ class PhotoRepository:
                     ORDER BY {preferred_analysis_order_sql()} LIMIT 1
                 )
                 WHERE {where}
-                ORDER BY p.rejected_at DESC,p.updated_at DESC,p.id DESC LIMIT ?
+                ORDER BY p.rejected_at DESC,p.updated_at DESC,p.id DESC LIMIT ? OFFSET ?
                 """,
-                (*parameters, max(1, min(int(limit), 500))),
+                (*parameters, max(1, min(int(limit), 500)), max(0, int(offset))),
             ).fetchall()
 
     def eligible_photo_ids(self, *, limit: int | None = None, include_all_active: bool = False) -> list[str]:
@@ -1838,6 +1847,28 @@ class PhotoRepository:
                     ),
                 ).fetchone()[0]
             )
+
+    def equivalent_provider_result(self, content_sha256: str, provider_id: str, model: str, plan: dict) -> dict | None:
+        from inktime.app.domain.analysis.plan import effective_provider_contract
+        target = effective_provider_contract(plan, provider_id, model)
+        if target is None:
+            return None
+        with self.database.session() as connection:
+            rows = connection.execute(
+                "SELECT raw_json,analysis_spec_json,created_at FROM photo_analysis "
+                "WHERE content_sha256=? AND provider=? AND model=? AND score_kind='semantic' "
+                "ORDER BY created_at DESC,id DESC LIMIT 50", (content_sha256, provider_id, model),
+            ).fetchall()
+        for row in rows:
+            try:
+                previous = json.loads(str(row["analysis_spec_json"] or "{}"))
+                if not isinstance(previous, dict) or effective_provider_contract(previous, provider_id, model) != target:
+                    continue
+                result = validate_analysis_result(row["raw_json"])
+                return {"result": result, "raw_json": row["raw_json"], "created_at": row["created_at"]}
+            except (TypeError, ValueError, KeyError):
+                continue
+        return None
 
     def get_ai_cache(
         self,
@@ -2067,6 +2098,15 @@ class PhotoRepository:
                     f"SELECT id FROM photo_analysis WHERE photo_id=? ORDER BY {preferred_analysis_order_sql()} LIMIT 1",
                     (photo_id,),
                 ).fetchone()
+                if latest is None and (types or side_caption.strip()):
+                    raise ValueError("IMG-004 此照片尚無分析紀錄，無法保存人工分類與短句；請先完成分析")
+                content = connection.execute("SELECT sha256 FROM photos WHERE id=?", (photo_id,)).fetchone()
+                connection.execute(
+                    "INSERT INTO photo_manual_dates(photo_id,content_sha256,captured_at,updated_at) VALUES (?,?,?,?) "
+                    "ON CONFLICT(photo_id) DO UPDATE SET content_sha256=excluded.content_sha256,"
+                    "captured_at=excluded.captured_at,updated_at=excluded.updated_at",
+                    (photo_id, str(content[0] or ""), normalized_captured_at, now),
+                )
                 if latest:
                     connection.execute(
                         "UPDATE photo_analysis SET types_json=?,side_caption=? WHERE id=?",
@@ -2200,6 +2240,7 @@ class PhotoRepository:
         duplicate_only: bool = False,
         limit: int = 200,
         offset: int = 0,
+        clamp_page: bool = False,
     ):
         clauses = ["1=1"]
         parameters: list = []
@@ -2220,17 +2261,23 @@ class PhotoRepository:
         if duplicate_only:
             clauses.append("p.duplicate_group_id IS NOT NULL")
         where = " AND ".join(clauses)
+        count_join = (
+            "LEFT JOIN photo_analysis a ON a.id=(SELECT display.id FROM photo_analysis display "
+            f"WHERE display.photo_id=p.id ORDER BY {display_analysis_order_sql('display')} LIMIT 1)"
+            if photo_type or minimum_score is not None else ""
+        )
         with self.database.session() as connection:
             total = int(
                 connection.execute(
                     f"""
-                SELECT COUNT(*) FROM photos p
-                LEFT JOIN photo_analysis a ON a.id=(SELECT display.id FROM photo_analysis display WHERE display.photo_id=p.id ORDER BY {display_analysis_order_sql('display')} LIMIT 1)
+                SELECT COUNT(*) FROM photos p {count_join}
                 WHERE {where}
                 """,
                     parameters,
                 ).fetchone()[0]
             )
+            if clamp_page and limit > 0:
+                offset = min(max(0, offset), max(0, (total - 1) // limit) * limit)
             rows = connection.execute(
                 f"""
                 SELECT p.*,l.name AS library_name,a.caption,a.types_json,a.memory_score,

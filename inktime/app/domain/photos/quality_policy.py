@@ -217,7 +217,7 @@ def evaluate_local_quality(
         if low_reasons
         else "pass"
     )
-    primary = (excluded_reasons or low_reasons or ["passed"])[0]
+    primary = "screenshot" if strong_screen else (excluded_reasons or low_reasons or ["passed"])[0]
     return {
         "decision": decision,
         "primary_reason": primary,

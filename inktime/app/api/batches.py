@@ -101,8 +101,12 @@ def _estimate_parameters(payload: dict) -> dict:
 @bp.get("/analysis/batches")
 @login_required
 def batches_page():
-    rows = _repository().list(limit=100)
-    holds = _repository().list_operator_holds(limit=100)
+    page = request.args.get("page", 1, type=int)
+    if page is None or not 1 <= page <= 100000:
+        abort(400, description="分頁不合法")
+    owner = None if str(g.user["role"]) == "administrator" else str(g.user["id"])
+    rows = _repository().list(limit=101, owner_id=owner, offset=(page-1)*100)
+    holds = _repository().list_operator_holds(limit=101, owner_id=owner, offset=(page-1)*100)
     if str(g.user["role"]) != "administrator":
         rows = [
             row
@@ -122,8 +126,8 @@ def batches_page():
         ]
     return render_template(
         "analysis_batches.html",
-        batches=rows,
-        operator_holds=holds,
+        batches=rows[:100], page=page, has_more=len(rows)>100 or len(holds)>100,
+        operator_holds=holds[:100],
         batch_provider_available=_batch_provider_available(),
     )
 
@@ -200,7 +204,11 @@ def create_batch():
 @bp.get("/api/v1/analysis/batches")
 @login_required
 def list_batches():
-    rows = _repository().list(limit=100)
+    page = request.args.get("page", 1, type=int)
+    if page is None or not 1 <= page <= 100000:
+        abort(400, description="分頁不合法")
+    owner = None if str(g.user["role"]) == "administrator" else str(g.user["id"])
+    rows = _repository().list(limit=101, owner_id=owner, offset=(page-1)*100)
     if str(g.user["role"]) != "administrator":
         rows = [
             row
@@ -210,7 +218,7 @@ def list_batches():
                 str(row["job_id"]), str(g.user["id"]), administrator=False
             )
         ]
-    return {"batches": rows}
+    return {"batches": rows[:100], "page": page, "has_more": len(rows)>100}
 
 
 @bp.get("/api/v1/analysis/batches/<batch_id>")

@@ -11,6 +11,11 @@ using inktime::ackjournal::Snapshot;
 
 class FakeNvs final : public inktime::ackjournal::Storage {
  public:
+  bool read_only = false;
+  bool begin(const char*, bool readOnly) {
+    read_only = readOnly;
+    return true;
+  }
   enum class Fault {
     None,
     FirstRecord,
@@ -32,6 +37,7 @@ class FakeNvs final : public inktime::ackjournal::Storage {
   };
 
   bool writeRecord(char bank, uint8_t index, const std::string& bytes) override {
+    if (read_only) return false;
     if (fault == Fault::FirstRecord && index == 0U) return false;
     if (fault == Fault::MiddleRecord && index == 1U) return false;
     if (fault == Fault::LastRecord && index + 1U == expected_count) return false;
@@ -48,6 +54,7 @@ class FakeNvs final : public inktime::ackjournal::Storage {
   bool writeSnapshotMetadata(
       char bank, uint64_t generation,
       const std::vector<std::string>& records) override {
+    if (read_only) return false;
     if (fault == Fault::Metadata) return false;
     banks[bank].generation = generation;
     banks[bank].records.resize(records.size());
@@ -60,6 +67,7 @@ class FakeNvs final : public inktime::ackjournal::Storage {
   }
 
   bool writeActivePointer(char bank, uint64_t generation, uint8_t count) override {
+    if (read_only) return false;
     if (fault == Fault::Pointer) return false;
     if (fault == Fault::PointerTorn) {
       pointer_valid = false;
@@ -435,6 +443,16 @@ static void assertBoundedEntryMutation() {
 }
 
 int main() {
+  FakeNvs recovery;
+  recovery.begin("acklog", true);
+  recovery.expected_count = 1U;
+  const Snapshot recovered = makeSnapshot('G', 1U, {"orphan-ack"});
+  std::string recoveryError;
+  assert(!inktime::ackjournal::commitSnapshot(recovery, 0, recovered, recoveryError));
+  assert(inktime::ackjournal::beginRecovery(recovery));
+  assert(inktime::ackjournal::commitSnapshot(recovery, 0, recovered, recoveryError));
+  assert(recovery.rebootRead().records == recovered.records);
+  assert(recovery.rebootRead().records == recovered.records);
   assertBoundedEntryMutation();
   assertPreviousSnapshotAfterFault(FakeNvs::Fault::FirstRecord);
   assertPreviousSnapshotAfterFault(FakeNvs::Fault::MiddleRecord);

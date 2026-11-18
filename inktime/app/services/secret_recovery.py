@@ -15,6 +15,7 @@ from cryptography.hazmat.primitives.kdf.scrypt import Scrypt
 from cryptography.fernet import Fernet, InvalidToken
 
 from inktime import __version__
+from inktime.app.core.atomic_files import write_private_bytes, sync_directory
 from inktime.app.db import Database
 
 
@@ -134,6 +135,9 @@ class RecoveryBundleService:
         lock = self.database.acquire_runtime_lock(exclusive=True, blocking=False)
         previous_key = None
         key_replaced = False
+        marker = self.data_dir / ".secret-recovery-in-progress"
+        marker_started = False
+        database_committed = False
         try:
             with self.database.session() as connection:
                 self._assert_database_key(connection, payload["session_key"])
@@ -141,12 +145,13 @@ class RecoveryBundleService:
             safe_copy = (
                 self.data_dir
                 / "backups"
-                / f"session-key-before-recovery-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
+                / f"session-key-before-recovery-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')}"
             )
             safe_copy.parent.mkdir(parents=True, exist_ok=True)
             if previous_key is not None:
-                safe_copy.write_bytes(previous_key)
-                os.chmod(safe_copy, 0o600)
+                write_private_bytes(safe_copy, previous_key)
+            write_private_bytes(marker, b"Recovery in progress; use the original recovery bundle before startup.\n")
+            marker_started = True
             with self.database.transaction(operation="secret_recovery_restore") as connection:
                 self._assert_database_key(connection, payload["session_key"])
                 connection.execute("DELETE FROM secrets")
@@ -162,18 +167,28 @@ class RecoveryBundleService:
                         for item in payload["secrets"]
                     ],
                 )
-                temporary = self.session_path.with_suffix(".key.recovery.tmp")
-                temporary.write_text(str(payload["session_key"]), encoding="utf-8")
-                os.chmod(temporary, 0o600)
-                os.replace(temporary, self.session_path)
                 key_replaced = True
+                write_private_bytes(self.session_path, str(payload["session_key"]).encode("utf-8"))
+            database_committed = True
+            marker.unlink(missing_ok=True)
+            sync_directory(self.data_dir)
             return {"schema_version": envelope["schema_version"], "secrets": len(payload["secrets"])}
         except Exception:
+            if database_committed:
+                # The committed secrets require the new key. Never restore an old
+                # key after a failure removing/syncing the recovery marker.
+                write_private_bytes(marker, b"Committed recovery requires verification before startup.\n")
+                raise
             if key_replaced and previous_key is not None:
-                self.session_path.write_bytes(previous_key)
-                os.chmod(self.session_path, 0o600)
+                write_private_bytes(self.session_path, previous_key)
+                with self.database.session() as connection:
+                    self._assert_database_key(connection, previous_key.decode("utf-8").strip())
             elif key_replaced:
                 self.session_path.unlink(missing_ok=True)
+                sync_directory(self.data_dir)
+            if marker_started:
+                marker.unlink(missing_ok=True)
+                sync_directory(self.data_dir)
             raise
         finally:
             lock.close()

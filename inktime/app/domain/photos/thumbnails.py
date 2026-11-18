@@ -13,7 +13,7 @@ from PIL import Image
 from inktime.app.core.locks import fcntl
 from inktime.app.domain.analysis.plan import AI_IMAGE_JPEG_QUALITY
 from inktime.app.domain.photos.formats import (
-    DERIVATIVE_FORMAT, DERIVATIVE_SIZES, DERIVATIVE_VERSION, ImageSourceError, load_rgb,
+    DERIVATIVE_FORMAT, DERIVATIVE_SIZES, DERIVATIVE_VERSION, ImageSourceError, SourceVerification, load_rgb,
 )
 
 
@@ -151,12 +151,14 @@ class ThumbnailCache:
             return self._get_or_create_locked(source, normalized_hash, destination, size)
 
     @contextmanager
-    def acquire_for_use(self, source: Path, content_hash: str, size: int, *, verify_source: bool = False):
+    def acquire_for_use(self, source: Path, content_hash: str, size: int, *, verify_source: bool = False,
+                        source_verification: SourceVerification | None = None):
         """Keep this cache shard alive until the caller has finished reading it."""
         normalized_hash, destination = self._destination(content_hash, size)
         with self._generation_lock(destination.stem) as acquired:
             assert acquired
-            if verify_source and self._content_sha256(source) != normalized_hash:
+            verified = source_verification is not None and source_verification.matches(source, normalized_hash)
+            if verify_source and not verified and self._content_sha256(source) != normalized_hash:
                 raise ImageSourceError("THUMB-004", "原始照片內容已變更；請重新掃描後分析", 409)
             yield self._get_or_create_locked(source, normalized_hash, destination, size)
 
@@ -180,9 +182,14 @@ class ThumbnailCache:
     def clear(self) -> int:
         removed = 0
         for path in self.root.glob("*.jpg"):
-            if path.is_file():
-                path.unlink()
-                removed += 1
+            with self._generation_lock(path.stem, blocking=False) as acquired:
+                if not acquired:
+                    continue
+                try:
+                    path.unlink()
+                    removed += 1
+                except FileNotFoundError:
+                    continue
         return removed
 
     def inventory(self, *, limit: int | None = None) -> list[tuple[Path, int, float, int, str]]:

@@ -4,10 +4,11 @@
 <div class="page-head">
   <div>
     <p class="eyebrow">維護</p><h1>備份與還原</h1>
-    <p>備份包含 SQLite、一般設定、分析結果、照片／排程狀態與顯示歷史紀錄；預設不包含 API Key、Webhook Token、原始照片、縮圖或已渲染 Release 檔案。</p>
+    <p>備份包含 SQLite、一般設定、分析結果、照片／排程狀態與顯示歷史紀錄；預設不包含 API Key、Webhook Token、原始照片、縮圖、Release payload、韌體、model-inputs 及 Batch JSONL／下載檔；這些需另外備份完整資料目錄。</p>
   </div>
   {% if g.user.role=='administrator' %}<button class="primary" id="backup-now">立即備份</button><span id="backup-status" role="status"></span>{% endif %}
 </div>
+{% if restore_failure %}<p class="notice warning">最近還原失敗：{{ restore_failure.failed_at|human_datetime }}（{{ restore_failure.error_type }}）；原資料庫恢復驗證：{{ '通過' if restore_failure.original_database_recovered else '未確認／未替換' }}。付費保護狀態仍須另行對帳。</p>{% endif %}
 <section class="panel" aria-labelledby="backup-schedule-title">
   <div class="panel-head">
     <h2 id="backup-schedule-title">自動備份排程</h2>
@@ -42,6 +43,6 @@
 {% endblock %}
 {% block scripts %}
 {% if g.user.role=='administrator' %}
-<script nonce="{{ csp_nonce }}">document.getElementById('backup-now').onclick=async()=>window.inktimeRunAction(document.getElementById('backup-now'),async()=>{const r=await window.inktimeFetch('/api/v1/backups',{method:'POST'}),d=await window.inktimeDecodeJson(r);if(r.ok)location.reload();else window.inktimeSetStatus('#backup-status',d.message||'備份失敗','error');});</script>
+<script nonce="{{ csp_nonce }}">document.getElementById('backup-now').onclick=async()=>window.inktimeRunAction(document.getElementById('backup-now'),async()=>{const r=await window.inktimeFetch('/api/v1/backups',{method:'POST'}),d=await window.inktimeDecodeJson(r);if(r.ok)location.href=d.detail_url;else window.inktimeSetStatus('#backup-status',d.message||'備份失敗','error');});</script>
 {% endif %}
 {% endblock %}

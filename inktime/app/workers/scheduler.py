@@ -45,6 +45,7 @@ class SchedulerRunner:
         self.last_notification_enqueue_at = 0.0
         self.last_batch_poll_at = 0.0
         self.last_seasonal_scan_at = 0.0
+        self.last_missing_backfill_at = -300.0
         self.last_backup_date: str | None = None
         self.last_observability_heartbeat_at: float = -OBSERVABILITY_HEARTBEAT_INTERVAL_SECONDS
         self.last_observability_tick_at: float = -OBSERVABILITY_TICK_INTERVAL_SECONDS
@@ -163,7 +164,7 @@ class SchedulerRunner:
             self.last_notification_scan_at = time.monotonic()
         # Scheduler 只做有界 Claim；實際 HTTP 由既有 Job Queue 處理，慢端點
         # 不會卡住排程掃描與備份。
-        if time.monotonic() - self.last_notification_enqueue_at >= scan_seconds:
+        if time.monotonic() - self.last_notification_enqueue_at >= min(scan_seconds, 60):
             self._safe_step(
                 "notification_enqueue",
                 lambda: notification_service.enqueue_pending(
@@ -256,7 +257,9 @@ class SchedulerRunner:
         backfill = self.app.extensions.get("inktime_analysis_backfill_service")
         if backfill is not None:
             self._safe_step("model_coverage_monthly_audit", lambda: backfill.enqueue_audit(now))
-            self._safe_step("missing_analysis_backfill", backfill.ensure)
+            if time.monotonic() - self.last_missing_backfill_at >= 300:
+                self._safe_step("missing_analysis_backfill", backfill.ensure)
+                self.last_missing_backfill_at = time.monotonic()
         complementary = self.app.extensions.get("inktime_complementary_analysis_service")
         if complementary is not None:
             self._safe_step("openai_oldest_first", complementary.ensure)
@@ -363,6 +366,7 @@ class SchedulerRunner:
         sync_time: str | None = None,
         minimum_gap_minutes: int = MINIMUM_SCHEDULE_GAP_MINUTES,
         maximum_slots: int = MAX_OFFLINE_SLOTS,
+        dated_schedule_times: dict[str, list[str]] | None = None,
     ) -> list[date]:
         """Return independent today/tomorrow targets from one domain policy."""
 
@@ -381,6 +385,7 @@ class SchedulerRunner:
                 sync_time=sync_time,
                 minimum_gap_minutes=minimum_gap_minutes,
                 maximum_slots=maximum_slots,
+                dated_schedule_times=dated_schedule_times,
             ).due_target_dates
         )
 
@@ -410,6 +415,7 @@ class SchedulerRunner:
             device_id = str(device.get("id", ""))
             timezone_name = str(device.get("timezone") or "UTC")
             schedule: list[str] | None = None
+            dated_schedule_times: dict[str, list[str]] = {}
             retry_deadline: datetime | None = None
             skip_target_dates: set[str] = set()
             keep_deadline_due = False
@@ -424,6 +430,11 @@ class SchedulerRunner:
                         device["minimum_schedule_gap_minutes"] or MINIMUM_SCHEDULE_GAP_MINUTES
                     ),
                 )
+                dated_schedule_times = {
+                    (local_now.date() + timedelta(days=offset)).isoformat():
+                    offline_schedules.times_for_date(local_now.date() + timedelta(days=offset), schedule)
+                    for offset in range(3)
+                }
                 targets = self._offline_prefetch_target_dates(
                     local_now,
                     schedule,
@@ -436,6 +447,7 @@ class SchedulerRunner:
                     resolve_offline_schedule_max_slots(
                         {"offline_schedule_max_slots": device["offline_schedule_max_slots"]}
                     ),
+                    dated_schedule_times=dated_schedule_times,
                 )
                 for target_date in targets[:2]:
                     target_iso = target_date.isoformat()
@@ -483,6 +495,33 @@ class SchedulerRunner:
                                 )
                                 keep_deadline_due = True
                         continue
+                    finalizer_failure = job_repository.latest_finalizer_failure(dedupe_key)
+                    if finalizer_failure is not None:
+                        try:
+                            failure_at = datetime.fromisoformat(
+                                str(
+                                    finalizer_failure.get("last_seen_at")
+                                    or finalizer_failure.get("completed_at")
+                                )
+                            )
+                            if failure_at.tzinfo is None:
+                                failure_at = failure_at.replace(tzinfo=timezone.utc)
+                        except (TypeError, ValueError):
+                            failure_at = authoritative_now
+                        finalizer_retry_deadline = failure_at.astimezone(timezone.utc) + timedelta(
+                            seconds=OFFLINE_PREPARE_RETRY_INTERVAL_SECONDS
+                        )
+                        if authoritative_now < finalizer_retry_deadline:
+                            # A failed finalizer rolls its callback writes back to the savepoint.
+                            # Keep the scheduler from immediately recreating the same offline job
+                            # when that rollback also removed its transient-recovery checkpoint.
+                            skip_target_dates.add(target_iso)
+                            retry_deadline = (
+                                min(retry_deadline, finalizer_retry_deadline)
+                                if retry_deadline
+                                else finalizer_retry_deadline
+                            )
+                            continue
                     transient_state = offline_schedules.transient_recovery_for_device(
                         device_id=str(device["id"]),
                         target_date=target_iso,
@@ -655,6 +694,7 @@ class SchedulerRunner:
                                 {"offline_schedule_max_slots": device["offline_schedule_max_slots"]}
                             ),
                             skip_target_dates=tuple(skip_target_dates),
+                            dated_schedule_times=dated_schedule_times,
                         )
                     )
                 if retry_deadline.tzinfo is None:
@@ -781,7 +821,7 @@ class SchedulerRunner:
                 created_by="system",
                 budget_limit=None,
                 priority=3,
-                dedupe_key=dedupe_key,
+                dedupe_key=f"{dedupe_key}:{task['next_run']}" if is_scheduled else None,
             )
         else:
             job_id = repository.create_maintenance(
