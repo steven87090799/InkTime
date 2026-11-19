@@ -176,7 +176,7 @@ docker stats --no-stream
 健康端點：
 
 - `/health/live`：Web 程序可回應。
-- `/health/ready`：Migration、SQLite、發布目錄、設定與工作租約正常。
+- `/health/ready` 會檢查資料庫版本、發布目錄、設定、背景服務心跳及工作租約。`/health/web-ready` 供 Web 容器在背景服務啟動前確認自身就緒。
 - `/health/detail`：登入管理員後查看詳細版本。
 - Worker／Scheduler：Compose healthcheck 只確認目標程序仍存在；工作進度仍須由 heartbeat、Job、Queue 與 Activity 判定。
 

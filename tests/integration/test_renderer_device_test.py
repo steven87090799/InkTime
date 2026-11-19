@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+
 from io import BytesIO
 from hashlib import sha256
 import json
@@ -19,6 +20,26 @@ from inktime.app.workers.runner import WorkerRunner
 from inktime.app.domain.rendering import DeviceTestReleaseStore
 from inktime.app.workers.process_boundary import ProcessCallError, ProcessCallTimeout
 
+
+def test_preview_snapshot_excludes_unrelated_photo_and_model_history(app, tmp_path):
+    import sqlite3
+    from contextlib import closing
+    from tests.unit.test_batch_analysis_lifecycle import _prepare_photos
+
+    selected, other = _prepare_photos(app, tmp_path, count=2)
+    database = app.extensions["inktime_database"]
+    workload = app.extensions["inktime_render_workload_service"]
+    with database.transaction() as connection:
+        connection.execute("CREATE TABLE preview_archive_fixture(raw_blob BLOB)")
+        connection.execute("INSERT INTO preview_archive_fixture VALUES (zeroblob(4194304))")
+    snapshot = tmp_path / "preview-private" / "render.db"
+    workload._preview_database_snapshot(database.path, snapshot, [{"primary_photo_id": selected}])
+    with closing(sqlite3.connect(snapshot)) as connection:
+        assert connection.execute("SELECT id FROM photos").fetchall() == [(selected,)]
+        assert connection.execute("SELECT 1 FROM photos WHERE id=?", (other,)).fetchone() is None
+        tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        assert not tables.intersection({"preview_archive_fixture", "model_request_evidence", "api_usage", "secrets", "users"})
+    assert snapshot.stat().st_size < 256 * 1024
 
 def _photo_upload(color: str = "#5079a8"):
     output = BytesIO()

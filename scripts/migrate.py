@@ -18,8 +18,9 @@ def main() -> None:
     parser.add_argument("--backup-dir", default="data/backups")
     args = parser.parse_args()
     database = Database(Path(args.database))
-    versions = migrate(database, Path(args.backup_dir))
-    print(f"資料庫完整性：{database.integrity_check(full=True)}")
+    with database.acquire_runtime_lock(exclusive=False):
+        versions = migrate(database, Path(args.backup_dir))
+        print(f"資料庫完整性：{database.integrity_check(full=True)}")
     print("已套用版本：" + (", ".join(map(str, versions)) if versions else "無"))
 
 

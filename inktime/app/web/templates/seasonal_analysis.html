@@ -21,7 +21,7 @@
 <td>{{ labels.get(task.status,task.status) }}{% if task.error_code %}<small>{{ task.error_code }}</small>{% endif %}<small>{{ task.updated_at|human_datetime }}</small></td>
 <td>{{ task.provider or '—' }}<small>{{ task.model or '—' }}</small></td>
 <td>{% if task.job_id %}<a href="/jobs/{{ task.job_id|urlencode }}">工作進度與費用</a><br><a href="/ai/traces?job_id={{ task.job_id|urlencode }}">模型紀錄</a>{% else %}沿用既有分析{% endif %}</td>
-<td>{% if task.is_latest and task.status in ['failed','unknown'] %}<button data-seasonal-retry="{{ task.id }}">手動重試</button>{% endif %}</td></tr>
+<td>{% if task.is_latest and task.status in ['failed','unknown'] %}<button data-seasonal-retry="{{ task.id }}" data-saved-evidence="{{ 'true' if task.saved_evidence else 'false' }}">{{ '恢復已保存回應' if task.saved_evidence else '手動重試' }}</button>{% endif %}</td></tr>
 {% else %}<tr><td colspan="5" class="empty">尚無同期處理紀錄。啟用後會自動核對，或按「檢查並補齊當期照片」。</td></tr>{% endfor %}
 </tbody></table></div>
 <p>{% if state.offset > 0 %}<a href="?page={{ state.offset // 100 }}">上一頁</a>{% endif %} 第 {{ state.offset // 100 + 1 }} 頁 · 共 {{ state.total_attempts }} 筆 {% if state.offset + 100 < state.total_attempts %}<a href="?page={{ state.offset // 100 + 2 }}">下一頁</a>{% endif %}</p>
@@ -38,7 +38,20 @@ const seasonalMessage=document.getElementById('seasonal-message'),rerunDialog=do
 let rerunPreview=null;
 async function seasonalPost(path,body={}){const response=await window.inktimeFetch('/api/v1/analysis/seasonal/'+path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});const data=await window.inktimeDecodeJson(response);if(!response.ok)throw new Error(data.message||'操作失敗');return data;}
 document.getElementById('seasonal-run').onclick=async function(){await window.inktimeRunAction(this,async()=>{try{const result=await seasonalPost('run');seasonalMessage.textContent=result.waiting?'當期分析已排入工作，完成後即可依資料排名。':'當期照片已核對，沒有需要自動補齊的項目。';location.reload();}catch(error){seasonalMessage.textContent=error.message;}});};
-document.querySelectorAll('[data-seasonal-retry]').forEach(button=>button.onclick=async()=>{if(!await window.inktimeConfirm('原請求可能已計費。這次手動重試可能再次產生費用；歷次紀錄會保留。確認重新處理這張照片？',{title:'手動重試照片'}))return;await window.inktimeRunAction(button,async()=>{try{const result=await seasonalPost('tasks/'+button.dataset.seasonalRetry+'/retry',{accept_possible_charge:true});location.href=result.detail_url;}catch(error){seasonalMessage.textContent=error.message;}});});
+document.querySelectorAll('[data-seasonal-retry]').forEach(button => {
+  button.onclick = async () => {
+    const saved = button.dataset.savedEvidence === 'true';
+    if (!saved && !await window.inktimeConfirm('原請求可能已計費。這次手動重試可能再次產生費用。確認重新處理這張照片？', {title: '手動重試照片'})) return;
+    await window.inktimeRunAction(button, async () => {
+      try {
+        const result = await seasonalPost('tasks/' + button.dataset.seasonalRetry + '/retry', {accept_possible_charge: !saved});
+        location.href = result.detail_url;
+      } catch (error) {
+        seasonalMessage.textContent = error.message;
+      }
+    });
+  };
+});
 document.getElementById('seasonal-rerun').onclick=async function(){await window.inktimeRunAction(this,async()=>{try{rerunPreview=await seasonalPost('rerun/preview');document.getElementById('rerun-summary').textContent='第一階段：核對範圍，共 '+rerunPreview.photo_count+' 張不同內容的照片。確認有效時間為 10 分鐘。';const estimate=rerunPreview.estimate;document.getElementById('rerun-cost').textContent=estimate.average_cost===null?'模型價格未知，無法提供可靠費用估算。':'預估費用 US$ '+estimate.average_cost.toFixed(4)+'（以 Token 假設估算，實際依供應商帳單；不是費用上限）。';document.getElementById('rerun-step-two').hidden=false;document.getElementById('rerun-step-three').hidden=true;document.getElementById('rerun-accept').checked=false;document.getElementById('rerun-phrase').value='';document.getElementById('rerun-phrase-label').textContent=rerunPreview.confirmation_phrase;rerunError.textContent='';rerunDialog.showModal();}catch(error){seasonalMessage.textContent=error.message;}});};
 document.getElementById('rerun-acknowledge').onclick=async function(){if(!document.getElementById('rerun-accept').checked){rerunError.textContent='請先勾選再次計費確認。';return;}await window.inktimeRunAction(this,async()=>{try{await seasonalPost('rerun/acknowledge',{token:rerunPreview.token,accept_additional_cost:true});document.getElementById('rerun-step-two').hidden=true;document.getElementById('rerun-step-three').hidden=false;document.getElementById('rerun-phrase').focus();rerunError.textContent='第三階段：輸入完整確認文字後才會建立工作。';}catch(error){rerunError.textContent=error.message;}});};
 document.getElementById('seasonal-rerun-form').onsubmit=async function(event){event.preventDefault();if(document.getElementById('rerun-step-three').hidden)return;await window.inktimeRunAction(this,async()=>{try{const result=await seasonalPost('rerun/execute',{token:rerunPreview.token,confirmation_phrase:document.getElementById('rerun-phrase').value,accept_additional_cost:true});location.href=result.detail_url;}catch(error){rerunError.textContent=error.message;}});};

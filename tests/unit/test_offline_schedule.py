@@ -11,6 +11,7 @@ from inktime.app.domain.photopainter.offline_schedule import (
     normalize_sync_strategy,
     next_sync_epoch,
     next_sleep_epoch,
+    next_daily_slot,
     offline_prepare_plan,
     offline_schedule_capability_is_usable,
     offline_schedule_capability_state,
@@ -22,6 +23,17 @@ from inktime.app.domain.photopainter.offline_schedule import (
     validate_offline_schedule,
 )
 from inktime.app.repositories.offline_schedules import OfflineScheduleRepository
+
+
+@pytest.mark.parametrize(("now", "next_utc", "hours"), [
+    ("2026-03-07T08:00:00-05:00", "2026-03-08T12:00:00+00:00", 23),
+    ("2026-10-31T08:00:00-04:00", "2026-11-01T13:00:00+00:00", 25),
+])
+def test_legacy_daily_refresh_uses_the_next_local_day_across_dst(now, next_utc, hours):
+    current = datetime.fromisoformat(now)
+    target = next_daily_slot(current, "08:00", ZoneInfo("America/New_York"))
+    assert target == datetime.fromisoformat(next_utc)
+    assert (target - current).total_seconds() == hours * 3600
 
 
 @pytest.mark.parametrize(

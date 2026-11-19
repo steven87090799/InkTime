@@ -3,10 +3,12 @@ from __future__ import annotations
 import os
 import platform
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 from flask import Blueprint, current_app
 
+from inktime.app.core.runtime_health import component_ready
+from inktime.app.db.migrations import MIGRATIONS
 from inktime.app.web.access import administrator_required
 from inktime.app.domain.photos.formats import ensure_image_codecs_registered, image_capabilities
 
@@ -19,26 +21,28 @@ def live():
     return {"status": "ok"}
 
 
-@bp.get("/health/ready")
-def ready():
+def _readiness(*, whole_platform: bool):
     database = current_app.extensions["inktime_database"]
     with database.session() as connection:
         migrations = connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0]
-        stalled = connection.execute(
-            """
-            SELECT COUNT(*) FROM jobs
-            WHERE status IN ('running','retrying','pausing')
-              AND (heartbeat_at IS NULL OR heartbeat_at<?)
-            """,
-            ((datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat(),),
-        ).fetchone()[0]
+        background_checks = {}
+        if whole_platform:
+            stalled = connection.execute(
+                """SELECT 1 FROM job_items WHERE status='running' AND worker_id IS NOT NULL
+                   AND lease_until<? LIMIT 1""",
+                (datetime.now(timezone.utc).isoformat(),),
+            ).fetchone()
+            background_checks = {
+                "worker": component_ready(connection, "worker") and stalled is None,
+                "scheduler": component_ready(connection, "scheduler"),
+            }
     checks = {
         "heif_decoder": ensure_image_codecs_registered(),
         "database": True,  # The bounded schema/heartbeat queries above proved connectivity.
         "release_directory": os.access(current_app.config["INKTIME_RELEASE_DIR"], os.R_OK | os.W_OK),
-        "migrations": int(migrations or 0) >= 6,
-        "worker": int(stalled) == 0,
+        "migrations": int(migrations or 0) == MIGRATIONS[-1].version,
         "settings": current_app.extensions["inktime_settings_repository"].get("general.timezone") is not None,
+        **background_checks,
     }
     preflight = current_app.extensions["inktime_production_preflight"]
     if not preflight.healthy:
@@ -48,6 +52,16 @@ def ready():
         if all(checks.values())
         else ({"status": "not_ready", "checks": checks}, 503)
     )
+
+
+@bp.get("/health/ready")
+def ready():
+    return _readiness(whole_platform=True)
+
+
+@bp.get("/health/web-ready")
+def web_ready():
+    return _readiness(whole_platform=False)
 
 
 @bp.get("/health/detail")

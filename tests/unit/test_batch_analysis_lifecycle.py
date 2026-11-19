@@ -1190,6 +1190,58 @@ def test_batch_reuses_output_saved_before_crash_even_without_a_provider(app, tmp
         assert connection.execute("SELECT side_caption FROM photo_analysis WHERE photo_id=?", (photo_id,)).fetchone()[0]
 
 
+@pytest.mark.parametrize("legacy", [False, True])
+def test_batch_replays_archived_lines_after_receipt_checkpoint_and_lost_file(app, tmp_path, monkeypatch, legacy):
+    photo_id = _prepare_photos(app, tmp_path, count=1)[0]
+    fake = FakeBatchProvider()
+    service = _wire_fake(app, fake)
+    monkeypatch.setattr(service, "_result_download_provider", lambda *args, **kwargs: fake)
+    batch_id = service.submit(scope="sample", sample_count=1, created_by="tester")["batch_ids"][0]
+    service.poll_due(limit=10)
+
+    def interrupted(*args, **kwargs):
+        raise RuntimeError("fixture interrupted after saving the receipt")
+
+    with monkeypatch.context() as interrupted_patch:
+        interrupted_patch.setattr(service, "_import_success", interrupted)
+        with pytest.raises(RuntimeError, match="fixture interrupted"):
+            service.import_batch(batch_id)
+    batch = service.batches.get(batch_id)
+    Path(batch["local_output_path"]).unlink()
+    with service.database.transaction() as connection:
+        assert connection.execute("SELECT COUNT(*) FROM batch_result_raw").fetchone()[0] == 1
+        if legacy:
+            connection.execute("DELETE FROM batch_result_files")
+
+    def no_download(*args, **kwargs):
+        raise AssertionError("SQLite already has the original result file")
+
+    monkeypatch.setattr(service, "_result_download_provider", no_download)
+    assert service.import_batch(batch_id)["success"] == 1
+    with service.database.session() as connection:
+        assert connection.execute("SELECT side_caption FROM photo_analysis WHERE photo_id=?", (photo_id,)).fetchone()[0]
+        assert connection.execute("SELECT COUNT(*) FROM api_usage WHERE batch_id=?", (batch_id,)).fetchone()[0] == 1
+    assert fake.batch_counter == 1
+
+
+def test_new_batch_reuses_caption_from_old_plan_without_a_paid_operation_row(app, tmp_path):
+    photo_id = _prepare_photos(app, tmp_path, count=1)[0]
+    fake = FakeBatchProvider()
+    service = _wire_fake(app, fake)
+    result = valid_result()
+    service.photos.save_analysis(
+        photo_id, None, "single", "legacy-provider", "legacy-model", result, json.dumps(result),
+        schema_kind="full", score_kind="semantic", analysis_fingerprint="different-legacy-plan",
+    )
+    with service.database.session() as connection:
+        assert connection.execute("SELECT COUNT(*) FROM billable_operations").fetchone()[0] == 0
+        assert connection.execute("SELECT COUNT(*) FROM model_analysis_results").fetchone()[0] == 1
+    result = service.submit(scope="manual_selection", photo_ids=[photo_id], created_by="tester")
+    assert result["cache_hits"] == 1
+    assert result["batch_ids"] == []
+    assert fake.batch_counter == 0
+
+
 def test_legacy_stale_batch_caption_can_be_restored_from_sql_without_provider(app, client, tmp_path, monkeypatch):
     from tests.conftest import create_admin, csrf, login
 
@@ -3119,6 +3171,7 @@ def test_lost_batch_cache_and_analysis_never_authorize_another_paid_request(app,
     with service.database.transaction() as connection:
         connection.execute("DELETE FROM photo_analysis")
         connection.execute("DELETE FROM ai_analysis_cache")
+        connection.execute("DELETE FROM model_analysis_results")
     if not keep_remote_identity:
         service.batches.update_batch(batch_id, remote_batch_id=None, submitted_at=None)
     estimate = service.estimate(scope="manual_selection", photo_ids=[photo_id])
@@ -3138,6 +3191,7 @@ def _mark_paid_batch_application_failed(service, batch_id):
     with service.database.transaction() as connection:
         connection.execute("DELETE FROM photo_analysis")
         connection.execute("DELETE FROM ai_analysis_cache")
+        connection.execute("DELETE FROM model_analysis_results")
     item = service.batches.items(batch_id)[0]
     service.batches.update_item(str(item["id"]), status="schema_invalid", error_code="schema_invalid")
     service.batches.update_batch(batch_id, status="completed_with_errors", remote_status="completed")
@@ -3179,6 +3233,7 @@ def test_failed_item_retry_authorizes_no_successful_sibling(app, tmp_path):
     with service.database.transaction() as connection:
         connection.execute("DELETE FROM photo_analysis")
         connection.execute("DELETE FROM ai_analysis_cache")
+        connection.execute("DELETE FROM model_analysis_results WHERE content_sha256=?", (first_item["content_sha256"],))
     service.batches.update_item(str(first_item["id"]), status="schema_invalid", error_code="schema_invalid")
     service.batches.update_batch(first, status="completed_with_errors", remote_status="completed")
     retried = service.retry_failed(first, created_by="tester")
@@ -3190,9 +3245,8 @@ def test_failed_item_retry_authorizes_no_successful_sibling(app, tmp_path):
             (retried["job_id"],),
         ).fetchall()
     assert [row[0] for row in authorized] == [first_item["id"]]
-    with pytest.raises(BatchLifecycleError) as error:
-        service.submit(scope="manual_selection", photo_ids=[str(sibling["photo_id"])], created_by="tester")
-    assert error.value.code == "BATCH-PAID-OPERATION-HOLD"
+    saved = service.submit(scope="manual_selection", photo_ids=[str(sibling["photo_id"])], created_by="tester")
+    assert saved["batch_ids"] == [] and saved["cache_hits"] == 1
 
 
 @pytest.mark.parametrize("other_operation", ["single_unknown", "batch_unknown", "unrelated_paid_batch"])

@@ -2809,6 +2809,17 @@ MIGRATIONS = (
             END""",
         ),
     ),
+    Migration(
+        81,
+        "保存照片工作排隊識別與批次結果檔的完整性紀錄",
+        (
+            "ALTER TABLE job_items ADD COLUMN analysis_content_sha256 TEXT",
+            "CREATE TABLE batch_result_files("
+            "batch_id TEXT NOT NULL REFERENCES analysis_batches(id) ON DELETE CASCADE,"
+            "source_file TEXT NOT NULL,line_count INTEGER NOT NULL CHECK(line_count>=0),"
+            "PRIMARY KEY(batch_id,source_file))",
+        ),
+    ),
 )
 
 

@@ -7,6 +7,7 @@ import pytest
 from inktime.app.core.preflight import (
     PreflightError,
     run_production_preflight,
+    validate_host_photo_isolation,
     validate_lan_environment,
 )
 from inktime.app.core.runtime_config import RuntimeConfig
@@ -39,6 +40,34 @@ class WritablePhotoFilesystem:
             "1 0 0:1 / / ro - ext4 /dev/root ro\n"
             f"2 1 0:2 / {self.photo_dir} rw - ext4 /dev/photos rw"
         )
+
+
+@pytest.mark.parametrize("placement", ["same_bind", "nested_bind", "independent"])
+def test_host_photo_mount_identity_is_checked_before_the_updater_can_write(tmp_path, placement):
+    data = tmp_path / "data"
+    photos = tmp_path / "photos"
+    data.mkdir()
+    photos.mkdir()
+    mount_path = data if placement == "same_bind" else data / "backups"
+    if mount_path != data:
+        mount_path.mkdir()
+
+    class HostMounts:
+        def mountinfo(self):
+            lines = [
+                "1 0 8:1 / / rw - ext4 /dev/root rw",
+                f"2 1 8:2 /family {photos} rw - ext4 /dev/storage rw",
+            ]
+            if placement != "independent":
+                lines.append(f"3 1 8:2 /family {mount_path} rw - ext4 /dev/storage rw")
+            return "\n".join(lines)
+
+    if placement == "independent":
+        validate_host_photo_isolation(data, photos, adapter=HostMounts())
+    else:
+        with pytest.raises(ValueError, match="NAS-UPDATE-PATH-006"):
+            validate_host_photo_isolation(data, photos, adapter=HostMounts())
+    assert not (data / ".inktime-update.lock").exists()
 
 
 def _config(tmp_path: Path, **overrides) -> RuntimeConfig:

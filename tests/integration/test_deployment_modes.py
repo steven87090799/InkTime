@@ -2,10 +2,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from inktime.app import bootstrap
 from inktime.app.core.preflight import NativeOSAdapter, run_production_preflight
 from inktime.app.core.runtime_config import RuntimeConfig
 from inktime.app.factory import create_app
+from inktime.app.db.connection import Database, RuntimeLockError
 from tests.conftest import csrf
 
 
@@ -49,6 +52,22 @@ def test_lan_http_setup_cookie_is_returned_and_dashboard_opens(tmp_path):
         assert "Strict-Transport-Security" not in client.get("/dashboard").headers
     finally:
         app.extensions["inktime_service_container"].close()
+
+
+def test_bootstrap_holds_restore_lock_before_opening_the_database(tmp_path, monkeypatch):
+    config = _config(tmp_path, production=False)
+
+    def interrupted_migration(database, *args):
+        assert not database.path.exists()
+        with pytest.raises(RuntimeLockError):
+            database.acquire_runtime_lock(exclusive=True, blocking=False)
+        raise RuntimeError("fixture stopped during startup")
+
+    monkeypatch.setattr(bootstrap, "migrate", interrupted_migration)
+    with pytest.raises(RuntimeError, match="fixture stopped"):
+        bootstrap.bootstrap_services(config, role="web")
+    with Database(config.database_path).acquire_runtime_lock(exclusive=True, blocking=False):
+        assert not config.database_path.exists()
 
 
 def test_production_https_cookie_is_secure_and_hsts_is_https_only(tmp_path, monkeypatch):

@@ -555,6 +555,9 @@ class PhotoRepository:
                     if not plan["content_changed"]:
                         continue
                     previous = {**plan["existing"], "root_path": str(root)}
+                    previous["reviews"] = [dict(row) for row in connection.execute(
+                        "SELECT * FROM photo_reviews WHERE photo_id=? ORDER BY id", (plan["id"],)
+                    )]
                     previous_analyses = [dict(row) for row in connection.execute(
                         "SELECT * FROM photo_analysis WHERE photo_id=? ORDER BY id", (plan["id"],)
                     )]
@@ -589,6 +592,11 @@ class PhotoRepository:
                         WHERE id IN ({placeholders})
                         """,  # noqa: S608 -- placeholders are generated; IDs remain bound
                         chunk,
+                    )
+                    connection.execute(
+                        f"UPDATE photo_reviews SET caption_override=NULL,version=version+1,updated_at=? "  # noqa: S608
+                        f"WHERE analysis_id IS NULL AND photo_id IN ({placeholders})",
+                        (now, *chunk),
                     )
                     connection.execute(
                         f"DELETE FROM photo_analysis WHERE photo_id IN ({placeholders})",  # noqa: S608
@@ -1644,23 +1652,21 @@ class PhotoRepository:
         """Identify requests that can be handled without a configured model."""
         if not photo_ids:
             return False
+        from inktime.app.repositories.billable_operations import BillableOperationRepository
+        from inktime.app.repositories.model_coverage import saved_model_evidence_sql
+
+        operations = BillableOperationRepository(self.database)
         with self.database.session() as connection:
-            return connection.execute(
-                """
-                SELECT 1 FROM json_each(?) ids WHERE NOT EXISTS (
-                    SELECT 1 FROM photos p WHERE p.id=ids.value AND COALESCE(p.sha256,'')<>'' AND (
-                        EXISTS(SELECT 1 FROM model_analysis_results m WHERE m.content_sha256=p.sha256)
-                        OR EXISTS(
-                            SELECT 1 FROM billable_operations o
-                            LEFT JOIN model_request_evidence e ON e.operation_id=o.id
-                            WHERE o.content_sha256=p.sha256 AND o.state IN ('started','response','completed')
-                              AND COALESCE(o.response_json,e.response_json) IS NOT NULL
-                        )
-                    )
-                ) LIMIT 1
-                """,
+            uncovered = connection.execute(
+                f"""SELECT p.sha256 FROM json_each(?) ids LEFT JOIN photos p ON p.id=ids.value
+                    WHERE COALESCE(p.sha256,'')='' OR NOT {saved_model_evidence_sql('p.sha256')}
+                """,  # noqa: S608 -- only a fixed column expression is interpolated.
                 (json.dumps(list(photo_ids)),),
-            ).fetchone() is None
+            )
+            return all(
+                bool(row[0]) and operations.has_approved_photo_response(str(row[0]), connection=connection)
+                for row in uncovered
+            )
 
     def exclusion_reasons(self) -> list[str]:
         with self.database.session() as connection:

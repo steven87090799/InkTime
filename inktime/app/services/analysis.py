@@ -12,6 +12,7 @@ from typing import Any, Callable
 
 from inktime.app.core.paths import safe_join
 from inktime.app.core.logging import log_event
+from inktime.app.domain.jobs.failure_policy import JobConfigurationError
 from inktime.app.domain.analysis import (
     AnalysisValidationError,
     SCHEMA_VERSION,
@@ -55,9 +56,9 @@ from inktime.app.repositories.billable_operations import (
     BillableOperationRepository,
     SavedModelResultAvailableError,
     UnreconciledOperationError,
-    deserialize_response,
     paid_operation_lock_name,
 )
+from inktime.app.repositories.model_evidence import ModelReceiptReadError, read_saved_photo_response
 from inktime.app.services.budgets import BudgetService
 from inktime.app.services.usage_tracking import record_failed_unknown_usage
 from inktime.app.services.usage_periods import usage_periods
@@ -749,24 +750,6 @@ class PhotoAnalysisService:
         )
         return effective_cost, usage_id
 
-    @staticmethod
-    def _saved_transport_response(saved: dict, context: dict, request: dict) -> ProviderResponse:
-        from inktime.app.providers.openai_compatible import OpenAICompatibleProvider, ProviderHTTPError
-        from inktime.app.providers.openai_responses import responses_to_completion
-
-        try:
-            if saved["response_json"]:
-                return deserialize_response(saved["response_json"])
-            payload = json.loads(saved["transport_response"] or "null")
-            status = context.get("transport_status")
-            if (status is not None and not 200 <= status < 300) or not isinstance(payload, dict) or payload.get("error"):
-                raise ValueError("not a successful model response")
-            if "input" in request or "output" in payload:
-                payload = responses_to_completion(payload)
-            return OpenAICompatibleProvider.decode_completion(payload, request_id=context.get("transport_request_id"))
-        except (ProviderHTTPError, KeyError, TypeError, ValueError) as exc:
-            raise UnreconciledOperationError("先前 Vision 請求缺少可核對的回應；須先對帳，不得自動重新送圖") from exc
-
     def _reuse_saved_photo_analysis(
         self, photo, job_id: str | None, provider: VisionProvider | None,
         analysis_context: dict, *, force_recompute: bool,
@@ -789,28 +772,12 @@ class PhotoAnalysisService:
         if saved is None:
             return None
         try:
-            context = json.loads(saved["resolution_note"] or "{}")
-            request = json.loads(saved["request_json"] or "{}")
-            if not isinstance(context, dict) or not isinstance(request, dict):
-                raise ValueError("invalid paid operation evidence")
-            plan_json = context.get("analysis_spec_json") or saved["original_job_plan"]
-            plan = json.loads(plan_json or "{}")
-            if not isinstance(plan, dict):
-                raise ValueError("invalid paid analysis plan")
-        except (TypeError, ValueError) as exc:
+            receipt = read_saved_photo_response(saved)
+        except ModelReceiptReadError as exc:
             raise UnreconciledOperationError("無法核對已保存的模型請求，禁止自動重送") from exc
-        response = self._saved_transport_response(saved, context, request)
-        assert_complete_response(response)
+        context, request, response, result = receipt.context, receipt.request, receipt.response, receipt.result
+        plan = receipt.plan
         operation_id = str(saved["id"])
-        payload = extract_json_value(response.content)
-        schema_version = context.get("schema_version") or plan.get("schema_version")
-        if schema_version is None and isinstance(payload, dict):
-            schema_version = payload.get("schema_version")
-        result = validate_model_response(
-            payload if isinstance(payload, dict) else response.content,
-            caption_controls=context.get("caption_controls") or plan.get("caption_controls"),
-            schema_version=int(schema_version or SCHEMA_VERSION),
-        )
         provider_name = str(context.get("provider") or "stored-provider")
         stored_provider_id = context.get("provider_id") or saved["reserved_provider_id"]
         provider_id = str(stored_provider_id or provider_name)
@@ -825,7 +792,7 @@ class PhotoAnalysisService:
         ), None)
         if pricing_provider is not None and not stored_provider_id:
             provider_id = str(getattr(pricing_provider, "provider_id", pricing_provider.name))
-        if saved["state"] == "started":
+        if saved["state"] in {"started", "approved"}:
             operations.save_response(operation_id, response)
         if saved["state"] != "completed":
             self._record(
@@ -847,7 +814,7 @@ class PhotoAnalysisService:
                 schema_kind="full", score_kind=SEMANTIC_SCORE_KIND,
                 prompt_version=str(context.get("prompt_version") or plan.get("prompt_version") or PROMPT_VERSION),
                 analysis_fingerprint=context.get("analysis_fingerprint") or (stored_analysis_fingerprint(plan) if plan else None),
-                analysis_spec_json=plan_json,
+                analysis_spec_json=receipt.plan_json,
                 vision_request_fingerprint=saved["request_fingerprint"],
                 vision_input_spec_json=context.get("vision_input_spec_json"),
                 analysis_source="recovered", connection=connection,
@@ -1604,12 +1571,13 @@ class PhotoAnalysisService:
         force_recompute: bool = False,
         analysis_plan: dict | None = None,
         expected_content_sha256: str | None = None,
+        saved_result_only: bool = False,
     ) -> dict:
         photo = self.photos.get_with_path(photo_id)
         if photo is None:
             raise FileNotFoundError("SCAN-001 找不到照片資料")
         if expected_content_sha256 is not None and photo["sha256"] != expected_content_sha256:
-            raise ValueError("IMG-CHANGED 照片內容已變更，不得沿用舊任務送出")
+            raise JobConfigurationError("照片內容已變更。請重新選取照片建立工作。")
         source = safe_join(Path(photo["root_path"]), str(photo["relative_path"]), decode_url=False)
         if not source.is_file():
             raise FileNotFoundError("SCAN-001 找不到照片檔案")
@@ -1765,7 +1733,10 @@ class PhotoAnalysisService:
         # A cache hit or saved receipt does not require a usable provider, a
         # thumbnail, or new budget. Busy owners are handled by the model fence.
         operation_lock_name = paid_operation_lock_name(content_sha)
-        operation_lock = self.photos.database.try_acquire_operation_lock(operation_lock_name)
+        operation_lock = (
+            self.photos.database.operation_lock(operation_lock_name) if saved_result_only else
+            self.photos.database.try_acquire_operation_lock(operation_lock_name)
+        )
         if operation_lock is not None:
             with operation_lock:
                 saved_result = self._reuse_saved_photo_analysis(
@@ -1774,6 +1745,8 @@ class PhotoAnalysisService:
             if saved_result is not None:
                 return saved_result
 
+        if saved_result_only:
+            raise UnreconciledOperationError("找不到可用的已保存模型結果；此工作只可恢復原回應")
         if provider_error is not None:
             raise provider_error
 

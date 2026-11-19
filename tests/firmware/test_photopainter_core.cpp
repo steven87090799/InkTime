@@ -92,6 +92,14 @@ static void testContentNoticeOverlay() {
 }
 
 int main() {
+  const int64_t currentEpoch = 1793448000;
+  const int64_t fallBackTarget = currentEpoch + 25 * 60 * 60;
+  assert(validLegacyRefreshEpoch(
+    currentEpoch, fallBackTarget, kLegacyWakeLimitSeconds + kLegacyWakeRemainderSeconds));
+  assert(validLegacyRefreshEpoch(
+    currentEpoch + kLegacyWakeLimitSeconds, fallBackTarget, kLegacyWakeRemainderSeconds));
+  assert(!validLegacyRefreshEpoch(fallBackTarget, fallBackTarget, kLegacyWakeLimitSeconds));
+  assert(!validLegacyRefreshEpoch(0, fallBackTarget, kLegacyWakeLimitSeconds));
   for (const int status : {-1, 408, 429, 500, 503, 599}) {
     assert(transientOfflineHttpFailure(status));
     assert(allowOfflineCachedFormalFrame(transientOfflineHttpFailure(status), true, false, false));

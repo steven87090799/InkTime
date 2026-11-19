@@ -251,20 +251,18 @@ class JobRepository:
                     ),
                 )
                 batch: list[tuple] = []
+                insert_item = """
+                    INSERT OR IGNORE INTO job_items(id,job_id,photo_id,available_at,analysis_content_sha256)
+                    VALUES (?,?,?,?,(SELECT sha256 FROM photos WHERE id=?))
+                """
                 for photo_id in photo_ids:
-                    batch.append((str(uuid4()), job_id, photo_id, now))
+                    batch.append((str(uuid4()), job_id, photo_id, now, photo_id))
                     if len(batch) == 500:
-                        connection.executemany(
-                            "INSERT OR IGNORE INTO job_items(id, job_id, photo_id, available_at) VALUES (?, ?, ?, ?)",
-                            batch,
-                        )
+                        connection.executemany(insert_item, batch)
                         total += len(batch)
                         batch.clear()
                 if batch:
-                    connection.executemany(
-                        "INSERT OR IGNORE INTO job_items(id, job_id, photo_id, available_at) VALUES (?, ?, ?, ?)",
-                        batch,
-                    )
+                    connection.executemany(insert_item, batch)
                     total += len(batch)
                 # OR IGNORE 可能排除同一工作中的重複照片，以實際筆數為準。
                 total = int(
@@ -1230,6 +1228,14 @@ class JobRepository:
                 (lease_until, job_id, worker_id),
             )
             connection.execute("UPDATE jobs SET heartbeat_at=? WHERE id=?", (now, job_id))
+            if cursor.rowcount:
+                connection.execute(
+                    """INSERT INTO observability_state(key,value_json,updated_at)
+                       VALUES ('heartbeat:worker','{}',?)
+                       ON CONFLICT(key) DO UPDATE SET updated_at=excluded.updated_at
+                       WHERE julianday(excluded.updated_at)-julianday(observability_state.updated_at)>=30.0/86400""",
+                    (now,),
+                )
         return int(cursor.rowcount)
 
     def complete_item(

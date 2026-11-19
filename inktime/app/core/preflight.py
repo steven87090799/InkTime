@@ -303,20 +303,45 @@ def _shares_backing_filesystem(left: MountInfo, right: MountInfo) -> bool:
     return left.device == right.device or (
         left.filesystem == right.filesystem == "btrfs"
         and left.source.startswith("/dev/") and left.source == right.source
+    ) or (
+        left.filesystem == right.filesystem
+        and left.filesystem in UNSAFE_NETWORK_FILESYSTEMS
+        and left.source not in {"none", "-"} and left.source == right.source
     )
 
 
-def _has_writable_photo_alias(path: Path, mounts: tuple[MountInfo, ...], photo_mounts: tuple[MountInfo, ...]) -> bool:
-    target = str(path)
-    writable = [(mount, mount.root) for mount in _mounts_at_or_below(target, mounts) if not mount.read_only]
+def _backing_paths(
+    target: str, mounts: tuple[MountInfo, ...]
+) -> list[tuple[MountInfo, PurePosixPath]]:
+    paths = [(mount, mount.root) for mount in _mounts_at_or_below(target, mounts)]
     parent = _mount_for(target, mounts)
-    if parent is not None and not parent.read_only and parent.mount_point != target:
+    if parent is not None and parent.mount_point != target:
         relative = PurePosixPath(target).relative_to(parent.mount_point)
-        writable.append((parent, parent.root / relative))
+        paths.append((parent, parent.root / relative))
+    return paths
+
+
+def _has_writable_photo_alias(
+    path: Path, mounts: tuple[MountInfo, ...], photo_paths: list[tuple[MountInfo, PurePosixPath]]
+) -> bool:
     return any(
-        _shares_backing_filesystem(mount, photo_mount) and _paths_overlap(root, photo_mount.root)
-        for mount, root in writable for photo_mount in photo_mounts
+        _shares_backing_filesystem(mount, photo_mount) and _paths_overlap(root, photo_root)
+        for mount, root in _backing_paths(str(path), mounts) if not mount.read_only
+        for photo_mount, photo_root in photo_paths
     )
+
+
+def validate_host_photo_isolation(
+    data_dir: Path, photo_dir: Path, *, adapter: OSAdapter | None = None
+) -> None:
+    """Verify the updater's host paths before its first write."""
+    data = data_dir.resolve(strict=True)
+    photos = photo_dir.resolve(strict=True)
+    mounts = _mountinfo_entries(adapter)
+    if _mount_for(str(data), mounts) is None or _mount_for(str(photos), mounts) is None:
+        raise ValueError("NAS-UPDATE-PATH-007 cannot verify host filesystem mounts")
+    if _paths_overlap(data, photos) or _has_writable_photo_alias(data, mounts, _backing_paths(str(photos), mounts)):
+        raise ValueError("NAS-UPDATE-PATH-006 writable data and photos overlap on the host filesystem")
 
 
 @dataclass(frozen=True)
@@ -408,7 +433,8 @@ def run_production_preflight(
             "Production /photos 含有可寫入的下層 mount",
             "將照片樹下每一個 nested mount 全部改為唯讀，或改用不含可寫下層 mount 的照片根目錄",
         )
-    if any(_has_writable_photo_alias(path, mounts, photo_mounts) for path in writable_roots):
+    photo_paths = [(mount, mount.root) for mount in photo_mounts]
+    if any(_has_writable_photo_alias(path, mounts, photo_paths) for path in writable_roots):
         _fail(
             "DEPLOY-PATH-OVERLAP-001",
             "Production 可寫資料目錄與原始照片在同一棵實體掛載樹上",

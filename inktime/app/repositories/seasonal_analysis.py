@@ -13,6 +13,7 @@ from inktime.app.domain.analysis.seasonal import seasonal_month_days
 from inktime.app.domain.photos.quality_policy import is_confirmed_screenshot
 from inktime.app.repositories.analysis_history import historical_model_sql
 from inktime.app.repositories.analysis_reservations import AnalysisReservationConflict, reserved_analysis_sql
+from inktime.app.repositories.model_coverage import saved_model_evidence_sql
 
 
 def utc_now() -> str:
@@ -242,7 +243,7 @@ class SeasonalAnalysisRepository:
                         photo_id=row["id"], job_id=None, error_code="SEASONAL-PAID-HISTORY", status=status)
 
     def claim_hook(self, rows: list[dict], target: date, *, retry_task: int | None = None,
-                   confirmation: tuple[str, str, str] | None = None):
+                   confirmation: tuple[str, str, str] | None = None, saved_result_only: bool = False):
         def commit(connection, job_id):
             if confirmation is not None:
                 token, actor, snapshot = confirmation
@@ -277,7 +278,7 @@ class SeasonalAnalysisRepository:
                     (row["sha256"],),
                 ).fetchone():
                     raise AnalysisReservationConflict("有尚未對帳或待匯入的模型回應，請先處理原請求")
-                if retry_task is not None:
+                if retry_task is not None and not saved_result_only:
                     if connection.execute(
                         "SELECT 1 FROM billable_operations o JOIN ai_cache_reservations r ON r.cache_key=o.request_fingerprint "
                         "WHERE o.content_sha256=? AND o.state='started' AND r.status='reserved' AND r.lease_until>? LIMIT 1",
@@ -287,7 +288,9 @@ class SeasonalAnalysisRepository:
                     connection.execute(
                         "UPDATE billable_operations SET state='approved',updated_at=?,"
                         "resolution_note=COALESCE(resolution_note || char(10),'') || ? "
-                        "WHERE content_sha256=? AND state='started'",
+                        "WHERE content_sha256=? AND state='started' AND response_json IS NULL "
+                        "AND NOT EXISTS (SELECT 1 FROM model_request_evidence e "
+                        "WHERE e.operation_id=billable_operations.id AND e.response_json IS NOT NULL)",
                         (utc_now(), f"管理員手動重試同期任務 {retry_task}；新工作 {job_id}，已接受可能重複費用", row["sha256"]),
                     )
                 connection.execute(
@@ -323,11 +326,13 @@ class SeasonalAnalysisRepository:
                     state = task["status"] if task else "reserved" if row["reserved"] else "completed" if row["existing_analysis_id"] else "unknown" if row["paid_state"] else "unprocessed"
                     counts[state] += 1
             tasks = connection.execute(
-                """SELECT t.*,p.relative_path,a.provider,a.model,a.created_at AS analyzed_at,
+                f"""SELECT t.*,p.relative_path,a.provider,a.model,a.created_at AS analyzed_at,
+                      {saved_model_evidence_sql('t.content_sha256')} AS saved_evidence,
                       t.id=(SELECT max(latest.id) FROM seasonal_analysis_tasks latest WHERE latest.content_sha256=t.content_sha256) AS is_latest
                    FROM seasonal_analysis_tasks t LEFT JOIN photos p ON p.id=t.photo_id
                    LEFT JOIN photo_analysis a ON a.id=t.analysis_id
-                   ORDER BY t.id DESC LIMIT ? OFFSET ?""", (limit, offset)
+                   ORDER BY t.id DESC LIMIT ? OFFSET ?""",  # noqa: S608 -- the evidence predicate is repository-owned.
+                (limit, offset),
             ).fetchall()
             total = connection.execute("SELECT count(*) FROM seasonal_analysis_tasks").fetchone()[0]
             missing_dates = connection.execute(

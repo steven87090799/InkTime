@@ -59,7 +59,7 @@ class AnalysisBatchRepository:
                 rows = active.execute(
                     cost_query + " AND i.id IN (SELECT value FROM json_each(?))",  # noqa: S608 -- fixed query.
                     (batch_id, json.dumps(item_ids)),
-                ).fetchall()
+                ).fetchall() if item_ids else []
         items = {
             str(row["id"]): {"cost_known": row["cost"] is not None, "display_cost": row["cost"]}
             for row in rows
@@ -82,11 +82,15 @@ class AnalysisBatchRepository:
             ).fetchall()
             for batch in batches:
                 current_id = str(batch["id"])
-                summary = self.cost_summary(current_id, connection=connection)
-                for item_id, cost in summary["items"].items():
-                    if cost["cost_known"]:
-                        connection.execute("UPDATE analysis_batch_items SET actual_cost=? WHERE id=?",
-                                           (cost["display_cost"], item_id))
+                summary = self.cost_summary(current_id, connection=connection, item_ids=[])
+                connection.execute(
+                    """UPDATE analysis_batch_items AS i
+                       SET actual_cost=COALESCE(u.actual_cost,u.estimated_cost)
+                       FROM api_usage u WHERE i.batch_id=? AND u.batch_item_id=i.id
+                         AND u.cost_source IN ('estimated','provider_reported')
+                         AND COALESCE(u.actual_cost,u.estimated_cost) IS NOT NULL""",
+                    (current_id,),
+                )
                 connection.execute("UPDATE analysis_batches SET actual_cost=? WHERE id=?",
                                    (summary["known_cost"], current_id))
                 unresolved = connection.execute(
@@ -94,7 +98,7 @@ class AnalysisBatchRepository:
                        ('pending','submitted','upload_unknown','submission_unknown','missing','retry_pending') LIMIT 1""",
                     (current_id,),
                 ).fetchone()
-                if (not summary["cost_complete"] or len(summary["items"]) != int(batch["total_items"])
+                if (not summary["cost_complete"] or summary["item_count"] != int(batch["total_items"])
                         or unresolved or batch["reconciliation_error_code"]):
                     continue
                 released += connection.execute(
@@ -428,6 +432,46 @@ class AnalysisBatchRepository:
                 "SELECT * FROM analysis_batch_items WHERE custom_id=?", (custom_id,)
             ).fetchone()
         return dict(row) if row is not None else None
+
+    def has_item_receipts(self, batch_id: str) -> bool:
+        with self.database.session() as connection:
+            return connection.execute(
+                "SELECT 1 FROM analysis_batch_items WHERE batch_id=? AND raw_response_json IS NOT NULL LIMIT 1",
+                (batch_id,),
+            ).fetchone() is not None
+
+    def unpaired_result_counts(self, batch_id: str, run_id: str) -> tuple[int, int]:
+        with self.database.session() as connection:
+            row = connection.execute(
+                """SELECT
+                     (SELECT COUNT(*) FROM batch_result_staging s WHERE s.batch_id=? AND s.run_id=?
+                      AND NOT EXISTS(SELECT 1 FROM analysis_batch_items i
+                                     WHERE i.batch_id=s.batch_id AND i.custom_id=s.custom_id)),
+                     (SELECT COUNT(*) FROM analysis_batch_items i WHERE i.batch_id=?
+                      AND NOT EXISTS(SELECT 1 FROM batch_result_staging s
+                                     WHERE s.batch_id=i.batch_id AND s.custom_id=i.custom_id AND s.run_id=?))""",
+                (batch_id, run_id, batch_id, run_id),
+            ).fetchone()
+            return int(row[0]), int(row[1])
+
+    def missing_result_items(self, batch_id: str, run_id: str) -> Iterable[dict]:
+        after = ""
+        while True:
+            with self.database.session() as connection:
+                rows = connection.execute(
+                    """SELECT i.id,i.job_item_id FROM analysis_batch_items i
+                       WHERE i.batch_id=? AND i.id>?
+                         AND i.status NOT IN ('imported','failed','schema_invalid','stale','duplicate_custom_id')
+                         AND NOT EXISTS(SELECT 1 FROM batch_result_staging s
+                                        WHERE s.batch_id=i.batch_id AND s.custom_id=i.custom_id AND s.run_id=?)
+                       ORDER BY i.id LIMIT 200""",
+                    (batch_id, after, run_id),
+                ).fetchall()
+            if not rows:
+                return
+            for row in rows:
+                yield dict(row)
+            after = str(rows[-1]["id"])
 
     def items_page(self, batch_id: str, *, offset: int, limit: int, include_raw: bool) -> List[dict]:
         columns = "*" if include_raw else (

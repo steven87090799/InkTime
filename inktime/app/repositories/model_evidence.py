@@ -6,6 +6,7 @@ addressed under /data/model-inputs; original NAS photos remain read-only.
 from __future__ import annotations
 
 import base64
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from hashlib import sha256
 import json
@@ -14,6 +15,15 @@ from pathlib import Path
 import tempfile
 
 from inktime.app.db import Database
+from inktime.app.domain.analysis import SCHEMA_VERSION
+from inktime.app.domain.analysis.json_repair import extract_json_value
+from inktime.app.domain.analysis.schema import validate_model_response
+from inktime.app.providers.base import (
+    IncompleteProviderResponse,
+    ProviderResponse,
+    assert_complete_response,
+    deserialize_response,
+)
 
 
 class ModelEvidenceNotSavedError(RuntimeError):
@@ -25,6 +35,72 @@ class ModelResponseNotSavedError(RuntimeError):
     ambiguous = True
     request_started = True
     vision_started = True
+
+
+class ModelReceiptReadError(ValueError):
+    """The stored transport record cannot be decoded."""
+
+
+@dataclass(frozen=True)
+class SavedPhotoResponse:
+    context: dict
+    request: dict
+    plan: dict
+    plan_json: str | None
+    response: ProviderResponse
+    result: dict
+
+
+def read_saved_photo_response(saved: dict) -> SavedPhotoResponse:
+    """Validate the original response against its original analysis contract."""
+    from inktime.app.providers.openai_compatible import OpenAICompatibleProvider, ProviderHTTPError
+    from inktime.app.providers.openai_responses import responses_to_completion
+
+    try:
+        # Older approval records append an audit note after the original JSON.
+        first_note = str(saved["resolution_note"] or "{}").split("\n", 1)[0]
+        context = json.loads(first_note if first_note.startswith("{") else "{}")
+        request = json.loads(saved["request_json"] or "{}")
+        if not isinstance(context, dict) or not isinstance(request, dict):
+            raise ValueError("invalid paid operation evidence")
+        plan_json = context.get("analysis_spec_json") or saved["original_job_plan"]
+        plan = json.loads(plan_json or "{}")
+        if not isinstance(plan, dict):
+            raise ValueError("invalid paid analysis plan")
+        if saved["response_json"]:
+            response = deserialize_response(saved["response_json"])
+        else:
+            payload = json.loads(saved["transport_response"] or "null")
+            status = context.get("transport_status")
+            if (status is not None and not 200 <= status < 300) or not isinstance(payload, dict) or payload.get("error"):
+                raise ValueError("not a successful model response")
+            if "input" in request or "output" in payload:
+                payload = responses_to_completion(payload)
+            response = OpenAICompatibleProvider.decode_completion(payload, request_id=context.get("transport_request_id"))
+    except (ProviderHTTPError, KeyError, TypeError, ValueError) as exc:
+        raise ModelReceiptReadError("無法核對已保存的模型請求") from exc
+
+    assert_complete_response(response)
+    payload = extract_json_value(response.content)
+    schema_version = context.get("schema_version") or plan.get("schema_version")
+    if schema_version is None and isinstance(payload, dict):
+        schema_version = payload.get("schema_version")
+    result = validate_model_response(
+        payload if isinstance(payload, dict) else response.content,
+        caption_controls=context.get("caption_controls") or plan.get("caption_controls"),
+        schema_version=int(schema_version or SCHEMA_VERSION),
+    )
+    return SavedPhotoResponse(context, request, plan, plan_json, response, result)
+
+
+def has_valid_saved_photo_response(saved: dict) -> bool:
+    if not (saved["response_json"] or saved["transport_response"]):
+        return False
+    try:
+        read_saved_photo_response(saved)
+    except (ValueError, TypeError, IncompleteProviderResponse):
+        return False
+    return True
 
 
 def _archive_image(database: Database, payload: bytes, mime: str) -> dict:

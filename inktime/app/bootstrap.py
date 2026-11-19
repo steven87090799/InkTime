@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import ExitStack
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -12,7 +13,7 @@ from typing import Literal
 from inktime.app.core.locks import FcntlLockProvider, LockProvider
 from inktime.app.core.logging import bind_log_context, configure_logging, log_event
 from inktime.app.core.runtime_config import RuntimeConfig, resolve_runtime_config
-from inktime.app.core.preflight import run_production_preflight
+from inktime.app.core.preflight import ProductionPreflight, run_production_preflight
 from inktime.app.db import Database, backfill_photo_capture_dates, migrate
 from inktime.app.db.migrations import MIGRATIONS, MigrationError
 from inktime.app.domain.photos import LocationResolver, ThumbnailCache
@@ -100,11 +101,13 @@ class ServiceContainer:
 
     def close(self) -> None:
         boundary = self.extensions.get("inktime_process_boundary")
-        if boundary is not None:
-            boundary.shutdown()  # type: ignore[attr-defined]
         runtime_lock = self.extensions.get("inktime_runtime_lock")
-        if runtime_lock is not None:
-            runtime_lock.close()  # type: ignore[attr-defined]
+        try:
+            if boundary is not None:
+                boundary.shutdown()  # type: ignore[attr-defined]
+        finally:
+            if runtime_lock is not None:
+                runtime_lock.close()  # type: ignore[attr-defined]
 
 
 def _persistent_secret(runtime_config: RuntimeConfig, lock_provider: LockProvider) -> str:
@@ -225,6 +228,30 @@ def bootstrap_services(
         path.mkdir(parents=True, exist_ok=True)
 
     database = Database(config.database_path)
+    with ExitStack() as resources:
+        runtime_lock = None if config.testing else resources.enter_context(
+            database.acquire_runtime_lock(exclusive=False)
+        )
+        container = _build_service_graph(
+            config, role, database, locks, preflight,
+            initialize_database=initialize_database, started=started,
+        )
+        if runtime_lock is not None:
+            container.extensions["inktime_runtime_lock"] = runtime_lock
+        resources.pop_all()
+        return container
+
+
+def _build_service_graph(
+    config: RuntimeConfig,
+    role: RuntimeRole,
+    database: Database,
+    locks: LockProvider,
+    preflight: ProductionPreflight,
+    *,
+    initialize_database: bool,
+    started: float,
+) -> ServiceContainer:
     if initialize_database:
         migrate(database, None if config.testing else config.backup_dir)
         backfill_photo_capture_dates(database)
@@ -240,9 +267,6 @@ def bootstrap_services(
         "inktime_database": database,
         "inktime_production_preflight": preflight,
     }
-    if not config.testing:
-        extensions["inktime_runtime_lock"] = database.acquire_runtime_lock(exclusive=False)
-
     secret = _persistent_secret(config, locks)
     _assert_master_secret_identity(database, secret, testing=config.testing)
     settings_repository = SettingsRepository(database)

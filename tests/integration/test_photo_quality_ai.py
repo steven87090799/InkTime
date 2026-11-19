@@ -668,9 +668,10 @@ def test_paid_result_is_recovered_without_network_or_new_job_cost_after_cache_lo
         assert connection.execute("SELECT COUNT(*) FROM api_usage").fetchone()[0] == 1
 
 
-@pytest.mark.parametrize("mode", ["chat", "responses"])
-def test_saved_transport_reply_recovers_after_interruption_with_provider_offline(app, client, tmp_path, mode):
+@pytest.mark.parametrize("mode", ["chat", "responses", "seasonal", "legacy-approved"])
+def test_saved_transport_reply_recovers_after_interruption_with_provider_offline(app, client, tmp_path, monkeypatch, mode):
     from inktime.app.providers.openai_compatible import ProviderHTTPError
+    from inktime.app.repositories.billable_operations import BillableOperationRepository
     from inktime.app.repositories.model_evidence import save_model_request, save_model_transport_response
 
     photo_id = _scan(app, tmp_path)[0]
@@ -716,6 +717,10 @@ def test_saved_transport_reply_recovers_after_interruption_with_provider_offline
     with database.session() as connection:
         assert connection.execute("SELECT state FROM billable_operations").fetchone()[0] == "started"
         assert connection.execute("SELECT status FROM api_usage").fetchone()[0] == "failed"
+        operation_id, sha = connection.execute("SELECT id,content_sha256 FROM billable_operations").fetchone()
+
+    with pytest.raises(ValueError, match="已有可用"):
+        BillableOperationRepository(database).approve_resend(operation_id, reason="fixture approval")
 
     restarted = analysis_module.PhotoAnalysisService(
         service.photos, service.usage, service.thumbnails, budgets=service.budgets, settings=service.settings,
@@ -734,6 +739,41 @@ def test_saved_transport_reply_recovers_after_interruption_with_provider_offline
         item = app.extensions["inktime_job_repository"].list_items(job_id)[0]
         assert item["status"] == "completed"
         assert json.loads(item["result_json"])["analysis"]["side_caption"] == original_caption
+    elif mode == "seasonal":
+        from inktime.app.workers.runner import WorkerRunner
+
+        _setting(app, "analysis.execution_mode", "seasonal_ai")
+        seasonal = app.extensions["inktime_seasonal_analysis_service"]
+        target = seasonal.today().isoformat()
+        with database.transaction() as connection:
+            task_id = connection.execute(
+                """INSERT INTO seasonal_analysis_tasks(
+                    content_sha256,photo_id,status,target_date,created_at,updated_at
+                ) VALUES (?,?,'unknown',?,?,?)""",
+                (sha, photo_id, target, target, target),
+            ).lastrowid
+
+        def no_router(*args, **kwargs):
+            raise AssertionError("seasonal recovery must not build a model route")
+
+        monkeypatch.setattr(seasonal.providers, "build_router", no_router)
+        create_admin(app)
+        login(client)
+        page = client.get("/analysis/seasonal")
+        assert page.status_code == 200
+        assert "恢復已保存回應" in page.get_data(as_text=True)
+        queued = client.post(f"/api/v1/analysis/seasonal/tasks/{task_id}/retry",
+                             json={}, headers={"X-CSRF-Token": csrf(client)})
+        assert queued.status_code == 201
+        assert WorkerRunner(app).run_once() == 1
+        item = app.extensions["inktime_job_repository"].list_items(queued.json["id"])[0]
+        assert item["status"] == "completed"
+        assert json.loads(item["result_json"])["analysis"]["side_caption"] == original_caption
+    elif mode == "legacy-approved":
+        with database.transaction() as connection:
+            connection.execute(
+                "UPDATE billable_operations SET state='approved',resolution_note=resolution_note||char(10)||'old approval'"
+            )
     for _ in range(2):
         restored = restarted.analyze_photo(**arguments, provider=None, high_model="future-model")
         assert restored["analysis"]["side_caption"] == original_caption
@@ -746,6 +786,53 @@ def test_saved_transport_reply_recovers_after_interruption_with_provider_offline
         assert [tuple(row) for row in usage] == [("completed", 0.002, "fixture-header-id", "served-fixture")]
     assert source.read_bytes() == original_bytes
     assert source.stat().st_mtime_ns == original_mtime
+
+
+def test_queued_manual_analysis_and_caption_are_bound_to_the_original_bytes(app, client, tmp_path, monkeypatch):
+    from inktime.app.workers.runner import WorkerRunner
+
+    photo_id = _scan(app, tmp_path)[0]
+    _setting(app, "analysis.execution_mode", "local_with_manual_ai")
+    fake = CountingProvider()
+    providers = app.extensions["inktime_provider_service"]
+    monkeypatch.setattr(providers, "usable_route_snapshot", lambda: [{"provider_id": "fake", "model": "fake"}])
+    monkeypatch.setattr(providers, "build_router", lambda *args, **kwargs: fake)
+    repository = app.extensions["inktime_photo_repository"]
+    old_sha = repository.get_with_path(photo_id)["sha256"]
+    with repository.database.transaction() as connection:
+        connection.execute(
+            "INSERT INTO photo_reviews(photo_id,caption_override,version,updated_at) VALUES (?,?,3,'2026-01-01')",
+            (photo_id, "舊照片的人工一句話"),
+        )
+    create_admin(app)
+    login(client)
+    queued = client.post(f"/api/v1/photos/{photo_id}/ai", headers={"X-CSRF-Token": csrf(client)})
+    assert queued.status_code == 201
+    job_id = queued.json["id"]
+    job_repository = app.extensions["inktime_job_repository"]
+    assert job_repository.list_items(job_id)[0]["analysis_content_sha256"] == old_sha
+
+    source = tmp_path / "photos" / "photo.jpg"
+    Image.new("RGB", (900, 600), "blue").save(source)
+    scanner = PhotoScanner(repository, PhotoPreprocessor(), app.extensions["inktime_thumbnail_cache"])
+    original = repository.get_with_path(photo_id)
+    with repository.database.session() as connection:
+        library_name = connection.execute("SELECT name FROM libraries WHERE id=?", (original["library_id"],)).fetchone()[0]
+    scanner.scan(library_name, source.parent, mode="full", build_thumbnails=False)
+    assert repository.get_with_path(photo_id)["sha256"] != old_sha
+    assert app.extensions["inktime_render_service"]._photo_level_caption_override(photo_id) is None
+    with repository.database.session() as connection:
+        archived = connection.execute(
+            "SELECT photo_json FROM photo_content_history WHERE photo_id=? AND content_sha256=?",
+            (photo_id, old_sha),
+        ).fetchone()
+        assert json.loads(archived[0])["reviews"][0]["caption_override"] == "舊照片的人工一句話"
+        review = connection.execute("SELECT version FROM photo_reviews WHERE photo_id=?", (photo_id,)).fetchone()
+        assert review[0] == 4
+    app.extensions["inktime_job_service"].start(job_id)
+    assert WorkerRunner(app).run_once() == 1
+    assert job_repository.list_items(job_id)[0]["error_code"] == "CONFIG_INVALID"
+    assert fake.analyze_calls == 0
 
 
 def test_source_replacement_with_same_size_and_mtime_cannot_reuse_old_analysis(app, tmp_path):

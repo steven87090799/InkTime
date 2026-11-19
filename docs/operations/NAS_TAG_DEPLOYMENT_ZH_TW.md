@@ -58,7 +58,7 @@ docker login ghcr.io -u YOUR_GITHUB_USERNAME
 
 ## 3. NAS 首次設定（只做一次）
 
-UGREEN Compose 專案的一鍵方式需要準備 Compose 設定與它使用的 `.env`；`scripts/update_nas.sh` 路徑另外需要 Docker Engine 24+、Compose v2、`realpath` 與 `flock`。首次取得本專案只需一次：
+UGREEN Compose 專案的一鍵方式需要準備 Compose 設定與它使用的 `.env`。`scripts/update_nas.sh` 另外需要 Docker Engine 24+、Compose v2、`realpath`、`flock` 及主機 Python 3（3.8 以上）。更新器會在建立鎖及復原目錄前，以 Linux 掛載資訊確認資料目錄與原始圖庫彼此獨立。首次取得本專案只需一次。
 
 ```bash
 git clone https://github.com/steven87090799/InkTime.git

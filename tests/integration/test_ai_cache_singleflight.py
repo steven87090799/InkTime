@@ -3,11 +3,14 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 from threading import Barrier
 
+import pytest
+
 
 def test_fallback_cache_tracks_selected_channel_behavior_revision(app, tmp_path, monkeypatch):
     from contextlib import nullcontext
     from PIL import Image
     from inktime.app.providers.router import FailoverVisionProvider, ProviderChannel
+    from inktime.app.repositories.billable_operations import SavedModelResultAvailableError
     from tests.unit.test_batch_analysis_lifecycle import _prepare_photos
     from tests.unit.test_scoring import LabProvider
 
@@ -32,8 +35,9 @@ def test_fallback_cache_tracks_selected_channel_behavior_revision(app, tmp_path,
         name = kwargs["selected_channel"].provider.name
         if name == "primary":
             raise ValueError("VLM-005 pre-dispatch primary failure")
+        result = original(**kwargs)
         calls.append(name)
-        return original(**kwargs)
+        return result
 
     monkeypatch.setattr(service, "_perform_uncached_model_call", external_call)
     image = tmp_path / "synthetic.jpg"
@@ -48,7 +52,12 @@ def test_fallback_cache_tracks_selected_channel_behavior_revision(app, tmp_path,
     assert cached[3] is True
     assert first[6] == cached[6]
     channel.analysis_revision = "new-endpoint"
-    changed = service._model_call(**parameters)
+    with pytest.raises(SavedModelResultAvailableError):
+        service._model_call(**parameters)
+    restored = service.analyze_photo(photo_id=photo_id, job_id=None, provider=router, strategy="single", force_ai=True)
+    assert restored["stage"] == "cache"
+    assert calls == ["fallback"]
+    changed = service._model_call(**parameters, force_recompute=True)
     assert changed[3] is False
     assert changed[6] != first[6]
     assert calls == ["fallback", "fallback"]

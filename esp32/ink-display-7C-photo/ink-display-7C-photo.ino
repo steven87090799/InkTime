@@ -4197,6 +4197,9 @@ static bool resumePendingQueueAck(Config &cfg) {
 // =======================
 //  下载每日相册 BIN
 // =======================
+static int64_t serverNextRefreshEpoch = 0;
+RTC_DATA_ATTR static int64_t deferredLegacyRefreshEpoch = 0;
+
 static bool applyRemoteDeviceConfiguration(Config &cfg, JsonObject remoteConfig) {
   const JsonVariantConst schema = remoteConfig["schema_version"];
   const JsonVariantConst version = remoteConfig["config_version"];
@@ -4288,6 +4291,9 @@ static bool applyRemoteDeviceConfiguration(Config &cfg, JsonObject remoteConfig)
     DBG_PRINTLN("[CFG] 已套用伺服器端裝置設定");
 #endif
   }
+  const JsonVariantConst nextRefresh = remoteConfig["next_refresh_epoch"];
+  serverNextRefreshEpoch = nextRefresh.is<int64_t>() && !nextRefresh.is<bool>()
+    ? nextRefresh.as<int64_t>() : 0;
   return true;
 }
 
@@ -6718,6 +6724,17 @@ void sleepUntilNextSchedule(const Config &cfg, bool hasTime, const struct tm &no
     return;
   }
 #endif
+  const int64_t nowEpoch = static_cast<int64_t>(time(nullptr));
+  if (hasTime && inktime::validLegacyRefreshEpoch(
+      nowEpoch, serverNextRefreshEpoch,
+      inktime::kLegacyWakeLimitSeconds + inktime::kLegacyWakeRemainderSeconds)) {
+    const int64_t delay = serverNextRefreshEpoch - nowEpoch;
+    // Keep the existing one-day sleep cap. Across a fall-back transition
+    // the first timer wake only schedules the remaining portion.
+    deferredLegacyRefreshEpoch = delay > inktime::kLegacyWakeLimitSeconds ? serverNextRefreshEpoch : 0;
+    goDeepSleepUntilEpoch(static_cast<time_t>(nowEpoch), static_cast<time_t>(serverNextRefreshEpoch));
+    return;
+  }
   if (!hasTime) {
     goDeepSleepMinutes(1440);
     return;
@@ -7300,6 +7317,19 @@ void setup() {
       && !pairingRetryDue(g_cfg)) {
     goDeepSleepSeconds(pairingBackoffSeconds(g_cfg));
     return;
+  }
+
+  const int64_t deferredRefresh = deferredLegacyRefreshEpoch;
+  deferredLegacyRefreshEpoch = 0;
+  if (deferredRefresh > 0 && esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_TIMER) {
+    struct tm localTime = {};
+    if (seedTimeFromRtc(g_cfg, localTime)) {
+      const int64_t nowEpoch = static_cast<int64_t>(time(nullptr));
+      if (inktime::validLegacyRefreshEpoch(nowEpoch, deferredRefresh, inktime::kLegacyWakeRemainderSeconds)) {
+        goDeepSleepUntilEpoch(static_cast<time_t>(nowEpoch), static_cast<time_t>(deferredRefresh));
+        return;
+      }
+    }
   }
 
 #if DEBUG_LOG

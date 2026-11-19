@@ -6,8 +6,9 @@ import hashlib
 from uuid import uuid4
 
 from inktime.app.db import Database
-from inktime.app.providers.base import ProviderCallTrace, ProviderResponse, Usage
+from inktime.app.providers.base import ProviderResponse, deserialize_response
 from inktime.app.repositories.analysis_reservations import assert_no_batch_content_owner
+from inktime.app.repositories.model_evidence import has_valid_saved_photo_response
 
 
 class UnreconciledOperationError(RuntimeError):
@@ -26,19 +27,21 @@ class SavedModelResultAvailableError(RuntimeError):
     not_sent = True
 
 
-def deserialize_response(raw: str) -> ProviderResponse:
-    payload = json.loads(raw)
-    payload["usage"] = Usage(**payload["usage"])
-    if payload.get("call_trace"):
-        payload["call_trace"] = ProviderCallTrace(**payload["call_trace"])
-    return ProviderResponse(**payload)
-
-
 def paid_operation_lock_name(content_key: str) -> str:
     # A Provider contract can hold its diagnostic lock while sending a paid
     # subrequest. Separate the namespaces so their lock shards cannot collide.
     prefix = "paid-diagnostic-" if content_key.startswith("diagnostic:") else "paid-operation-"
     return prefix + hashlib.sha256(content_key.encode()).hexdigest()[:3]
+
+
+def approved_receipt_sql(content_sha: str) -> str:
+    """Find old approvals which still carry a possibly usable response."""
+    return f"""EXISTS(
+        SELECT 1 FROM billable_operations approved
+        LEFT JOIN model_request_evidence evidence ON evidence.operation_id=approved.id
+        WHERE approved.content_sha256={content_sha} AND approved.state='approved'
+          AND COALESCE(approved.response_json,evidence.response_json) IS NOT NULL
+    )"""  # noqa: S608 -- fixed column expressions supplied by repository callers.
 
 
 class BillableOperationRepository:
@@ -47,22 +50,51 @@ class BillableOperationRepository:
     def __init__(self, database: Database):
         self.database = database
 
+    _PHOTO_RECEIPT_SELECT = """
+        SELECT o.*,e.request_json,e.response_json AS transport_response,
+               original_job.id AS original_job_id,original_job.analysis_spec_json AS original_job_plan,
+               original_photo.id AS original_photo_id,reservation.provider_id AS reserved_provider_id
+        FROM billable_operations o
+        LEFT JOIN model_request_evidence e ON e.operation_id=o.id
+        LEFT JOIN jobs original_job ON original_job.id=json_extract(
+            CASE WHEN json_valid(o.resolution_note) THEN o.resolution_note
+                 WHEN instr(o.resolution_note,char(10))>0 AND
+                      json_valid(substr(o.resolution_note,1,instr(o.resolution_note,char(10))-1))
+                 THEN substr(o.resolution_note,1,instr(o.resolution_note,char(10))-1) ELSE '{}' END, '$.job_id')
+        LEFT JOIN photos original_photo ON original_photo.id=json_extract(
+            CASE WHEN json_valid(o.resolution_note) THEN o.resolution_note
+                 WHEN instr(o.resolution_note,char(10))>0 AND
+                      json_valid(substr(o.resolution_note,1,instr(o.resolution_note,char(10))-1))
+                 THEN substr(o.resolution_note,1,instr(o.resolution_note,char(10))-1) ELSE '{}' END, '$.photo_id')
+        LEFT JOIN budget_reservations reservation ON reservation.id='vision:'||o.id
+    """
+
+    def _approved_photo_response(self, connection, content_sha256: str) -> dict | None:
+        # Old builds could approve a resend despite an already valid answer.
+        for row in connection.execute(
+            self._PHOTO_RECEIPT_SELECT + """
+            WHERE o.content_sha256=? AND o.state='approved'
+              AND COALESCE(o.response_json,e.response_json) IS NOT NULL
+            ORDER BY o.created_at DESC,o.id DESC
+            """,
+            (content_sha256,),
+        ):
+            saved = dict(row)
+            if has_valid_saved_photo_response(saved):
+                return saved
+        return None
+
+    def has_approved_photo_response(self, content_sha256: str, *, connection=None) -> bool:
+        context = self.database.session() if connection is None else nullcontext(connection)
+        with context as active:
+            return self._approved_photo_response(active, content_sha256) is not None
+
     def photo_operation(
         self, content_sha256: str, *, include_completed: bool, job_id: str | None = None,
     ) -> dict | None:
         with self.database.session() as connection:
             row = connection.execute(
-                """
-                SELECT o.*,e.request_json,e.response_json AS transport_response,
-                       original_job.id AS original_job_id,original_job.analysis_spec_json AS original_job_plan,
-                       original_photo.id AS original_photo_id,reservation.provider_id AS reserved_provider_id
-                FROM billable_operations o
-                LEFT JOIN model_request_evidence e ON e.operation_id=o.id
-                LEFT JOIN jobs original_job ON original_job.id=json_extract(
-                    CASE WHEN json_valid(o.resolution_note) THEN o.resolution_note ELSE '{}' END, '$.job_id')
-                LEFT JOIN photos original_photo ON original_photo.id=json_extract(
-                    CASE WHEN json_valid(o.resolution_note) THEN o.resolution_note ELSE '{}' END, '$.photo_id')
-                LEFT JOIN budget_reservations reservation ON reservation.id='vision:'||o.id
+                self._PHOTO_RECEIPT_SELECT + """
                 WHERE o.content_sha256=?
                   AND (o.state IN ('started','response')
                     OR (o.state='completed' AND (? OR original_job.id=?)))
@@ -71,7 +103,9 @@ class BillableOperationRepository:
                 """,
                 (content_sha256, int(include_completed), job_id),
             ).fetchone()
-        return dict(row) if row else None
+            if row is not None:
+                return dict(row)
+            return self._approved_photo_response(connection, content_sha256) if include_completed else None
 
     def check_retry(
         self, content_sha256: str, request_fingerprint: str, *, reuse_completed: bool = False,
@@ -149,12 +183,12 @@ class BillableOperationRepository:
                 (content_sha256,),
             ).fetchone():
                 raise SeasonalAlreadyProcessedError("相同內容已有付費回應，沿用原資料；不因模型規格不同再次送出")
-            if guard_paid_photo and reuse_completed and connection.execute(
+            if guard_paid_photo and reuse_completed and (connection.execute(
                 "SELECT 1 FROM model_analysis_results WHERE content_sha256=? "
                 "UNION ALL SELECT 1 FROM billable_operations WHERE content_sha256=? "
                 "AND state IN ('response','completed') LIMIT 1",
                 (content_sha256, content_sha256),
-            ).fetchone():
+            ).fetchone() or self._approved_photo_response(connection, content_sha256) is not None):
                 raise SavedModelResultAvailableError("相同照片已保存模型結果，改為讀取本機紀錄")
             if job_id is not None and not reuse_completed and connection.execute(
                 "SELECT 1 FROM billable_operations WHERE content_sha256=? AND state='completed' "
@@ -223,6 +257,14 @@ class BillableOperationRepository:
             raise ValueError("模型請求仍由執行者處理中，不可批准重送")
         try:
             with self.database.transaction() as connection:
+                saved = connection.execute(
+                    self._PHOTO_RECEIPT_SELECT + " WHERE o.id=? AND o.state IN ('started','response')",
+                    (operation_id,),
+                ).fetchone()
+                if saved is not None and not str(saved["content_sha256"]).startswith("diagnostic:") and (
+                    has_valid_saved_photo_response(dict(saved))
+                ):
+                    raise ValueError("此照片已有可用的模型回應，請恢復已保存結果")
                 cursor = connection.execute(
                     "UPDATE billable_operations SET state='approved',resolution_note=COALESCE(resolution_note || char(10),'') || ?,updated_at=? "
                     "WHERE id=? AND state IN ('started','response')",

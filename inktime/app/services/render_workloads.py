@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
-from datetime import datetime, timedelta, timezone
+from contextlib import closing
+from datetime import date, datetime, timedelta, timezone
 from hashlib import sha256, file_digest
 import json
 import os
@@ -25,6 +26,7 @@ from inktime.app.domain.rendering import (
 )
 from inktime.app.db import Database
 from inktime.app.core.locks import FcntlLockProvider
+from inktime.app.domain.analysis.scoring import preferred_analysis_order_sql
 from inktime.app.domain.photos import LocationResolver
 from inktime.app.domain.rendering.text_mask import render_plan_text_mask
 from inktime.app.repositories.photos import PhotoRepository
@@ -638,21 +640,57 @@ class RenderWorkloadService:
         return self._result_url(token, "preview")
 
     @staticmethod
-    def _private_database_snapshot(source: Path, destination: Path) -> None:
-        """Copy a consistent SQLite view and remove credentials from the child copy."""
-
+    def _preview_database_snapshot(source: Path, destination: Path, plans: Iterable[dict[str, Any]]) -> None:
+        """Capture only the chosen photos and settings in an isolated child database."""
+        photo_ids = json.dumps(sorted({
+            str(plan[key]) for plan in plans
+            for key in ("primary_photo_id", "secondary_photo_id") if plan.get(key)
+        }))
         destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        source_connection = sqlite3.connect(source)
-        snapshot_connection = sqlite3.connect(destination)
-        try:
-            source_connection.backup(snapshot_connection)
-            snapshot_connection.execute("DELETE FROM secrets")
-            snapshot_connection.execute("UPDATE users SET password_hash=''")
-            snapshot_connection.execute("UPDATE devices SET token_hash='preview-' || id")
-            snapshot_connection.commit()
-        finally:
-            snapshot_connection.close()
-            source_connection.close()
+        with closing(sqlite3.connect(destination, uri=True)) as snapshot:
+            snapshot.execute("ATTACH DATABASE ? AS upstream", (f"{source.resolve().as_uri()}?mode=ro",))
+            snapshot.execute("BEGIN")
+            snapshot.execute(
+                """CREATE TABLE settings AS SELECT * FROM upstream.settings
+                   WHERE key LIKE 'render.%' OR key IN ('general.timezone','analysis.execution_mode')
+                         OR key GLOB 'analysis.side_caption_*'"""
+            )
+            snapshot.execute(
+                "CREATE TABLE photos AS SELECT * FROM upstream.photos WHERE id IN (SELECT value FROM json_each(?))",
+                (photo_ids,),
+            )
+            snapshot.execute(
+                "CREATE TABLE libraries AS SELECT * FROM upstream.libraries WHERE id IN (SELECT library_id FROM photos)"
+            )
+            snapshot.execute(
+                f"""CREATE TABLE photo_analysis AS SELECT * FROM upstream.photo_analysis WHERE id IN (
+                       SELECT (SELECT latest.id FROM upstream.photo_analysis latest WHERE latest.photo_id=p.id
+                               ORDER BY {preferred_analysis_order_sql('latest')} LIMIT 1) FROM photos p
+                   )""",  # noqa: S608 -- the ranking expression is repository-owned.
+            )
+            snapshot.execute(
+                """CREATE TABLE photo_reviews AS SELECT * FROM upstream.photo_reviews WHERE id IN (
+                       SELECT (SELECT r.id FROM upstream.photo_reviews r
+                               WHERE r.photo_id=p.id AND r.analysis_id IS NULL ORDER BY r.id DESC LIMIT 1) FROM photos p
+                   )"""
+            )
+            snapshot.execute(
+                "CREATE TABLE photo_locations AS SELECT * FROM upstream.photo_locations WHERE photo_id IN (SELECT id FROM photos)"
+            )
+            sensor = snapshot.execute("SELECT value_json FROM settings WHERE key='render.sensor_device_id'").fetchone()
+            device_id = str(json.loads(sensor[0]) if sensor else "").strip()
+            snapshot.execute(
+                """CREATE TABLE device_power_samples AS
+                   SELECT id,device_id,temperature_c,humidity_percent,recorded_at
+                   FROM upstream.device_power_samples WHERE (temperature_c IS NOT NULL OR humidity_percent IS NOT NULL)
+                     AND (?='' OR device_id=?)
+                   ORDER BY recorded_at DESC,id DESC LIMIT 1""",
+                (device_id, device_id),
+            )
+            snapshot.execute(
+                "CREATE TABLE devices AS SELECT id,name FROM upstream.devices WHERE id IN (SELECT device_id FROM device_power_samples)"
+            )
+            snapshot.commit()
 
     def library_preview(
         self,
@@ -665,7 +703,8 @@ class RenderWorkloadService:
         """Prepare in a spawn child; commit cache/result only for the lease owner."""
 
         context = dict(commit_context)
-        fingerprint = {**dict(settings["fingerprint"]), "preview_quantized": bool(settings["arguments"].get("quantized"))}
+        arguments = dict(settings["arguments"])
+        fingerprint = {**dict(settings["fingerprint"]), "preview_quantized": bool(arguments.get("quantized"))}
 
         def cancelled() -> bool:
             return not self.jobs.can_commit_item(
@@ -677,6 +716,19 @@ class RenderWorkloadService:
 
         if cancelled():
             raise ProcessCallError("library preview lease lost")
+        plan = arguments.get("render_plan")
+        if plan is None:
+            display_day = arguments.get("calendar_display_date")
+            plan = render_service.resolve_render_plan(
+                str(arguments["photo_id"]), layout=arguments.get("layout"), crop_x=arguments.get("crop_x"),
+                crop_y=arguments.get("crop_y"), secondary_photo_id=arguments.get("secondary_photo_id"),
+                orientation=arguments.get("orientation"), fit_mode=arguments.get("fit_mode"),
+                profile=arguments.get("profile"), dither=arguments.get("requested_dither"),
+                primary_caption=arguments.get("primary_caption"), secondary_caption=arguments.get("secondary_caption"),
+                display_date=date.fromisoformat(str(display_day)) if display_day else None,
+            )
+            arguments["render_plan"] = plan
+            fingerprint["render_plan"] = plan
         image = render_cache.get(fingerprint)
         if image is not None:
             if cancelled():
@@ -699,7 +751,7 @@ class RenderWorkloadService:
         try:
             prepared.mkdir(mode=0o700, parents=True)
             snapshot_path = prepared / "render.db"
-            self._private_database_snapshot(Path(render_service.database.path), snapshot_path)
+            self._preview_database_snapshot(render_service.database.path, snapshot_path, [plan])
             if cancelled():
                 raise ProcessCallError("library preview lease lost")
             child_result = self.process_boundary.call(
@@ -707,7 +759,7 @@ class RenderWorkloadService:
                 timeout_seconds=float(settings.get("timeout_seconds", 30)),
                 kwargs={
                     "settings": {
-                        "arguments": dict(settings["arguments"]),
+                        "arguments": arguments,
                     },
                     "database_path": str(snapshot_path),
                     "prepared_path": str(prepared),
@@ -765,7 +817,7 @@ class RenderWorkloadService:
         try:
             prepared.mkdir(mode=0o700, parents=True)
             snapshot_path = prepared / "render.db"
-            self._private_database_snapshot(Path(render_service.database.path), snapshot_path)
+            self._preview_database_snapshot(render_service.database.path, snapshot_path, settings["plans"])
             result = self.process_boundary.call(
                 _prepare_dual_pair_compare_child,
                 timeout_seconds=float(settings.get("timeout_seconds", 45)),
