@@ -4329,7 +4329,7 @@ bool downloadLatestPhotoBin(Config &cfg) {
   String base;
   if (!normalizedBackendBase(cfg, base)) return false;
   if (!ensureWakeHttpSession(cfg, base)) return false;
-  String manifestUrl = base + String(DEVICE_MANIFEST_PATH);
+  String manifestUrl = base + String(DEVICE_MANIFEST_PATH) + "?refresh_epoch=1";
 
 #if DEBUG_LOG
   DBG_PRINTLN("[HTTP] 取得版本 Manifest（Authorization 已遮蔽）");

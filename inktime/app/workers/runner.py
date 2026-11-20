@@ -732,14 +732,15 @@ class WorkerRunner:
 
     def run_forever(self, poll_seconds: float | None = None) -> None:
         repository = self.app.extensions["inktime_settings_repository"]
-        observability = self.app.extensions["inktime_observability_service"]
+        observability = self.app.extensions.get("inktime_observability_service")
         configure_logging(settings_repository=repository)
         log_event(LOGGER, logging.INFO, "背景 Worker 已啟動", event="worker_started")
         idle_index = 0
         while not self.stop.is_set():
             try:
                 processed = self.run_once()
-                observability.heartbeat("worker")
+                if observability is not None:
+                    observability.heartbeat("worker")
             except Exception as exc:
                 # An unexpected error must not take the container down: Docker
                 # restarts it, it claims the same poison job, and the queue is

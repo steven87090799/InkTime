@@ -127,7 +127,7 @@ Device Secret 只在 claim 成功回應中交給裝置，短效 envelope 允許�
 1. 優先 `GET /api/device/v1/queue/manifest`；只有 404 或 Queue 空白才回退 `GET /api/device/v1/releases/latest`。自動配對裝置帶 `Authorization: Bearer <device-secret>` 與 `X-InkTime-Credential-Version`；Legacy 裝置維持 Bearer Token 相容格式。
 2. Queue Manifest 僅接受 bounded top-level JSON object、真正 JSON integer、Item 綁定的同源相對 URL；拒絕 absolute／cross-origin／traversal／NUL／backslash。
 3. 驗證 Manifest schema、`pixel_format=2bpp`／`indexed4`、Profile、`width=480`、`height=800`。
-4. 套用 `device_config` schema v2 的設定版本、面板 Profile、IANA 時區換算後的 UTC offset、`HH:MM` 與 rotation。舊連線模式有伺服器提供的 `next_refresh_epoch` 時，會按該時間喚醒。遇到切回標準時間造成兩次更新相隔超過一天，韌體保留 24 小時睡眠上限，第一次喚醒後再等到目標時間。
+4. 套用 `device_config` schema v2 的設定版本、面板 Profile、IANA 時區換算後的 UTC offset、`HH:MM` 與 rotation。支援新版排程的韌體以 `?refresh_epoch=1` 要求舊連線模式的 `next_refresh_epoch`，再按該時間喚醒。遇到切回標準時間造成兩次更新相隔超過一天，韌體保留 24 小時睡眠上限，第一次喚醒後再等到目標時間。
 5. 四色檔必須剛好 96,000 bytes、六／七色必須 192,000 bytes；Content-Type、Content-Length、實際長度與 SHA-256 都須相符。
 6. Queue 事件先持久化 NVS，再送 canonical `POST /api/device/v1/queue/ack`；timeout／5xx／restart 重用同一 idempotency key，2xx 才清除，409 重新取得 Manifest。
 7. 只有已驗證的 SHA、Release、render profile、rotation、board profile 與先前成功狀態完全相同才 skip；forced refresh 或 NVS 損壞不可 skip。

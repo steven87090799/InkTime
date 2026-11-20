@@ -544,7 +544,9 @@ def update_device(device_id: str):
     }
 
 
-def _device_configuration(device, profile_key: str, *, schedule_day: date | None = None) -> dict:
+def _device_configuration(
+    device, profile_key: str, *, schedule_day: date | None = None, include_refresh_epoch: bool = False,
+) -> dict:
     zone = ZoneInfo(str(device["timezone"]))
     now = datetime.now(zone)
     offset = now.utcoffset()
@@ -559,7 +561,7 @@ def _device_configuration(device, profile_key: str, *, schedule_day: date | None
         "rotation": int(device["rotation"]),
     }
     mode = str(device["delivery_mode"] or "legacy_online")
-    if mode == "legacy_online" and SCHEDULE_PATTERN.fullmatch(schedule):
+    if include_refresh_epoch and mode == "legacy_online" and SCHEDULE_PATTERN.fullmatch(schedule):
         config["next_refresh_epoch"] = int(next_daily_slot(now, schedule, zone).timestamp())
     if mode == "inktime_offline_schedule":
         config.update(
@@ -646,7 +648,9 @@ def latest_release():
         # Configuration is an authenticated control plane even with an empty library.
         manifest = {"schema_version": 3, "pixel_format": "indexed4", "no_content": True,
                     "files": [], "width": 0, "height": 0}
-    manifest["device_config"] = _device_configuration(device, profile_key)
+    manifest["device_config"] = _device_configuration(
+        device, profile_key, include_refresh_epoch=request.args.get("refresh_epoch") == "1",
+    )
     if authorization.test_assignment is not None:
         assignment = authorization.test_assignment
         manifest["test_delivery"] = {
