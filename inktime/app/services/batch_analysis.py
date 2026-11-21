@@ -36,6 +36,7 @@ from inktime.app.domain.analysis import (
 from inktime.app.domain.analysis.plan import SCHEMA_VERSION, provider_prompt_contract_sha256
 from inktime.app.domain.analysis.schema import validate_model_response
 from inktime.app.domain.analysis.execution_mode import execution_mode, permits_manual_ai
+from inktime.app.domain.photos.formats import assert_source_content
 from inktime.app.domain.photos.quality_policy import is_confirmed_screenshot
 from inktime.app.domain.analysis.plan import FULL_ANALYSIS_TOKEN_CAP, analysis_output_token_cap
 from inktime.app.services.budgets import BudgetService
@@ -52,6 +53,8 @@ from inktime.app.repositories.analysis_reservations import (
     valid_batch_retry_sql,
 )
 from inktime.app.repositories.batch_retry_authorizations import BatchRetryAuthorizationRepository
+from inktime.app.repositories.billable_operations import BillableOperationRepository, approved_receipt_sql
+from inktime.app.repositories.model_coverage import saved_model_result_sql
 from inktime.app.repositories.analysis_batches import (
     ACTIVE_BATCH_STATUSES,
     TERMINAL_BATCH_STATUSES,
@@ -215,12 +218,29 @@ class BatchAnalysisService:
         self.budgets = BudgetService(database, settings)
         self.data_dir = data_dir.resolve()
         self.batch_root = self.data_dir / "batches"
+        if self.batch_root.is_symlink():
+            raise BatchLifecycleError("Batch 證據目錄不可使用符號連結", "BATCH-INPUT-002")
         self.batch_root.mkdir(parents=True, exist_ok=True)
         os.chmod(self.batch_root, 0o700)
         self.observability = observability
         self.scoring_repository = scoring_repository
         self._cleanup_locks: dict[str, _CleanupLockEntry] = {}
         self._cleanup_locks_guard = threading.Lock()
+
+    def _local_evidence_path(self, batch_id: str, stored_path: str) -> Path:
+        # Database backups can carry absolute paths from another environment.
+        # Only paths inside this batch's current data directory are writable.
+        root = self.batch_root / batch_id
+        path = Path(stored_path)
+        try:
+            if root.parent != self.batch_root or root.is_symlink() or not self.batch_root.is_dir():
+                raise ValueError("invalid batch evidence directory")
+            if self.batch_root.is_symlink() or path.is_symlink():
+                raise ValueError("invalid batch evidence link")
+            relative = path.relative_to(root)
+            return safe_join(root, relative.as_posix(), decode_url=False)
+        except (OSError, ValueError) as exc:
+            raise BatchLifecycleError("Batch 本機檔案不在專用證據目錄，請重新核對", "BATCH-INPUT-002") from exc
 
     @contextmanager
     def _cleanup_lock(self, batch_id: str):
@@ -357,6 +377,11 @@ class BatchAnalysisService:
                    p.camera_make,p.camera_model,p.exif_json,p.gps_lat,p.gps_lon,p.blur_score,p.contrast,
                    p.overexposed_ratio,p.underexposed_ratio,p.screenshot_likelihood,
                    p.local_candidate_score,p.captured_at,p.created_at,l.root_path,
+                   {saved_model_result_sql('p.sha256')} AS saved_model_result,
+                   {approved_receipt_sql('p.sha256')} AS approved_receipt,
+                   EXISTS(SELECT 1 FROM photo_analysis a WHERE a.photo_id=p.id
+                          AND COALESCE(a.content_sha256,p.sha256)=p.sha256 AND a.score_kind='semantic'
+                          AND a.schema_version IN (4,5,6)) AS local_model_result,
                    EXISTS(SELECT 1 FROM billable_operations paid_single
                           WHERE paid_single.content_sha256=p.sha256
                             AND paid_single.state IN ('started','response','completed')) AS paid_single_held,
@@ -519,6 +544,7 @@ class BatchAnalysisService:
         vision_input["reasoning_effort"] = str(plan["reasoning_effort"])
         vision_input_json = canonical_json(vision_input)
         rows = (photo for page in self._candidate_pages(query, parameters, seed=seed, limit=scan_limit) for photo in page)
+        operations = BillableOperationRepository(self.database)
         for photo in rows:
             if is_confirmed_screenshot(photo):
                 confirmed_screenshot_excluded += 1
@@ -545,7 +571,10 @@ class BatchAnalysisService:
                     **vision_input,
                 }
             )
-            held = bool(photo["paid_single_held"] or photo["paid_batch_held"])
+            held = bool(
+                photo["paid_single_held"] or photo["paid_batch_held"] or
+                (photo["approved_receipt"] and operations.has_approved_photo_response(content_sha))
+            )
             if held:
                 paid_operation_held += 1
             cached = self.photos.get_ai_cache(
@@ -571,6 +600,22 @@ class BatchAnalysisService:
                         )
                     cache_hits += 1
                     continue
+            if photo["saved_model_result"]:
+                if apply_cached and not photo["local_model_result"]:
+                    try:
+                        assert_source_content(source, content_sha)
+                        restored = self.photos.inherit_existing_analysis(
+                            str(photo["id"]), None, semantic_only=True, match_plan=False,
+                            expected_content_sha256=content_sha,
+                        )
+                    except (OSError, ValueError, TypeError):
+                        restored = None
+                    if restored is None:
+                        if not held:
+                            paid_operation_held += 1
+                        continue
+                cache_hits += 1
+                continue
             if held:
                 continue
             if content_sha in seen_sha:
@@ -687,17 +732,21 @@ class BatchAnalysisService:
             "max_jsonl_bytes": max_bytes,
         }
 
-    def _provider(self, provider_id: str, plan: dict[str, Any]):
+    def _provider(
+        self, provider_id: str, plan: dict[str, Any], *, batch_result_owner: dict[str, str] | None = None,
+    ):
         configured = self.providers.get(provider_id)
         if configured is not None and str(configured.get("kind") or "").lower() == "openrouter":
             raise BatchLifecycleError("OpenRouter 僅支援即時 Chat Completions，不可進入 Batch", "BATCH-OPENROUTER-001")
         route = [item for item in plan["provider_route"] if str(item["provider_id"]) == provider_id]
         if not route:
             raise BatchLifecycleError("Frozen Batch Provider 不存在", "BATCH-PROVIDER-003")
+        ownership: dict[str, Any] = {"batch_result_owner": batch_result_owner} if batch_result_owner is not None else {}
         provider = self.provider_service.build_router(
             route,
             scoring_rules=str(plan.get("scoring_rules") or ""),
             caption_controls=plan.get("caption_controls") or None,
+            **ownership,
         )
         if provider is None:
             raise BatchLifecycleError("Frozen Batch Provider 無法建立", "BATCH-PROVIDER-004")
@@ -755,6 +804,15 @@ class BatchAnalysisService:
                 f"Provider identity 不一致：{','.join(mismatches)}",
             )
         return True, "", ""
+
+    def _result_download_provider(self, batch: dict[str, Any], plan: dict[str, Any]):
+        """Read an existing result only from the original account and project."""
+        keys = ("provider_base_url_fingerprint", "provider_project_id", "provider_account_fingerprint")
+        if any(batch.get(key) is None for key in keys) or not batch["provider_base_url_fingerprint"]:
+            raise BatchLifecycleError("缺少原 Batch 帳號證據，無法下載未保存的結果", "BATCH-IMPORT-DEFERRED")
+        return self._provider(
+            str(batch["provider_id"]), plan, batch_result_owner={key: str(batch[key]) for key in keys},
+        )
 
     def _mark_cleanup_provider_unknown(self, batch_id: str, code: str, message: str) -> None:
         current = self.batches.get(batch_id)
@@ -1005,15 +1063,26 @@ class BatchAnalysisService:
         # One indexed EXISTS-style query, not one new DB connection per photo.
         with self.database.session() as connection:
             if connection.execute(
-                "SELECT 1 FROM analysis_batch_items i JOIN billable_operations paid_single "
-                "ON paid_single.content_sha256=i.content_sha256 "
-                "WHERE i.batch_id=? AND paid_single.state IN ('started','response','completed') LIMIT 1",
+                f"""SELECT 1 FROM analysis_batch_items i WHERE i.batch_id=? AND (
+                    {saved_model_result_sql('i.content_sha256')}
+                    OR EXISTS(SELECT 1 FROM billable_operations paid_single
+                              WHERE paid_single.content_sha256=i.content_sha256
+                              AND paid_single.state IN ('started','response','completed'))
+                ) LIMIT 1""",  # noqa: S608 -- fixed content identities.
                 (batch_id,),
             ).fetchone():
                 raise BatchLifecycleError(
-                    "相同照片已有即時模型付費操作；請先續行或對帳，Batch 請求未送出",
+                    "相同照片已有模型結果或即時付費紀錄；請沿用或對帳，Batch 請求未送出",
                     "BATCH-PAID-OPERATION-HOLD",
                 )
+            approved_receipts = connection.execute(
+                f"""SELECT DISTINCT i.content_sha256 FROM analysis_batch_items i
+                    WHERE i.batch_id=? AND {approved_receipt_sql('i.content_sha256')}""",  # noqa: S608
+                (batch_id,),
+            )
+            operations = BillableOperationRepository(self.database)
+            if any(operations.has_approved_photo_response(str(row[0]), connection=connection) for row in approved_receipts):
+                raise BatchLifecycleError("同內容已有可恢復的模型回應", "BATCH-PAID-OPERATION-HOLD")
             if connection.execute(
                 f"""SELECT 1 FROM analysis_batch_items current_item
                     JOIN analysis_batch_items reserved_batch_item
@@ -1083,7 +1152,7 @@ class BatchAnalysisService:
                     raise
                 expired = True
             if expired:
-                if not Path(str(batch["local_input_path"] or "")).is_file():
+                if not self._local_evidence_path(batch_id, str(batch["local_input_path"] or "")).is_file():
                     raise BatchLifecycleError("到期分片缺少本機原始檔案，須人工核對", "BATCH-INPUT-002")
                 if not self.batches.reset_expired_input(batch_id, str(batch["input_file_id"])):
                     raise BatchLifecycleError("Batch 狀態已變更，停止恢復", "BATCH-CLAIM-STALE")
@@ -1130,7 +1199,7 @@ class BatchAnalysisService:
                 current = self.batches.get(batch_id)
                 if current is None:
                     raise KeyError(batch_id)
-                input_path = Path(str(current["local_input_path"] or ""))
+                input_path = self._local_evidence_path(batch_id, str(current["local_input_path"] or ""))
                 if not input_path.is_file():
                     raise BatchLifecycleError("找不到待上傳的 JSONL 分片", "BATCH-INPUT-002")
                 self.budgets.reserve("batch:" + batch_id, reserved_cost,
@@ -1507,19 +1576,28 @@ class BatchAnalysisService:
             "model": model,
         }
 
-    def _enqueue_import(self, batch_id: str, *, cleanup_only: bool = False) -> str:
+    def _enqueue_import(self, batch_id: str, *, cleanup_only: bool = False, replay_saved: bool = False) -> str:
+        mode = "saved" if replay_saved else "cleanup" if cleanup_only else "import"
         job_id = self.jobs.create_maintenance(
             kind="analysis_batch_import",
             name=f"匯入 OpenAI Batch {batch_id}",
-            settings={"batch_id": batch_id, "cleanup_only": cleanup_only},
+            settings={"batch_id": batch_id, "cleanup_only": cleanup_only, "replay_saved": replay_saved},
             created_by=None,
             priority=2,
-            dedupe_key=f"analysis-batch-import:{batch_id}:{'cleanup' if cleanup_only else 'import'}",
+            dedupe_key=f"analysis-batch-import:{batch_id}:{mode}",
         )
         current = self.jobs.get(job_id)
         if current is not None and str(current["status"]) == "pending":
             self.job_service.start(job_id)
         return job_id
+
+    def enqueue_saved_result_import(self, batch_id: str) -> str:
+        batch = self.batches.get(batch_id)
+        if batch is None or str(batch["status"]) not in TERMINAL_BATCH_STATUSES:
+            raise ValueError("只能復原已結束批次的本機結果")
+        if not self.batches.has_saved_stale_results(batch_id):
+            raise ValueError("這個批次沒有可復原的舊版已保存回應")
+        return self._enqueue_import(batch_id, replay_saved=True)
 
     def _phase_is_stale(self, batch: dict[str, Any]) -> bool:
         batch = dict(batch)
@@ -2378,7 +2456,7 @@ class BatchAnalysisService:
         """Paid evidence is durable even when the result cannot be applied."""
         usage = self._usage_from_body(body)
         served_model = str(body.get("model") or batch["model"])
-        estimated = provider.estimate_batch_cost(served_model, usage)
+        estimated = provider.estimate_batch_cost(served_model, usage) if provider is not None else None
         actual = usage.provider_reported_cost
         response = line.get("response") or {}
         request_id = response.get("request_id") or line.get("request_id") or body.get("id")
@@ -2410,23 +2488,27 @@ class BatchAnalysisService:
         body: dict[str, Any],
         plan: dict[str, Any],
         provider,
-        current_analysis_fingerprint: str | None,
+        *,
+        replay_saved: bool = False,
     ) -> str:
-        self._persist_result_receipt(batch, item, line, body, provider)
+        if not replay_saved:
+            self._persist_result_receipt(batch, item, line, body, provider)
         if str(item["status"]) == "imported":
             return "already_imported"
-        if str(item["status"]) not in {"pending", "submitted", "retry_pending"}:
+        allowed_states = {"stale"} if replay_saved else {"pending", "submitted", "retry_pending"}
+        if str(item["status"]) not in allowed_states:
             return str(item["status"])
         submitted_fingerprint = str(batch["analysis_fingerprint"] or "")
+        # Provider output belongs to the request that was sent. Live settings
+        # can change while the remote Batch is running.
         if (
-            current_analysis_fingerprint != submitted_fingerprint
-            or fingerprint(plan) != submitted_fingerprint
+            fingerprint(plan) != submitted_fingerprint
             or str(item["analysis_fingerprint"] or "") != submitted_fingerprint
         ):
             self._mark_item_error(
                 item,
                 "BATCH-STALE-ANALYSIS-FINGERPRINT",
-                "目前 Analysis Fingerprint 已不同於送出時版本",
+                "已保存的批次計畫與送出時的分析指紋不符",
                 "stale",
                 job_id=str(batch["job_id"]),
             )
@@ -2514,14 +2596,14 @@ class BatchAnalysisService:
             )
             return "schema_invalid"
         served_model = str(body.get("model") or batch["model"])
-        estimated_cost = provider.estimate_batch_cost(served_model, usage)
+        estimated_cost = provider.estimate_batch_cost(served_model, usage) if provider is not None else None
         actual_cost = usage.provider_reported_cost
         cost_source = "provider_reported" if actual_cost is not None else "estimated" if estimated_cost is not None else "unknown"
         recorded_cost = actual_cost if actual_cost is not None else estimated_cost
         raw_line = json.dumps(line, ensure_ascii=False, separators=(",", ":"))
         with self.database.transaction(operation="analysis_batch_import") as connection:
             current_item = connection.execute(
-                "SELECT status FROM analysis_batch_items WHERE id=?",
+                "SELECT status,error_code FROM analysis_batch_items WHERE id=?",
                 (str(item["id"]),),
             ).fetchone()
             if current_item is None:
@@ -2529,7 +2611,9 @@ class BatchAnalysisService:
             current_item_status = str(current_item["status"])
             if current_item_status == "imported":
                 return "already_imported"
-            if current_item_status not in {"pending", "submitted", "retry_pending"}:
+            if current_item_status not in allowed_states:
+                return current_item_status
+            if replay_saved and current_item["error_code"] != "BATCH-STALE-ANALYSIS-FINGERPRINT":
                 return current_item_status
             canonical_result = validate_analysis_result(result)
             ranked = self.analysis._save_result(
@@ -2583,27 +2667,28 @@ class BatchAnalysisService:
                     vision_fp=str(item["vision_request_fingerprint"]),
                     vision_input_json=str(item["vision_input_spec_json"]), connection=connection,
                 )
-            self.usage.record_batch_once(
-                provider=str(batch["provider_id"]),
-                provider_id=str(batch["provider_id"]),
-                model=served_model,
-                job_id=str(batch["job_id"]) if batch["job_id"] else None,
-                photo_id=str(item["photo_id"]),
-                batch_id=str(batch["id"]),
-                batch_item_id=str(item["id"]),
-                request_type="analysis_batch",
-                input_tokens=usage.input_tokens,
-                cached_tokens=usage.cached_tokens,
-                output_tokens=usage.output_tokens,
-                reasoning_tokens=usage.reasoning_tokens,
-                estimated_cost=estimated_cost,
-                actual_cost=actual_cost,
-                request_id=str(request_id) if request_id else None,
-                started_at=str(batch["submitted_at"] or utc_now()),
-                cache_write_tokens=usage.cache_write_tokens,
-                cost_source=cost_source,
-                connection=connection,
-            )
+            if not replay_saved:
+                self.usage.record_batch_once(
+                    provider=str(batch["provider_id"]),
+                    provider_id=str(batch["provider_id"]),
+                    model=served_model,
+                    job_id=str(batch["job_id"]) if batch["job_id"] else None,
+                    photo_id=str(item["photo_id"]),
+                    batch_id=str(batch["id"]),
+                    batch_item_id=str(item["id"]),
+                    request_type="analysis_batch",
+                    input_tokens=usage.input_tokens,
+                    cached_tokens=usage.cached_tokens,
+                    output_tokens=usage.output_tokens,
+                    reasoning_tokens=usage.reasoning_tokens,
+                    estimated_cost=estimated_cost,
+                    actual_cost=actual_cost,
+                    request_id=str(request_id) if request_id else None,
+                    started_at=str(batch["submitted_at"] or utc_now()),
+                    cache_write_tokens=usage.cache_write_tokens,
+                    cost_source=cost_source,
+                    connection=connection,
+                )
             self.batches.update_item(
                 str(item["id"]),
                 connection=connection,
@@ -2620,6 +2705,12 @@ class BatchAnalysisService:
                 raw_response_json=raw_line,
                 imported_at=utc_now(),
             )
+            if replay_saved:
+                connection.execute(
+                    "UPDATE analysis_batches SET imported_items=imported_items+1,stale_items=MAX(0,stale_items-1) "
+                    "WHERE id=?",
+                    (batch["id"],),
+                )
             if item.get("job_item_id"):
                 self.jobs.complete_batch_item(
                     str(batch["job_id"]),
@@ -2627,6 +2718,7 @@ class BatchAnalysisService:
                     {"stage": "single", "processing_mode": "batch", "analysis": ranked},
                     recorded_cost or 0.0,
                     connection=connection,
+                    recover_stale_receipt=replay_saved,
                 )
 
         from inktime.app.repositories.photos import invalidate_score_population_cache
@@ -2640,19 +2732,26 @@ class BatchAnalysisService:
         *,
         is_error: bool,
         records,
+        archived: bool = False,
     ) -> None:
         batch = dict(batch)
-        if path is None or not path.is_file():
+        if path is None or (not archived and not path.is_file()):
             return
-        if path.stat().st_size > MAX_BATCH_RESULT_BYTES:
+        if not archived and path.stat().st_size > MAX_BATCH_RESULT_BYTES:
             raise BatchLifecycleError("結果檔超過總位元組上限", "BATCH-OUTPUT-SIZE-001")
         max_line_bytes = 4 * 1024 * 1024
-        with path.open("rb") as stream:
-            for line_number, raw_line in enumerate(iter(lambda: stream.readline(max_line_bytes + 1), b""), 1):
+        source_file = str(batch.get("error_file_id" if is_error else "output_file_id") or path.name)
+        with ExitStack() as resources:
+            if archived:
+                lines = records.raw_lines(source_file)
+            else:
+                stream = resources.enter_context(path.open("rb"))
+                lines = enumerate(iter(lambda: stream.readline(max_line_bytes + 1), b""), 1)
+            line_number = 0
+            for line_number, raw_line in lines:
                 if len(raw_line) > max_line_bytes:
                     raise BatchLifecycleError("結果 JSONL 單行超過解析上限", "BATCH-OUTPUT-LINE-001")
-                if isinstance(records, BatchResultStore):
-                    source_file = str(batch.get("error_file_id" if is_error else "output_file_id") or path.name)
+                if isinstance(records, BatchResultStore) and not archived:
                     records.save_raw(raw_line, source_file=source_file, line_number=line_number)
                 try:
                     record = json.loads(raw_line)
@@ -2699,6 +2798,8 @@ class BatchAnalysisService:
                     records[custom_id] = ("schema_invalid", record, None)
                     continue
                 records[custom_id] = ("success", record, body)
+            if isinstance(records, BatchResultStore) and not archived:
+                records.mark_file_complete(source_file, line_number)
 
     def _housekeep_local(self, *, limit: int = 20) -> None:
         days = max(0, int(self.settings.get("batch.local_retention_days", 0)))
@@ -2731,8 +2832,8 @@ class BatchAnalysisService:
             raw_path = batch.get(key)
             if not raw_path:
                 continue
-            path = Path(str(raw_path))
             try:
+                path = self._local_evidence_path(str(batch["id"]), str(raw_path))
                 if path.is_file() and (retention_days == 0 or path.stat().st_mtime <= cutoff):
                     path.unlink()
                 if not path.exists():
@@ -2743,15 +2844,20 @@ class BatchAnalysisService:
                             f"UPDATE analysis_batches SET {key}=NULL WHERE id=? AND {key}=?",  # noqa: S608 -- key is from the fixed three-column tuple above.
                             (batch["id"], raw_path),
                         )
-            except OSError as exc:
+            except (OSError, BatchLifecycleError) as exc:
                 log_event(LOGGER, logging.WARNING, "Batch local evidence cleanup deferred",
                           event="batch_local_cleanup", operation="batch_local_cleanup",
                           details={"batch_id": batch.get("id"), "column": key, "error_type": type(exc).__name__})
                 continue
         if immediate:
             batch_id = str(batch.get("id") or "")
-            root = (self.batch_root / batch_id).resolve() if batch_id else None
-            if root is not None and root.parent == self.batch_root.resolve() and root.is_dir():
+            if not batch_id:
+                return
+            try:
+                root = self._local_evidence_path(batch_id, str(self.batch_root / batch_id))
+            except BatchLifecycleError:
+                return
+            if root.is_dir():
                 for candidate in sorted(root.rglob("*"), key=lambda value: len(value.parts), reverse=True):
                     try:
                         if candidate.is_file() or candidate.is_symlink():
@@ -3112,11 +3218,41 @@ class BatchAnalysisService:
             return "noop"
         return "cleanup_only"
 
-    def import_batch(self, batch_id: str, *, cleanup_only: bool = False) -> dict[str, Any]:
+    def _import_saved_results(self, batch: dict[str, Any]) -> dict[str, Any]:
+        batch_id = str(batch["id"])
+        job = self.jobs.get(str(batch["job_id"])) if batch["job_id"] else None
+        if str(batch["status"]) not in TERMINAL_BATCH_STATUSES or job is None:
+            raise ValueError("找不到已結束批次或其原始計畫")
+        plan = json.loads(job["analysis_spec_json"] or "{}")
+        if not isinstance(plan, dict) or fingerprint(plan) != batch["analysis_fingerprint"]:
+            raise ValueError("已保存的批次計畫與送出時的分析指紋不符")
+        imported = held = 0
+        for item in self.batches.saved_stale_results(batch_id):
+            try:
+                record = json.loads(item["raw_response_json"])
+                response = record["response"]
+                if (record.get("custom_id") != item["custom_id"] or record.get("error") is not None
+                        or response.get("status_code") != 200 or not isinstance(response.get("body"), dict)):
+                    raise ValueError("invalid stored Batch response")
+                outcome = self._import_success(batch, item, record, response["body"], plan, None, replay_saved=True)
+            except (AttributeError, BatchLifecycleError, KeyError, TypeError, ValueError):
+                held += 1
+                continue
+            if outcome in {"imported", "already_imported"}:
+                imported += 1
+            else:
+                held += 1
+        return {"batch_id": batch_id, "restored": imported, "held": held}
+
+    def import_batch(
+        self, batch_id: str, *, cleanup_only: bool = False, replay_saved: bool = False,
+    ) -> dict[str, Any]:
         import_started = time.monotonic()
         batch = self.batches.get(batch_id)
         if batch is None:
             raise KeyError(batch_id)
+        if replay_saved:
+            return self._import_saved_results(dict(batch))
         terminal_mode = self._terminal_import_mode(batch)
         if terminal_mode == "noop":
             return {"batch_id": batch_id, "already_imported": True}
@@ -3164,57 +3300,63 @@ class BatchAnalysisService:
                 self._cleanup_remote(dict(batch), plan)
                 return {"batch_id": batch_id, "cleanup_only": True}
             self.batches.update_batch(batch_id, status="importing")
-            provider = self._provider(str(batch["provider_id"]), plan)
+            output_path = self._local_evidence_path(
+                batch_id, str(batch["local_output_path"] or (self.batch_root / batch_id / "output.jsonl")),
+            )
+            error_path = self._local_evidence_path(
+                batch_id, str(batch["local_error_path"] or (self.batch_root / batch_id / "error.jsonl")),
+            )
+            # Before file completion was tracked, an item receipt was written
+            # only after both streams had been read. Require contiguous archived
+            # lines for each remote file before relying on this older evidence.
+            legacy_checkpoint = self.batches.has_item_receipts(batch_id)
+            result_files = (
+                ("output", output_path, batch["output_file_id"]),
+                ("error", error_path, batch["error_file_id"]),
+            )
+            archived_files = {
+                role: records.has_complete_file(str(file_id or path.name), legacy_checkpoint=legacy_checkpoint)
+                for role, path, file_id in result_files
+            }
+            downloads = [
+                (role, path, file_id) for role, path, file_id in result_files
+                if file_id and not archived_files[role] and not path.is_file()
+            ]
+            try:
+                provider = (
+                    self._result_download_provider(dict(batch), plan) if downloads
+                    else self._provider(str(batch["provider_id"]), plan)
+                )
+            except (ValueError, BatchLifecycleError) as unavailable:
+                if downloads:
+                    self.batches.update_batch(
+                        batch_id, status="import_pending", last_error_code="BATCH-IMPORT-DEFERRED",
+                        last_error_message="需要原帳號、專案與端點才能下載 Batch 結果",
+                    )
+                    raise BatchLifecycleError(
+                        "無法用原帳號下載 Batch 結果，稍後可重試匯入", "BATCH-IMPORT-DEFERRED",
+                    ) from unavailable
+                provider = None
             close = getattr(provider, "close", None)
             if callable(close):
                 resources.callback(close)
-            output_path = Path(
-                str(batch["local_output_path"] or (self.batch_root / batch_id / "output.jsonl"))
-            )
-            error_path = Path(str(batch["local_error_path"] or (self.batch_root / batch_id / "error.jsonl")))
-            if batch["output_file_id"] and not output_path.is_file():
-                provider.download_file_content(str(batch["output_file_id"]), output_path)
-                self.batches.update_batch(batch_id, local_output_path=str(output_path))
-            if batch["error_file_id"] and not error_path.is_file():
-                provider.download_file_content(str(batch["error_file_id"]), error_path)
-                self.batches.update_batch(batch_id, local_error_path=str(error_path))
-            successes: set[str] = set()
-            errors: set[str] = set()
-            current_batch = self.batches.get(batch_id)
-            self._read_results(
-                Path(str(current_batch["local_output_path"])) if current_batch["local_output_path"] else None,
-                current_batch,
-                is_error=False,
-                records=records,
-            )
-            self._read_results(
-                Path(str(current_batch["local_error_path"])) if current_batch["local_error_path"] else None,
-                current_batch,
-                is_error=True,
-                records=records,
-            )
-            expected: dict[str, dict[str, Any]] = {
-                str(item["custom_id"]): item for item in self.batches.items(batch_id)
-            }
-            try:
-                lane = plan["provider_route"][0].get("complementary_lane")
-                route = self.provider_service.complementary_route(lane) if lane == "openai_backfill" else None
-                _current_plan, current_analysis_fingerprint, _current_model = (
-                    self._plan(route) if route is not None else self._plan()
-                )
-            except Exception as exc:
-                raise BatchLifecycleError("目前分析計畫無法核對，保留結果等待重新匯入", "BATCH-IMPORT-DEFERRED") from exc
-            unknown = set(records) - set(expected)
+            for role, path, file_id in downloads:
+                provider.download_file_content(str(file_id), path)
+                self.batches.update_batch(batch_id, **{f"local_{role}_path": str(path)})
+            successes = errors = deferred = 0
+            for role, path, _ in result_files:
+                self._read_results(path, dict(batch), is_error=role == "error", records=records,
+                                   archived=archived_files[role])
+            unknown, missing = self.batches.unpaired_result_counts(batch_id, records.run_id)
             if unknown:
                 self.batches.update_batch(
                     batch_id,
                     reconciliation_error_code="unexpected_custom_id",
-                    reconciliation_error_message=f"結果檔含 {len(unknown)} 個未預期 custom_id",
+                    reconciliation_error_message=f"結果檔含 {unknown} 個未預期 custom_id",
                 )
-            deferred: set[str] = set()
             for custom_id, (kind, record, body) in records.items():
-                expected_item: dict[str, Any] | None = expected.get(custom_id)
-                if expected_item is None:
+                expected_item = self.batches.item_by_custom_id(custom_id)
+                if expected_item is None or str(expected_item["batch_id"]) != batch_id:
                     continue
                 remote_response = record.get("response")
                 receipt_body = remote_response.get("body") if isinstance(remote_response, dict) else None
@@ -3228,7 +3370,7 @@ class BatchAnalysisService:
                         "duplicate_custom_id",
                         job_id=str(batch["job_id"]),
                     )
-                    errors.add(custom_id)
+                    errors += 1
                 elif kind == "error":
                     raw_error = record.get("error")
                     error = raw_error if isinstance(raw_error, dict) else {"message": str(raw_error or "遠端 Batch 項目失敗")}
@@ -3239,7 +3381,7 @@ class BatchAnalysisService:
                         "failed",
                         job_id=str(batch["job_id"]),
                     )
-                    errors.add(custom_id)
+                    errors += 1
                 elif kind == "schema_invalid":
                     self._mark_item_error(
                         expected_item,
@@ -3248,13 +3390,10 @@ class BatchAnalysisService:
                         "schema_invalid",
                         job_id=str(batch["job_id"]),
                     )
-                    errors.add(custom_id)
+                    errors += 1
                 elif kind == "success" and body is not None:
                     try:
-                        outcome = self._import_success(
-                            batch, expected_item, record, body, plan, provider,
-                            current_analysis_fingerprint,
-                        )
+                        outcome = self._import_success(batch, expected_item, record, body, plan, provider)
                     except BatchLifecycleError as exc:
                         if exc.code != "BATCH-IMPORT-DEFERRED":
                             raise
@@ -3262,24 +3401,13 @@ class BatchAnalysisService:
                         # intact. The importer retries it without a new POST.
                         self.batches.update_item(str(expected_item["id"]),
                                                  error_code=exc.code, error_message=str(exc))
-                        deferred.add(custom_id)
+                        deferred += 1
                         continue
                     if outcome in {"imported", "already_imported"}:
-                        successes.add(custom_id)
+                        successes += 1
                     elif outcome not in {"pending", "submitted", "retry_pending"}:
-                        errors.add(custom_id)
-            seen = set(records)
-            for custom_id, item in expected.items():
-                if custom_id in seen:
-                    continue
-                if str(item["status"]) in {
-                    "imported",
-                    "failed",
-                    "schema_invalid",
-                    "stale",
-                    "duplicate_custom_id",
-                }:
-                    continue
+                        errors += 1
+            for item in self.batches.missing_result_items(batch_id, records.run_id):
                 self.batches.update_item(
                     str(item["id"]),
                     status="retry_pending",
@@ -3296,9 +3424,9 @@ class BatchAnalysisService:
             if deferred:
                 self.batches.update_batch(batch_id, status="import_pending",
                                           last_error_code="BATCH-IMPORT-DEFERRED",
-                                          last_error_message=f"{len(deferred)} 筆來源暫時無法核對，保留結果等待重試")
-                return {"batch_id": batch_id, "success": len(successes), "errors": len(errors),
-                        "missing": len(set(expected) - seen), "deferred": len(deferred)}
+                                          last_error_message=f"{deferred} 筆來源暫時無法核對，保留結果等待重試")
+                return {"batch_id": batch_id, "success": successes, "errors": errors,
+                        "missing": missing, "deferred": deferred}
             current = self.batches.get(batch_id)
             if current is not None and current["last_error_code"] == "BATCH-IMPORT-DEFERRED":
                 self.batches.update_batch(batch_id, last_error_code=None, last_error_message=None)
@@ -3309,9 +3437,9 @@ class BatchAnalysisService:
                 self._finish(batch_id)
             result = {
                 "batch_id": batch_id,
-                "success": len(successes),
-                "errors": len(errors),
-                "missing": len(set(expected) - seen),
+                "success": successes,
+                "errors": errors,
+                "missing": missing,
             }
             log_event(
                 LOGGER,
@@ -3329,13 +3457,22 @@ class BatchAnalysisService:
             )
             return result
 
-    def get_detail(self, batch_id: str) -> dict[str, Any] | None:
+    def get_detail(self, batch_id: str, *, item_page: int = 1, include_raw: bool = True) -> dict[str, Any] | None:
         batch = self.batches.get(batch_id)
         if batch is None:
             return None
         result = dict(batch)
         result["items_by_status"] = self.batches.counts(batch_id)
-        result["items"] = self.batches.items(batch_id)
+        result["can_replay_saved"] = (
+            str(batch["status"]) in TERMINAL_BATCH_STATUSES and self.batches.has_saved_stale_results(batch_id)
+        )
+        page_size = 200
+        items = self.batches.items_page(
+            batch_id, offset=(item_page - 1) * page_size, limit=page_size + 1, include_raw=include_raw,
+        )
+        result["items"] = items[:page_size]
+        result["item_page"] = item_page
+        result["has_more_items"] = len(items) > page_size
         input_path = Path(str(batch["local_input_path"])) if batch["local_input_path"] else None
         result["actual_jsonl_bytes"] = input_path.stat().st_size if input_path and input_path.is_file() else 0
         shard_rows = self.batches.list(limit=500)
@@ -3351,9 +3488,9 @@ class BatchAnalysisService:
                 }
             )
         imported = int(batch["imported_items"] or 0)
-        costs = self.batches.cost_summary(batch_id)
+        costs = self.batches.cost_summary(batch_id, item_ids=[str(item["id"]) for item in result["items"]])
         result.update({key: costs[key] for key in ("cost_complete", "unknown_cost_items", "known_cost")})
-        result["cost_complete"] = costs["cost_complete"] and len(costs["items"]) == int(batch["total_items"])
+        result["cost_complete"] = costs["cost_complete"] and costs["item_count"] == int(batch["total_items"])
         for item in result["items"]:
             item.update(costs["items"].get(str(item["id"]), {"cost_known": False, "display_cost": None}))
         result["actual_cost"] = costs["known_cost"] if result["cost_complete"] else None

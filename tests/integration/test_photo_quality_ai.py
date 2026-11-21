@@ -541,7 +541,8 @@ def test_token_limited_provider_cache_is_used_without_failover(app, tmp_path):
     channel.semaphore.release()
 
 
-def test_failover_checks_next_provider_cache_after_first_network_miss(app, tmp_path):
+@pytest.mark.parametrize("first_unavailable", [False, True])
+def test_failover_reuses_saved_caption_even_if_primary_recovers(app, tmp_path, first_unavailable):
     photo_id = _scan(app, tmp_path)[0]
     _setting(app, "analysis.ai_mode", "eligible")
     _setting(app, "analysis.prefilter_enabled", False)
@@ -550,7 +551,7 @@ def test_failover_checks_next_provider_cache_after_first_network_miss(app, tmp_p
     first.provider_id = "provider-a"
     fallback = CountingProvider()
     fallback.provider_id = "provider-b"
-    service.analyze_photo(
+    original = service.analyze_photo(
         photo_id=photo_id,
         job_id=None,
         provider=fallback,
@@ -558,7 +559,8 @@ def test_failover_checks_next_provider_cache_after_first_network_miss(app, tmp_p
         high_model="failover-cache",
     )
     channel = ProviderChannel(first, priority=1)
-    channel.circuit_until = time.monotonic() + 60
+    if first_unavailable:
+        channel.circuit_until = time.monotonic() + 60
     router = FailoverVisionProvider([channel, ProviderChannel(fallback, priority=2)])
 
     result = service.analyze_photo(
@@ -570,6 +572,8 @@ def test_failover_checks_next_provider_cache_after_first_network_miss(app, tmp_p
     )
 
     assert result["stage"] == "cache"
+    assert result["analysis"]["side_caption"] == original["analysis"]["side_caption"]
+    assert result["_actual_cost"] == 0
     assert first.analyze_calls == 0
     assert fallback.analyze_calls == 1
 
@@ -664,6 +668,173 @@ def test_paid_result_is_recovered_without_network_or_new_job_cost_after_cache_lo
         assert connection.execute("SELECT COUNT(*) FROM api_usage").fetchone()[0] == 1
 
 
+@pytest.mark.parametrize("mode", ["chat", "responses", "seasonal", "legacy-approved"])
+def test_saved_transport_reply_recovers_after_interruption_with_provider_offline(app, client, tmp_path, monkeypatch, mode):
+    from inktime.app.providers.openai_compatible import ProviderHTTPError
+    from inktime.app.repositories.billable_operations import BillableOperationRepository
+    from inktime.app.repositories.model_evidence import save_model_request, save_model_transport_response
+
+    photo_id = _scan(app, tmp_path)[0]
+    _setting(app, "analysis.ai_mode", "eligible")
+    _setting(app, "analysis.prefilter_enabled", False)
+    database = app.extensions["inktime_database"]
+    source = tmp_path / "photos" / "photo.jpg"
+    original_bytes = source.read_bytes()
+    original_mtime = source.stat().st_mtime_ns
+    original_caption = "那天的風和笑容都在。"
+
+    class InterruptedProvider(CountingProvider):
+        def analyze(self, **_kwargs):
+            self.analyze_calls += 1
+            with database.session() as connection:
+                operation_id = connection.execute(
+                    "SELECT id FROM billable_operations WHERE state='started'"
+                ).fetchone()[0]
+            content = json.dumps(valid_result(side_caption=original_caption), ensure_ascii=False)
+            if mode == "responses":
+                body = {"status": "completed", "output": [
+                    {"type": "message", "content": [{"type": "output_text", "text": content}]},
+                ]}
+                request = {"model": "old-model", "input": []}
+            else:
+                body = {"choices": [{"message": {"content": content}, "finish_reason": "stop"}]}
+                request = {"model": "old-model", "messages": []}
+            body.update(id="fixture-body-id", model="served-fixture",
+                        usage={"input_tokens": 100, "output_tokens": 20, "cost": 0.002})
+            save_model_request(database, operation_id, request)
+            save_model_transport_response(
+                database, operation_id, json.dumps(body, ensure_ascii=False),
+                http_status=200, request_id="fixture-header-id",
+            )
+            raise ProviderHTTPError("fixture interrupted after durable receipt", "VLM-001",
+                                    ambiguous=True, vision_started=True, request_started=True)
+
+    provider = InterruptedProvider()
+    service = app.extensions["inktime_analysis_service"]
+    arguments = dict(photo_id=photo_id, job_id=None, strategy="single")
+    with pytest.raises(ProviderHTTPError):
+        service.analyze_photo(**arguments, provider=provider, high_model="old-model")
+    with database.session() as connection:
+        assert connection.execute("SELECT state FROM billable_operations").fetchone()[0] == "started"
+        assert connection.execute("SELECT status FROM api_usage").fetchone()[0] == "failed"
+        operation_id, sha = connection.execute("SELECT id,content_sha256 FROM billable_operations").fetchone()
+
+    with pytest.raises(ValueError, match="已有可用"):
+        BillableOperationRepository(database).approve_resend(operation_id, reason="fixture approval")
+
+    restarted = analysis_module.PhotoAnalysisService(
+        service.photos, service.usage, service.thumbnails, budgets=service.budgets, settings=service.settings,
+    )
+    if mode == "responses":
+        from inktime.app.workers.runner import WorkerRunner
+
+        create_admin(app)
+        login(client)
+        _setting(app, "analysis.execution_mode", "local_with_manual_ai")
+        queued = client.post(f"/api/v1/photos/{photo_id}/ai", headers={"X-CSRF-Token": csrf(client)})
+        assert queued.status_code == 201
+        job_id = queued.json["id"]
+        app.extensions["inktime_job_service"].start(job_id)
+        assert WorkerRunner(app).run_once() == 1
+        item = app.extensions["inktime_job_repository"].list_items(job_id)[0]
+        assert item["status"] == "completed"
+        assert json.loads(item["result_json"])["analysis"]["side_caption"] == original_caption
+    elif mode == "seasonal":
+        from inktime.app.workers.runner import WorkerRunner
+
+        _setting(app, "analysis.execution_mode", "seasonal_ai")
+        seasonal = app.extensions["inktime_seasonal_analysis_service"]
+        target = seasonal.today().isoformat()
+        with database.transaction() as connection:
+            task_id = connection.execute(
+                """INSERT INTO seasonal_analysis_tasks(
+                    content_sha256,photo_id,status,target_date,created_at,updated_at
+                ) VALUES (?,?,'unknown',?,?,?)""",
+                (sha, photo_id, target, target, target),
+            ).lastrowid
+
+        def no_router(*args, **kwargs):
+            raise AssertionError("seasonal recovery must not build a model route")
+
+        monkeypatch.setattr(seasonal.providers, "build_router", no_router)
+        create_admin(app)
+        login(client)
+        page = client.get("/analysis/seasonal")
+        assert page.status_code == 200
+        assert "恢復已保存回應" in page.get_data(as_text=True)
+        queued = client.post(f"/api/v1/analysis/seasonal/tasks/{task_id}/retry",
+                             json={}, headers={"X-CSRF-Token": csrf(client)})
+        assert queued.status_code == 201
+        assert WorkerRunner(app).run_once() == 1
+        item = app.extensions["inktime_job_repository"].list_items(queued.json["id"])[0]
+        assert item["status"] == "completed"
+        assert json.loads(item["result_json"])["analysis"]["side_caption"] == original_caption
+    elif mode == "legacy-approved":
+        with database.transaction() as connection:
+            connection.execute(
+                "UPDATE billable_operations SET state='approved',resolution_note=resolution_note||char(10)||'old approval'"
+            )
+    for _ in range(2):
+        restored = restarted.analyze_photo(**arguments, provider=None, high_model="future-model")
+        assert restored["analysis"]["side_caption"] == original_caption
+        assert restored["_actual_cost"] == 0
+    assert provider.analyze_calls == 1
+    with database.session() as connection:
+        assert connection.execute("SELECT state FROM billable_operations").fetchone()[0] == "completed"
+        assert connection.execute("SELECT COUNT(*) FROM billable_operations").fetchone()[0] == 1
+        usage = connection.execute("SELECT status,actual_cost,request_id,model FROM api_usage").fetchall()
+        assert [tuple(row) for row in usage] == [("completed", 0.002, "fixture-header-id", "served-fixture")]
+    assert source.read_bytes() == original_bytes
+    assert source.stat().st_mtime_ns == original_mtime
+
+
+def test_queued_manual_analysis_and_caption_are_bound_to_the_original_bytes(app, client, tmp_path, monkeypatch):
+    from inktime.app.workers.runner import WorkerRunner
+
+    photo_id = _scan(app, tmp_path)[0]
+    _setting(app, "analysis.execution_mode", "local_with_manual_ai")
+    fake = CountingProvider()
+    providers = app.extensions["inktime_provider_service"]
+    monkeypatch.setattr(providers, "usable_route_snapshot", lambda: [{"provider_id": "fake", "model": "fake"}])
+    monkeypatch.setattr(providers, "build_router", lambda *args, **kwargs: fake)
+    repository = app.extensions["inktime_photo_repository"]
+    old_sha = repository.get_with_path(photo_id)["sha256"]
+    with repository.database.transaction() as connection:
+        connection.execute(
+            "INSERT INTO photo_reviews(photo_id,caption_override,version,updated_at) VALUES (?,?,3,'2026-01-01')",
+            (photo_id, "舊照片的人工一句話"),
+        )
+    create_admin(app)
+    login(client)
+    queued = client.post(f"/api/v1/photos/{photo_id}/ai", headers={"X-CSRF-Token": csrf(client)})
+    assert queued.status_code == 201
+    job_id = queued.json["id"]
+    job_repository = app.extensions["inktime_job_repository"]
+    assert job_repository.list_items(job_id)[0]["analysis_content_sha256"] == old_sha
+
+    source = tmp_path / "photos" / "photo.jpg"
+    Image.new("RGB", (900, 600), "blue").save(source)
+    scanner = PhotoScanner(repository, PhotoPreprocessor(), app.extensions["inktime_thumbnail_cache"])
+    original = repository.get_with_path(photo_id)
+    with repository.database.session() as connection:
+        library_name = connection.execute("SELECT name FROM libraries WHERE id=?", (original["library_id"],)).fetchone()[0]
+    scanner.scan(library_name, source.parent, mode="full", build_thumbnails=False)
+    assert repository.get_with_path(photo_id)["sha256"] != old_sha
+    assert app.extensions["inktime_render_service"]._photo_level_caption_override(photo_id) is None
+    with repository.database.session() as connection:
+        archived = connection.execute(
+            "SELECT photo_json FROM photo_content_history WHERE photo_id=? AND content_sha256=?",
+            (photo_id, old_sha),
+        ).fetchone()
+        assert json.loads(archived[0])["reviews"][0]["caption_override"] == "舊照片的人工一句話"
+        review = connection.execute("SELECT version FROM photo_reviews WHERE photo_id=?", (photo_id,)).fetchone()
+        assert review[0] == 4
+    app.extensions["inktime_job_service"].start(job_id)
+    assert WorkerRunner(app).run_once() == 1
+    assert job_repository.list_items(job_id)[0]["error_code"] == "CONFIG_INVALID"
+    assert fake.analyze_calls == 0
+
+
 def test_source_replacement_with_same_size_and_mtime_cannot_reuse_old_analysis(app, tmp_path):
     import os
     from inktime.app.domain.photos.formats import ImageSourceError
@@ -686,6 +857,49 @@ def test_source_replacement_with_same_size_and_mtime_cannot_reuse_old_analysis(a
         service.analyze_photo(**arguments)
     assert error.value.code == "THUMB-004"
     assert provider.analyze_calls == 1
+
+
+def test_retry_of_same_confirmed_recompute_job_reuses_its_result(app, tmp_path):
+    photo_id = _scan(app, tmp_path)[0]
+    _setting(app, "analysis.ai_mode", "eligible")
+    _setting(app, "analysis.prefilter_enabled", False)
+    actor = create_admin(app)
+    service = app.extensions["inktime_analysis_service"]
+    jobs = app.extensions["inktime_job_service"]
+    job_id = jobs.create_analysis_job(
+        name="explicit fixture recompute", strategy="single", settings={}, created_by=actor,
+        photo_ids=[photo_id], force_recompute=True, budget_limit=None,
+    )
+    provider = CountingProvider()
+    arguments = dict(photo_id=photo_id, job_id=job_id, strategy="single", provider=provider, force_recompute=True)
+    first = service.analyze_photo(**arguments)
+    replayed = service.analyze_photo(**arguments)
+    assert first["_actual_cost"] > 0
+    assert replayed["_actual_cost"] == 0
+    assert replayed["analysis"]["side_caption"] == first["analysis"]["side_caption"]
+    assert provider.analyze_calls == 1
+
+
+def test_concurrent_jobs_using_different_models_only_send_each_content_once(app, tmp_path):
+    photo_id = _scan(app, tmp_path)[0]
+    _setting(app, "analysis.ai_mode", "eligible")
+    _setting(app, "analysis.prefilter_enabled", False)
+    service = app.extensions["inktime_analysis_service"]
+    first = SlowCountingProvider(valid_result(side_caption="保留第一句測試短句。"))
+    first.provider_id = "fixture-first"
+    second = SlowCountingProvider(valid_result(side_caption="保留第二句測試短句。"))
+    second.provider_id = "fixture-second"
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        tasks = [executor.submit(
+            service.analyze_photo, photo_id=photo_id, job_id=None, strategy="single",
+            provider=provider, high_model=provider.provider_id,
+        ) for provider in (first, second)]
+        results = [task.result(timeout=30) for task in tasks]
+    assert first.analyze_calls + second.analyze_calls == 1
+    assert results[0]["analysis"]["side_caption"] == results[1]["analysis"]["side_caption"]
+    assert sum(result["_actual_cost"] > 0 for result in results) == 1
+    with app.extensions["inktime_database"].session() as connection:
+        assert connection.execute("SELECT COUNT(*) FROM api_usage").fetchone()[0] == 1
 
 
 def test_concurrent_force_requests_share_one_fresh_generation(app, tmp_path):

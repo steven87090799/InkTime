@@ -305,6 +305,14 @@ def local_slot_datetime(
     raise ValueError("DEVICE-008 local slot 無法正規化為有效 timezone epoch")
 
 
+def next_daily_slot(now: datetime, slot: str, zone: ZoneInfo) -> datetime:
+    local_day = now.astimezone(zone).date()
+    candidate = local_slot_datetime(local_day, slot, zone).astimezone(timezone.utc)
+    if candidate <= now.astimezone(timezone.utc):
+        candidate = local_slot_datetime(local_day + timedelta(days=1), slot, zone).astimezone(timezone.utc)
+    return candidate
+
+
 def resolved_slot_datetimes(
     target_date: date, values: list[str], timezone_name: str | ZoneInfo, *,
     minimum_gap_minutes: int = MINIMUM_SCHEDULE_GAP_MINUTES, maximum_slots: int = MAX_OFFLINE_SLOTS,

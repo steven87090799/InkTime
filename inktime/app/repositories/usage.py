@@ -64,13 +64,31 @@ class UsageRepository:
         tokens_reported: bool = True,
     ) -> int:
         completed_at = datetime.now(timezone.utc).isoformat()
+        recorded_cost = (
+            max(0.0, float(actual_cost if actual_cost is not None else estimated_cost or 0))
+            if cost_source in {"provider_reported", "estimated"} else 0.0
+        )
         with self.database.transaction() as connection:
             if operation_id is not None:
                 existing = connection.execute(
-                    "SELECT id FROM api_usage WHERE operation_id=?", (operation_id,)
+                    "SELECT id,job_id,status,cost_source FROM api_usage WHERE operation_id=?", (operation_id,)
                 ).fetchone()
                 if existing:
-                    return int(existing["id"])
+                    usage_id = int(existing["id"])
+                    if existing["status"] == "failed" and existing["cost_source"] == "unknown" and status == "completed":
+                        connection.execute(
+                            """
+                            UPDATE api_usage SET model=?,input_tokens=?,output_tokens=?,cached_tokens=?,
+                                reasoning_tokens=?,cache_write_tokens=?,estimated_cost=?,actual_cost=?,
+                                cost_source=?,usage_complete=?,status='completed',error_code=NULL,completed_at=?,
+                                request_id=COALESCE(?,request_id)
+                            WHERE id=?
+                            """,
+                            (model,input_tokens,output_tokens,cached_tokens,reasoning_tokens,cache_write_tokens,
+                             estimated_cost,actual_cost,cost_source,int(tokens_reported),completed_at,request_id,usage_id),
+                        )
+                        self._add_job_cost(connection, existing["job_id"], usage_id, recorded_cost)
+                    return usage_id
             registered_provider_id = self._registered_provider_id(connection, provider_id)
             cursor = connection.execute(
                 """
@@ -114,11 +132,7 @@ class UsageRepository:
             )
             if cursor.rowcount:
                 connection.execute("UPDATE api_usage SET usage_complete=? WHERE id=?", (int(tokens_reported), cursor.lastrowid))
-                self._add_job_cost(
-                    connection, job_id, int(cursor.lastrowid or 0),
-                    max(0.0, float(actual_cost if actual_cost is not None else estimated_cost or 0))
-                    if cost_source in {"provider_reported", "estimated"} else 0.0,
-                )
+                self._add_job_cost(connection, job_id, int(cursor.lastrowid or 0), recorded_cost)
         if cursor.lastrowid is None:
             raise RuntimeError("USAGE-001 inserted usage id unavailable")
         return int(cursor.lastrowid)

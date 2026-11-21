@@ -3,9 +3,17 @@
 
 from __future__ import annotations
 
+from contextlib import closing
+import os
 from pathlib import Path
+import sqlite3
 import sys
 
+ROOT_DIR = Path(__file__).resolve().parents[1]
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+
+from inktime.app.core.runtime_health import component_ready
 
 TARGETS = {
     "worker": b"inktime.app.workers.runner",
@@ -32,7 +40,15 @@ def main() -> int:
     if not process_exists(target):
         print(f"{mode} process not found", file=sys.stderr)
         return 1
-    return 0
+    database = Path(os.environ.get("INKTIME_DATABASE") or "/data/inktime.db").resolve()
+    try:
+        with closing(sqlite3.connect(f"{database.as_uri()}?mode=ro", timeout=2, uri=True)) as connection:
+            if component_ready(connection, mode):
+                return 0
+    except sqlite3.Error:
+        pass
+    print(f"{mode} heartbeat missing or stale", file=sys.stderr)
+    return 1
 
 
 if __name__ == "__main__":

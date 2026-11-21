@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -89,6 +90,8 @@ def test_worker_idle_backoff_is_bounded_and_resets_after_work(monkeypatch):
 
 
 def test_worker_legacy_poll_value_never_exceeds_idle_cap(monkeypatch):
+    heartbeats = []
+
     class FakeStop:
         def __init__(self):
             self.run_count = 0
@@ -101,7 +104,10 @@ def test_worker_legacy_poll_value_never_exceeds_idle_cap(monkeypatch):
             self.waits.append(timeout)
 
     class FakeApp:
-        extensions = {"inktime_settings_repository": object()}
+        extensions = {
+            "inktime_settings_repository": object(),
+            "inktime_observability_service": SimpleNamespace(heartbeat=heartbeats.append),
+        }
 
     monkeypatch.setattr("inktime.app.workers.runner.configure_logging", lambda **_kwargs: None)
     runner = WorkerRunner(FakeApp())
@@ -116,6 +122,7 @@ def test_worker_legacy_poll_value_never_exceeds_idle_cap(monkeypatch):
     runner.run_forever(poll_seconds=300)
 
     assert stop.waits == [60.0, 60.0]
+    assert heartbeats == ["worker", "worker"]
 
 
 def test_worker_poll_setting_matches_the_runtime_backoff_ceiling():

@@ -80,18 +80,21 @@ class SeasonalAnalysisService:
                                         scoring_profile_id=str(self.scoring.current()["id"]))
 
     def _create(self, rows: list[dict], target: date, actor: str, *, retry_task=None,
-                confirmation=None, force=False, plan=None) -> str:
+                confirmation=None, force=False, plan=None, saved_result_only=False) -> str:
         plan = plan or self._plan()
         job_id = self.jobs.create(
             name=f"{'手動重試' if retry_task else '全部重跑' if force else '歷年同期'}：{target.isoformat()}（{len(rows)} 張）",
             strategy="single", settings={"concurrency": 1, "max_attempts": 1, "force_ai": True,
                 "seasonal_analysis": True, "seasonal_retry_task_id": retry_task,
+                "saved_result_only": saved_result_only,
                 "target_date": target.isoformat(), "source": "seasonal",
                 **({"complementary_lane": "openrouter_daily"} if self.settings.get("analysis.complementary_enabled", False) else {})},
             photo_ids=[row["id"] for row in rows], created_by=actor, priority=1,
             analysis_spec=plan, analysis_fingerprint=stored_analysis_fingerprint(plan), force_recompute=force,
             dedupe_key=f"seasonal-rerun:{confirmation[0]}" if confirmation else None,
-            commit_hook=self.repository.claim_hook(rows, target, retry_task=retry_task, confirmation=confirmation),
+            commit_hook=self.repository.claim_hook(
+                rows, target, retry_task=retry_task, confirmation=confirmation, saved_result_only=saved_result_only,
+            ),
         )
         self.jobs.transition(job_id, {"pending"}, "running", "started")
         return job_id
@@ -193,7 +196,7 @@ class SeasonalAnalysisService:
             self.repository.note_waiting(job_id, target)
         return waiting
 
-    def analyze_item(self, *, photo_id: str, job_id: str, **kwargs) -> dict:
+    def analyze_item(self, *, photo_id: str, job_id: str, expected_content_sha256: str | None = None, **kwargs) -> dict:
         if self.settings.get("analysis.complementary_enabled", False):
             job = self.jobs.get(job_id)
             scope = json.loads(job["settings_json"]) if job else {}
@@ -208,13 +211,17 @@ class SeasonalAnalysisService:
         if task is None or task["status"] not in {"queued", "running"}:
             raise ValueError("SEASONAL-OWNERSHIP 分析任務已結束或沒有送出授權")
         photo = self.photos.get_with_path(photo_id)
-        if photo is None or photo["sha256"] != task["content_sha256"]:
+        if (photo is None or photo["sha256"] != task["content_sha256"]
+                or (expected_content_sha256 is not None and photo["sha256"] != expected_content_sha256)):
             raise ValueError("IMG-CHANGED 同期任務的照片內容已變更，請重新掃描")
         with self.repository.database.transaction() as connection:
             connection.execute("UPDATE seasonal_analysis_tasks SET status='running',updated_at=? WHERE id=?", (utc_now(), task["id"]))
         try:
             if not kwargs.get("force_recompute", False):
-                inherited = self.photos.inherit_existing_analysis(photo_id, job_id, include_self=True, semantic_only=True)
+                inherited = self.photos.inherit_existing_analysis(
+                    photo_id, job_id, include_self=True, semantic_only=True,
+                    expected_content_sha256=str(task["content_sha256"]),
+                )
                 if inherited is not None:
                     return {"analysis": inherited, "stage": "inherited", "_actual_cost": 0}
             result = self.analysis.analyze_photo(photo_id=photo_id, job_id=job_id,
@@ -237,11 +244,16 @@ class SeasonalAnalysisService:
         task = self.repository.task(task_id)
         if task is None or task["status"] not in {"failed", "unknown"}:
             raise ValueError("只有失敗或結果不明的照片可手動重試")
-        if not accept_possible_charge:
-            raise ValueError("請確認手動重試可能再次計費")
         rows: list[dict] = next(self.repository.candidate_pages(None, 0, content_sha256=str(task["content_sha256"])), [])
         if not rows:
             raise ValueError("照片已變更、被排除或無法處理，請先檢查照片庫")
+        if self.photos.have_saved_model_evidence([str(row["id"]) for row in rows]):
+            plan = self.analysis.build_plan(
+                strategy="single", provider_route=[], scoring_profile_id=str(self.scoring.current()["id"]),
+            )
+            return self._create(rows, self.today(), actor, retry_task=task_id, plan=plan, saved_result_only=True)
+        if not accept_possible_charge:
+            raise ValueError("請確認手動重試可能再次計費")
         original_job = self.jobs.get(str(task["job_id"])) if task["job_id"] else None
         force = bool(original_job and original_job["force_recompute"])
         return self._create(rows, self.today(), actor, retry_task=task_id, force=force)

@@ -374,6 +374,7 @@ def test_device_auth_endpoints_share_identical_missing_token_behavior(client, pa
 def test_device_downloads_versioned_manifest_and_verified_file(client, app):
     from PIL import Image
     from hashlib import sha256
+    from zoneinfo import ZoneInfo
     from tests.security.test_device_release_authorization import certified_release_metadata
 
     _, token = app.extensions["inktime_device_repository"].create("客廳")
@@ -401,6 +402,15 @@ def test_device_downloads_versioned_manifest_and_verified_file(client, app):
         "schedule": "08:00",
         "rotation": 0,
     }
+    requested_at = datetime.now(timezone.utc)
+    extended = client.get("/api/device/v1/releases/latest?refresh_epoch=1", headers=headers)
+    assert extended.status_code == 200
+    extended_config = extended.get_json()["device_config"]
+    epoch = extended_config.pop("next_refresh_epoch")
+    assert type(epoch) is int and epoch > int(requested_at.timestamp())
+    refresh = datetime.fromtimestamp(epoch, ZoneInfo("Asia/Taipei"))
+    assert (refresh.hour, refresh.minute, refresh.second) == (8, 0, 0)
+    assert extended_config == body["device_config"]
     file_response = client.get(body["download_base_url"] + body["files"][0]["name"], headers=headers)
     assert file_response.status_code == 200
     assert len(file_response.data) == 96_000

@@ -70,9 +70,9 @@ def _ai_job_error(exc: ValueError) -> dict:
     return {"error_code": code, "message": str(exc)}
 
 
-def _build_analysis_plan(settings, strategy: str) -> dict:
+def _build_analysis_plan(settings, strategy: str, *, photo_ids: list[str] | None = None) -> dict:
     provider_route = current_app.extensions["inktime_provider_service"].usable_route_snapshot()
-    if not provider_route:
+    if not provider_route and not (photo_ids and _repository().have_saved_model_evidence(photo_ids)):
         raise ValueError("目前沒有已啟用且設定完整的 Vision Provider")
     return current_app.extensions["inktime_analysis_service"].build_plan(
         strategy=strategy,
@@ -122,7 +122,7 @@ def _queue_ai(
     if not selected:
         raise ValueError("已排除的照片禁止送入 AI；請先明確恢復照片，再執行分析")
     strategy = str(settings.get("analysis.strategy", "single"))
-    plan = analysis_plan if analysis_plan is not None else _build_analysis_plan(settings, strategy)
+    plan = analysis_plan if analysis_plan is not None else _build_analysis_plan(settings, strategy, photo_ids=selected)
     idempotency_key_value = scoped_idempotency_key(idempotency_scope, created_by, idempotency_key)
     idempotency_fingerprint = (
         request_fingerprint(
@@ -321,12 +321,15 @@ def excluded_photos_page():
         page = max(1, min(int(request.args.get("page", 1)), 100000))
     except ValueError:
         page = 1
-    rows = [dict(row) for row in _repository().search_exclusions(**filters, limit=201, offset=(page - 1) * 200)]
+    repository = _repository()
+    rows = [dict(row) for row in repository.search_exclusions(**filters, limit=201, offset=(page - 1) * 200)]
     has_next = len(rows) > 200
     rows = rows[:200]
     for row in rows:
         row["ai_blocked"] = is_confirmed_screenshot(row)
-    reasons = sorted({str(row["reject_reason"]) for row in rows if row["reject_reason"]})
+    reasons = repository.exclusion_reasons()
+    if filters["reason"] and filters["reason"] not in reasons:
+        reasons = sorted([*reasons, filters["reason"]])
     return render_template("excluded_photos.html", photos=rows, filters=filters, reasons=reasons, page=page, has_next=has_next)
 
 

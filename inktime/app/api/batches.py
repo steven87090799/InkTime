@@ -160,6 +160,9 @@ def batches_page_action():
             _service().retry_failed(str(request.form["batch_id"]), created_by=str(g.user["id"]))
         elif action == "cleanup":
             _service().retry_cleanup(str(request.form["batch_id"]))
+        elif action == "import_saved":
+            job_id = _service().enqueue_saved_result_import(str(request.form["batch_id"]))
+            return redirect(url_for("jobs.job_detail", job_id=job_id), code=303)
         elif action == "recover":
             _service().recover_submission(str(request.form["batch_id"]), str(request.form["remote_batch_id"]))
         elif action == "recover_upload":
@@ -224,7 +227,10 @@ def list_batches():
 @bp.get("/api/v1/analysis/batches/<batch_id>")
 @login_required
 def batch_detail(batch_id: str):
-    detail = _service().get_detail(batch_id)
+    page = request.args.get("page", 1, type=int)
+    if page is None or not 1 <= page <= 100000:
+        abort(400, description="分頁不合法")
+    detail = _service().get_detail(batch_id, item_page=page)
     if detail is None:
         abort(404)
     if str(g.user["role"]) != "administrator" and (
@@ -240,7 +246,10 @@ def batch_detail(batch_id: str):
 @bp.get("/analysis/batches/<batch_id>")
 @login_required
 def batch_detail_page(batch_id: str):
-    detail = _service().get_detail(batch_id)
+    page = request.args.get("page", 1, type=int)
+    if page is None or not 1 <= page <= 100000:
+        abort(400, description="分頁不合法")
+    detail = _service().get_detail(batch_id, item_page=page, include_raw=False)
     if detail is None:
         abort(404)
     if str(g.user["role"]) != "administrator" and (

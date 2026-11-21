@@ -47,6 +47,25 @@ def test_independent_encrypted_keys_defaults_and_primary_billing_boundary(app, c
                          "base_url": "https://api.openai.com/v1", "model": "gpt-6-luna"}, "tester")
 
 
+def test_batch_result_read_accepts_model_change_but_rejects_account_change(app):
+    provider_id = save_direct(app, model="gpt-6-luna")
+    providers = app.extensions["inktime_provider_service"]
+    route = providers.route_snapshot()
+    identity = providers.identity_snapshot(provider_id)
+    owner = {key: identity[key] for key in (
+        "provider_base_url_fingerprint", "provider_project_id", "provider_account_fingerprint",
+    )}
+    save_direct(app, model="gpt-5.6-luna")
+    with pytest.raises(ValueError, match="Provider 設定已變更"):
+        providers.build_router(route)
+    reader = providers.build_router(route, batch_result_owner=owner)
+    assert reader is not None
+    reader.close()
+    save_direct(app, model="gpt-5.6-luna", api_key="sk-different-fixture-key")
+    with pytest.raises(ValueError, match="原始帳號"):
+        providers.build_router(route, batch_result_owner=owner)
+
+
 def test_existing_openai_chat_configuration_keeps_frozen_revision(app):
     repository = app.extensions["inktime_provider_repository"]
     # Simulate an existing deployment, whose options predate Responses.

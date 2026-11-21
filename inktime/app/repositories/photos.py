@@ -555,6 +555,9 @@ class PhotoRepository:
                     if not plan["content_changed"]:
                         continue
                     previous = {**plan["existing"], "root_path": str(root)}
+                    previous["reviews"] = [dict(row) for row in connection.execute(
+                        "SELECT * FROM photo_reviews WHERE photo_id=? ORDER BY id", (plan["id"],)
+                    )]
                     previous_analyses = [dict(row) for row in connection.execute(
                         "SELECT * FROM photo_analysis WHERE photo_id=? ORDER BY id", (plan["id"],)
                     )]
@@ -589,6 +592,11 @@ class PhotoRepository:
                         WHERE id IN ({placeholders})
                         """,  # noqa: S608 -- placeholders are generated; IDs remain bound
                         chunk,
+                    )
+                    connection.execute(
+                        f"UPDATE photo_reviews SET caption_override=NULL,version=version+1,updated_at=? "  # noqa: S608
+                        f"WHERE analysis_id IS NULL AND photo_id IN ({placeholders})",
+                        (now, *chunk),
                     )
                     connection.execute(
                         f"DELETE FROM photo_analysis WHERE photo_id IN ({placeholders})",  # noqa: S608
@@ -1160,14 +1168,21 @@ class PhotoRepository:
         self, photo_id: str, job_id: str | None, *, analysis_context: dict | None = None,
         include_self: bool = False,
         semantic_only: bool = False,
+        match_plan: bool = True,
+        expected_content_sha256: str | None = None,
     ) -> dict | None:
-        required_fingerprint = str((analysis_context or {}).get("analysis_fingerprint") or "")
-        required_spec = str((analysis_context or {}).get("analysis_spec_json") or "")
+        requested_fingerprint = str((analysis_context or {}).get("analysis_fingerprint") or "")
+        required_fingerprint = requested_fingerprint if match_plan else ""
+        required_spec = str((analysis_context or {}).get("analysis_spec_json") or "") if match_plan else ""
         reusable_fingerprint = None
         if required_spec:
             reusable_fingerprint = reusable_analysis_fingerprint(json.loads(required_spec))
         with self.database.session() as connection:
             target_content = connection.execute("SELECT sha256,gps_lat,gps_lon FROM photos WHERE id=?", (photo_id,)).fetchone()
+            if expected_content_sha256 is not None and (
+                target_content is None or target_content["sha256"] != expected_content_sha256
+            ):
+                raise ValueError("IMG-CHANGED 照片內容已變更，無法沿用原模型結果")
             candidates = connection.execute(
                 f"""
                 SELECT a.*,source.local_candidate_score AS source_local_candidate_score,
@@ -1177,9 +1192,10 @@ class PhotoRepository:
                 JOIN photo_analysis a ON a.photo_id=source.id
                 WHERE target.id=?
                   AND a.schema_version IN (4,5,6)
+                  AND COALESCE(a.content_sha256, source.sha256)=target.sha256
                   AND (?=0 OR a.score_kind='semantic')
                   AND (?='' OR a.analysis_fingerprint=? OR ?)
-                ORDER BY {preferred_analysis_order_sql('a')}
+                ORDER BY (source.id<>target.id),{preferred_analysis_order_sql('a')}
                 """,
                 (int(include_self), photo_id, int(semantic_only), required_fingerprint, required_fingerprint, reusable_fingerprint is not None),
             )
@@ -1195,6 +1211,7 @@ class PhotoRepository:
                         break
                 except (TypeError, ValueError):
                     continue
+            live_match = row is not None
             if row is None and target_content is not None:
                 covered = connection.execute(
                     "SELECT analysis_snapshot_json FROM model_analysis_results WHERE content_sha256=?",
@@ -1225,6 +1242,8 @@ class PhotoRepository:
         )
         semantic_available = source_kind == SEMANTIC_SCORE_KIND
         result = validate_analysis_result(row["raw_json"])
+        if live_match and not match_plan and str(row["photo_id"]) == photo_id and row["analysis_fingerprint"] == requested_fingerprint:
+            return result
         self.save_analysis(
             photo_id,
             job_id,
@@ -1628,6 +1647,37 @@ class PhotoRepository:
                     now,
                 ),
             )
+
+    def have_saved_model_evidence(self, photo_ids: Sequence[str]) -> bool:
+        """Identify requests that can be handled without a configured model."""
+        if not photo_ids:
+            return False
+        from inktime.app.repositories.billable_operations import BillableOperationRepository
+        from inktime.app.repositories.model_coverage import saved_model_evidence_sql
+
+        operations = BillableOperationRepository(self.database)
+        with self.database.session() as connection:
+            uncovered = connection.execute(
+                f"""SELECT p.sha256 FROM json_each(?) ids LEFT JOIN photos p ON p.id=ids.value
+                    WHERE COALESCE(p.sha256,'')='' OR NOT {saved_model_evidence_sql('p.sha256')}
+                """,  # noqa: S608 -- only a fixed column expression is interpolated.
+                (json.dumps(list(photo_ids)),),
+            )
+            return all(
+                bool(row[0]) and operations.has_approved_photo_response(str(row[0]), connection=connection)
+                for row in uncovered
+            )
+
+    def exclusion_reasons(self) -> list[str]:
+        with self.database.session() as connection:
+            return [str(row[0]) for row in connection.execute(
+                """
+                SELECT DISTINCT reject_reason FROM photos
+                WHERE reject_reason IS NOT NULL AND reject_reason<>''
+                  AND (eligible=0 OR exclusion_status IN ('auto_excluded','manually_excluded','pending_review'))
+                ORDER BY reject_reason
+                """
+            )]
 
     def search_exclusions(
         self,

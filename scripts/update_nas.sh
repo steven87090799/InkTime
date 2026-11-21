@@ -105,9 +105,29 @@ if paths_overlap "$data_path" "$photo_path"; then
   exit 2
 fi
 
+command -v python3 >/dev/null 2>&1 || { echo "NAS-UPDATE-PATH-007 host Python 3 is required to verify actual mounts" >&2; exit 2; }
+if ! python3 -I -B - "$project_dir" "$data_path" "$photo_path" <<'PY'
+from pathlib import Path
+import sys
+
+sys.path.insert(0, sys.argv[1])
+from inktime.app.core.preflight import validate_host_photo_isolation
+
+try:
+    validate_host_photo_isolation(Path(sys.argv[2]), Path(sys.argv[3]))
+except (OSError, ValueError) as exc:
+    print(exc, file=sys.stderr)
+    sys.exit(2)
+PY
+then
+  echo "NAS-UPDATE-PATH-007 host photo isolation check refused the update before writing data" >&2
+  exit 2
+fi
+
 command -v flock >/dev/null 2>&1 || { echo "NAS-UPDATE-LOCK-001 host flock is required" >&2; exit 2; }
 lock_file="${data_path}/.inktime-update.lock"
-exec 9>"$lock_file"
+[ ! -L "$lock_file" ] || { echo "NAS-UPDATE-LOCK-001 update lock cannot be a symlink" >&2; exit 2; }
+exec 9>>"$lock_file"
 if ! flock -n 9; then
   echo "NAS-UPDATE-LOCK-002 another InkTime update holds ${lock_file}" >&2
   exit 2
@@ -389,8 +409,8 @@ PY
 fi
 
 if [ "$write_marker" -eq 1 ]; then
-  marker_tmp="${data_path}/.inktime-deployment-root.new.$$"
   umask 077
+  marker_tmp=$(mktemp "${data_path}/.inktime-deployment-root.new.XXXXXXXX")
   {
     echo "marker_version=1"
     echo "data_path=${data_path}"

@@ -8,6 +8,25 @@ import json
 from inktime.app.domain.analysis.schema import validate_analysis_result
 
 
+def saved_model_result_sql(content_sha: str) -> str:
+    """Match by exact bytes, including live rows from before the archive."""
+    return f"""(
+        EXISTS(SELECT 1 FROM model_analysis_results saved WHERE saved.content_sha256={content_sha})
+        OR EXISTS(SELECT 1 FROM photo_analysis saved
+                  WHERE saved.content_sha256={content_sha} AND saved.score_kind='semantic'
+                    AND saved.schema_version IN (4,5,6))
+    )"""  # noqa: S608 -- fixed column expressions supplied by repository callers.
+
+
+def saved_model_evidence_sql(content_sha: str) -> str:
+    return f"""({saved_model_result_sql(content_sha)} OR EXISTS(
+        SELECT 1 FROM billable_operations o
+        LEFT JOIN model_request_evidence e ON e.operation_id=o.id
+        WHERE o.content_sha256={content_sha} AND o.state IN ('started','response','completed')
+          AND COALESCE(o.response_json,e.response_json) IS NOT NULL
+    ))"""  # noqa: S608 -- fixed column expressions supplied by repository callers.
+
+
 def remember_model_result(connection, content_sha256: str, snapshot: dict) -> bool:
     if not content_sha256 or snapshot.get("score_kind") != "semantic":
         return False

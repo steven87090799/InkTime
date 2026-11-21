@@ -14,6 +14,7 @@ from inktime.app.core.logging import configure_logging, log_event
 from inktime.app.domain.jobs.settings import validate_worker_settings
 from inktime.app.domain.jobs.failure_policy import (
     FailureClass,
+    JobConfigurationError,
     classify_codes,
     failure_code,
 )
@@ -34,8 +35,6 @@ LOGGER = logging.getLogger("worker")
 def _execute_job_item(app, item, *, job, settings, provider, provider_error, analysis, analysis_plan, execution, progress_items, progress_seconds, scanner_disk_batch_size, scanner_write_batch_size, scanner_missing_threshold_ratio, scanner_safety, runtime_settings, scan_cancel_requested, log_scan_progress):
     if job["kind"] == "analysis" and execution == "disabled":
         raise AnalysisDisabledError("Frozen Analysis Plan 指定完全停用；工作項目已拒絕")
-    if provider_error is not None:
-        raise provider_error
     if job["kind"] == "analysis_coverage_audit":
         return app.extensions["inktime_analysis_backfill_service"].repository.reconcile(month=settings.get("month"))
     if job["kind"] == "analysis_batch_poll":
@@ -44,6 +43,7 @@ def _execute_job_item(app, item, *, job, settings, provider, provider_error, ana
         return app.extensions["inktime_batch_analysis_service"].import_batch(
             str(settings["batch_id"]),
             cleanup_only=bool(settings.get("cleanup_only", False)),
+            replay_saved=bool(settings.get("replay_saved", False)),
         )
     if job["kind"] == "render_preview":
         operation = str(settings.get("operation", ""))
@@ -266,6 +266,10 @@ def _execute_job_item(app, item, *, job, settings, provider, provider_error, ana
         return app.extensions["inktime_notification_service"].deliver_one(
             int(settings["notification_id"])
         )
+    expected_sha = item["analysis_content_sha256"]
+    if (not expected_sha and str(job["strategy"]) != "local" and execution != "local_only"
+            and not (settings.get("seasonal_analysis") or settings.get("missing_analysis_backfill"))):
+        raise JobConfigurationError("舊工作缺少排隊時的照片識別。請重新選取原圖建立工作，已保存的分析仍可沿用。")
     analyze = (
         app.extensions["inktime_complementary_analysis_service"].analyze_item
         if settings.get("complementary_lane") == "openai_backfill" else
@@ -282,6 +286,9 @@ def _execute_job_item(app, item, *, job, settings, provider, provider_error, ana
         force_ai=bool(settings.get("force_ai", False)),
         force_actor=str(job["created_by"] or "system"),
         force_recompute=bool(job["force_recompute"]),
+        saved_result_only=bool(settings.get("saved_result_only", False)),
+        expected_content_sha256=expected_sha,
+        **({"provider_error": provider_error} if provider_error is not None else {}),
     )
 
 
@@ -382,7 +389,8 @@ class WorkerRunner:
             may_build_provider = permits_automatic_ai(execution) or (
                 bool(settings.get("force_ai", False)) and permits_manual_ai(execution)
             )
-            if str(job["kind"]) == "analysis" and str(job["strategy"]) != "local" and may_build_provider:
+            if (str(job["kind"]) == "analysis" and str(job["strategy"]) != "local"
+                    and may_build_provider and not settings.get("saved_result_only")):
                 try:
                     provider = self.app.extensions["inktime_provider_service"].build_router(
                         analysis_plan.get("provider_route"),
@@ -724,12 +732,15 @@ class WorkerRunner:
 
     def run_forever(self, poll_seconds: float | None = None) -> None:
         repository = self.app.extensions["inktime_settings_repository"]
+        observability = self.app.extensions.get("inktime_observability_service")
         configure_logging(settings_repository=repository)
         log_event(LOGGER, logging.INFO, "背景 Worker 已啟動", event="worker_started")
         idle_index = 0
         while not self.stop.is_set():
             try:
                 processed = self.run_once()
+                if observability is not None:
+                    observability.heartbeat("worker")
             except Exception as exc:
                 # An unexpected error must not take the container down: Docker
                 # restarts it, it claims the same poison job, and the queue is

@@ -57,7 +57,7 @@ from inktime.app.web.datetime_display import display_timezone, format_display_da
 
 LOGGER = logging.getLogger("platform")
 REQUEST_ID_PATTERN = re.compile(r"^[A-Za-z0-9._:-]{1,64}$")
-QUIET_REQUEST_ENDPOINTS = {"health.live", "health.ready", "static"}
+QUIET_REQUEST_ENDPOINTS = {"health.live", "health.ready", "health.web_ready", "static"}
 
 
 def configure_web_application(
@@ -199,6 +199,7 @@ def configure_web_application(
         "auth.login",
         "health.live",
         "health.ready",
+        "health.web_ready",
         "devices.latest_release",
         "devices.stock_data_up_payload",
         "devices.device_offline_schedule",

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+import json
 from pathlib import Path
 from typing import Any
 
@@ -85,6 +86,14 @@ class IncompleteProviderResponse(RuntimeError):
 def assert_complete_response(response: ProviderResponse) -> None:
     if response.refusal or response.finish_reason in {"length", "content_filter", "max_tokens"}:
         raise IncompleteProviderResponse("Provider 拒答、過濾或截斷；保留回應，不進行文字修復")
+
+
+def deserialize_response(raw: str) -> ProviderResponse:
+    payload = json.loads(raw)
+    payload["usage"] = Usage(**payload["usage"])
+    if payload.get("call_trace"):
+        payload["call_trace"] = ProviderCallTrace(**payload["call_trace"])
+    return ProviderResponse(**payload)
 
 
 @dataclass

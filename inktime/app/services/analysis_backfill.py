@@ -231,7 +231,7 @@ class AnalysisBackfillService:
             self.jobs.transition(job_id, {"pending"}, "running", "audit_started")
             return job_id
 
-    def analyze_item(self, *, photo_id: str, job_id: str, **kwargs) -> dict:
+    def analyze_item(self, *, photo_id: str, job_id: str, expected_content_sha256: str | None = None, **kwargs) -> dict:
         if self.settings.get("analysis.complementary_enabled", False):
             raise ProviderHTTPError("免費額度已保留給歷年明天分析", "VLM-005", retry_after=300,
                                     request_started=False, vision_started=False)
@@ -242,13 +242,16 @@ class AnalysisBackfillService:
         if task is None:
             raise ValueError("補齊項目沒有持久化授權")
         photo = self.photos.get_with_path(photo_id)
-        if photo is None or photo["sha256"] != task["content_sha256"]:
+        if (photo is None or photo["sha256"] != task["content_sha256"]
+                or (expected_content_sha256 is not None and photo["sha256"] != expected_content_sha256)):
             raise ValueError("IMG-CHANGED 補齊照片內容已變更，請重新掃描")
         sha = str(task["content_sha256"])
-        if self.repository.has_uncertain_content(sha):
+        if self.repository.has_uncertain_content(sha) and not self.photos.have_saved_model_evidence([photo_id]):
             raise UnreconciledOperationError("先前請求的回應或成本不確定，請先確認原紀錄")
         if self.repository.covered(sha):
-            inherited = self.photos.inherit_existing_analysis(photo_id, job_id, include_self=True, semantic_only=True)
+            inherited = self.photos.inherit_existing_analysis(
+                photo_id, job_id, include_self=True, semantic_only=True, expected_content_sha256=sha,
+            )
             if inherited is None:
                 raise UnreconciledOperationError("已存在付費模型證據但無法恢復有效分析，請先核對，不會自動重送")
             return {"analysis": inherited, "stage": "inherited", "_actual_cost": 0}

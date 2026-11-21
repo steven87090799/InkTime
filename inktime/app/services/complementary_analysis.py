@@ -231,15 +231,18 @@ class ComplementaryAnalysisService:
         finally:
             lock.close()
 
-    def analyze_item(self, *, photo_id, job_id, **kwargs):
+    def analyze_item(self, *, photo_id, job_id, expected_content_sha256=None, **kwargs):
         photo = self.photos.get_with_path(photo_id)
         if photo is None:
             raise ValueError("照片不存在")
         sha = str(photo["sha256"])
+        if expected_content_sha256 is not None and sha != expected_content_sha256:
+            raise ValueError("IMG-CHANGED 補齊排隊後照片內容已變更，請重新選取")
         if self.repository.has_uncertain_content(sha):
             raise UnreconciledOperationError("先前請求回應或費用不確定，須先對帳")
         if self.repository.covered(sha):
-            return {"analysis": self.photos.inherit_existing_analysis(photo_id, job_id, include_self=True, semantic_only=True),
+            return {"analysis": self.photos.inherit_existing_analysis(
+                        photo_id, job_id, include_self=True, semantic_only=True, expected_content_sha256=sha),
                     "stage": "inherited", "_actual_cost": 0}
         if not self.can_run(job_id):
             raise ProviderHTTPError("每日工作優先或補齊已暫停；保留照片排隊", "VLM-005", retry_after=60,

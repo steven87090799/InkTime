@@ -7,6 +7,7 @@ import pytest
 from inktime.app.core.preflight import (
     PreflightError,
     run_production_preflight,
+    validate_host_photo_isolation,
     validate_lan_environment,
 )
 from inktime.app.core.runtime_config import RuntimeConfig
@@ -39,6 +40,34 @@ class WritablePhotoFilesystem:
             "1 0 0:1 / / ro - ext4 /dev/root ro\n"
             f"2 1 0:2 / {self.photo_dir} rw - ext4 /dev/photos rw"
         )
+
+
+@pytest.mark.parametrize("placement", ["same_bind", "nested_bind", "independent"])
+def test_host_photo_mount_identity_is_checked_before_the_updater_can_write(tmp_path, placement):
+    data = tmp_path / "data"
+    photos = tmp_path / "photos"
+    data.mkdir()
+    photos.mkdir()
+    mount_path = data if placement == "same_bind" else data / "backups"
+    if mount_path != data:
+        mount_path.mkdir()
+
+    class HostMounts:
+        def mountinfo(self):
+            lines = [
+                "1 0 8:1 / / rw - ext4 /dev/root rw",
+                f"2 1 8:2 /family {photos} rw - ext4 /dev/storage rw",
+            ]
+            if placement != "independent":
+                lines.append(f"3 1 8:2 /family {mount_path} rw - ext4 /dev/storage rw")
+            return "\n".join(lines)
+
+    if placement == "independent":
+        validate_host_photo_isolation(data, photos, adapter=HostMounts())
+    else:
+        with pytest.raises(ValueError, match="NAS-UPDATE-PATH-006"):
+            validate_host_photo_isolation(data, photos, adapter=HostMounts())
+    assert not (data / ".inktime-update.lock").exists()
 
 
 def _config(tmp_path: Path, **overrides) -> RuntimeConfig:
@@ -213,6 +242,45 @@ def test_production_rejects_effectively_writable_photo_mount(tmp_path):
             config,
             adapter=WritablePhotoFilesystem(config.photo_dir),
         )
+
+
+@pytest.mark.parametrize("data_backing", ["/albums", "/albums/project", "/"])
+def test_production_rejects_aliases_of_readonly_photo_mount(tmp_path, data_backing):
+    config = _config(tmp_path)
+
+    class BackingFilesystem:
+        def mountinfo(self) -> str:
+            return "\n".join((
+                "1 0 0:1 / / ro - overlay overlay ro",
+                f"2 1 8:1 {data_backing} {config.data_dir} rw - ext4 /dev/volume rw",
+                f"3 1 8:1 /albums {config.photo_dir} ro - ext4 /dev/volume rw",
+            ))
+
+    with pytest.raises(PreflightError, match="DEPLOY-PATH-OVERLAP-001"):
+        run_production_preflight(config, adapter=BackingFilesystem())
+    assert not config.data_dir.exists()
+    assert not config.photo_dir.exists()
+
+
+def test_production_compares_writable_and_readonly_nested_mounts_by_backing_root(tmp_path):
+    config = _config(tmp_path)
+
+    class NestedFilesystem:
+        def __init__(self, writable_child: str) -> None:
+            self.writable_child = writable_child
+
+        def mountinfo(self) -> str:
+            return "\n".join((
+                "1 0 0:1 / / ro - overlay overlay ro",
+                f"2 1 8:1 /runtime {config.data_dir} rw - ext4 /dev/data rw",
+                f"3 1 8:1 /albums {config.photo_dir} ro - ext4 /dev/data rw",
+                f"4 3 0:21 /archive {config.photo_dir}/archive ro - btrfs /dev/media rw",
+                f"5 2 0:22 {self.writable_child} {config.cache_dir}/extra rw - btrfs /dev/media rw",
+            ))
+
+    assert run_production_preflight(config, adapter=NestedFilesystem("/archive-other")).healthy
+    with pytest.raises(PreflightError, match="DEPLOY-PATH-OVERLAP-001"):
+        run_production_preflight(config, adapter=NestedFilesystem("/archive/nested"))
 
 
 @pytest.mark.parametrize("photo_relative", ["photos", "runtime-old"])
