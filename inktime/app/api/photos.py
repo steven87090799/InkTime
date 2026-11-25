@@ -802,6 +802,8 @@ def photo_detail(photo_id: str):
                 raw_analysis = json.loads(str(analysis.get("raw_json") or "{}"))
             except (TypeError, ValueError, json.JSONDecodeError):
                 raw_analysis = {}
+            if isinstance(raw_analysis, dict) and isinstance(raw_analysis.get("visible_detail"), str):
+                analysis["visible_detail"] = raw_analysis["visible_detail"]
             exclusion = raw_analysis.get("display_exclusion") if isinstance(raw_analysis, dict) else None
             if isinstance(exclusion, dict):
                 labels = {

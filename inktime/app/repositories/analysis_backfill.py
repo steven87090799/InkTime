@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 import json
 
 from inktime.app.repositories.analysis_reservations import AnalysisReservationConflict, reserved_analysis_sql
-from inktime.app.repositories.model_coverage import remember_model_result
+from inktime.app.repositories.model_coverage import has_saved_model_result, remember_model_result, saved_model_result_sql
 
 
 def utc_now() -> str:
@@ -45,7 +45,7 @@ class AnalysisBackfillRepository:
                   JOIN photos rp ON rp.id=ri.photo_id WHERE rp.sha256=p.sha256 AND ri.status='running'
                   AND rj.kind IN ('analysis','analysis_batch')) THEN 'running'
                 WHEN ({self.uncertain_sql()}) THEN 'unknown'
-                WHEN EXISTS(SELECT 1 FROM model_analysis_results c WHERE c.content_sha256=p.sha256) THEN 'completed'
+                WHEN {saved_model_result_sql('p.sha256')} THEN 'completed'
                 WHEN COALESCE(p.never_upload,0)=1 OR p.eligible=0 OR
                   p.exclusion_status IN ('auto_excluded','manually_excluded') OR
                   COALESCE(p.screenshot_likelihood,0)>=0.95 THEN 'excluded'
@@ -163,15 +163,15 @@ class AnalysisBackfillRepository:
     def refresh(self) -> None:
         with self.database.transaction() as connection:
             connection.execute(
-                """UPDATE analysis_backfill_tasks AS t SET status=CASE
+                f"""UPDATE analysis_backfill_tasks AS t SET status=CASE
                     WHEN EXISTS(SELECT 1 FROM job_items i WHERE i.job_id=t.job_id AND i.photo_id=t.photo_id AND i.status='running') THEN 'running'
-                    WHEN EXISTS(SELECT 1 FROM model_analysis_results c WHERE c.content_sha256=t.content_sha256) THEN 'completed'
+                    WHEN {saved_model_result_sql('t.content_sha256')} THEN 'completed'
                     WHEN EXISTS(SELECT 1 FROM billable_operations o WHERE o.content_sha256=t.content_sha256 AND o.state IN ('started','response')) THEN 'unknown'
                     WHEN EXISTS(SELECT 1 FROM job_items i WHERE i.job_id=t.job_id AND i.photo_id=t.photo_id AND i.status IN ('failed','cancelled')) THEN 'failed'
                     WHEN EXISTS(SELECT 1 FROM job_items i WHERE i.job_id=t.job_id AND i.photo_id=t.photo_id AND i.status='completed') THEN 'completed'
                     ELSE 'queued' END,
                     error_code=(SELECT i.error_code FROM job_items i WHERE i.job_id=t.job_id AND i.photo_id=t.photo_id),updated_at=?
-                    WHERE t.status IN ('queued','running')""", (utc_now(),),
+                    WHERE t.status IN ('queued','running')""", (utc_now(),),  # noqa: S608 -- fixed coverage expression.
             )
 
     def reconcile(self, *, month: str | None = None) -> dict:
@@ -222,7 +222,7 @@ class AnalysisBackfillRepository:
 
     def covered(self, sha: str) -> bool:
         with self.database.session() as connection:
-            return connection.execute("SELECT 1 FROM model_analysis_results WHERE content_sha256=?", (sha,)).fetchone() is not None
+            return has_saved_model_result(connection, sha)
 
     def pause(self, reason: str) -> None:
         with self.database.transaction() as connection:

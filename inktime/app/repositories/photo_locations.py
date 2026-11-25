@@ -24,12 +24,17 @@ class PhotoLocationRepository:
                 "SELECT place_json,gps_key FROM photo_locations WHERE photo_id=? AND content_sha256=?",
                 (photo["id"], photo["sha256"]),
             ).fetchone()
-        if row is None:
+        return self.matching_place(photo, row["place_json"], row["gps_key"]) if row else None
+
+    @staticmethod
+    def matching_place(photo, place_json, gps_key) -> PhotoPlace | None:
+        """Both single and batch queries join the location to the same content hash."""
+        if not place_json:
             return None
         try:
-            if row["gps_key"] != coordinate_key(photo["gps_lat"], photo["gps_lon"]):
+            if gps_key != coordinate_key(photo["gps_lat"], photo["gps_lon"]):
                 return None
-            return PhotoPlace.from_dict(json.loads(row["place_json"]))
+            return PhotoPlace.from_dict(json.loads(place_json))
         except (ValueError, TypeError):
             return None
 

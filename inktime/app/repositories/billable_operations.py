@@ -9,6 +9,7 @@ from inktime.app.db import Database
 from inktime.app.providers.base import ProviderResponse, deserialize_response
 from inktime.app.repositories.analysis_reservations import assert_no_batch_content_owner
 from inktime.app.repositories.model_evidence import has_valid_saved_photo_response
+from inktime.app.repositories.model_coverage import has_saved_model_result
 
 
 class UnreconciledOperationError(RuntimeError):
@@ -25,6 +26,7 @@ class SavedModelResultAvailableError(RuntimeError):
     """A result appeared after the local reuse check, before a new request."""
 
     not_sent = True
+    code = "SAVED-MODEL-RESULT"
 
 
 def paid_operation_lock_name(content_key: str) -> str:
@@ -163,12 +165,12 @@ class BillableOperationRepository:
             if saved:
                 return str(saved["id"]), deserialize_response(saved["response_json"])
             backfill = connection.execute(
-                "SELECT 1 FROM jobs WHERE id=? AND json_extract(settings_json,'$.missing_analysis_backfill')=1",
+                "SELECT 1 FROM jobs WHERE id=? AND (json_extract(settings_json,'$.missing_analysis_backfill')=1 "
+                "OR json_extract(settings_json,'$.complementary_lane')='openai_backfill')",
                 ((context or {}).get("job_id"),),
             ).fetchone()
-            if backfill and connection.execute(
-                "SELECT 1 FROM model_analysis_results WHERE content_sha256=?", (content_sha256,),
-            ).fetchone():
+            has_result = (backfill or (guard_paid_photo and reuse_completed)) and has_saved_model_result(connection, content_sha256)
+            if backfill and has_result:
                 raise SeasonalAlreadyProcessedError("相同照片內容已有完整模型資訊，補齊工作沿用原結果")
             # Recheck at the last durable boundary, not only when candidates
             # were selected. An older job/provider can finish in between.
@@ -183,11 +185,10 @@ class BillableOperationRepository:
                 (content_sha256,),
             ).fetchone():
                 raise SeasonalAlreadyProcessedError("相同內容已有付費回應，沿用原資料；不因模型規格不同再次送出")
-            if guard_paid_photo and reuse_completed and (connection.execute(
-                "SELECT 1 FROM model_analysis_results WHERE content_sha256=? "
-                "UNION ALL SELECT 1 FROM billable_operations WHERE content_sha256=? "
+            if guard_paid_photo and reuse_completed and (has_result or connection.execute(
+                "SELECT 1 FROM billable_operations WHERE content_sha256=? "
                 "AND state IN ('response','completed') LIMIT 1",
-                (content_sha256, content_sha256),
+                (content_sha256,),
             ).fetchone() or self._approved_photo_response(connection, content_sha256) is not None):
                 raise SavedModelResultAvailableError("相同照片已保存模型結果，改為讀取本機紀錄")
             if job_id is not None and not reuse_completed and connection.execute(

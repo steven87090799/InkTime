@@ -3,6 +3,8 @@ from pathlib import Path
 from inktime.app.db import Database
 from inktime.app.domain.photos.quality_policy import is_confirmed_screenshot
 from inktime.app.repositories.openai_backfill import OpenAIBackfillRepository
+from inktime.app.repositories.billable_operations import SavedModelResultAvailableError
+from inktime.app.repositories.model_coverage import has_saved_model_result
 
 
 class UploadNotAllowedError(ValueError):
@@ -14,7 +16,8 @@ class UploadPausedError(UploadNotAllowedError):
     code = "VLM-005"
 
 
-def assert_upload_allowed(database_path, photo_id, job_id=None, operation_id=None, expected_content_sha256=None):
+def assert_upload_allowed(database_path, photo_id, job_id=None, operation_id=None, expected_content_sha256=None,
+                          reuse_completed=False):
     database = Database(Path(database_path))
     with database.session() as connection:
         photo = connection.execute("SELECT p.* FROM photos p JOIN libraries l ON l.id=p.library_id "
@@ -33,7 +36,11 @@ def assert_upload_allowed(database_path, photo_id, job_id=None, operation_id=Non
             job = connection.execute("SELECT status,json_extract(settings_json,'$.complementary_lane') AS lane,"
                                      "json_extract(settings_json,'$.openai_account_pause') AS account_pause "
                                      "FROM jobs WHERE id=?", (job_id,)).fetchone()
-            if job and job["lane"] == "openai_backfill" and (job["account_pause"] or not OpenAIBackfillRepository.enabled(connection)):
-                raise UploadPausedError("OpenAI 補齊已暫停，照片保留排隊")
+            if job and job["lane"] == "openai_backfill":
+                if job["account_pause"] or not OpenAIBackfillRepository.enabled(connection):
+                    raise UploadPausedError("OpenAI 補齊已暫停，照片保留排隊")
+                reuse_completed = True
             if job is None or job["status"] in {"cancelled", "paused", "pausing", "failed", "budget_exceeded"}:
                 raise UploadNotAllowedError("工作目前已停止或取消；請求未送出")
+        if reuse_completed and has_saved_model_result(connection, photo["sha256"]):
+            raise SavedModelResultAvailableError("照片已有模型結果，沿用已保存的資料")

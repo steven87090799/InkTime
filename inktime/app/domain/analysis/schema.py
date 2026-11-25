@@ -14,6 +14,7 @@ SUPPORTED_ANALYSIS_SCHEMA_VERSIONS = frozenset({LEGACY_SCHEMA_VERSION, PREVIOUS_
 CAPTION_MAX_CHARS = 100
 SIDE_CAPTION_MIN_CHARS = 1
 SIDE_CAPTION_MAX_CHARS = 20
+VISIBLE_DETAIL_MAX_CHARS = 40
 # New work defaults to 16; stored v6 results and frozen 20-char plans stay valid.
 DEFAULT_SIDE_CAPTION_MAX_CHARS = 16
 LEGACY_SIDE_CAPTION_MIN_CHARS = 8
@@ -212,6 +213,11 @@ ANALYSIS_JSON_SCHEMA["schema"]["properties"]["display_exclusion"] = _object(
 ANALYSIS_JSON_SCHEMA["schema"]["required"] = sorted(ANALYSIS_JSON_SCHEMA["schema"]["properties"])
 FULL_ANALYSIS_JSON_SCHEMA = ANALYSIS_JSON_SCHEMA
 REQUIRED_FIELDS = set(ANALYSIS_JSON_SCHEMA["schema"]["required"])
+OBSERVATION_ANALYSIS_JSON_SCHEMA = deepcopy(ANALYSIS_JSON_SCHEMA)
+OBSERVATION_ANALYSIS_JSON_SCHEMA["schema"]["properties"]["visible_detail"] = {
+    "type": "string", "minLength": 0, "maxLength": VISIBLE_DETAIL_MAX_CHARS,
+}
+OBSERVATION_ANALYSIS_JSON_SCHEMA["schema"]["required"] = sorted(OBSERVATION_ANALYSIS_JSON_SCHEMA["schema"]["properties"])
 
 
 PROVIDER_CONTRACT_JSON_SCHEMA: dict[str, Any] = {
@@ -291,15 +297,25 @@ def _validate_unicode(value: Any) -> None:
             _validate_unicode(item)
 
 
+def analysis_result_schema(version: object, *, include_visible_detail: bool = False) -> dict:
+    if version == LEGACY_SCHEMA_VERSION:
+        return LEGACY_V4_JSON_SCHEMA
+    if version == PREVIOUS_SCHEMA_VERSION:
+        return V5_ANALYSIS_JSON_SCHEMA
+    if version != SCHEMA_VERSION:
+        raise AnalysisValidationError("analysis.schema_version 不支援的版本")
+    return OBSERVATION_ANALYSIS_JSON_SCHEMA if include_visible_detail else ANALYSIS_JSON_SCHEMA
+
+
 def json_schema_for_stage(
     stage: str, *, caption_controls: dict[str, Any] | None = None,
-    schema_version: int = SCHEMA_VERSION,
+    schema_version: int = SCHEMA_VERSION, include_visible_detail: bool = False,
 ) -> dict[str, Any]:
     if stage == "provider_contract_level2":
         return deepcopy(PROVIDER_CONTRACT_JSON_SCHEMA)
     if schema_version not in {PREVIOUS_SCHEMA_VERSION, SCHEMA_VERSION}:
         raise ValueError("不支援的模型輸出 Schema 版本")
-    schema = deepcopy(V5_ANALYSIS_JSON_SCHEMA if schema_version == PREVIOUS_SCHEMA_VERSION else ANALYSIS_JSON_SCHEMA)
+    schema = deepcopy(analysis_result_schema(schema_version, include_visible_detail=include_visible_detail))
     if caption_controls:
         controls = normalize_caption_controls(caption_controls)
         if schema_version == PREVIOUS_SCHEMA_VERSION:
@@ -387,6 +403,13 @@ def validate_model_response(raw: str | dict, *, caption_controls: dict[str, Any]
     # Landmark is optional wire evidence, stored independently of v4/v5/v6 scores.
     if schema_version == SCHEMA_VERSION and isinstance(raw, dict):
         raw = {key: value for key, value in raw.items() if key != "landmark"}
+        if "visible_detail" in raw:
+            # A poor optional observation must never discard a paid score and caption.
+            detail = raw["visible_detail"]
+            if isinstance(detail, str) and len(detail.strip()) <= VISIBLE_DETAIL_MAX_CHARS and all(c.isprintable() for c in detail.strip()):
+                raw["visible_detail"] = detail.strip()
+            else:
+                del raw["visible_detail"]
     _validate_unicode(raw)
     value = to_taiwan_traditional(deepcopy(raw), protected=PROTOCOL_ENUM_VALUES)
     if schema_version == SCHEMA_VERSION and isinstance(value, dict) and isinstance(value.get("side_caption"), str):
@@ -407,6 +430,7 @@ def validate_model_response(raw: str | dict, *, caption_controls: dict[str, Any]
             orientation["evidence"] = list(dict.fromkeys(evidence))
     _validate(value, json_schema_for_stage(
         "single", caption_controls=caption_controls, schema_version=schema_version,
+        include_visible_detail=isinstance(value, dict) and "visible_detail" in value,
     )["schema"], "analysis")
     if not isinstance(value, dict):
         raise AnalysisValidationError("analysis 必須是 object")
@@ -442,11 +466,7 @@ def validate_analysis_result(
     version = value.get("schema_version")
     if type(version) is not int or version not in accepted_versions:
         raise AnalysisValidationError("analysis.schema_version 不支援的版本")
-    schema = (
-        LEGACY_V4_JSON_SCHEMA if version == LEGACY_SCHEMA_VERSION
-        else V5_ANALYSIS_JSON_SCHEMA if version == PREVIOUS_SCHEMA_VERSION
-        else ANALYSIS_JSON_SCHEMA
-    )
+    schema = analysis_result_schema(version, include_visible_detail="visible_detail" in value)
     if version == SCHEMA_VERSION and isinstance(value.get("side_caption"), str):
         value["side_caption"] = value["side_caption"].strip()
     _validate(value, schema["schema"], "analysis")

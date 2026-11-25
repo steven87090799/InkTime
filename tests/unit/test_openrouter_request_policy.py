@@ -391,6 +391,7 @@ def test_responses_only_model_is_rejected_before_image_access(tmp_path, model):
     ("photo-analysis-v5-complete-literary-20261011-caption-abc123", "COMPLETE_V5_INITIAL_COMMON_PROMPT"),
     ("photo-analysis-v5-complete-literary-v2-20261011", "COMPLETE_V5_V2_COMMON_PROMPT"),
     ("photo-analysis-v5-complete-literary-v2-20261011-caption-abc123", "COMPLETE_V5_V2_COMMON_PROMPT"),
+    ("photo-analysis-v6-literary20-landmarks-20261026-caption-abc123", "LITERARY_V6_COMMON_PROMPT"),
     (None, "COMMON_PROMPT"),
 ])
 def test_frozen_prompt_version_matches_actual_wire_contract(tmp_path, version, contract_name):
@@ -408,8 +409,8 @@ def test_complete_prompt_retains_original_contract_and_bounds_output():
     from inktime.app.services.analysis import PROMPT_VERSION
 
     assert "8～16 字" in LEGACY_V5_COMMON_PROMPT
-    assert PROMPT_VERSION == "photo-analysis-v6-literary20-landmarks-20261026"
-    assert "文青風格" in COMMON_PROMPT
+    assert PROMPT_VERSION == "photo-analysis-v6-observation-landmarks-20261125"
+    assert "生活觀察" in COMMON_PROMPT
     assert "不須加總" in COMMON_PROMPT
     assert "保留所有必填欄位" in COMMON_PROMPT
 

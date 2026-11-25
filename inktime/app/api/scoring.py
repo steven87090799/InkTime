@@ -24,7 +24,6 @@ from inktime.app.domain.analysis.scoring import (
     ranking_components,
     normalize_scoring_rules,
 )
-from inktime.app.domain.analysis.schema import json_schema_for_stage
 from inktime.app.providers.config import effective_provider_kind
 from inktime.app.providers.openai_compatible import (
     ProviderHTTPError,
@@ -58,9 +57,14 @@ def _prompt_preview(rules: str | None = None) -> dict:
     controls = plan["caption_controls"]
     saved_rules = str(plan["scoring_rules"])
     selected_rules = saved_rules if rules is None else rules
-    prompt = analysis_system_prompt(selected_rules, controls)
-    saved_prompt = analysis_system_prompt(saved_rules, controls)
-    schema = json_schema_for_stage("single", caption_controls=controls)
+    version = plan["prompt_version"]
+    prompt = analysis_system_prompt(selected_rules, controls, prompt_version=version)
+    saved_prompt = analysis_system_prompt(saved_rules, controls, prompt_version=version)
+    canonical_format = analysis_response_format(
+        "openai", "single", supports_json_schema=True, caption_controls=controls, prompt_version=version,
+    )
+    assert canonical_format is not None
+    schema = canonical_format["json_schema"]
     providers = []
     provider_service = current_app.extensions["inktime_provider_service"]
     usable_ids = (
@@ -76,12 +80,12 @@ def _prompt_preview(rules: str | None = None) -> dict:
         )
         response_format = analysis_response_format(
             provider_kind, "single", supports_json_schema=bool(row["supports_json_schema"]),
-            caption_controls=controls,
+            caption_controls=controls, prompt_version=version,
         )
         fallback_system_prompt = None
         if response_format is None:
             fallback_format = analysis_response_format(
-                provider_kind, "single", supports_json_schema=True, caption_controls=controls,
+                provider_kind, "single", supports_json_schema=True, caption_controls=controls, prompt_version=version,
             )
             assert fallback_format is not None
             provider_schema = fallback_format["json_schema"]["schema"]
@@ -102,7 +106,7 @@ def _prompt_preview(rules: str | None = None) -> dict:
         "scope": scope,
         "rules": selected_rules,
         "profile_matches_settings": normalize_scoring_rules(profile["rules"]) == saved_rules.strip(),
-        "sections": analysis_prompt_sections(selected_rules, controls),
+        "sections": analysis_prompt_sections(selected_rules, controls, prompt_version=version),
         "system_prompt": prompt,
         "user_prompt": ANALYSIS_USER_PROMPT,
         "schema": schema,

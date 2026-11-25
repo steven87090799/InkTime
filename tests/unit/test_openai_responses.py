@@ -7,6 +7,7 @@ from unittest.mock import Mock
 import pytest
 import requests
 
+from inktime.app.domain.analysis.captions import OBSERVATION_PROMPT_VERSION
 from inktime.app.domain.analysis.schema import validate_model_response
 from inktime.app.providers.base import IncompleteProviderResponse, Usage, assert_complete_response
 from inktime.app.providers.config import normalize_options, validate_base_url
@@ -61,6 +62,41 @@ def image(tmp_path):
 
 def call(p, image, **kwargs):
     return p.analyze(image_path=image, model="gpt-6-luna", detail="high", stage="single", max_tokens=512, **kwargs)
+
+
+@pytest.mark.parametrize("version,current", [
+    (OBSERVATION_PROMPT_VERSION + "-caption-custom", True),
+    ("photo-analysis-v6-literary20-landmarks-20261026", False),
+    ("photo-analysis-v5-compact", False),
+])
+def test_capture_context_and_detail_are_versioned_on_the_responses_wire(image, version, current):
+    p = provider()
+    call(p, image, prompt_version=version, photo_context={
+        "capture_year_month": "2020-03", "city": "新北市", "gps_lat": 25.123456,
+        "full_address": "私密路十號", "filename": "私密檔名.jpg",
+    })
+    body = p.session.calls[0][1]["json"]
+    text, photo = body["input"][1]["content"]
+    assert photo["type"] == "input_image"
+    assert text["text"] == "分析這張照片。" + ('\n拍攝背景：{"capture_year_month":"2020-03","city":"新北市"}' if current else "")
+    schema = body["text"]["format"]["schema"]
+    assert ("visible_detail" in schema["required"]) is current
+    assert ("生活觀察" in body["input"][0]["content"]) is current
+
+
+def test_batch_router_forwards_the_frozen_prompt_and_per_photo_context(image):
+    from inktime.app.providers.router import FailoverVisionProvider, ProviderChannel
+    from inktime.app.services.batch_analysis import BatchAnalysisService
+
+    router = FailoverVisionProvider([ProviderChannel(provider())])
+    plan = {"model": "gpt-6-luna", "vision_input": {"detail": "high"}, "reasoning_effort": "none",
+            "batch_endpoint": "/v1/responses"}
+    item = {"thumbnail": image, "custom_id": "one", "vision_input_spec_json": '{"photo_context":{"city":"新北市"}}'}
+    for version, current in [(OBSERVATION_PROMPT_VERSION, True), ("photo-analysis-v6-literary20-landmarks-20261026", False)]:
+        make_line = BatchAnalysisService._line_factory(SimpleNamespace(settings=None), router, {**plan, "prompt_version": version})
+        request = json.loads(make_line(item))["body"]
+        assert ("新北市" in request["input"][1]["content"][0]["text"]) is current
+        assert ("visible_detail" in request["text"]["format"]["schema"]["required"]) is current
 
 
 def test_responses_reuses_schema_prompt_usage_and_normalized_photo(image):

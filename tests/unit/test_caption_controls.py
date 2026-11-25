@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import json
 
+from inktime.app.domain.analysis.captions import photo_caption_context
 from inktime.app.domain.analysis.schema import FULL_ANALYSIS_JSON_SCHEMA, json_schema_for_stage
+from inktime.app.domain.photos.places import PhotoPlace
 from inktime.app.providers.openai_compatible import (
     ANALYSIS_USER_PROMPT,
     COMMON_PROMPT,
@@ -22,6 +24,15 @@ def _controls(**updates):
     }
     value.update(updates)
     return value
+
+
+def test_caption_context_omits_edit_dates_approximate_locations_and_unverified_fields():
+    photo = {"capture_date_status": "valid", "captured_date": "2023-02-01", "caption_manual_date": None,
+             "exif_json": '{"DateTime":"2023:02:01 12:34:56"}', "gps_lat": 25, "gps_lon": 121}
+    place = PhotoPlace(city="臺北市", precision="approximate_city", source="offline-city-index")
+    assert photo_caption_context(photo, place) == {}
+    assert photo_caption_context({**photo, "caption_manual_date": "2023-02-01"}, place) == {"capture_year_month": "2023-02"}
+    assert photo_caption_context({**photo, "exif_json": '{"DateTimeOriginal":"2023:01:01 01:02:03"}'}, None) == {}
 
 
 def test_only_minimal_side_caption_settings_are_registered():
@@ -63,9 +74,9 @@ def test_complete_prompt_and_schema_have_no_advanced_caption_contract(tmp_path):
         name="test", base_url="https://example.invalid", api_key="", caption_controls=controls
     )
     prompt = provider.system_prompt
-    assert "輕微冷幽默" in prompt
-    assert "不寫流水帳" in prompt
-    assert "完整一句" in prompt
+    assert "生活觀察" in prompt
+    assert "人物關係、對白和內心留白" in prompt
+    assert "不複述 visible_detail" in prompt
     for removed in (
         "caption target",
         "copy_humor_level",

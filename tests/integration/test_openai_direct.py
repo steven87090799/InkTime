@@ -154,6 +154,8 @@ def test_credit_rejected_photo_can_resume_without_rebilling_an_unknown_request(a
 
 class ResponsesBatch(FakeBatchProvider):
     fail_first = False
+    supports_prompt_version = True
+    supports_photo_context = True
 
     def retrieve_file(self, file_id):
         return {"id": file_id, "purpose": "batch", "expires_at": None}
@@ -170,6 +172,7 @@ class ResponsesBatch(FakeBatchProvider):
         for index, custom_id in enumerate(reversed(self.custom_ids)):
             body = wire_response(**({"status": "incomplete", "incomplete_details": {"reason": "max_output_tokens"}}
                                     if self.fail_first and index == 0 else {}))
+            body["output"][1]["content"][0]["text"] = json.dumps(self.result)
             lines.append(json.dumps({"custom_id": custom_id, "response": {"status_code": 200, "body": body}}))
         destination.write_text("\n".join(lines) + "\n")
         return destination
@@ -193,6 +196,50 @@ def test_responses_batch_requires_private_photo_consent_before_creating_work(app
     assert not fake.custom_ids
     with app.extensions["inktime_database"].session() as connection:
         assert connection.execute("SELECT COUNT(*) FROM analysis_batches").fetchone()[0] == 0
+
+
+def test_a2_batch_keeps_each_photos_background_and_reuses_imported_observations(app, tmp_path):
+    from inktime.app.domain.photos.places import PhotoPlace
+    from inktime.app.repositories.photo_locations import PhotoLocationRepository
+
+    one, two = _prepare_photos(app, tmp_path, 2)
+    service, fake = batch_setup(app)
+    fake.result["visible_detail"] = "三雙筷子伸向一顆餃子"
+    fake.result["side_caption"] = "最難分的，總是最後一顆。"
+    with service.database.transaction() as con:
+        con.execute("UPDATE photos SET captured_date='2021-06-09',capture_date_status='valid',gps_lat=25,gps_lon=121 WHERE id=?", (one,))
+        con.execute("INSERT INTO photo_manual_dates(photo_id,content_sha256,captured_at,updated_at) "
+                    "SELECT id,sha256,'2021-06-09',updated_at FROM photos WHERE id=?", (one,))
+        con.execute("UPDATE photos SET captured_date=NULL,capture_date_status='missing',gps_lat=24,gps_lon=120 WHERE id=?", (two,))
+    locations = PhotoLocationRepository(service.database)
+    for photo_id in (one, two):
+        photo = service.photos.get_with_path(photo_id)
+        locations.save_address(photo_id, photo["sha256"], photo["gps_lat"], photo["gps_lon"], PhotoPlace(
+            city="新北市", district="私密地區", full_address="私密路十號", precision="district", source="nlsc-1120317-sanhe",
+        ))
+    with service.database.transaction() as con:
+        con.execute("UPDATE photos SET gps_lon=119 WHERE id=?", (two,))
+    batch_id, = service.submit(sample_count=2, privacy_acknowledged=True)["batch_ids"]
+    batch = service.batches.get(batch_id)
+    with open(batch["local_input_path"]) as lines:
+        bodies = [json.loads(line)["body"] for line in lines]
+    prompts = []
+    for body in bodies:
+        text, image = body["input"][1]["content"]
+        prompts.append(text["text"])
+        assert image["type"] == "input_image"
+        assert "visible_detail" in body["text"]["format"]["schema"]["required"]
+    assert sorted(prompts) == ["分析這張照片。", '分析這張照片。\n拍攝背景：{"capture_year_month":"2021-06","city":"新北市"}']
+    service.poll_due()
+    assert service.import_batch(batch_id)["success"] == 2
+    with service.database.session() as con:
+        results = con.execute("SELECT raw_json,side_caption FROM photo_analysis WHERE score_kind='semantic'").fetchall()
+    assert len(results) == 2
+    assert all(json.loads(r["raw_json"])["visible_detail"] == fake.result["visible_detail"]
+               and r["side_caption"] == fake.result["side_caption"] for r in results)
+    service.settings.update_many({"analysis.side_caption_max_chars": 15}, changed_by="tester", source_ip="127.0.0.1")
+    assert service.submit(sample_count=2, privacy_acknowledged=True)["batch_ids"] == []
+    assert fake.batch_counter == 1
 
 
 @pytest.mark.parametrize("partial", [False, True])

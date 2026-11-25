@@ -83,7 +83,7 @@ def test_prompt_guardrails_and_no_duplicate_default_rubric():
     for text in (
         "泳裝、自拍、旅行、運動或一般人像不因此自動成立",
         "自拍",
-        "輕微冷幽默",
+        "生活觀察",
         "insufficient_visual_cues",
     ):
         assert text in prompt

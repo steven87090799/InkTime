@@ -60,6 +60,13 @@ def test_strict_schema_accepts_expected_result():
     assert validate_analysis_result(json.dumps(valid_result(), ensure_ascii=False)) == valid_result()
 
 
+def test_optional_observation_does_not_invalidate_a_paid_caption():
+    assert validate_model_response(valid_result(visible_detail="三雙筷子"))["visible_detail"] == "三雙筷子"
+    for unusable in (None, ["多個細節"], "兩行\n細節", "字" * 41):
+        assert validate_model_response(valid_result(visible_detail=unusable)) == valid_result()
+    assert validate_model_response(valid_result(visible_detail=""))["visible_detail"] == ""
+
+
 @pytest.mark.parametrize("field", sorted(REQUIRED_FIELDS))
 def test_every_v6_field_is_required(field):
     value = valid_result()

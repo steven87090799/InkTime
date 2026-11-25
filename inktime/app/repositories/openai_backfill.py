@@ -49,8 +49,7 @@ class OpenAIBackfillRepository(AnalysisBackfillRepository):
                   COALESCE(p.display_count,0) AS exposures,-COALESCE(p.local_candidate_score,0) AS quality_order,
                   COALESCE(p.captured_at,p.created_at) AS capture_order
                 FROM population p LEFT JOIN priorities d ON d.month_day=p.captured_month_day
-                WHERE NOT EXISTS(SELECT 1 FROM model_analysis_results c WHERE c.content_sha256=p.sha256)
-                AND p.coverage_status='missing')
+                WHERE p.coverage_status='missing')
             SELECT * FROM ranked WHERE (day_rank,exposures,quality_order,capture_order,id)>(?,?,?,?,?)
             ORDER BY day_rank,exposures,quality_order,capture_order,id LIMIT ?""",  # noqa: S608 -- fixed CTE and bound cursor.
             (json.dumps(priorities), *after, max(1, min(500, limit))),

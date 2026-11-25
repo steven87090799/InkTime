@@ -71,6 +71,39 @@ def test_monthly_display_priority_reaches_the_rest_and_reuses_content(app):
     assert service.budgets.openai.snapshot()["stop_at"] == 40
 
 
+@pytest.mark.parametrize("schema_version", [3, 4, 5, 6])
+def test_monthly_upgrade_skips_unarchived_model_history_and_identical_copies(app, schema_version):
+    from inktime.app.core.model_upload_guard import assert_upload_allowed
+    from inktime.app.repositories.billable_operations import BillableOperationRepository, SavedModelResultAvailableError
+    from tests.unit.test_analysis_schema import legacy_v4_result, valid_result
+
+    service, _ = setup_monthly(app)
+    sha = _photo(app, "already-seen")
+    _photo(app, "same-bytes", same_as="already-seen")
+    _photo(app, "needs-a2")
+    save_result(app, "already-seen", side_caption="舊的短句。")
+    old = valid_result(schema_version=schema_version, side_caption="舊的短句。")
+    if schema_version < 6:
+        del old["display_exclusion"]
+        old["side_caption"] = "照片保留下來的舊短句。"
+    if schema_version == 4:
+        old = legacy_v4_result(side_caption=old["side_caption"])
+    with service.repository.database.transaction() as con:
+        con.execute("DELETE FROM model_analysis_results WHERE content_sha256=?", (sha,))
+        con.execute("UPDATE photo_analysis SET schema_version=?,score_kind=?,content_sha256=NULL,raw_json=?,side_caption=? "
+                    "WHERE photo_id='already-seen'", (schema_version, "legacy" if schema_version == 3 else "semantic",
+                                                     json.dumps(old), old["side_caption"]))
+    assert service.repository.covered(sha)
+    assert [r["id"] for r in service.repository.candidates(10, display_from=date(2026, 11, 25))] == ["needs-a2"]
+    with pytest.raises(SavedModelResultAvailableError):
+        BillableOperationRepository(service.repository.database).begin(sha, "new-a2", guard_paid_photo=True, reuse_completed=True)
+    with pytest.raises(SavedModelResultAvailableError):
+        assert_upload_allowed(service.repository.database.path, "same-bytes", reuse_completed=True)
+    restored = service.photos.inherit_existing_analysis("same-bytes", None, semantic_only=True, match_plan=False)
+    assert restored["side_caption"] == old["side_caption"]
+    assert "visible_detail" not in restored
+
+
 def test_monthly_cursor_wraps_calendar_and_rechecks_skipped_older_rows(app):
     service, _ = setup_monthly(app)
     _photo(app, "jan", "2000-01-01")

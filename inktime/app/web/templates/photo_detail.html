@@ -136,6 +136,7 @@
       </dl>
       <p>AI 語意評分：尚未分析；此結果僅為本機影像品質分析，不等同 AI 回看價值與視覺評分。</p>
       {% endif %}
+      {% if a.visible_detail %}<p><strong>可見細節</strong> {{ a.visible_detail }}</p>{% endif %}
       <h3>產生的一句話（電子紙短文案）</h3>
       <blockquote class="generated-caption">{{ a.side_caption or '這次分析沒有產生電子紙短文案。' }}</blockquote>
       <details><summary>原始分析 JSON</summary><pre>{{ a.raw_json }}</pre></details>
