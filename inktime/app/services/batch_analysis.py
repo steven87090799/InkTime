@@ -1106,7 +1106,8 @@ class BatchAnalysisService:
                 raise BatchLifecycleError("相同照片已有其他 Batch 付費證據；請從原批次／完整備份恢復結果或先對帳", "BATCH-PAID-OPERATION-HOLD")
             blocked = connection.execute(
                 "SELECT 1 FROM analysis_batch_items i LEFT JOIN photos p ON p.id=i.photo_id "
-                "WHERE i.batch_id=? AND (p.id IS NULL OR p.never_upload<>0 OR p.lifecycle_status<>'active' "
+                "LEFT JOIN libraries l ON l.id=p.library_id "
+                "WHERE i.batch_id=? AND (p.id IS NULL OR COALESCE(l.enabled,0)<>1 OR p.never_upload<>0 OR p.lifecycle_status<>'active' "
                 "OR p.eligible<>1 OR p.exclusion_status NOT IN ('eligible','manually_restored') "
                 "OR COALESCE(p.sha256,'')<>i.content_sha256) LIMIT 1",
                 (batch_id,),
@@ -1394,7 +1395,9 @@ class BatchAnalysisService:
             apply_cached=True,
             retry_authorization=_retry_authorization,
         )
-        if not candidates and skipped["cache_hits"]:
+        if not candidates and (skipped["cache_hits"] or (
+            (_job_settings or {}).get("source") == "openai-monthly-display" and not skipped.get("paid_operation_held")
+        )):
             return {"job_id": None, "batch_ids": [], "prepared_batch_ids": [],
                     "not_submitted_batch_ids": [], "submission_status": "no_candidates",
                     "candidate_count": 0, **skipped, "analysis_fingerprint": analysis_fp, "model": model}

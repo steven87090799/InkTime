@@ -365,7 +365,7 @@ class WorkerRunner:
             seasonal = self.app.extensions.get("inktime_seasonal_analysis_service")
             if (seasonal is not None and seasonal.settings.get("analysis.complementary_enabled", False)
                     and settings.get("seasonal_analysis") and job["created_by"] == "system"
-                    and (settings.get("complementary_lane") != "openrouter_daily"
+                    and (seasonal.openai_only() or settings.get("complementary_lane") != "openrouter_daily"
                          or settings.get("target_date") != (seasonal.today() + timedelta(days=1)).isoformat())):
                 repository.request_pause(str(job["id"]))
                 continue

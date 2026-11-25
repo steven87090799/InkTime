@@ -215,6 +215,15 @@ class ProviderService:
             raise ValueError("OpenAI 自動補齊須使用 Responses API")
         return [{**route, "complementary_lane": lane}]
 
+    def validate_split_accounts(self, primary: str, secondary: str) -> None:
+        first = self.repository.get(primary, include_secret=True) or {}
+        second = self.repository.get(secondary, include_secret=True) or {}
+        first_org = first.get("options", {}).get("organization_id")
+        second_org = second.get("options", {}).get("organization_id")
+        if (not first.get("api_key") or not second.get("api_key") or first["api_key"] == second["api_key"]
+                or (first_org and first_org == second_org)):
+            raise ValueError("分開計費須選擇兩個不同帳戶的 OpenAI API Key；同一組織請選共用額度")
+
     def identity_snapshot(self, provider_id: str) -> dict[str, str]:
         """Return the non-secret identity required for safe Batch cleanup.
 

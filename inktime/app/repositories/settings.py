@@ -1501,6 +1501,9 @@ def _govern_definition(key: str, definition: dict[str, Any]) -> None:
 SETTING_DEFINITIONS.update({
     "analysis.complementary_enabled": {"type": "boolean", "default": False, "description": "啟用 OpenAI 照片庫補齊與 OpenRouter 歷年明天分工"},
     "analysis.openai_provider_id": {"type": "string", "default": "", "max_length": 200, "description": "照片庫補齊使用的 OpenAI Provider ID（Key 與模型在模型與 API 管理）"},
+    "analysis.openai_backfill_policy": {"type": "string", "default": "oldest", "choices": ["oldest", "monthly_shared", "monthly_split"], "choice_labels": {"oldest": "由舊到新，自訂預算", "monthly_shared": "近期顯示優先，每月共用 US$40", "monthly_split": "近期顯示優先，每月兩個帳戶各 US$20"}, "description": "OpenAI 全庫補齊順序與每月額度的計算方式"},
+    "analysis.openai_secondary_provider_id": {"type": "string", "default": "", "max_length": 200, "description": "分開計費時使用的第二個 OpenAI 帳戶"},
+    "openai_budget.secondary_anchor": {"type": "string", "default": "", "max_length": 10, "description": "第二個帳戶的補發日期，留空時與主帳戶相同"},
     "analysis.daily_openrouter_provider_id": {"type": "string", "default": "", "max_length": 200, "description": "每日歷年明天使用的免費 OpenRouter Provider ID"},
     "analysis.openai_backfill_enabled": {"type": "boolean", "default": False, "description": "開啟 OpenAI 由舊到新補齊；關閉後保留進度"},
     "analysis.openai_backfill_concurrency": {"type": "integer", "default": 1, "min": 1, "max": 8, "description": "OpenAI 補齊並行數（也受 Provider 與 Worker 限制）"},
@@ -1988,14 +1991,19 @@ class SettingsRepository:
     def _validate_all(values: dict[str, Any]) -> None:
         SettingsRepository._validate_caption_ranges(values)
         try:
-            anchor = values["openai_budget.cycle_anchor"]
-            if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", anchor):
-                raise ValueError("invalid date format")
-            datetime.strptime(anchor, "%Y-%m-%d")
+            for anchor in (values["openai_budget.cycle_anchor"], values["openai_budget.secondary_anchor"] or values["openai_budget.cycle_anchor"]):
+                if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", anchor):
+                    raise ValueError("invalid date format")
+                datetime.strptime(anchor, "%Y-%m-%d")
         except ValueError as exc:
             raise ValueError("OpenAI 週期起算日須為有效的 YYYY-MM-DD 日期") from exc
-        if values["openai_budget.warning_percent"] > values["openai_budget.stop_percent"]:
+        if values["analysis.openai_backfill_policy"] == "oldest" and values["openai_budget.warning_percent"] > values["openai_budget.stop_percent"]:
             raise ValueError("OpenAI 提醒比例不可高於暫停比例")
+        if values["analysis.complementary_enabled"] and values["analysis.openai_backfill_policy"] == "monthly_split":
+            primary = values["analysis.openai_provider_id"]
+            secondary = values["analysis.openai_secondary_provider_id"]
+            if not primary or not secondary or primary == secondary:
+                raise ValueError("分開計費須選擇兩個不同帳戶的 OpenAI API Key")
         if values["analysis.openai_backfill_mode"] == "batch" and values["analysis.openai_backfill_enabled"] and not values["analysis.openai_batch_consent"]:
             raise ValueError("開啟自動 Batch 前須明確同意 Files 暫存私人縮圖")
         # Read-only, unwired warning thresholds must not prevent operators

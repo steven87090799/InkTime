@@ -12,7 +12,7 @@ import hashlib
 from inktime.app.repositories.usage import UsageRepository
 from inktime.app.repositories.settings import SettingsRepository
 from inktime.app.services.usage_periods import usage_periods
-from inktime.app.services.openai_budget import OpenAIBudget
+from inktime.app.services.openai_budget import OpenAIBudget, OpenAIBudgetExceeded
 
 
 class BudgetExceeded(RuntimeError):
@@ -185,7 +185,7 @@ class BudgetService:
                 return
             native = self.openai.is_openai(provider_id)
             if self.openai.enabled() and native:
-                self.openai.assert_reserve(amount)
+                self.openai.assert_reserve(amount, provider_id=provider_id)
             dedicated = self._dedicated_lane(job_id, provider_id)
             snapshot = self.snapshot(job_id, photo_id)
             if snapshot["job_limit"] is not None and snapshot["job_effective"] + amount > snapshot["job_limit"]:
@@ -216,6 +216,10 @@ class BudgetService:
             model, Usage(input_tokens=max(8000, int(self.settings.get("budget.max_tokens", 8000))),
                          output_tokens=output_tokens),
         )
+        if ((estimate is None or not math.isfinite(estimate) or estimate <= 0)
+                and getattr(provider, "kind", None) == "openai" and self.openai.enabled()
+                and self.settings.get("analysis.openai_backfill_policy", "oldest") != "oldest"):
+            raise OpenAIBudgetExceeded("review", "請先確認此 OpenAI 模型的價格，才能使用每月額度")
         return max(0.0, float(estimate)) if estimate is not None else floor
 
     def call(self, provider, method: str, **kwargs):

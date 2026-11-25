@@ -21,9 +21,20 @@ def _state():
     if category not in STATUSES or page is None or not 1 <= page <= 100000:
         abort(400, description="篩選或分頁不合法")
     service = _service()
-    return {**service.repository.status(category=category, offset=(page - 1) * 50),
-            "profile": service.profile(), "page": page, "category": category,
-            "complementary": current_app.extensions["inktime_complementary_analysis_service"].state()}
+    coverage = service.repository.status(category=category, offset=(page - 1) * 50)
+    dual = current_app.extensions["inktime_complementary_analysis_service"].state()
+    status_text = dual["control"]["pause_reason"]
+    if not status_text:
+        if not (dual["settings"]["analysis.complementary_enabled"] and dual["settings"]["analysis.openai_backfill_enabled"]):
+            status_text = "補齊尚未啟用"
+        elif any(coverage[key] for key in ("missing", "queued", "running")):
+            status_text = "補齊已開啟"
+        elif any(coverage[key] for key in ("failed", "unknown", "preprocessing")):
+            status_text = "目前沒有可送出的照片，請查看待處理項目"
+        else:
+            status_text = "可分析的照片已全部補齊" if coverage["total"] else "等待掃描到照片"
+    return {**coverage, "profile": service.profile(), "page": page, "category": category,
+            "complementary": {**dual, "status_text": status_text}}
 
 
 @bp.get("/analysis/missing")
@@ -84,6 +95,20 @@ def complementary_settings():
         result = service.configure(payload, str(g.user["id"]))
         return {**service.state(), **result}
     except (ValueError, RuntimeError) as exc:
+        return {"message": str(exc)}, 409
+
+
+@bp.post("/api/v1/analysis/complementary/balance")
+@administrator_required
+def complementary_balance():
+    payload = json_object_payload(request, maximum_bytes=2048, error_prefix="BACKFILL-001")
+    if set(payload) != {"account", "cycle_start", "remaining"}:
+        return {"message": "請提供帳戶、本期開始時間與 Billing 餘額"}, 400
+    budget = current_app.extensions["inktime_complementary_analysis_service"].budgets.openai
+    try:
+        budget.record_balance(**payload)
+        return {"budget": budget.snapshot()}
+    except ValueError as exc:
         return {"message": str(exc)}, 409
 
 

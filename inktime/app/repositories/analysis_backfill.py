@@ -30,12 +30,14 @@ class AnalysisBackfillRepository:
                    WHERE bi.content_sha256=p.sha256 AND (bi.status IN ('upload_unknown','submission_unknown')
                    OR b.status IN ('upload_unknown','submission_unknown')))"""
 
-    def _population_sql(self, *, after: bool = False, selected: bool = False, materialized: bool = False) -> str:
+    def _population_sql(self, *, after: bool = False, selected: bool = False, materialized: bool = False,
+                        display_priority: bool = False) -> str:
         cursor = "AND (COALESCE(p.captured_at,p.created_at),p.id)>(?,?)" if after else ""
         scope = "AND p.id IN (SELECT value FROM json_each(?))" if selected else ""
         materialization = "MATERIALIZED" if materialized else ""
+        display = "p.captured_month_day,p.never_display,p.display_count,p.local_candidate_score," if display_priority else ""
         return f"""WITH population AS {materialization} (
-            SELECT p.id,p.sha256,p.relative_path,p.captured_at,p.created_at,
+            SELECT p.id,p.sha256,p.relative_path,p.captured_at,p.created_at,{display}
               COALESCE((SELECT t.job_id FROM analysis_backfill_tasks t WHERE t.content_sha256=p.sha256 ORDER BY t.id DESC LIMIT 1),
                 (SELECT ji.job_id FROM job_items ji WHERE ji.photo_id=p.id ORDER BY ji.available_at DESC,ji.id DESC LIMIT 1)) AS last_job_id,
               CASE

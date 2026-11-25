@@ -53,7 +53,7 @@ class SeasonalAnalysisRepository:
                 connection.execute("INSERT INTO job_events(job_id,event,message,details_json,created_at) VALUES (?,'daily_handoff',?,'{}',?)",
                                    (job_id, "未送出的明天照片改交每日免費佇列；原結果與帳務保留", utc_now()))
             if rows:
-                connection.execute("UPDATE openai_backfill_control SET cursor_date='',cursor_id='' WHERE id=1")
+                connection.execute("UPDATE openai_backfill_control SET cursor_date='',cursor_id='',monthly_cursor=NULL WHERE id=1")
         return len(rows)
 
     def retire_old_daily_queue(self, target):
@@ -66,14 +66,14 @@ class SeasonalAnalysisRepository:
                 "COALESCE(json_extract(j.settings_json,'$.complementary_lane'),'')<>'openrouter_daily' OR "
                 "json_extract(j.settings_json,'$.target_date')<>?) "
                 "AND NOT EXISTS(SELECT 1 FROM billable_operations o WHERE o.content_sha256=p.sha256 AND o.state<>'not_sent') LIMIT 500",
-                (target.isoformat(),),
+                (target.isoformat() if target is not None else "",),
             ).fetchall()
             for row in rows:
                 connection.execute("UPDATE job_items SET status='cancelled',error_code='DAILY-DEFERRED',completed_at=? WHERE id=?", (utc_now(), row["id"]))
                 connection.execute("UPDATE seasonal_analysis_tasks SET status='failed',error_code='DAILY-DEFERRED',updated_at=? WHERE job_id=? AND photo_id=? AND status IN ('queued','running')",
                                    (utc_now(), row["job_id"], row["photo_id"]))
             if rows:
-                connection.execute("UPDATE openai_backfill_control SET cursor_date='',cursor_id='' WHERE id=1")
+                connection.execute("UPDATE openai_backfill_control SET cursor_date='',cursor_id='',monthly_cursor=NULL WHERE id=1")
         return len(rows)
 
     def candidates(self, target: date | None, window: int, *, connection=None) -> list[dict]:
