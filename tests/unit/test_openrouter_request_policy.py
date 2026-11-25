@@ -264,7 +264,11 @@ def test_openrouter_no_compatible_endpoint_404_requires_configuration_review():
     provider.close()
 
 
-def test_disabled_structured_output_includes_complete_text_schema(tmp_path):
+@pytest.mark.parametrize(("version", "include_visible_detail"), [
+    (None, True),
+    ("photo-analysis-v6-literary20-landmarks-20261026", False),
+])
+def test_disabled_structured_output_includes_complete_text_schema(tmp_path, version, include_visible_detail):
     from inktime.app.domain.analysis.schema import json_schema_for_stage
     from inktime.app.domain.analysis.landmarks import with_landmark_schema
 
@@ -273,12 +277,14 @@ def test_disabled_structured_output_includes_complete_text_schema(tmp_path):
     provider = _provider(kind="openai_compatible")
     provider.supports_json_schema = False
     body = provider.build_analysis_request_body(
-        image_path=image, model="vision-model", detail="high", stage="single",
+        image_path=image, model="vision-model", detail="high", stage="single", prompt_version=version,
     )
     assert "response_format" not in body
     prompt = body["messages"][0]["content"]
     schema = json.loads(prompt.split("完整 JSON Schema：", 1)[1])
-    assert schema == with_landmark_schema(json_schema_for_stage("single"))["schema"]
+    expected = json_schema_for_stage("single", include_visible_detail=include_visible_detail)
+    assert schema == with_landmark_schema(expected)["schema"]
+    assert ("visible_detail" in schema["required"]) is include_visible_detail
 
 
 @pytest.mark.parametrize("model", ["o1", "o3", "o3-2025-04-16", "o4-mini"])

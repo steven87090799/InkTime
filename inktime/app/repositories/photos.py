@@ -13,9 +13,11 @@ from uuid import uuid4
 
 from inktime.app.core.paths import UnsafePathError, safe_join
 from inktime.app.db import Database
+from inktime.app.domain.analysis.captions import photo_caption_context
 from inktime.app.domain.analysis.plan import reusable_analysis_fingerprint
 from inktime.app.repositories.analysis_history import display_analysis_order_sql, historical_model_sql
 from inktime.app.repositories.model_coverage import preserved_outputs_sql
+from inktime.app.repositories.photo_locations import PhotoLocationRepository
 from inktime.app.domain.analysis.scoring import (
     RANKING_RULE_VERSION,
     SEMANTIC_SCORE_KIND,
@@ -1289,7 +1291,6 @@ class PhotoRepository:
                 ).fetchone()
             evidence = json.loads(covered[0]).get("landmark_evidence") if covered else None
             if isinstance(evidence, dict) and evidence.get("landmark_source") == "vision":
-                from inktime.app.repositories.photo_locations import PhotoLocationRepository
                 PhotoLocationRepository(self.database).save_landmark(
                     photo_id, str(target_content["sha256"]), target_content["gps_lat"], target_content["gps_lon"],
                     name=str(evidence.get("landmark") or ""), confidence=float(evidence.get("landmark_confidence") or 0),
@@ -1328,18 +1329,34 @@ class PhotoRepository:
         with self.database.session() as connection:
             return connection.execute(
                 f"""
-                SELECT p.*, l.root_path, md.captured_at AS caption_manual_date,
+                SELECT p.*, l.root_path,
                        (SELECT latest.score_kind FROM photo_analysis latest
                         WHERE latest.photo_id=p.id
                         ORDER BY {preferred_analysis_order_sql('latest')} LIMIT 1) AS latest_score_kind,
                        (SELECT latest.ranking_score FROM photo_analysis latest
                         WHERE latest.photo_id=p.id
                         ORDER BY {preferred_analysis_order_sql('latest')} LIMIT 1) AS latest_ranking_score
-                FROM photos p JOIN libraries l ON l.id=p.library_id
-                LEFT JOIN photo_manual_dates md ON md.photo_id=p.id AND md.content_sha256=p.sha256 WHERE p.id=?
+                FROM photos p JOIN libraries l ON l.id=p.library_id WHERE p.id=?
                 """,
                 (photo_id,),
             ).fetchone()
+
+    def get_caption_context(self, photo_id: str, content_sha256: str) -> dict[str, str]:
+        """Read the verified date and location together for this image's API request."""
+        with self.database.session() as connection:
+            row = connection.execute(
+                """SELECT p.captured_date,p.capture_date_status,p.exif_json,p.gps_lat,p.gps_lon,
+                          md.captured_at AS caption_manual_date,pl.place_json,pl.gps_key
+                   FROM photos p
+                   LEFT JOIN photo_manual_dates md ON md.photo_id=p.id AND md.content_sha256=p.sha256
+                   LEFT JOIN photo_locations pl ON pl.photo_id=p.id AND pl.content_sha256=p.sha256
+                   WHERE p.id=? AND p.sha256=?""",
+                (photo_id, content_sha256),
+            ).fetchone()
+        if row is None:
+            return {}
+        place = PhotoLocationRepository.matching_place(row, row["place_json"], row["gps_key"])
+        return photo_caption_context(row, place)
 
     def compatibility_page(
         self,

@@ -25,7 +25,7 @@ from inktime.app.domain.analysis import (
 )
 from inktime.app.domain.analysis.plan import FULL_ANALYSIS_TOKEN_CAP as FULL_ANALYSIS_TOKEN_CAP, analysis_output_token_cap, stored_analysis_fingerprint
 from inktime.app.domain.analysis.content_filter import CONTENT_FILTER_SWITCHES
-from inktime.app.domain.analysis.captions import OBSERVATION_PROMPT_VERSION, observation_caption_enabled, photo_caption_context
+from inktime.app.domain.analysis.captions import OBSERVATION_PROMPT_VERSION, observation_caption_enabled
 from inktime.app.domain.analysis.json_repair import extract_json_value
 from inktime.app.domain.analysis.execution_mode import (
     execution_mode,
@@ -51,7 +51,6 @@ from inktime.app.domain.photos.quality_policy import (
 from inktime.app.providers.base import ProviderResponse, Usage, VisionAttemptState, VisionProvider, request_definitely_not_sent
 from inktime.app.providers.base import assert_complete_response, provider_process_timeout, openai_request_rejected
 from inktime.app.repositories.photos import PhotoRepository
-from inktime.app.repositories.photo_locations import PhotoLocationRepository
 from inktime.app.repositories.settings import SettingsRepository
 from inktime.app.repositories.usage import UsageRepository
 from inktime.app.repositories.billable_operations import (
@@ -1791,8 +1790,7 @@ class PhotoAnalysisService:
         if not sha or str(photo["local_features_status"] or "") != "complete":
             raise ValueError("IMG-003 照片尚未完成本地預處理")
         if observation_caption_enabled(prompt_version):
-            place = PhotoLocationRepository(self.photos.database).get(photo) if photo["gps_lat"] is not None else None
-            photo_context = photo_caption_context(photo, place)
+            photo_context = self.photos.get_caption_context(photo_id, sha)
             if photo_context:
                 vision_input["photo_context"] = photo_context
         total_cost = 0.0
