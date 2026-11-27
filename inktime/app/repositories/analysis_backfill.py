@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 import json
 
 from inktime.app.repositories.analysis_reservations import AnalysisReservationConflict, reserved_analysis_sql
-from inktime.app.repositories.model_coverage import remember_model_result
+from inktime.app.repositories.model_coverage import has_saved_model_result, remember_model_result, saved_model_result_sql
 
 
 def utc_now() -> str:
@@ -30,12 +30,14 @@ class AnalysisBackfillRepository:
                    WHERE bi.content_sha256=p.sha256 AND (bi.status IN ('upload_unknown','submission_unknown')
                    OR b.status IN ('upload_unknown','submission_unknown')))"""
 
-    def _population_sql(self, *, after: bool = False, selected: bool = False, materialized: bool = False) -> str:
+    def _population_sql(self, *, after: bool = False, selected: bool = False, materialized: bool = False,
+                        display_priority: bool = False) -> str:
         cursor = "AND (COALESCE(p.captured_at,p.created_at),p.id)>(?,?)" if after else ""
         scope = "AND p.id IN (SELECT value FROM json_each(?))" if selected else ""
         materialization = "MATERIALIZED" if materialized else ""
+        display = "p.captured_month_day,p.never_display,p.display_count,p.local_candidate_score," if display_priority else ""
         return f"""WITH population AS {materialization} (
-            SELECT p.id,p.sha256,p.relative_path,p.captured_at,p.created_at,
+            SELECT p.id,p.sha256,p.relative_path,p.captured_at,p.created_at,{display}
               COALESCE((SELECT t.job_id FROM analysis_backfill_tasks t WHERE t.content_sha256=p.sha256 ORDER BY t.id DESC LIMIT 1),
                 (SELECT ji.job_id FROM job_items ji WHERE ji.photo_id=p.id ORDER BY ji.available_at DESC,ji.id DESC LIMIT 1)) AS last_job_id,
               CASE
@@ -43,7 +45,7 @@ class AnalysisBackfillRepository:
                   JOIN photos rp ON rp.id=ri.photo_id WHERE rp.sha256=p.sha256 AND ri.status='running'
                   AND rj.kind IN ('analysis','analysis_batch')) THEN 'running'
                 WHEN ({self.uncertain_sql()}) THEN 'unknown'
-                WHEN EXISTS(SELECT 1 FROM model_analysis_results c WHERE c.content_sha256=p.sha256) THEN 'completed'
+                WHEN {saved_model_result_sql('p.sha256')} THEN 'completed'
                 WHEN COALESCE(p.never_upload,0)=1 OR p.eligible=0 OR
                   p.exclusion_status IN ('auto_excluded','manually_excluded') OR
                   COALESCE(p.screenshot_likelihood,0)>=0.95 THEN 'excluded'
@@ -161,15 +163,15 @@ class AnalysisBackfillRepository:
     def refresh(self) -> None:
         with self.database.transaction() as connection:
             connection.execute(
-                """UPDATE analysis_backfill_tasks AS t SET status=CASE
+                f"""UPDATE analysis_backfill_tasks AS t SET status=CASE
                     WHEN EXISTS(SELECT 1 FROM job_items i WHERE i.job_id=t.job_id AND i.photo_id=t.photo_id AND i.status='running') THEN 'running'
-                    WHEN EXISTS(SELECT 1 FROM model_analysis_results c WHERE c.content_sha256=t.content_sha256) THEN 'completed'
+                    WHEN {saved_model_result_sql('t.content_sha256')} THEN 'completed'
                     WHEN EXISTS(SELECT 1 FROM billable_operations o WHERE o.content_sha256=t.content_sha256 AND o.state IN ('started','response')) THEN 'unknown'
                     WHEN EXISTS(SELECT 1 FROM job_items i WHERE i.job_id=t.job_id AND i.photo_id=t.photo_id AND i.status IN ('failed','cancelled')) THEN 'failed'
                     WHEN EXISTS(SELECT 1 FROM job_items i WHERE i.job_id=t.job_id AND i.photo_id=t.photo_id AND i.status='completed') THEN 'completed'
                     ELSE 'queued' END,
                     error_code=(SELECT i.error_code FROM job_items i WHERE i.job_id=t.job_id AND i.photo_id=t.photo_id),updated_at=?
-                    WHERE t.status IN ('queued','running')""", (utc_now(),),
+                    WHERE t.status IN ('queued','running')""", (utc_now(),),  # noqa: S608 -- fixed coverage expression.
             )
 
     def reconcile(self, *, month: str | None = None) -> dict:
@@ -220,7 +222,7 @@ class AnalysisBackfillRepository:
 
     def covered(self, sha: str) -> bool:
         with self.database.session() as connection:
-            return connection.execute("SELECT 1 FROM model_analysis_results WHERE content_sha256=?", (sha,)).fetchone() is not None
+            return has_saved_model_result(connection, sha)
 
     def pause(self, reason: str) -> None:
         with self.database.transaction() as connection:

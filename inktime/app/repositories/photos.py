@@ -13,8 +13,11 @@ from uuid import uuid4
 
 from inktime.app.core.paths import UnsafePathError, safe_join
 from inktime.app.db import Database
+from inktime.app.domain.analysis.captions import photo_caption_context
 from inktime.app.domain.analysis.plan import reusable_analysis_fingerprint
 from inktime.app.repositories.analysis_history import display_analysis_order_sql, historical_model_sql
+from inktime.app.repositories.model_coverage import preserved_outputs_sql
+from inktime.app.repositories.photo_locations import PhotoLocationRepository
 from inktime.app.domain.analysis.scoring import (
     RANKING_RULE_VERSION,
     SEMANTIC_SCORE_KIND,
@@ -28,9 +31,7 @@ from inktime.app.domain.analysis.content_filter import (
     evaluate_display_exclusion,
 )
 from inktime.app.domain.analysis.schema import (
-    ANALYSIS_JSON_SCHEMA,
-    LEGACY_V4_JSON_SCHEMA,
-    V5_ANALYSIS_JSON_SCHEMA,
+    analysis_result_schema,
     SUPPORTED_ANALYSIS_SCHEMA_VERSIONS,
     validate_analysis_result,
 )
@@ -1231,6 +1232,8 @@ class PhotoRepository:
                         not required_fingerprint or snapshot.get("analysis_fingerprint") == required_fingerprint or
                         (reusable_fingerprint is not None and source_spec and reusable_analysis_fingerprint(source_spec) == reusable_fingerprint)):
                         row = snapshot
+        if row is None and semantic_only and not required_fingerprint and target_content is not None:
+            return self._restore_preserved_output(photo_id, job_id, str(target_content["sha256"]))
         if row is None:
             return None
         if row["schema_version"] not in SUPPORTED_ANALYSIS_SCHEMA_VERSIONS:
@@ -1242,7 +1245,7 @@ class PhotoRepository:
         )
         semantic_available = source_kind == SEMANTIC_SCORE_KIND
         result = validate_analysis_result(row["raw_json"])
-        if live_match and not match_plan and str(row["photo_id"]) == photo_id and row["analysis_fingerprint"] == requested_fingerprint:
+        if live_match and not match_plan and str(row["photo_id"]) == photo_id:
             return result
         self.save_analysis(
             photo_id,
@@ -1288,11 +1291,38 @@ class PhotoRepository:
                 ).fetchone()
             evidence = json.loads(covered[0]).get("landmark_evidence") if covered else None
             if isinstance(evidence, dict) and evidence.get("landmark_source") == "vision":
-                from inktime.app.repositories.photo_locations import PhotoLocationRepository
                 PhotoLocationRepository(self.database).save_landmark(
                     photo_id, str(target_content["sha256"]), target_content["gps_lat"], target_content["gps_lon"],
                     name=str(evidence.get("landmark") or ""), confidence=float(evidence.get("landmark_confidence") or 0),
                 )
+        return result
+
+    def _restore_preserved_output(self, photo_id, job_id, content_sha):
+        with self.database.session() as connection:
+            saved = connection.execute(
+                "SELECT snapshot FROM (" + preserved_outputs_sql(":sha")  # noqa: S608 -- fixed query, bound content hash.
+                + ") ORDER BY json_extract(snapshot,'$.schema_version') DESC,json_extract(snapshot,'$.created_at') DESC LIMIT 1",
+                {"sha": content_sha},
+            ).fetchone()
+        if saved is None:
+            return None
+        snapshot = json.loads(saved["snapshot"])
+        if snapshot["schema_version"] in (1, 2, 3):
+            # Old model scores are display history and must not enter current ranking.
+            raw = json.loads(snapshot["raw_json"])
+            return {**raw, "schema_version": snapshot["schema_version"],
+                    "side_caption": snapshot.get("side_caption") or raw.get("side_caption", "")}
+        result = validate_analysis_result(snapshot["raw_json"])
+        self.save_analysis(
+            photo_id, job_id, "inherited", snapshot["provider"], snapshot["model"],
+            result, snapshot["raw_json"], "inherited", score_kind=SEMANTIC_SCORE_KIND,
+            schema_kind=snapshot.get("schema_kind") or "full",
+            prompt_version=str(snapshot.get("prompt_version") or "photo-quality-v3").split("@vision-")[0],
+            scoring_version_id=snapshot.get("scoring_version_id"), analysis_fingerprint=snapshot.get("analysis_fingerprint"),
+            analysis_spec_json=snapshot.get("analysis_spec_json"),
+            vision_request_fingerprint=snapshot.get("vision_request_fingerprint"),
+            vision_input_spec_json=snapshot.get("vision_input_spec_json"), expected_content_sha256=content_sha,
+        )
         return result
 
     def get_with_path(self, photo_id: str):
@@ -1310,6 +1340,23 @@ class PhotoRepository:
                 """,
                 (photo_id,),
             ).fetchone()
+
+    def get_caption_context(self, photo_id: str, content_sha256: str) -> dict[str, str]:
+        """Read the verified date and location together for this image's API request."""
+        with self.database.session() as connection:
+            row = connection.execute(
+                """SELECT p.captured_date,p.capture_date_status,p.exif_json,p.gps_lat,p.gps_lon,
+                          md.captured_at AS caption_manual_date,pl.place_json,pl.gps_key
+                   FROM photos p
+                   LEFT JOIN photo_manual_dates md ON md.photo_id=p.id AND md.content_sha256=p.sha256
+                   LEFT JOIN photo_locations pl ON pl.photo_id=p.id AND pl.content_sha256=p.sha256
+                   WHERE p.id=? AND p.sha256=?""",
+                (photo_id, content_sha256),
+            ).fetchone()
+        if row is None:
+            return {}
+        place = PhotoLocationRepository.matching_place(row, row["place_json"], row["gps_key"])
+        return photo_caption_context(row, place)
 
     def compatibility_page(
         self,
@@ -2738,12 +2785,8 @@ class PhotoRepository:
         # policy state. Keep them outside our writer transaction; all content,
         # manual override and current-policy checks remain inside it.
         result_version = result.get("schema_version")
-        result_schema = (
-            LEGACY_V4_JSON_SCHEMA if result_version == 4 else
-            V5_ANALYSIS_JSON_SCHEMA if result_version == 5 else ANALYSIS_JSON_SCHEMA
-        )
-        result_fields = set(result_schema["schema"]["required"])
-        canonical = validate_analysis_result({key: result[key] for key in result_fields})
+        result_schema = analysis_result_schema(result_version, include_visible_detail="visible_detail" in result)
+        canonical = validate_analysis_result({key: result[key] for key in result_schema["schema"]["required"]})
         strict_display = canonical["schema_version"] >= 6
         display_evaluation = evaluate_display_exclusion(canonical["display_exclusion"]) if strict_display else None
         now = datetime.now(timezone.utc).isoformat()
@@ -2906,6 +2949,7 @@ class PhotoRepository:
                         {
                             key: canonical[key]
                             for key in (
+                                "visible_detail",
                                 "special_level",
                                 "content_filter",
                                 "display_exclusion",

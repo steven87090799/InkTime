@@ -26,6 +26,7 @@ from uuid import uuid4
 from inktime.app.core.paths import safe_join
 from inktime.app.core.logging import log_event
 from inktime.app.domain.analysis.json_repair import extract_json_value
+from inktime.app.domain.analysis.captions import observation_caption_enabled, photo_caption_context
 from inktime.app.domain.analysis import (
     AnalysisValidationError,
     canonical_json,
@@ -55,6 +56,7 @@ from inktime.app.repositories.analysis_reservations import (
 from inktime.app.repositories.batch_retry_authorizations import BatchRetryAuthorizationRepository
 from inktime.app.repositories.billable_operations import BillableOperationRepository, approved_receipt_sql
 from inktime.app.repositories.model_coverage import saved_model_result_sql
+from inktime.app.repositories.photo_locations import PhotoLocationRepository
 from inktime.app.repositories.analysis_batches import (
     ACTIVE_BATCH_STATUSES,
     TERMINAL_BATCH_STATUSES,
@@ -377,6 +379,7 @@ class BatchAnalysisService:
                    p.camera_make,p.camera_model,p.exif_json,p.gps_lat,p.gps_lon,p.blur_score,p.contrast,
                    p.overexposed_ratio,p.underexposed_ratio,p.screenshot_likelihood,
                    p.local_candidate_score,p.captured_at,p.created_at,l.root_path,
+                   p.captured_date,p.capture_date_status,md.captured_at AS caption_manual_date,pl.place_json,pl.gps_key,
                    {saved_model_result_sql('p.sha256')} AS saved_model_result,
                    {approved_receipt_sql('p.sha256')} AS approved_receipt,
                    EXISTS(SELECT 1 FROM photo_analysis a WHERE a.photo_id=p.id
@@ -395,6 +398,8 @@ class BatchAnalysisService:
                             AND (retry_approval.source_item_id IS NULL OR
                                  NOT {valid_batch_retry_sql('paid_item', 'paid_batch')})) AS paid_batch_held
             FROM photos p JOIN libraries l ON l.id=p.library_id
+            LEFT JOIN photo_locations pl ON pl.photo_id=p.id AND pl.content_sha256=p.sha256
+            LEFT JOIN photo_manual_dates md ON md.photo_id=p.id AND md.content_sha256=p.sha256
             WHERE p.lifecycle_status='active' AND p.eligible=1
               AND NOT {reserved_analysis_sql()}
               AND COALESCE(p.never_upload,0)=0
@@ -542,7 +547,7 @@ class BatchAnalysisService:
         vision_input = dict(plan.get("vision_input") or plan.get("high_vision_input") or {})
         vision_input["schema_kind"] = "full"
         vision_input["reasoning_effort"] = str(plan["reasoning_effort"])
-        vision_input_json = canonical_json(vision_input)
+        use_caption_context = observation_caption_enabled(plan["prompt_version"])
         rows = (photo for page in self._candidate_pages(query, parameters, seed=seed, limit=scan_limit) for photo in page)
         operations = BillableOperationRepository(self.database)
         for photo in rows:
@@ -558,6 +563,13 @@ class BatchAnalysisService:
             if not source.is_file():
                 continue
             content_sha = str(photo["sha256"] or "").casefold()
+            photo_input = vision_input
+            if use_caption_context:
+                place = PhotoLocationRepository.matching_place(photo, photo["place_json"], photo["gps_key"])
+                context = photo_caption_context(photo, place)
+                if context:
+                    photo_input = {**vision_input, "photo_context": context}
+            vision_input_json = canonical_json(photo_input)
             vision_fp = fingerprint(
                 {
                     "content_sha256": content_sha,
@@ -568,7 +580,7 @@ class BatchAnalysisService:
                     "schema_kind": "full",
                     "reasoning_effort": str(plan["reasoning_effort"]),
                     "provider_prompt_contract_sha256": str(plan.get("provider_prompt_contract_sha256") or ""),
-                    **vision_input,
+                    **photo_input,
                 }
             )
             held = bool(
@@ -961,6 +973,7 @@ class BatchAnalysisService:
         max_tokens = analysis_output_token_cap(self.settings)
 
         def make_line(item: dict[str, Any]) -> bytes:
+            context = json.loads(item.get("vision_input_spec_json") or "{}").get("photo_context")
             body = provider.build_analysis_request_body(
                 image_path=item["thumbnail"],
                 model=str(plan.get("model") or plan.get("high_model") or ""),
@@ -969,6 +982,7 @@ class BatchAnalysisService:
                 max_tokens=max_tokens,
                 caption_controls=plan.get("caption_controls") or None,
                 reasoning_effort=str(plan["reasoning_effort"]),
+                **({"photo_context": context} if context and getattr(provider, "supports_photo_context", False) else {}),
                 **({"prompt_version": str(plan["prompt_version"])} if getattr(provider, "supports_prompt_version", False) else {}),
             )
             payload = {
@@ -1106,7 +1120,8 @@ class BatchAnalysisService:
                 raise BatchLifecycleError("相同照片已有其他 Batch 付費證據；請從原批次／完整備份恢復結果或先對帳", "BATCH-PAID-OPERATION-HOLD")
             blocked = connection.execute(
                 "SELECT 1 FROM analysis_batch_items i LEFT JOIN photos p ON p.id=i.photo_id "
-                "WHERE i.batch_id=? AND (p.id IS NULL OR p.never_upload<>0 OR p.lifecycle_status<>'active' "
+                "LEFT JOIN libraries l ON l.id=p.library_id "
+                "WHERE i.batch_id=? AND (p.id IS NULL OR COALESCE(l.enabled,0)<>1 OR p.never_upload<>0 OR p.lifecycle_status<>'active' "
                 "OR p.eligible<>1 OR p.exclusion_status NOT IN ('eligible','manually_restored') "
                 "OR COALESCE(p.sha256,'')<>i.content_sha256) LIMIT 1",
                 (batch_id,),
@@ -1394,7 +1409,9 @@ class BatchAnalysisService:
             apply_cached=True,
             retry_authorization=_retry_authorization,
         )
-        if not candidates and skipped["cache_hits"]:
+        if not candidates and (skipped["cache_hits"] or (
+            (_job_settings or {}).get("source") == "openai-monthly-display" and not skipped.get("paid_operation_held")
+        )):
             return {"job_id": None, "batch_ids": [], "prepared_batch_ids": [],
                     "not_submitted_batch_ids": [], "submission_status": "no_candidates",
                     "candidate_count": 0, **skipped, "analysis_fingerprint": analysis_fp, "model": model}

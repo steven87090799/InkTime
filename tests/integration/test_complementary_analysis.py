@@ -1,6 +1,6 @@
 """Two explicit lanes, cycle accounting and renewal; all calls use mocks."""
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime
+from datetime import date, datetime, timedelta
 import json
 
 import pytest
@@ -32,6 +32,215 @@ def record_cost(app, cost, *, provider_id="direct-test", started_at=None):
         job_id=None, photo_id=None, request_type="test", input_tokens=100, output_tokens=10, cached_tokens=0,
         estimated_cost=cost, actual_cost=None, started_at=started_at or datetime.now().astimezone().isoformat(),
         latency_ms=1, status="completed", cost_source="estimated" if cost is not None else "unknown")
+
+
+def setup_monthly(app, *, split=False, **updates):
+    service = app.extensions["inktime_complementary_analysis_service"]
+    actor = create_admin(app)
+    primary = save_direct(app, supports_batch=True)
+    secondary = save_direct(app, id="second", name="Second", api_key="mock-second-account", supports_batch=True) if split else ""
+    service.configure({"analysis.complementary_enabled": True, "analysis.openai_backfill_enabled": True,
+                       "analysis.openai_backfill_policy": "monthly_split" if split else "monthly_shared",
+                       "analysis.openai_provider_id": primary, "analysis.openai_secondary_provider_id": secondary,
+                       **updates}, actor)
+    return service, actor
+
+
+def test_monthly_display_priority_reaches_the_rest_and_reuses_content(app):
+    service, _ = setup_monthly(app)
+    today = app.extensions["inktime_seasonal_analysis_service"].today()
+    assert not app.extensions["inktime_seasonal_analysis_service"].enabled()
+    tomorrow = today + timedelta(days=1)
+    _photo(app, "tomorrow", tomorrow.strftime("2000-%m-%d"))
+    _photo(app, "today", today.strftime("2000-%m-%d"))
+    _photo(app, "old", (today + timedelta(days=30)).strftime("1980-%m-%d"))
+    _photo(app, "done", today.strftime("2000-%m-%d"))
+    _photo(app, "done-copy", same_as="done")
+    _photo(app, "private", today.strftime("2000-%m-%d"))
+    save_result(app, "done")
+    with service.repository.database.transaction() as con:
+        con.execute("UPDATE photos SET never_upload=1 WHERE id='private'")
+    job = service.ensure()["job_id"]
+    items = service.jobs.claim(job, "worker", 3)
+    assert [i["photo_id"] for i in items] == ["today", "tomorrow", "old"]
+    for item in items:
+        save_result(app, item["photo_id"])
+        assert service.jobs.complete_item(job, item["id"], {"stage": "single"}, worker_id="worker")
+    assert service.ensure()["reason"] == "queue_completed"
+    assert service.ensure()["reason"] == "no_missing_items"
+    assert service.budgets.openai.snapshot()["stop_at"] == 40
+
+
+@pytest.mark.parametrize("schema_version", [3, 4, 5, 6])
+def test_monthly_upgrade_skips_unarchived_model_history_and_identical_copies(app, schema_version):
+    from inktime.app.core.model_upload_guard import assert_upload_allowed
+    from inktime.app.repositories.billable_operations import BillableOperationRepository, SavedModelResultAvailableError
+    from tests.unit.test_analysis_schema import legacy_v4_result, valid_result
+
+    service, _ = setup_monthly(app)
+    sha = _photo(app, "already-seen")
+    _photo(app, "same-bytes", same_as="already-seen")
+    _photo(app, "needs-a2")
+    save_result(app, "already-seen", side_caption="舊的短句。")
+    old = valid_result(schema_version=schema_version, side_caption="舊的短句。")
+    if schema_version < 6:
+        del old["display_exclusion"]
+        old["side_caption"] = "照片保留下來的舊短句。"
+    if schema_version == 4:
+        old = legacy_v4_result(side_caption=old["side_caption"])
+    with service.repository.database.transaction() as con:
+        con.execute("DELETE FROM model_analysis_results WHERE content_sha256=?", (sha,))
+        con.execute("UPDATE photo_analysis SET schema_version=?,score_kind=?,content_sha256=NULL,raw_json=?,side_caption=? "
+                    "WHERE photo_id='already-seen'", (schema_version, "legacy" if schema_version == 3 else "semantic",
+                                                     json.dumps(old), old["side_caption"]))
+    assert service.repository.covered(sha)
+    assert [r["id"] for r in service.repository.candidates(10, display_from=date(2026, 11, 25))] == ["needs-a2"]
+    with pytest.raises(SavedModelResultAvailableError):
+        BillableOperationRepository(service.repository.database).begin(sha, "new-a2", guard_paid_photo=True, reuse_completed=True)
+    with pytest.raises(SavedModelResultAvailableError):
+        assert_upload_allowed(service.repository.database.path, "same-bytes", reuse_completed=True)
+    restored = service.photos.inherit_existing_analysis("same-bytes", None, semantic_only=True, match_plan=False)
+    assert restored["side_caption"] == old["side_caption"]
+    assert "visible_detail" not in restored
+
+
+def test_monthly_cursor_wraps_calendar_and_rechecks_skipped_older_rows(app):
+    service, _ = setup_monthly(app)
+    _photo(app, "jan", "2000-01-01")
+    _photo(app, "leap", "2000-02-29")
+    _photo(app, "other", "1980-10-01")
+    repo = service.repository
+    first = repo.candidates(1, display_from=date(2023, 12, 31))
+    assert first[0]["id"] == "jan"
+    with repo.database.transaction() as con:
+        repo.advance(con, first)
+    assert repo.candidates(1, display_from=date(2023, 12, 31))[0]["id"] == "other"
+    assert repo.candidates(1, display_from=date(2024, 2, 28))[0]["id"] == "leap"
+    assert repo.candidates(1, display_from=date(2023, 2, 28), nearby_days=1)[0]["id"] == "leap"
+    with repo.database.transaction() as con:
+        con.execute("UPDATE photos SET local_candidate_score=99 WHERE id='other'")
+    assert repo.candidates(1, display_from=date(2023, 12, 31), ranked_only=True)[0]["id"] == "other"
+
+
+def test_monthly_send_boundary_rechecks_library_and_account_pause(app):
+    from inktime.app.core.model_upload_guard import assert_upload_allowed, UploadNotAllowedError, UploadPausedError
+    service, _ = setup_monthly(app, split=True)
+    sha = _photo(app, "selected")
+    job = service.ensure()["job_id"]
+    database = service.repository.database
+    assert_upload_allowed(database.path, "selected", job, expected_content_sha256=sha)
+    service._pause_for_error(ProviderHTTPError("credit exhausted", "API_CREDIT_EXHAUSTED", http_status=429), job)
+    with pytest.raises(UploadPausedError):
+        assert_upload_allowed(database.path, "selected", job, expected_content_sha256=sha)
+    with database.transaction() as con:
+        con.execute("UPDATE libraries SET enabled=0 WHERE id='seasonal'")
+    with pytest.raises(UploadNotAllowedError):
+        assert_upload_allowed(database.path, "selected", expected_content_sha256=sha)
+
+
+def test_monthly_shared_reconciles_partial_grant_and_resumes_only_missing_on_renewal(app, client, monkeypatch):
+    service, _ = setup_monthly(app, **{"openai_budget.cycle_months": 12, "openai_budget.stop_percent": 85,
+                                       "openai_budget.daily_limit": 1, "openai_budget.auto_resume": False})
+    budget = service.budgets.openai
+    record_cost(app, 3)
+    start = budget.snapshot()["start"]
+    payload = {"account": "", "cycle_start": start, "remaining": 5}
+    path = "/api/v1/analysis/complementary/balance"
+    login(client)
+    assert client.post(path, json=payload).status_code == 403
+    headers = {"X-CSRF-Token": csrf(client)}
+    assert client.post(path, json={**payload, "cycle_start": "previous"}, headers=headers).status_code == 409
+    response = client.post(path, json=payload, headers=headers)
+    assert response.status_code == 200
+    assert response.get_json()["budget"]["remaining"] == 5
+    service.budgets.reserve("old-pending", .5, provider_id="direct-test")
+    assert budget.snapshot()["remaining"] == 4.5
+    budget.record_balance("", start, 0)
+    _photo(app, "stored")
+    _photo(app, "missing")
+    save_result(app, "stored")
+    assert service.ensure()["job_id"] is None
+    assert service.repository.control()["pause_kind"] == "settlement"
+    assert service.ensure()["job_id"] is None
+    real_snapshot = budget.snapshot
+    new_month = datetime.fromisoformat(real_snapshot()["end"]) + timedelta(seconds=1)
+    monkeypatch.setattr(budget, "snapshot", lambda: real_snapshot(now=new_month))
+    assert budget.snapshot()["remaining"] == 39.5
+    job = service.ensure()["job_id"]
+    assert [i["photo_id"] for i in service.jobs.list_items(job)] == ["missing"]
+
+
+def test_split_limits_are_atomic_and_select_second_when_first_cannot_fund_one_photo(app):
+    service, actor = setup_monthly(app, split=True)
+    service.settings.update("budget.daily_stop", 100, changed_by=actor, source_ip="test")
+    record_cost(app, 19.50)
+    def reserve(identifier):
+        try:
+            service.budgets.reserve(identifier, .4, provider_id="direct-test")
+            return True
+        except OpenAIBudgetExceeded as exc:
+            assert exc.pause_kind == "account"
+            return False
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        assert sorted(pool.map(reserve, ["left", "right"])) == [False, True]
+    record_cost(app, .09999)
+    _photo(app, "next")
+    job = service.ensure()["job_id"]
+    assert json.loads(service.jobs.get(job)["analysis_spec_json"])["provider_route"][0]["provider_id"] == "second"
+    assert service.budgets.openai.snapshot()["accounts"]["second"]["remaining"] == 20
+
+
+def test_split_refusal_reassigns_only_unexecuted_photos(app):
+    service, _ = setup_monthly(app, split=True)
+    _photo(app, "unpaid")
+    sha = _photo(app, "uncertain")
+    first = service.ensure()["job_id"]
+    from inktime.app.repositories.billable_operations import BillableOperationRepository
+    BillableOperationRepository(service.repository.database).begin(sha, "uncertain-response")
+    service._pause_for_error(ProviderHTTPError("credit exhausted", "API_CREDIT_EXHAUSTED", http_status=429), first)
+    service.jobs.request_pause(first)
+    second = service.ensure()["job_id"]
+    assert first != second
+    assert [i["photo_id"] for i in service.jobs.list_items(second)] == ["unpaid"]
+    assert json.loads(service.jobs.get(second)["analysis_spec_json"])["provider_route"][0]["provider_id"] == "second"
+    assert service.repository.has_uncertain_content(sha)
+    assert service.budgets.openai.snapshot()["accounts"]["direct-test"]["held"]
+
+
+def test_split_renewal_and_balance_calibration_are_per_account(app):
+    service, actor = setup_monthly(app, split=True, **{"openai_budget.cycle_anchor": "2026-01-01",
+                                                       "openai_budget.secondary_anchor": "2026-01-15"})
+    budget = service.budgets.openai
+    state = budget.snapshot()
+    budget.record_balance("second", state["accounts"]["second"]["start"], 2)
+    assert budget.snapshot()["remaining"] == 22
+    earlier = budget.snapshot(now=datetime.fromisoformat("2026-01-14T18:00:00+08:00"))
+    later = budget.snapshot(now=datetime.fromisoformat("2026-01-15T01:00:00+08:00"))
+    assert earlier["start"] == later["start"]
+    assert earlier["accounts"]["second"]["start"] != later["accounts"]["second"]["start"]
+    with pytest.raises(ValueError, match="不同帳戶"):
+        service.configure({"analysis.openai_secondary_provider_id": "direct-test"}, actor)
+
+
+def test_monthly_batch_on_second_account_imports_once_and_preserves_held_batch(app, tmp_path, monkeypatch):
+    service, actor = setup_monthly(app, split=True, **{"analysis.openai_backfill_chunk": 1})
+    _prepare_photos(app, tmp_path, 2)
+    first, second = ResponsesBatch(), ResponsesBatch()
+    def reject(*args, **kwargs):
+        raise ProviderHTTPError("credit exhausted", "API_CREDIT_EXHAUSTED", http_status=429)
+    monkeypatch.setattr(first, "create_batch", reject)
+    monkeypatch.setattr(service.batch, "_provider", lambda provider_id, plan, **kwargs: first if provider_id == "direct-test" else second)
+    service.configure({"analysis.openai_backfill_mode": "batch", "analysis.openai_batch_consent": True}, actor)
+    held = service.ensure()["job_id"]
+    assert service.jobs.get(held)["status"] == "paused"
+    funded = service.ensure()["job_id"]
+    batch = service.batch.batches.list_for_job(funded)[0]
+    assert batch["provider_id"] == "second"
+    service.batch.poll_due()
+    assert service.batch.import_batch(batch["id"])["success"] == 1
+    service.batch.import_batch(batch["id"])
+    assert second.batch_counter == 1
+    assert service.jobs.get(held)["status"] == "paused"
 
 
 def test_billing_cycle_clamps_month_end_without_drifting_and_supports_yearly():
@@ -435,7 +644,7 @@ def test_generic_resume_explains_lane_control_without_false_success(app, pause_k
     app.extensions["inktime_job_service"].pause(job_id)
     with service.repository.database.transaction() as connection:
         connection.execute("UPDATE openai_backfill_control SET pause_kind=? WHERE id=1", (pause_kind,))
-    with pytest.raises(ValueError, match="雙 Provider 分工"):
+    with pytest.raises(ValueError, match="補齊模型資訊"):
         app.extensions["inktime_job_service"].resume(job_id)
     assert service.jobs.get(job_id)["status"] == "paused"
     assert service.repository.control()["pause_kind"] == pause_kind

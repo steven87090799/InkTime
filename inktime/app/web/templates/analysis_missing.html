@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% block title %}補齊模型資訊 · InkTime{% endblock %}
 {% block content %}
-<div class="page-head"><div><h1>補齊模型資訊</h1><p>按拍攝日期由舊到新，只處理缺少有效模型資訊的照片。</p></div><a href="/analysis/seasonal">歷年同期分析</a></div>
+<div class="page-head"><div><h1>補齊模型資訊</h1><p>追蹤尚無模型資訊的照片、可用額度與補齊進度。</p></div><a href="/analysis/seasonal">歷年同期分析</a></div>
 {% set labels = {'completed':'已完成模型資訊','missing':'尚未處理','queued':'排隊中','running':'處理中','failed':'失敗','unknown':'回應／成本待確認','excluded':'本機排除／禁止上傳','preprocessing':'等待本機預處理'} %}
 {% include 'complementary_analysis.html' %}
 <section class="panel">
@@ -18,7 +18,7 @@
 </section>
 <section class="panel">
   <h2>原有免費一鍵補齊</h2>
-  <p id="backfill-state">{% if state.complementary.settings['analysis.complementary_enabled'] %}分工模式已保留免費次數給每日分析；原免費全庫補齊暫停。{% elif state.control.pause_reason %}已自動暫停：{{ state.control.pause_reason }}{% elif state.control.enabled %}補齊已開啟；相框及日常工作優先。{% else %}補齊已關閉；維持一般設定的歷年同期分析範圍。{% endif %}</p>
+  <p id="backfill-state">{% if state.complementary.settings['analysis.complementary_enabled'] %}已啟用 OpenAI 補齊設定，原免費全庫補齊暫停。{% elif state.control.pause_reason %}已自動暫停：{{ state.control.pause_reason }}{% elif state.control.enabled %}補齊已開啟；相框及日常工作優先。{% else %}補齊已關閉；維持一般設定的歷年同期分析範圍。{% endif %}</p>
   <button type="button" id="enable-backfill" class="primary" {% if state.complementary.settings['analysis.complementary_enabled'] %}disabled{% endif %}>{% if state.control.pause_reason %}重新檢查並繼續補齊{% else %}補齊缺少項目{% endif %}</button>
   <button type="button" id="disable-backfill" class="secondary">關閉補齊</button>
   <p class="muted">定期查驗免費模型與當日剩餘額度；送出請求的最高價格固定為 US$0。額度用完保留佇列，下個 UTC 日再檢查；模型下架、改收費或成本待確認會自動暫停。沒有每日掃圖張數上限。</p>
@@ -62,12 +62,35 @@
       location.reload();
     });
   }
-  document.getElementById('complementary-settings').addEventListener('submit', event => {
+  const form = document.getElementById('complementary-settings');
+  const policy = form.elements.namedItem('analysis.openai_backfill_policy');
+  function showPolicy() {
+    const monthly = policy.value !== 'oldest';
+    form.querySelector('[data-monthly-note]').hidden = !monthly;
+    for (const label of form.querySelectorAll('[data-custom-budget], [data-split-setting]')) {
+      const enabled = label.hasAttribute('data-custom-budget') ? !monthly : policy.value === 'monthly_split';
+      label.hidden = !enabled;
+      label.querySelector('input,select').disabled = !enabled;
+    }
+  }
+  policy.addEventListener('change', showPolicy);
+  showPolicy();
+  for (const balanceForm of document.querySelectorAll('[data-balance-account]')) {
+    balanceForm.addEventListener('submit', event => {
+      event.preventDefault();
+      dualChange(balanceForm.querySelector('button'), '/api/v1/analysis/complementary/balance', {
+        account: balanceForm.dataset.balanceAccount,
+        cycle_start: balanceForm.dataset.cycleStart,
+        remaining: Number(balanceForm.elements.namedItem('remaining').value),
+      });
+    });
+  }
+  form.addEventListener('submit', event => {
     event.preventDefault();
     const form = event.currentTarget;
     const payload = {};
     for (const input of form.elements) {
-      if (!input.name) continue;
+      if (!input.name || input.disabled) continue;
       payload[input.name] = input.type === 'checkbox' ? input.checked : input.type === 'number' ? Number(input.value) : input.value;
     }
     dualChange(form.querySelector('button'), '/api/v1/analysis/complementary/settings', payload);
@@ -103,20 +126,25 @@
       const data = await response.json();
       for (const key of ['completed','missing','queued','running','failed','unknown','excluded','preprocessing']) document.getElementById('count-' + key).textContent = data[key];
       const dual = data.complementary, budget = dual.budget;
+      document.getElementById('openai-remaining').textContent = budget.remaining.toFixed(4);
+      for (const label of document.querySelectorAll('[data-openai-account]')) {
+        const account = budget.accounts[label.dataset.openaiAccount];
+        if (account) label.textContent = account.held ? '等待下期' : '尚可預留 US$' + account.remaining.toFixed(4);
+      }
       document.getElementById('openai-cycle-used').textContent = budget.known.toFixed(4);
       document.getElementById('openai-cycle-limit').textContent = budget.limit.toFixed(2);
       document.getElementById('openai-cycle-reserved').textContent = budget.reserved.toFixed(4);
       document.getElementById('openai-cycle-unknown').textContent = budget.unknown_count;
       document.getElementById('openai-budget-warning').hidden = !budget.warning;
       document.getElementById('openai-next-cycle').textContent = new Date(budget.end).toLocaleString('zh-TW', {timeZone:dual.timezone});
-      document.getElementById('openai-lane-status').textContent = dual.control.pause_reason || (dual.settings['analysis.openai_backfill_enabled'] && dual.settings['analysis.complementary_enabled'] ? '補齊已開啟' : '補齊尚未啟用');
+      document.getElementById('openai-lane-status').textContent = dual.status_text;
       document.getElementById('daily-analysis-date').textContent = dual.tomorrow;
       document.getElementById('daily-analysis-missing').textContent = dual.tomorrow_missing;
       document.getElementById('total').textContent = data.total;
       document.getElementById('local-caption-only').textContent = data.local_caption_only;
       document.getElementById('percent').textContent = data.percent;
       document.getElementById('coverage-progress').value = data.percent;
-      document.getElementById('backfill-state').textContent = data.complementary.settings['analysis.complementary_enabled'] ? '分工模式已保留免費次數給每日分析；原免費全庫補齊暫停。' : data.control.pause_reason ? '已自動暫停：' + data.control.pause_reason : data.control.enabled ? '補齊已開啟；相框及日常工作優先。' : '補齊已關閉；維持一般設定的歷年同期分析範圍。';
+      document.getElementById('backfill-state').textContent = data.complementary.settings['analysis.complementary_enabled'] ? '已啟用 OpenAI 補齊設定，原免費全庫補齊暫停。' : data.control.pause_reason ? '已自動暫停：' + data.control.pause_reason : data.control.enabled ? '補齊已開啟；相框及日常工作優先。' : '補齊已關閉；維持一般設定的歷年同期分析範圍。';
       if (data.photos_per_minute) document.getElementById('speed').textContent = `今天約 ${data.photos_per_minute} 張／分鐘；待處理部分約需 ${data.eta_minutes} 分鐘（僅供參考）。`;
     } catch (_) { /* A status read never retries a model request. */ }
     finally { setTimeout(refresh, 10000); }

@@ -154,6 +154,8 @@ def semantic_repair_snapshot(source: dict[str, Any] | None) -> dict[str, Any]:
         V5_SEMANTIC_INTEGRITY_FIELDS if version == 5 else
         LEGACY_V4_SEMANTIC_INTEGRITY_FIELDS
     )
+    if version == 6 and source and "visible_detail" in source:
+        fields = fields | {"visible_detail"}
     missing = sorted(fields - set(source or {}))
     if source is None or missing:
         error = AnalysisValidationError(

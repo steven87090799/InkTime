@@ -165,7 +165,7 @@ def test_receipt_expression_index_upgrade_preserves_offset_time_accounting(tmp_p
 
 
 def test_fresh_database_is_migrated(tmp_path):
-    assert CURRENT_SCHEMA_VERSION == 81
+    assert CURRENT_SCHEMA_VERSION == 82
     database = Database(tmp_path / "inktime.db")
     assert migrate(database) == list(range(1, CURRENT_SCHEMA_VERSION + 1))
     assert database.integrity_check() == "ok"

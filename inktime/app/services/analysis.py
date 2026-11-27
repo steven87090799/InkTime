@@ -25,6 +25,7 @@ from inktime.app.domain.analysis import (
 )
 from inktime.app.domain.analysis.plan import FULL_ANALYSIS_TOKEN_CAP as FULL_ANALYSIS_TOKEN_CAP, analysis_output_token_cap, stored_analysis_fingerprint
 from inktime.app.domain.analysis.content_filter import CONTENT_FILTER_SWITCHES
+from inktime.app.domain.analysis.captions import OBSERVATION_PROMPT_VERSION, observation_caption_enabled
 from inktime.app.domain.analysis.json_repair import extract_json_value
 from inktime.app.domain.analysis.execution_mode import (
     execution_mode,
@@ -72,7 +73,7 @@ class AnalysisDisabledError(RuntimeError):
     code = "ANALYSIS-DISABLED"
 
 
-PROMPT_VERSION = "photo-analysis-v6-literary20-landmarks-20261026"
+PROMPT_VERSION = OBSERVATION_PROMPT_VERSION
 # The compact response still needs enough headroom to complete
 # strict JSON without truncation.
 LOGGER = logging.getLogger("analysis")
@@ -763,6 +764,8 @@ class PhotoAnalysisService:
                 semantic_only=True, match_plan=False, expected_content_sha256=sha,
             )
             if result is not None:
+                if result["schema_version"] in (1, 2, 3):
+                    return {"analysis": result, "stage": "history", "_actual_cost": 0}
                 result = self._score_result(result, photo)
                 result.update(score_kind=SEMANTIC_SCORE_KIND, semantic_scores_available=True)
                 return {"analysis": result, "stage": "cache", "_actual_cost": 0}
@@ -1072,9 +1075,10 @@ class PhotoAnalysisService:
                 )
         except Exception as exc:
             self.photos.finish_ai_cache_reservation(cache_key, owner_id, error=str(exc))
-            if isinstance(exc, SavedModelResultAvailableError):
+            if getattr(exc, "code", None) == SavedModelResultAvailableError.code and request_definitely_not_sent(exc):
                 self._trace_write("complete_run", trace_id, status="SUCCESS", error_message=str(exc))
-                raise
+                # Isolated transports return the child's error code, not its Python type.
+                raise SavedModelResultAvailableError(str(exc)) from exc
             record_outcome = getattr(self.photos, "record_analysis_request_outcome", None)
             if callable(record_outcome):
                 ambiguous = bool(getattr(exc, "ambiguous", False))
@@ -1241,7 +1245,7 @@ class PhotoAnalysisService:
                 operations.finish(operation_id, not_sent=True)
                 raise
         try:
-            call = {
+            call: dict[str, Any] = {
                 "image_path": image,
                 "model": model,
                 "detail": detail,
@@ -1253,6 +1257,10 @@ class PhotoAnalysisService:
             }
             if getattr(actual_call_provider, "supports_prompt_version", False):
                 call["prompt_version"] = prompt_version
+            if getattr(actual_call_provider, "supports_photo_context", False):
+                photo_context = json.loads(vision_input_spec_json).get("photo_context")
+                if photo_context:
+                    call["photo_context"] = photo_context
             if self.process_boundary is None:
                 # Cooperative providers may use this mutable marker to tell
                 # the caller exactly when their transport has been handed the
@@ -1273,7 +1281,7 @@ class PhotoAnalysisService:
                     })
                 guard = {"database_path": str(self.photos.database.path), "photo_id": photo_id,
                          "job_id": job_id, "operation_id": operation_id,
-                         "expected_content_sha256": content_sha256}
+                         "expected_content_sha256": content_sha256, "reuse_completed": reuse_completed}
                 assert_upload_allowed(**guard)
                 if getattr(actual_call_provider, "supports_upload_guard", False):
                     call["upload_guard"] = guard
@@ -1290,18 +1298,7 @@ class PhotoAnalysisService:
                     specification = provider.process_spec()
                     if specification is None:
                         self.process_boundary.record_cooperative()
-                        response = provider.analyze(
-                            image_path=image,
-                            model=model,
-                            detail=detail,
-                            stage=stage,
-                            max_tokens=max_tokens,
-                            reasoning_effort=reasoning_effort,
-                            caption_controls=caption_controls,
-                            vision_attempt=vision_attempt,
-                            provider_request_context_id=provider_request_context_id,
-                            **({"prompt_version": prompt_version} if getattr(actual_call_provider, "supports_prompt_version", False) else {}),
-                        )
+                        response = provider.analyze(**call, vision_attempt=vision_attempt)
                     else:
                         response = self.process_boundary.call_provider(
                             specification,
@@ -1310,19 +1307,7 @@ class PhotoAnalysisService:
                             kwargs=call,
                         )
                 else:
-                    response = provider.analyze(
-                        image_path=image,
-                        model=model,
-                        detail=detail,
-                        stage=stage,
-                        max_tokens=max_tokens,
-                        reasoning_effort=reasoning_effort,
-                        caption_controls=caption_controls,
-                        vision_attempt=vision_attempt,
-                        provider_request_context_id=provider_request_context_id,
-                        **({"prompt_version": prompt_version} if getattr(actual_call_provider, "supports_prompt_version", False) else {}),
-                        **({"upload_guard": guard} if getattr(provider, "supports_upload_guard", False) else {}),
-                    )
+                    response = provider.analyze(**call)
             vision_attempt.vision_started = True
             vision_attempt.vision_completed = True
             if checkpoint is None:
@@ -1677,12 +1662,11 @@ class PhotoAnalysisService:
             "analysis_spec_json": analysis_spec_json,
             "scoring_version_id": scoring_version_id,
         }
-        inherited = None if force_recompute else self.photos.inherit_existing_analysis(
-            photo_id,
-            job_id,
-            analysis_context=analysis_context,
-            expected_content_sha256=content_sha,
-        )
+        inherited = None
+        if not force_recompute and (strategy == "local" or photo["latest_score_kind"] != SEMANTIC_SCORE_KIND):
+            inherited = self.photos.inherit_existing_analysis(
+                photo_id, job_id, analysis_context=analysis_context, expected_content_sha256=content_sha,
+            )
         if inherited is not None:
             return {"analysis": inherited, "stage": "inherited", "_actual_cost": 0}
         if strategy == "local":
@@ -1805,6 +1789,10 @@ class PhotoAnalysisService:
         sha = str(photo["sha256"] or "")
         if not sha or str(photo["local_features_status"] or "") != "complete":
             raise ValueError("IMG-003 照片尚未完成本地預處理")
+        if observation_caption_enabled(prompt_version):
+            photo_context = self.photos.get_caption_context(photo_id, sha)
+            if photo_context:
+                vision_input["photo_context"] = photo_context
         total_cost = 0.0
 
         def record_force(provider_name: str, model_name: str) -> None:

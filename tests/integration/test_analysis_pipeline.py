@@ -308,6 +308,38 @@ def prepare(app, tmp_path, duplicate=False):
     return result, ids, service
 
 
+def test_observation_result_is_saved_once_and_reused_without_rewriting_the_old_caption(app, tmp_path):
+    from inktime.app.domain.photos.places import PhotoPlace
+    from inktime.app.repositories.photo_locations import PhotoLocationRepository
+
+    _, ids, service = prepare(app, tmp_path, duplicate=True)
+    detail, caption = "三雙筷子伸向一顆餃子", "最難分的，總是最後一顆。"
+    with service.photos.database.transaction() as con:
+        con.execute("UPDATE photos SET captured_date='2021-06-09',capture_date_status='valid',gps_lat=25,gps_lon=121")
+        con.execute("UPDATE photos SET exif_json=?", (json.dumps({"DateTimeOriginal": "2021:06:09 13:59:42"}),))
+    photo = service.photos.get_with_path(ids[0])
+    PhotoLocationRepository(service.photos.database).save_address(ids[0], photo["sha256"], 25, 121, PhotoPlace(
+        city="新北市", district="新店區", full_address="私密路十號", source="nlsc-1120317-sanhe", precision="district",
+    ))
+    provider = MockProvider([valid_result(side_caption=caption, visible_detail=detail)])
+    provider.supports_photo_context = True
+    provider.supports_prompt_version = True
+    def analyze(photo_id):
+        return service.analyze_photo(photo_id=photo_id, job_id=None, provider=provider, strategy="single", high_model="mock")
+
+    assert analyze(ids[0])["analysis"]["visible_detail"] == detail
+    assert provider.analyze_kwargs[0]["photo_context"] == {"capture_year_month": "2021-06", "city": "新北市"}
+    assert analyze(ids[1])["_actual_cost"] == 0
+    assert analyze(ids[0])["analysis"]["side_caption"] == caption
+    assert provider.analyze_calls == 1
+    with service.photos.database.session() as con:
+        rows = con.execute("SELECT raw_json,semantic_json FROM photo_analysis WHERE score_kind='semantic'").fetchall()
+        assert len(rows) == 2
+        for row in rows:
+            assert json.loads(row["raw_json"])["visible_detail"] == detail
+            assert json.loads(row["semantic_json"])["values"]["visible_detail"] == detail
+
+
 def test_single_model_call_returns_all_fields_and_usage(app, tmp_path):
     _, ids, service = prepare(app, tmp_path)
     service.ai_traces = app.extensions["inktime_ai_trace_repository"]

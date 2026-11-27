@@ -8,7 +8,7 @@
   <p id="prompt-size">System 文字 {{ prompt_preview.prompt_chars }} 字元 · 評分參考 {{ prompt_preview.rules_chars }} 字元</p>
   <p class="notice">字元數不是 Token 數。實際輸入用量還包含圖片、JSON Schema 與服務商封裝，請以 AI 即時追蹤的用量為準。單張測試台目前不套用進階文案設定。</p>
   <details open><summary>System · 共用提示詞（唯讀）</summary><pre id="prompt-system" class="prompt-text">{{ prompt_preview.system_prompt }}</pre></details>
-  <details><summary>User · 固定指令與圖片</summary><pre class="prompt-text">{{ prompt_preview.user_prompt }}</pre><p>接著附上當次照片的影像輸入；此預覽尚未選擇照片。</p></details>
+  <details><summary>User · 指令、拍攝背景與圖片</summary><pre class="prompt-text">{{ prompt_preview.user_prompt }}</pre><p>分析圖庫照片時，已確認的拍攝年月與城市會附在這段文字後面。缺少的欄位會略過，每次附一張縮圖。</p></details>
   <details><summary>各模型服務的 JSON Schema 與實際 System · 唯讀</summary><div id="prompt-provider-formats">
     {% for provider in prompt_preview.providers %}<article><h3>{{ provider.name }} / {{ provider.model }}</h3>{% if provider.response_format %}<p>Schema 封裝 {{ provider.schema_chars }} 字元</p><pre class="prompt-text">{{ provider.response_format|tojson(indent=2) }}</pre>{% else %}<p>此服務將完整 JSON Schema 附加到 System（共 {{ provider.fallback_prompt_chars }} 字元），回應仍受伺服器的 Schema v6 驗證。</p><details><summary>查看實際 System 文字</summary><pre class="prompt-text">{{ provider.fallback_system_prompt }}</pre></details>{% endif %}</article>
     {% else %}<p>目前沒有啟用模型服務。固定欄位仍可在上方查看，新增服務後會顯示對應封裝。</p>{% endfor %}

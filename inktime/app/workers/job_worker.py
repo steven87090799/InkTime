@@ -149,7 +149,7 @@ class BoundedJobWorker:
                 self.repository.request_pause(job_id)
                 self.repository.add_event(
                     job_id, "provider_credit_pause",
-                    "OpenAI 額度／支出上限已用盡，已暫停新增請求；請至 OpenAI Billing 核對後手動恢復",
+                    "OpenAI 額度或支出上限已用盡，工作已暫停。可至 OpenAI Billing 核對額度與補發日期。",
                     {"item_id": item_id, "error_code": code},
                 )
             return

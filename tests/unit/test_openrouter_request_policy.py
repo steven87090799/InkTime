@@ -264,7 +264,11 @@ def test_openrouter_no_compatible_endpoint_404_requires_configuration_review():
     provider.close()
 
 
-def test_disabled_structured_output_includes_complete_text_schema(tmp_path):
+@pytest.mark.parametrize(("version", "include_visible_detail"), [
+    (None, True),
+    ("photo-analysis-v6-literary20-landmarks-20261026", False),
+])
+def test_disabled_structured_output_includes_complete_text_schema(tmp_path, version, include_visible_detail):
     from inktime.app.domain.analysis.schema import json_schema_for_stage
     from inktime.app.domain.analysis.landmarks import with_landmark_schema
 
@@ -273,12 +277,14 @@ def test_disabled_structured_output_includes_complete_text_schema(tmp_path):
     provider = _provider(kind="openai_compatible")
     provider.supports_json_schema = False
     body = provider.build_analysis_request_body(
-        image_path=image, model="vision-model", detail="high", stage="single",
+        image_path=image, model="vision-model", detail="high", stage="single", prompt_version=version,
     )
     assert "response_format" not in body
     prompt = body["messages"][0]["content"]
     schema = json.loads(prompt.split("完整 JSON Schema：", 1)[1])
-    assert schema == with_landmark_schema(json_schema_for_stage("single"))["schema"]
+    expected = json_schema_for_stage("single", include_visible_detail=include_visible_detail)
+    assert schema == with_landmark_schema(expected)["schema"]
+    assert ("visible_detail" in schema["required"]) is include_visible_detail
 
 
 @pytest.mark.parametrize("model", ["o1", "o3", "o3-2025-04-16", "o4-mini"])
@@ -391,6 +397,7 @@ def test_responses_only_model_is_rejected_before_image_access(tmp_path, model):
     ("photo-analysis-v5-complete-literary-20261011-caption-abc123", "COMPLETE_V5_INITIAL_COMMON_PROMPT"),
     ("photo-analysis-v5-complete-literary-v2-20261011", "COMPLETE_V5_V2_COMMON_PROMPT"),
     ("photo-analysis-v5-complete-literary-v2-20261011-caption-abc123", "COMPLETE_V5_V2_COMMON_PROMPT"),
+    ("photo-analysis-v6-literary20-landmarks-20261026-caption-abc123", "LITERARY_V6_COMMON_PROMPT"),
     (None, "COMMON_PROMPT"),
 ])
 def test_frozen_prompt_version_matches_actual_wire_contract(tmp_path, version, contract_name):
@@ -408,8 +415,8 @@ def test_complete_prompt_retains_original_contract_and_bounds_output():
     from inktime.app.services.analysis import PROMPT_VERSION
 
     assert "8～16 字" in LEGACY_V5_COMMON_PROMPT
-    assert PROMPT_VERSION == "photo-analysis-v6-literary20-landmarks-20261026"
-    assert "文青風格" in COMMON_PROMPT
+    assert PROMPT_VERSION == "photo-analysis-v6-observation-landmarks-20261125"
+    assert "生活觀察" in COMMON_PROMPT
     assert "不須加總" in COMMON_PROMPT
     assert "保留所有必填欄位" in COMMON_PROMPT
 

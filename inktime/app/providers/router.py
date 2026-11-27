@@ -532,6 +532,14 @@ class FailoverVisionProvider(VisionProvider):
         channel = getattr(self._local, "channel", None)
         return channel.provider if channel is not None else self.channels[0].provider
 
+    @property
+    def supports_prompt_version(self) -> bool:
+        return bool(getattr(self._batch_provider(), "supports_prompt_version", False))
+
+    @property
+    def supports_photo_context(self) -> bool:
+        return bool(getattr(self._batch_provider(), "supports_photo_context", False))
+
     def upload_batch_file(self, path: Path, *, remote_filename: str | None = None) -> str:
         provider = self._batch_provider()
         result = provider.upload_batch_file(path, remote_filename=remote_filename)

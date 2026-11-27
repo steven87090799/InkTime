@@ -2820,6 +2820,16 @@ MIGRATIONS = (
             "PRIMARY KEY(batch_id,source_file))",
         ),
     ),
+    Migration(
+        82,
+        "記錄近期顯示補齊進度與各 OpenAI 帳戶的額度暫停",
+        (
+            "ALTER TABLE openai_backfill_control ADD COLUMN monthly_cursor TEXT",
+            "CREATE TABLE openai_account_holds(provider_id TEXT PRIMARY KEY,cycle_start TEXT NOT NULL)",
+            "CREATE TABLE openai_credit_adjustments(account TEXT NOT NULL,cycle_start TEXT NOT NULL,"
+            "untracked_usd REAL NOT NULL CHECK(untracked_usd BETWEEN 0 AND 40),PRIMARY KEY(account,cycle_start))",
+        ),
+    ),
 )
 
 

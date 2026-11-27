@@ -1160,10 +1160,8 @@ class JobRepository:
                 openai_backfill = job_settings.get("complementary_lane") == "openai_backfill"
                 if backfill or openai_backfill:
                     if openai_backfill:
-                        enabled = connection.execute("SELECT value_json FROM settings WHERE key='analysis.openai_backfill_enabled'").fetchone()
-                        dual = connection.execute("SELECT value_json FROM settings WHERE key='analysis.complementary_enabled'").fetchone()
-                        pause = connection.execute("SELECT pause_kind FROM openai_backfill_control WHERE id=1").fetchone()
-                        allowed = bool(enabled and dual and enabled[0] == 'true' and dual[0] == 'true' and not pause[0])
+                        from inktime.app.repositories.openai_backfill import OpenAIBackfillRepository
+                        allowed = not job_settings.get("openai_account_pause") and OpenAIBackfillRepository.enabled(connection)
                     else:
                         control = connection.execute("SELECT enabled,pause_reason FROM analysis_backfill_control WHERE id=1").fetchone()
                         dual = connection.execute("SELECT value_json FROM settings WHERE key='analysis.complementary_enabled'").fetchone()
@@ -1183,11 +1181,13 @@ class JobRepository:
                 SELECT * FROM job_items
                 WHERE job_id=? AND status='pending' AND available_at<=?
                 ORDER BY available_at ASC,
+                  CASE WHEN ? THEN job_items.rowid ELSE 0 END,
                   CASE WHEN ? THEN (SELECT COALESCE(p.captured_at,p.created_at) FROM photos p WHERE p.id=job_items.photo_id) ELSE '' END,
                   CASE WHEN ? THEN (SELECT t.id FROM analysis_backfill_tasks t
                       WHERE t.job_id=job_items.job_id AND t.photo_id=job_items.photo_id) ELSE 0 END,id ASC LIMIT ?
                     """,
-                    (job_id, now, int(openai_backfill), int(backfill), limit),
+                    (job_id, now, int(openai_backfill and job_settings.get("source") == "openai-monthly-display"),
+                     int(openai_backfill), int(backfill), limit),
                 ).fetchall()
                 ids = [row["id"] for row in rows]
                 if ids:

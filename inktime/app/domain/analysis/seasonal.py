@@ -15,3 +15,15 @@ def seasonal_month_days(target: date, window_days: int) -> list[str]:
         (anchor + timedelta(days=offset)).strftime("%m-%d")
         for offset in range(-window_days, window_days + 1)
     })
+
+
+def upcoming_display_priorities(today: date, nearby_days: int) -> dict[str, int]:
+    """Eight actual display dates first, then their recurring calendar fallbacks."""
+    targets = [today + timedelta(days=offset) for offset in range(8)]
+    priorities = {target.strftime("%m-%d"): offset for offset, target in enumerate(targets)}
+    for distance in range(1, nearby_days + 1):
+        for target in targets:
+            anchor = date(2000, target.month, target.day)
+            for offset in (-distance, distance):
+                priorities.setdefault((anchor + timedelta(days=offset)).strftime("%m-%d"), 7 + distance)
+    return priorities

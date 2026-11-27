@@ -30,7 +30,12 @@ class SeasonalAnalysisService:
         return int(self.settings.get("analysis.seasonal_window_days", 5))
 
     def enabled(self) -> bool:
-        return execution_mode(self.settings) == "seasonal_ai"
+        return execution_mode(self.settings) == "seasonal_ai" and not self.openai_only()
+
+    def openai_only(self) -> bool:
+        return (self.settings.get("analysis.complementary_enabled", False)
+                and self.settings.get("analysis.openai_backfill_policy", "oldest") != "oldest"
+                and not self.settings.get("analysis.daily_openrouter_provider_id", ""))
 
     def preparation_target(self, now: datetime, *, device_id: str | None = None) -> date | None:
         """Start tomorrow after verified morning delivery or confirmed display."""
@@ -200,7 +205,7 @@ class SeasonalAnalysisService:
         if self.settings.get("analysis.complementary_enabled", False):
             job = self.jobs.get(job_id)
             scope = json.loads(job["settings_json"]) if job else {}
-            if job and job["created_by"] == "system" and (scope.get("complementary_lane") != "openrouter_daily"
+            if job and job["created_by"] == "system" and (self.openai_only() or scope.get("complementary_lane") != "openrouter_daily"
                     or scope.get("target_date") != (self.today() + timedelta(days=1)).isoformat()):
                 raise ProviderHTTPError("每日分析已切換日期；尚未送出的照片保留給補齊", "VLM-005", retry_after=60,
                                         request_started=False, vision_started=False)

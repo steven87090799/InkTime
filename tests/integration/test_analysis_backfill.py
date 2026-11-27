@@ -334,6 +334,8 @@ def test_bounded_claim_query_uses_photo_id_index(app):
     details = [str(row["detail"]) for row in plan]
     assert any("SEARCH p USING INDEX" in detail and "(id=?)" in detail for detail in details)
     assert not any(detail == "SCAN p" for detail in details)
+    assert any("idx_analysis_content_kind" in detail for detail in details)
+    assert any("idx_photo_analysis_photo_id" in detail for detail in details)
 
 
 def test_scheduler_audit_resumes_pending_checkpoint_without_duplicate_job(app):
